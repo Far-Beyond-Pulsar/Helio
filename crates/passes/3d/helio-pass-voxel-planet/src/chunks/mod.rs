@@ -2824,6 +2824,12 @@ impl ChunkWorld {
                     },
                     count: None,
                 },
+                // The meshes' depth: rays end at it.
+                texture_entry(
+                    27,
+                    wgpu::TextureSampleType::Depth,
+                    wgpu::ShaderStages::COMPUTE,
+                ),
             ],
         });
         let seed_layout_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2835,6 +2841,12 @@ impl ChunkWorld {
                     wgpu::ShaderStages::FRAGMENT,
                 ),
                 storage(22, true, wgpu::ShaderStages::VERTEX),
+                // The meshes' depth: boxes behind it are marked hidden.
+                texture_entry(
+                    27,
+                    wgpu::TextureSampleType::Depth,
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
             ],
         });
         // The cull writes the draw list the draw layout reads: its own layouts.
@@ -6334,6 +6346,7 @@ impl ChunkWorld {
             [SUN_OCCLUSION_SIDE; 2],
             drawn,
             self.rounds,
+            &self.no_scene_depth,
             None,
         );
         encoder.copy_texture_to_texture(
@@ -6440,8 +6453,9 @@ impl ChunkWorld {
     /// Records one view's primary visibility (`params`: its parameters,
     /// uploaded into `view`'s): the drawn chunks culled and binned, then
     /// `rounds` of seed and trace into `targets` (`size` pixels; `drawn`
-    /// chunks), timed as `timing` says. Its draw bind group, for the stages
-    /// that shade its hits.
+    /// chunks), the rays ending at the meshes' `scene_depth`, timed as
+    /// `timing` says. Its draw bind group, for the stages that shade its
+    /// hits.
     #[allow(clippy::too_many_arguments)]
     fn trace_view(
         &self,
@@ -6452,6 +6466,7 @@ impl ChunkWorld {
         size: [u32; 2],
         drawn: u32,
         rounds: u32,
+        scene_depth: &wgpu::TextureView,
         timing: Option<(&wgpu::QuerySet, u32)>,
     ) -> wgpu::BindGroup {
         self.queue
@@ -6526,6 +6541,7 @@ impl ChunkWorld {
                     resource: wgpu::BindingResource::TextureView(&exits),
                 },
                 entry(22, vb.cull_state),
+                view_entry(27, scene_depth),
             ],
         });
         {
@@ -6592,6 +6608,7 @@ impl ChunkWorld {
                     binding: 26,
                     resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler),
                 },
+                view_entry(27, scene_depth),
             ],
         });
         // Rounds of seed and trace: each resolves the rays that hit in
@@ -6779,6 +6796,9 @@ impl ChunkWorld {
                     .filter(|&r| r == (frame % TIMING_RING) as usize),
             )
             .map(|((set, resolve), ring)| (set, resolve, ring as u32));
+        // The meshes' depth (the frame's size): the rays end there, and
+        // meshes in front of the terrain walk to the sun from it.
+        let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
         let group = self.trace_view(
             encoder,
             self.camera_view(),
@@ -6787,14 +6807,14 @@ impl ChunkWorld {
             size,
             drawn,
             self.rounds,
+            scene_depth,
             timing.map(|(set, _, ring)| (set, ring)),
         );
         self.last_group = Some(group.clone());
         let targets = self.targets.as_ref().unwrap();
         {
             // 4. Sun shadows: samples, then every hit, and meshes before
-            // their hits (`scene_depth`: the meshes', the frame's size).
-            let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
+            // their hits.
             let occlusion = self.sun_occlusion.as_ref().unwrap();
             let (distance, visibility, samples, normal, sky) = (
                 view(&targets.distance),

@@ -63,7 +63,8 @@ pub struct PickRequest {
 }
 
 /// The answer to a [`PickRequest`]: the first terrain hit along that
-/// pixel's ray as drawn, or `None` (sky, loading).
+/// pixel's ray as drawn, or `None` (sky, loading, a mesh in front:
+/// terrain behind meshes is not traced).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickResult {
     pub id: u64,

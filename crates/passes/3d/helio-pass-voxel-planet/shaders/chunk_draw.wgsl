@@ -364,13 +364,26 @@ fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     return out;
 }
 
+// A seed box past the pixel's mesh (`scene_depth`): nothing in it is seen.
+const BEHIND_MESH: u32 = 0x80000000u;
+// Rays end a thousandth past a mesh: the shading tells which of a mesh and
+// a hit that close is in front (`shadow`).
+const MESH_MARGIN: f32 = 1.001;
+
 // Boxes the eye is outside of: the box's front face is the depth. Later
 // rounds keep only the boxes beyond where the pixel's ray left the last.
+// A box past the mesh there is marked (`BEHIND_MESH`), not discarded: the
+// nearest still wins, so a hidden pixel's box is the chunk nearest past
+// its mesh (`frame_chunk`). The marking reads the depth: the raster does
+// not test it (the publish's NVIDIA issue, docs/chunk-octree.md).
 @fragment
 fn seed_fragment(in: VOut) -> @location(0) u32 {
-    let exit = textureLoad(exits, vec2<i32>(in.position.xy), 0).r;
+    let q = vec2<i32>(in.position.xy);
+    let exit = textureLoad(exits, q, 0).r;
     if exit < 0.0 || (exit > 0.0 && ray_distance(in.world) <= exit) { discard; }
-    return in.instance;
+    // The reversed depth: farther, smaller.
+    let hidden = in.position.z * MESH_MARGIN < textureLoad(scene_depth, q, 0);
+    return in.instance | select(0u, BEHIND_MESH, hidden);
 }
 
 struct SeedInside {
@@ -1222,8 +1235,9 @@ struct Walk {
 }
 
 // Where a walk ended: a hit (chunk, cell, the face it entered by and its
-// side, material), or how far it went when it left the cut or ran out of
-// boxes.
+// side, material), or how far it went when it left the cut, ran out of
+// boxes or reached its end (and the chunk it was in last; NONE past the
+// ceiling).
 struct WalkEnd {
     hit: bool,
     t: f32,
@@ -1468,7 +1482,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     }
     WCOUNT(8)
     WCOUNT_BOXES
-    return WalkEnd(false, t_prev, NONE, vec3<i32>(0), 0u, 0u, 0u);
+    return WalkEnd(false, t_prev, slot, vec3<i32>(0), 0u, 0u, 0u);
 }
 
 // The camera's rays all start at the eye: their origin is a constant zero
@@ -1502,10 +1516,23 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         textureStore(out_exits, p, vec4<f32>(-1.0));
         return;
     }
+    // Its nearest box past its mesh: hidden, the box the chunk its mesh
+    // point is placed by.
+    if (box & BEHIND_MESH) != 0u {
+        textureStore(out_visibility, p, vec4<u32>(NONE, (box & ~BEHIND_MESH) + 1u, 0u, 0u));
+        textureStore(out_exits, p, vec4<f32>(-1.0));
+        return;
+    }
     COUNT(0)
     let dir = pixel_ray(id.xy, size);
     let org = select(vec3<f32>(0.0), pixel_origin(id.xy, size), ortho);
     var t_prev = max(exit, params.sun.w);
+    // Past the pixel's mesh nothing is seen: its ray ends there.
+    var t_end = 1e30;
+    if !ortho {
+        let mesh = mesh_point(id.xy, size);
+        if mesh.w > 0.0 { t_end = length(mesh.xyz) * MESH_MARGIN; }
+    }
     // The chunk whose frame the ray is in (its last), and the box it is
     // crossing in that frame's cells: the chunk itself, or air.
     var frame = chunk_frame(box);
@@ -1544,8 +1571,14 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
             real = false;
         }
     }
-    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, 1e30, r, 128u, true, id.xy);
+    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, t_end, r, 128u, true, id.xy);
     if !end.hit {
+        // At its mesh: resolved, the chunk it ended in kept (`frame_chunk`).
+        if end.t >= t_end {
+            textureStore(out_visibility, p, vec4<u32>(NONE, end.slot + 1u, 0u, 0u));
+            textureStore(out_exits, p, vec4<f32>(-1.0));
+            return;
+        }
         // Unresolved: the next round seeds the boxes beyond (none past
         // the ceiling: the sky).
         textureStore(out_exits, p, vec4<f32>(select(end.t + 1e-4, -1.0, end.t < 0.0)));
@@ -2485,9 +2518,16 @@ fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: 
     return select(1.0, 0.0, point_walk(q, org, v, dir, range).hit);
 }
 
+// The chunk pixel `v`'s points are placed by: its hit's, else the one its
+// ray ended in at its mesh or whose box past the mesh it had
+// (`trace_pixel`), else NONE.
+fn frame_chunk(v: vec2<u32>) -> u32 {
+    return select(v.y - 1u, v.x, v.x != NONE);
+}
+
 // What the point `org` (eye-relative) at pixel `q` meets along `dir` within
 // `range`: a walk from the node of the cut it is in, placed in the frame of
-// the chunk of `v` (a hit by it) to its cells' precision; without a hit
+// pixel `v`'s chunk (`frame_chunk`) to its cells' precision; without one
 // finer than the exact levels, from the exact level's node over it
 // (planet-centred: to half a metre on an Earth). In rock or a Buried node,
 // a hit at once with no chunk (slot NONE).
@@ -2498,9 +2538,10 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
     let r = fade_dither(q);
     var start = Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false);
     var t0 = 0.0;
-    if v.x != NONE && !exact_level(chunk_keys[v.x].x >> 8u) {
-        let key = chunk_keys[v.x];
-        let frame = chunk_frame(v.x);
+    let placed = frame_chunk(v);
+    if placed != NONE && !exact_level(chunk_keys[placed].x >> 8u) {
+        let key = chunk_keys[placed];
+        let frame = chunk_frame(placed);
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         var face = key.x & 7;
         let level = key.x >> 8u;
@@ -2526,9 +2567,9 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
         } else if at.level == LOST {
             return none;
         } else if exact_level(at.level) {
-            start = Walk(v.x, vec4<i32>(face | (at.level << 8u), 0, 0, 0), at.lo, at.hi, false);
+            start = Walk(placed, vec4<i32>(face | (at.level << 8u), 0, 0, 0), at.lo, at.hi, false);
         } else {
-            let f = select(v.x, at.frame, at.frame != NONE);
+            let f = select(placed, at.frame, at.frame != NONE);
             let fk = chunk_keys[f];
             start = Walk(f, fk, to_frame(at.lo, at.level - (fk.x >> 8u), fk, true), clip_to_face(to_frame(at.hi, at.level - (fk.x >> 8u), fk, false), fk), false);
         }
