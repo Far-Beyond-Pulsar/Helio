@@ -203,8 +203,8 @@ impl Streams {
     }
 
     /// Cell `c`'s stream's box on its face (`in_box`): its segment's ends
-    /// in the face's coordinates, grown by its reach and its valley's swing
-    /// over the cell's shortest side, a quarter more (the gnomonic scale
+    /// in the face's coordinates, grown by its reach over the cell's
+    /// shortest side, a quarter more (the gnomonic scale
     /// changes over the cells around), a cell's tenth more; clamped to the
     /// cells around (a column only looks at those).
     fn record_box(&self, c: Cell, s: &Stream) -> u32 {
@@ -220,8 +220,7 @@ impl Streams {
         };
         let (a, b) = (at(s.node), at(s.target));
         let side = self.cell_reach(c) * 256.0 / f64::from(REACH_Q8);
-        let swing = 1.75 * f64::from(planet_maps::meander_amplitudes(s.floodplain, s.channel)[0]);
-        let grow = ((f64::from(s.reach) + swing) / side * 1.25 + 0.1) * 32.0;
+        let grow = (f64::from(s.reach) / side * 1.25 + 0.1) * 32.0;
         let byte = |v: f64| (v.clamp(-127.0, 127.0) as i32 as i8 as u8) as u32;
         byte((a.0.min(b.0) - grow).floor())
             | byte((a.0.max(b.0) + grow).ceil()) << 8
@@ -614,7 +613,8 @@ impl Streams {
         let mut out = h;
         let mut inside = false;
         let cell = 8i32 << level.min(24);
-        let bent = planet_maps::bends(p, self.seed);
+        // The meanders' noise, only where a channel may be.
+        let mut bent: Option<[IVec3; 3]> = None;
         let mut last: Option<([u32; 2], Arc<[u32]>)> = None;
         for r in 0..=self.levels as u8 {
             if resolved(self.reach(r), cell) == 0 {
@@ -649,7 +649,7 @@ impl Streams {
                         if !near_box(&s, p) {
                             continue;
                         }
-                        let at = surface(&s, p, bent, cell);
+                        let at = surface(&s, p, &mut bent, self.seed, cell);
                         if at.dist >= s.reach {
                             continue;
                         }
@@ -706,22 +706,23 @@ struct At {
     dist: i32,
 }
 
-/// A stream at `p`, bent by its meanders.
-fn surface(s: &Stream, p: IVec3, bent: [IVec3; 3], cell: i32) -> At {
+/// A stream at `p`. Its valley runs straight (a stream's reach is short
+/// next to the valleys' swing); its channel meanders on its floodplain as
+/// a river's, the noise (`bent`, the bend fields at `p` with `seed`) made
+/// only where a channel may be.
+fn surface(s: &Stream, p: IVec3, bent: &mut Option<[IVec3; 3]>, seed: u32, cell: i32) -> At {
     let span = s.target - s.node;
     let e = unit_q30(span);
     let length = mul_shr_signed(span.x, e.x, 30) + mul_shr_signed(span.y, e.y, 30) + mul_shr_signed(span.z, e.z, 30);
-    // Meanders as the rivers': the valley swings, its channel on its
-    // floodplain.
     let m = planet_maps::meander_amplitudes(s.floodplain, s.channel);
-    let valley = planet_maps::swing(p, bent[0], m[0]);
-    let (dist, a) = planet_maps::axis(valley, s.node, e, length);
+    let (dist, a) = planet_maps::axis(p, s.node, e, length);
     let t = if length > 0 { ratio_q16(a, length.max(a)) } else { 0 };
     let bed = s.bed[0] - mul_shr_signed(s.bed[0] - s.bed[1], t, 16);
     let mut z = bed + planet_maps::wall_rise((dist - s.floodplain).max(0), s.floodplain, s.wall);
     let mut inside = false;
     let flow = if dist < s.floodplain && s.channel > 0 {
-        let channel = planet_maps::swing(planet_maps::swing(valley, bent[1], m[1]), bent[2], m[2]);
+        let b = *bent.get_or_insert_with(|| planet_maps::bends(p, seed));
+        let channel = planet_maps::swing(planet_maps::swing(p, b[1], m[1]), b[2], m[2]);
         planet_maps::axis(channel, s.node, e, length).0
     } else {
         i32::MAX
@@ -737,10 +738,10 @@ fn surface(s: &Stream, p: IVec3, bent: [IVec3; 3], cell: i32) -> At {
 }
 
 /// Whether `p` lies within a stream's box: its segment's bounds grown by
-/// its reach and meanders (outside, the stream cannot touch `p`;
-/// `stream_near_box` in WGSL).
+/// its reach (outside, the stream cannot touch `p`; `stream_near_box` in
+/// WGSL).
 fn near_box(s: &Stream, p: IVec3) -> bool {
-    let grow = s.reach + planet_maps::meander_amplitudes(s.floodplain, s.channel)[0];
+    let grow = s.reach;
     let lo = s.node.min(s.target) - IVec3::splat(grow);
     let hi = s.node.max(s.target) + IVec3::splat(grow);
     p.cmpge(lo).all() && p.cmple(hi).all()

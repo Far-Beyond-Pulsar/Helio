@@ -317,9 +317,7 @@ fn stream_weight(d: i32, reach: i32) -> i32 {
 fn stream_near_box(slot: u32, at: u32, p: vec3<i32>, reach: i32) -> bool {
     let node = vec3<i32>(bitcast<i32>(terrain_region_word(slot, at)), bitcast<i32>(terrain_region_word(slot, at + 1u)), bitcast<i32>(terrain_region_word(slot, at + 2u)));
     let tip = vec3<i32>(bitcast<i32>(terrain_region_word(slot, at + 3u)), bitcast<i32>(terrain_region_word(slot, at + 4u)), bitcast<i32>(terrain_region_word(slot, at + 5u)));
-    let floodplain = bitcast<i32>(terrain_region_word(slot, at + 8u));
-    let channel = i32(terrain_region_word(slot, at + 9u) & 0x1ffffu);
-    let grow = vec3<i32>(reach + map_meanders(floodplain, channel).x);
+    let grow = vec3<i32>(reach);
     return all(p >= min(node, tip) - grow) && all(p <= max(node, tip) + grow);
 }
 
@@ -329,9 +327,10 @@ struct StreamAt {
     dist: i32,
 }
 
-// A stream record (at word `at` of region `slot`) at `column`, bent by its
-// meanders (`streams::surface`).
-fn stream_surface(slot: u32, at: u32, column: vec3<i32>, bend: array<vec3<i32>, 3>, cell: i32) -> StreamAt {
+// A stream record (at word `at` of region `slot`) at `column`: its valley
+// straight, its channel meandering, the bend fields (`bend`, made once
+// `bent`) only where a channel may be (`streams::surface`).
+fn stream_surface(slot: u32, at: u32, column: vec3<i32>, bend: ptr<function, array<vec3<i32>, 3>>, bent: ptr<function, bool>, cell: i32) -> StreamAt {
     let node = vec3<i32>(bitcast<i32>(terrain_region_word(slot, at)), bitcast<i32>(terrain_region_word(slot, at + 1u)), bitcast<i32>(terrain_region_word(slot, at + 2u)));
     let tip = vec3<i32>(bitcast<i32>(terrain_region_word(slot, at + 3u)), bitcast<i32>(terrain_region_word(slot, at + 4u)), bitcast<i32>(terrain_region_word(slot, at + 5u)));
     let bed0 = bitcast<i32>(terrain_region_word(slot, at + 6u));
@@ -345,10 +344,8 @@ fn stream_surface(slot: u32, at: u32, column: vec3<i32>, bend: array<vec3<i32>, 
     let span = tip - node;
     let e = unit_q30(span);
     let length = mul_shr_signed(span.x, e.x, 30u) + mul_shr_signed(span.y, e.y, 30u) + mul_shr_signed(span.z, e.z, 30u);
-    // Meanders as the rivers' (`streams::surface`).
     let m = map_meanders(floodplain, channel);
-    let valley = map_swing(column, bend[0], m.x);
-    let foot = map_axis(valley, node, e, length);
+    let foot = map_axis(column, node, e, length);
     let dist = foot.x;
     let s = foot.y;
     var t = 0;
@@ -358,7 +355,12 @@ fn stream_surface(slot: u32, at: u32, column: vec3<i32>, bend: array<vec3<i32>, 
     var inside = false;
     var flow = 0x7fffffff;
     if dist < floodplain && channel > 0 {
-        flow = map_axis(map_swing(map_swing(valley, bend[1], m.y), bend[2], m.z), node, e, length).x;
+        if !*bent {
+            *bend = map_bends(column, bitcast<u32>(terrain.maps[3].w));
+            *bent = true;
+        }
+        let b = *bend;
+        flow = map_axis(map_swing(map_swing(column, b[1], m.y), b[2], m.z), node, e, length).x;
     }
     if flow < channel {
         let q = (flow << 14u) / max(channel, 1);
@@ -439,11 +441,7 @@ fn map_streams(p: vec3<i32>, level: u32, h: i32) -> vec2<i32> {
                     let d = vec2<i32>(fc.y - (x << shift), fc.z - (y << shift));
                     if !stream_in_box(terrain_region_word(u32(region), at + 12u), d, shift) { continue; }
                     if !stream_near_box(u32(region), at, p, reach) { continue; }
-                    if !bent {
-                        bend = map_bends(p, bitcast<u32>(header[3].w));
-                        bent = true;
-                    }
-                    let s = stream_surface(u32(region), at, p, bend, cell);
+                    let s = stream_surface(u32(region), at, p, &bend, &bent, cell);
                     if s.dist >= reach { continue; }
                     let cap = bitcast<i32>(terrain_region_word(u32(region), at + 11u) & 0xffffffu);
                     let carved = landform_smooth_min(h, s.z, cap / 8);

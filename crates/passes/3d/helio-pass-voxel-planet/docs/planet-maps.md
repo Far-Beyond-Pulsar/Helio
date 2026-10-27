@@ -217,7 +217,9 @@ levels, at most 3):
   that, the stream stays underground and its valley begins downstream.
 - **Valleys.** A stream is carved like a small river (floodplain and
   channel with the square root of its discharge, incision and depth with
-  its fourth root, meanders), within a reach of a quarter of its cell:
+  its fourth root; its valley runs straight, its channel meanders on its
+  floodplain, the bend noise made only where a channel may be), within a
+  reach of a quarter of its cell:
   its walls steepen up to 1.5 rise over run to meet the terrain there, and
   past half the reach its cut eases out to nothing (smoothstep), so it
   never steps. Its cut is at most three incisions and the channel's
