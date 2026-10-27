@@ -606,6 +606,16 @@ impl Planet {
         }
     }
 
+    /// Seal every recent brush now (a snapshot's or a benchmark's: the
+    /// world is the same, its brushes baked).
+    pub fn seal_all(&mut self) -> Result<(), String> {
+        let n = self.edits.recent.len();
+        if n > 0 {
+            self.seal(n)?;
+        }
+        Ok(())
+    }
+
     /// Undo the latest brush: a recent one, or one of the latest sealed ones
     /// (its seal is undone first); `None` past them
     /// ([`Edits::undoable`]).
@@ -2297,5 +2307,72 @@ mod scaling {
                 t.elapsed().as_secs_f64() * 1000.0 / copies as f64
             );
         }
+    }
+}
+
+/// The cells one brush changes on `planet`, and how: what the gameplay
+/// API reports as blocks broken, placed and changed.
+#[derive(Clone, Debug, Default)]
+pub struct EditEvents {
+    /// Each changed cell's centre (planet-centred), material before and
+    /// after (0: air).
+    pub cells: Vec<(DVec3, u32, u32)>,
+}
+
+impl std::fmt::Display for EditEvents {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let broken = self.cells.iter().filter(|c| c.1 != 0).count();
+        let placed = self.cells.iter().filter(|c| c.2 != 0).count();
+        write!(f, "{} cells changed, {broken} broken, {placed} placed", self.cells.len())
+    }
+}
+
+/// [`EditEvents`] of `brush` over `planet`: every base cell the brush
+/// holds, its material before and after (on a copy with the brush applied).
+pub fn edit_events(planet: &Planet, brush: &Brush) -> EditEvents {
+    let grid = planet.grid();
+    let mut preview = planet.clone();
+    let mut cells = std::collections::HashSet::new();
+    for face_brush in brush.resolve(grid).unwrap_or_default() {
+        let radius = i64::from(face_brush.radius_half);
+        let center = face_brush.center;
+        let low = center.map(|value| (i64::from(value) - radius - 1).div_euclid(2));
+        let high = center.map(|value| (i64::from(value) + radius - 1).div_euclid(2));
+        for k in low[2]..=high[2] {
+            for j in low[1]..=high[1] {
+                for i in low[0]..=high[0] {
+                    let [i, j, k] = [i as i32, j as i32, k as i32];
+                    let sample = [
+                        crate::edits::center_half(i, 0),
+                        crate::edits::center_half(j, 0),
+                        crate::edits::center_half(k, 0),
+                    ];
+                    if !face_brush
+                        .contains(sample, || grid.volume_point(face_brush.face(), i, j, k, 0))
+                    {
+                        continue;
+                    }
+                    let position = grid.position(
+                        face_brush.face(),
+                        [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5],
+                    );
+                    cells.insert(grid.locate(position).0);
+                }
+            }
+        }
+    }
+    let before: Vec<_> = cells
+        .into_iter()
+        .map(|cell| (cell, preview.material(cell)))
+        .collect();
+    let _ = preview.apply(*brush);
+    EditEvents {
+        cells: before
+            .into_iter()
+            .filter_map(|(cell, was)| {
+                let now = preview.material(cell);
+                (was != now).then(|| (grid.cell_center(cell), was, now))
+            })
+            .collect(),
     }
 }

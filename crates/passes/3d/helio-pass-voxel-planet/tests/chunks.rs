@@ -2033,6 +2033,143 @@ fn large_sculpt_strokes_settle() {
     );
 }
 
+/// What a burst of sculpt strokes looks like while it happens, under a
+/// host's generation budget (a report: `--ignored --nocapture`): each
+/// frame's sampled pixels against the CPU's ray casts of the world as
+/// edited (wrong: off by more than a metre and 2% of the distance, or a
+/// hit where there is none or none where there is one), pixels drawing
+/// material 0 (magenta), the coarsest level drawn, and the frames after
+/// the last stroke until the view is right again.
+#[test]
+#[ignore]
+fn sculpt_bursts_while_they_happen() {
+    use rayon::prelude::*;
+    let Some(gpu) = gpu() else { return };
+    let voxel = 0.1;
+    let mut planet = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        voxel_size_m: voxel,
+        terrain: TerrainLayers::moon().source(75),
+        features: helio_pass_voxel_planet::feature_recipe::FeatureRecipe::moon().grow(voxel, 75),
+        ..Default::default()
+    })
+    .unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let view = View::new(
+        ground + up * 120.0 - fwd * 160.0,
+        (fwd - up * 0.7).normalize().as_vec3(),
+        [480, 270],
+    );
+    let mut config = ResidencyConfig::default();
+    config.plan.pixel_angle = view.pixel_angle();
+    let mut world = World::new(&gpu, &planet);
+    world.jitter = Some(0);
+    world.settle(&gpu, &planet, &view);
+    let view_proj = view.view_proj(&planet);
+    // Every fourth pixel each way.
+    let pixels: Vec<(u32, u32)> = (0..view.size[1])
+        .step_by(4)
+        .flat_map(|y| (0..view.size[0]).step_by(4).map(move |x| (x, y)))
+        .collect();
+    let dirs: Vec<DVec3> = pixels
+        .iter()
+        .map(|&(x, y)| view.pixel_dir(view_proj, x, y))
+        .collect();
+    // (wrong, magenta, coarsest level) of the frame just drawn.
+    let judge = |world: &World, planet: &Planet| -> (usize, usize, u32) {
+        let hits = world.chunks.read_hits();
+        let cpu: Vec<Option<f64>> = dirs
+            .par_iter()
+            .map(|&d| planet.raycast(view.eye, d, 3000.0).map(|h| h.distance))
+            .collect();
+        let (mut wrong, mut magenta, mut coarsest) = (0, 0, 0);
+        for (n, &(x, y)) in pixels.iter().enumerate() {
+            let drawn = hits[(y * view.size[0] + x) as usize];
+            if let Some(h) = drawn {
+                magenta += usize::from(h.material == 0);
+                coarsest = coarsest.max(h.level);
+            }
+            let bad = match (drawn, cpu[n]) {
+                (Some(h), Some(c)) => (h.distance - c).abs() > 1.0f64.max(c * 0.02),
+                (None, None) => false,
+                (Some(h), None) => h.distance < 2500.0,
+                (None, Some(_)) => true,
+            };
+            wrong += usize::from(bad);
+        }
+        (wrong, magenta, coarsest)
+    };
+    let before = judge(&world, &planet);
+    eprintln!(
+        "BURST settled: wrong {} magenta {} coarsest level {} of {} pixels",
+        before.0,
+        before.1,
+        before.2,
+        pixels.len()
+    );
+    let bursts: [(&str, f64, BrushOp, u32, f64); 4] = [
+        ("dig 3 m", 3.0, BrushOp::Remove, 0, 1.0),
+        ("dig 12 m", 12.0, BrushOp::Remove, 0, 4.0),
+        ("build 60 m", 60.0, BrushOp::Add, material::COBBLE, 4.0),
+        ("dig 60 m", 60.0, BrushOp::Remove, 0, 4.0),
+    ];
+    for (label, radius, op, material, step) in bursts {
+        let (mut wrong_frames, mut wrong_sum, mut wrong_max) = (0, 0, 0);
+        let (mut magenta_sum, mut coarsest) = (0, 0);
+        let mut cpu = Vec::new();
+        let strokes = 40;
+        let mut frames_after = None;
+        let mut frame = 0;
+        loop {
+            if frame < strokes {
+                let along = (frame as f64 - 20.0) * step;
+                let centre = planet.surface_point((ground + side * along).normalize(), 0.0);
+                planet
+                    .apply(Brush {
+                        center: centre.to_array(),
+                        radius,
+                        shape: BrushShape::Sphere,
+                        op,
+                        material,
+                        height: 0.0,
+                    })
+                    .unwrap();
+                world.sync(&gpu, &planet);
+            }
+            let t = std::time::Instant::now();
+            world.frame_with(&gpu, &planet, &view, &config);
+            cpu.push(t.elapsed().as_secs_f64() * 1e3);
+            let (wrong, magenta, level) = judge(&world, &planet);
+            wrong_sum += wrong;
+            wrong_max = wrong_max.max(wrong);
+            wrong_frames += usize::from(wrong * 200 > pixels.len());
+            magenta_sum += magenta;
+            coarsest = coarsest.max(level);
+            frame += 1;
+            if frame >= strokes && wrong * 200 <= pixels.len() && frames_after.is_none() {
+                frames_after = Some(frame - strokes);
+            }
+            if frame >= strokes && (world.chunks.settled() || frame > strokes + 1500) {
+                break;
+            }
+        }
+        cpu.sort_by(f64::total_cmp);
+        eprintln!(
+            "BURST {label}: {frame} frames; wrong over 0.5% in {wrong_frames}, wrong pixel-frames {wrong_sum} (most a frame {wrong_max} of {}), magenta pixel-frames {magenta_sum}, coarsest level {coarsest}; right {:?} frames after the last stroke, settled {}; frame ms p50 {:.1} p95 {:.1} max {:.1}",
+            pixels.len(),
+            frames_after,
+            frame - strokes,
+            cpu[cpu.len() / 2],
+            cpu[cpu.len() * 95 / 100],
+            cpu[cpu.len() - 1]
+        );
+    }
+}
+
 #[test]
 fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };
