@@ -174,8 +174,7 @@ pub(crate) struct WorldGpu {
     grid: [i32; 4],
     /// domain scale (Q24), pad.
     scale: [u32; 4],
-    /// sphere domain constants (`Grid::sphere_constants`); w: columns store
-    /// a surface word per cell.
+    /// sphere domain constants (`Grid::sphere_constants`).
     sphere: [u32; 4],
 }
 
@@ -193,11 +192,7 @@ impl WorldGpu {
                 let (inv, shift, layer_q16) = g.volume_constants();
                 [g.domain_scale(), inv, shift, layer_q16]
             },
-            sphere: {
-                let mut sphere = g.sphere_constants();
-                sphere[3] = u32::from(planet.field().program().wgsl.contains("fn terrain_surface"));
-                sphere
-            },
+            sphere: g.sphere_constants(),
         }
     }
 }
@@ -268,12 +263,6 @@ pub(crate) fn terrain_source(
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(include_str!("../shaders/material_state.wgsl"));
     s.push_str(&program.wgsl);
-    if !program.wgsl.contains("fn terrain_surface") {
-        // No surface word: columns store none (`World::sphere.w`).
-        s.push_str(
-            "fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 { return 0u; }\n",
-        );
-    }
     if !program.wgsl.contains("fn terrain_density") {
         // Heightfield programs: no volumetric terms (`TerrainField::extent`, `density`).
         s.push_str(
@@ -557,7 +546,8 @@ pub fn verify_field(
     let e = verify_extra[id.x];
     let level = u32(a.w);
     let p = domain_point(u32(a.x), a.y, a.z, level);
-    let height = field_height(u32(a.x), a.y, a.z, level);
+    let column = generation_column(u32(a.x), a.y, a.z, level, false);
+    let height = column.x;
     // A layer near the column top (inside any volumetric extent).
     let top = top_cells(height, level);
     let extent = terrain_extent(p, level);
@@ -567,7 +557,7 @@ pub fn verify_field(
     let density = terrain_density(p, q, level, top, height, height + (e.z & 8191) - 4096, k);
     let lean = terrain_lean(level);
     let offset = terrain_lean_offset(p, a.y, a.z, k, level);
-    let surface = terrain_surface(p, level + u32(world.grid.w), height) & 0xffu;
+    let surface = u32(column.y) & 0xffu;
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
         density, (q.x ^ q.y ^ q.z) + i32(surface) * 7919 + extent.x * 65599 + extent.y * 257
             + lean.x * 7 + lean.y * 13 + offset.x * 31 + offset.y * 131);

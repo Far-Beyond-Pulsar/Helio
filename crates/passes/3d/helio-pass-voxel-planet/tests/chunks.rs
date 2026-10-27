@@ -2033,6 +2033,67 @@ fn large_sculpt_strokes_settle() {
     );
 }
 
+/// The Moon's pole at seed 75 (Pulsar's Moon example), 300 m over the
+/// ground. Capsule parts once held cells far outside their box (the
+/// distance test overflowed i32 there): the CPU met a boulder floating
+/// 290 m over its anchor that the GPU, bounding stamps by their boxes,
+/// never drew, and every shadow ray toward it came back black.
+#[test]
+fn moon_pole_view_matches_cpu_ray_casts() {
+    let Some(gpu) = gpu() else { return };
+    let voxel = 0.1;
+    let planet = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        voxel_size_m: voxel,
+        terrain: TerrainLayers::moon().source(75),
+        features: helio_pass_voxel_planet::feature_recipe::FeatureRecipe::moon().grow(voxel, 75),
+        ..Default::default()
+    })
+    .unwrap();
+    let eye = DVec3::new(0.0, 1_738_104.0, 0.0);
+    let up = eye.length() - planet.surface_point(eye.normalize(), 0.0).length();
+    let view = View::new(
+        eye,
+        Vec3::new(-0.07329183, -0.57357645, 0.81586665),
+        [320, 180],
+    );
+    // The top-left pixel's ray once met the floating boulder 9 m away.
+    let wall = planet
+        .raycast(eye, view.pixel_dir(view.view_proj(&planet), 0, 0), 2000.0)
+        .expect("ground");
+    assert!(
+        wall.distance > up * 0.5,
+        "the top-left ray met {:?} {:.1} m away, {up:.0} m over the ground",
+        wall.cell,
+        wall.distance
+    );
+    // Nothing here is near enough for level 0 (`compare`): the drawn
+    // levels must meet the exact ground within a few of their cells.
+    let hits = World::new(&gpu, &planet).settle(&gpu, &planet, &view);
+    let view_proj = view.view_proj(&planet);
+    let (mut compared, mut mismatched) = (0, 0);
+    for y in (0..view.size[1]).step_by(12) {
+        for x in (0..view.size[0]).step_by(12) {
+            let Some(cpu) = planet.raycast(eye, view.pixel_dir(view_proj, x, y), 2000.0) else {
+                continue;
+            };
+            compared += 1;
+            let drawn = hits[(y * view.size[0] + x) as usize];
+            let near = drawn.is_some_and(|h| {
+                (h.distance - cpu.distance).abs()
+                    <= 8.0 * voxel * f64::from(1u32 << h.level) + cpu.distance * 0.02
+            });
+            if !near {
+                mismatched += 1;
+                eprintln!("pixel {x},{y}: drawn {drawn:?}, cpu {:?} at {:.1}", cpu.cell, cpu.distance);
+            }
+        }
+    }
+    eprintln!("compared {compared}, mismatched {mismatched}");
+    assert!(compared > 100, "{compared} pixels compared");
+    assert!(mismatched * 50 <= compared, "{mismatched} of {compared}");
+}
+
 #[test]
 fn orbital_view_has_complete_coverage() {
     let Some(gpu) = gpu() else { return };

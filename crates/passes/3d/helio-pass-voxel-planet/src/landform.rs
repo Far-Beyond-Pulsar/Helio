@@ -1118,7 +1118,7 @@ pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
     height_parts(k, p, level).0
 }
 
-/// Surface word of a column (`terrain_surface`), by material style.
+/// Surface word of a column (`terrain_column_nodes(..).y`), by material style.
 /// Earthlike: the erosion term as a signed byte of the erosion amplitude
 /// sum (negative: gully floors, positive: the ribs between them). Lunar:
 /// the freshest ejecta (bits 0..6) and the basin flag (bit 7).
