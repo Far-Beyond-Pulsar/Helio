@@ -4106,17 +4106,11 @@ fn gi_rays_see_light_through_leaves() {
     let c = trace_gi_rays(gpu, &planet, eye, &view);
     assert!(c.compared > 400 && c.wrong * 100 <= c.compared, "{c:?}");
     assert!(c.leaves > 100 && c.through_wrong == 0, "{c:?}");
-    // The maps' 2x2 filter against their nearest texel: a tenth may differ.
+    // The pages' 2x2 filter as the tracer reads it: a tenth may differ.
     assert!(c.back > 8 && c.back_wrong * 10 <= c.back, "{c:?}");
     assert!(c.sun_wrong * 50 <= c.lit, "{c:?}");
 }
 
-/// Whether the sun's occlusion maps (`ChunkWorld::read_sun_occlusion`) say
-/// planet-centred point `p` sees the sun, the eye at `eye`: the finest level
-/// holding it, its nearest texel against the point's distance along the sun
-/// with the shader's bias (`sun_occlusion.wgsl`, without its filter), the
-/// level, its texel (m) and how far it sees toward the sun from `p` (m);
-/// `None` outside every level, or near a texel's edge.
 /// The terrain occludes the sun for the volumetric fog, GI hits and fine
 /// cells (`sun_occlusion`): towers out to a kilometre cast shadows under a
 /// low sun; points around each, between a quarter and three quarters of
