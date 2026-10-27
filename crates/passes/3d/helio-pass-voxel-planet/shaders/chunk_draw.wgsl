@@ -2117,8 +2117,8 @@ fn screen_ground(q: vec2<u32>, size: vec2<u32>, t: f32) -> vec3<f32> {
 
 // Hit `v` (pixels `pixel_m` wide there). Voxels a few pixels wide are lit
 // by their own faces (a slope reads as its steps, each shadowing the next);
-// a natural step (air above it, of a material that lets no light through)
-// is lit partly with the slope's normal, `Materials::detail.w` (step
+// a natural step (air above it, its leaf storing the heightfield's slope) is
+// lit partly with the slope's normal, `Materials::detail.w` (step
 // softness), its sun ray passing its own steps.
 // Voxels of a pixel or less are lit by the slope's normal, at every level:
 // the weight follows the voxel's size on screen, not the cell's, so it is
@@ -2140,18 +2140,20 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
     let small = 1.0 - smoothstep(1.0, 3.0, params.planet.y / max(pixel_m, 1e-6));
     let coarse = max(under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6)), small);
-    // Ground's steps only: a leaf cell's top (air over a canopy) stands for
-    // no slope, and its sun ray passing the leaves around it shadowed them
-    // by chance (canopy speckle).
-    let foliage = materials.m[min((v.y >> 21u) & 31u, 31u)].light.x > 0.0;
-    let step = !foliage && !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
+    // Natural steps only: the leaf stores the heightfield's slope where it
+    // holds natural tops. A feature's cells (a boulder, a tree's leaves) or an
+    // edit's stand for no slope: softened, rock fields lost their form and
+    // shadows, and leaves' sun rays skipped the leaves around them (canopy
+    // speckle).
+    let stored = leaf_ground(v.x, cell, c);
+    let step = dot(stored, stored) > 0.0 && !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
     if !step && coarse == 0.0 { return f; }
     let w = max(select(0.0, materials.detail.w, step), coarse);
     // The heightfield's exact slope stored with the leaf; else, cells of a
     // pixel or less: the slope the hits around make (a few loads); larger
     // ones measure their column tops (`slope_normal`).
     var ground = ground_hint;
-    if dot(ground, ground) == 0.0 { ground = leaf_ground(v.x, cell, c); }
+    if dot(ground, ground) == 0.0 { ground = stored; }
     if dot(ground, ground) == 0.0 && length(c.m0.xyz) <= 1.5 * pixel_m { ground = screen_ground(q, size, t); }
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
     // A unit normal (written so NaN fails it), else the face's own.

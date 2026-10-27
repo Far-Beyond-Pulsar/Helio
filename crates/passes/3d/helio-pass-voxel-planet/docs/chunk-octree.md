@@ -452,7 +452,10 @@ softness: 0.75 by default) and its sun and sky rays pass its own steps.
 Lit by their own faces (step softness 0, the default from 2026-10-12 to
 2026-10-26), the 10 cm steps of a gentle slope drew each riser and the
 shadow it casts as a dark line: contour lines over every meadow, under
-the grass and past it, near and from the air.
+the grass and past it, near and from the air, and rings in lunar crater
+bowls. Natural means the leaf stores the heightfield's slope (its columns
+hold natural tops): features and edits keep their own faces (softened, a
+rock field lost its form and its shadows).
 Helio's deferred lighting, atmosphere and TSR do the rest.
 
 It writes only the hits no mesh covers, as the shading pass found them
