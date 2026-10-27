@@ -1973,10 +1973,13 @@ fn lunar_material(
 }
 
 /// The lunar look: the shared material table (lunar ground has its own
-/// ids there) with steps lit as crisp voxels (no atmosphere softens them).
+/// ids there), less patch and pigment contrast, steps lit mostly by the
+/// slope they stand for: lit by their own faces, a crater bowl's 10 cm
+/// terraces drew concentric rings (moiré at distance), their shadows black
+/// without a sky to fill them.
 pub fn lunar_appearance() -> TerrainAppearance {
     TerrainAppearance {
-        detail: [0.2, 0.12, 0.08, 0.0],
+        detail: [0.2, 0.12, 0.08, 0.75],
         ..TerrainAppearance::default()
     }
 }
