@@ -279,7 +279,17 @@ fn map_carve(p: vec3<i32>, level: u32, h: i32) -> vec2<i32> {
 // stream records (`streams::RECORD_WORDS` words: node, target, beds,
 // floodplain, channel | depth << 17, reach, cap | wall << 24).
 const MAP_FLAG_STREAMS: i32 = 16;
-const STREAM_RECORD_WORDS: u32 = 12u;
+const STREAM_RECORD_WORDS: u32 = 13u;
+
+// Whether a point `d` (Q16 texel units) from a level's cell lies in a
+// record's box (`streams::in_box`).
+fn stream_in_box(b: u32, d: vec2<i32>, shift: u32) -> bool {
+    let u = (d.x << 5u) >> shift;
+    let v = (d.y << 5u) >> shift;
+    let lo = vec2<i32>(bitcast<i32>(b << 24u) >> 24u, bitcast<i32>(b << 8u) >> 24u);
+    let hi = vec2<i32>(bitcast<i32>(b << 16u) >> 24u, bitcast<i32>(b) >> 24u);
+    return u >= lo.x && u <= hi.x && v >= lo.y && v <= hi.y;
+}
 
 // `a / b` in Q16, exactly in 32 bits (`streams::ratio_q16`).
 fn stream_ratio(a: i32, b: i32) -> i32 {
@@ -424,7 +434,11 @@ fn map_streams(p: vec3<i32>, level: u32, h: i32) -> vec2<i32> {
                     if region < 0 { continue; }
                     let at = record * STREAM_RECORD_WORDS;
                     let reach = bitcast<i32>(terrain_region_word(u32(region), at + 10u));
-                    if reach == 0 || !stream_near_box(u32(region), at, p, reach) { continue; }
+                    if reach == 0 { continue; }
+                    // The record's box first: one word, most cells' last.
+                    let d = vec2<i32>(fc.y - (x << shift), fc.z - (y << shift));
+                    if !stream_in_box(terrain_region_word(u32(region), at + 12u), d, shift) { continue; }
+                    if !stream_near_box(u32(region), at, p, reach) { continue; }
                     if !bent {
                         bend = map_bends(p, bitcast<u32>(header[3].w));
                         bent = true;

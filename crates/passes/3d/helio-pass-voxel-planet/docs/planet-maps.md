@@ -237,8 +237,10 @@ the GPU reads the same records from the program's **regions**
 `RegionPool` keeps every region a footprint's columns may read resident
 while it generates, making the missing ones on the CPU (in parallel) and
 evicting the longest unused. A region is a parent cell's 16 records (and
-a texel's stem), 12 words each: node, target, beds, floodplain, channel and
-depth, reach, cut and wall slope.
+a texel's stem), 13 words each: node, target, beds, floodplain, channel and
+depth, reach, cut and wall slope, and its box on its face (signed bytes of
+thirty-seconds of a cell around its segment, grown by its reach and
+swing): a column reads one word of most of the nine cells it looks at.
 
 ## Sampling
 
@@ -291,8 +293,17 @@ disk cache instead of baking.
 Streams on the CPU: a cold area's regions (44 for a level-0 footprint)
 take ~13 ms, ~0.3 ms a region; a level-0 column's height costs ~27 us with
 three stream levels against ~23 us without (warm caches). The GPU reads
-regions from the pool (832 bytes each, 8192 kept: 6.8 MB).
+regions from the pool (896 bytes each, 32768 kept: 29 MB).
 
 Generation on the GPU (`voxel_flight` holds, `HELIO_VOXEL_GEN_BENCH=3`,
-RTX 3060): see the table below (base: before the maps; maps: the first
-deliverable; streams: with erosion and three stream levels).
+RTX 3060, interleaved runs, all of a tile's generation per tile):
+
+| view | before the maps | maps (rivers, climate) | + erosion, streams (3 levels) |
+|---|---|---|---|
+| ground: all / columns (us a tile) | 32.7-34.5 / 19.4-20.3 | 36.4-36.6 / 23.4-23.5 | 45.8-46.8 / 32.3-33.2 |
+| mountain slope: all / columns | 38.2-38.7 / 20.6-20.8 | 42.7-43.2 / 25.7-26.1 | 57.4-68.3 / 39.3-47.3 |
+
+Settling the held views took the same frames with and without streams
+once regions were asked for ahead (mountain slope 385 frames; 353-639
+without). Streams' columns read one box word for most of the cells around
+them (`in_box`), which the last measurements predate.

@@ -202,6 +202,33 @@ impl Streams {
         }
     }
 
+    /// Cell `c`'s stream's box on its face (`in_box`): its segment's ends
+    /// in the face's coordinates, grown by its reach and its valley's swing
+    /// over the cell's shortest side, a quarter more (the gnomonic scale
+    /// changes over the cells around), a cell's tenth more; clamped to the
+    /// cells around (a column only looks at those).
+    fn record_box(&self, c: Cell, s: &Stream) -> u32 {
+        if s.kind != Kind::Stream {
+            return 0;
+        }
+        let header = &self.maps.header;
+        let shift = 16 - 2 * u32::from(c.level);
+        let at = |p: IVec3| {
+            let (_, x, y) = planet_maps::coords_on(header, p, u32::from(c.slot));
+            let unit = f64::from(1u32 << shift);
+            (f64::from(x - (c.i << shift)) / unit * 32.0, f64::from(y - (c.j << shift)) / unit * 32.0)
+        };
+        let (a, b) = (at(s.node), at(s.target));
+        let side = self.cell_reach(c) * 256.0 / f64::from(REACH_Q8);
+        let swing = 1.75 * f64::from(planet_maps::meander_amplitudes(s.floodplain, s.channel)[0]);
+        let grow = ((f64::from(s.reach) + swing) / side * 1.25 + 0.1) * 32.0;
+        let byte = |v: f64| (v.clamp(-127.0, 127.0) as i32 as i8 as u8) as u32;
+        byte((a.0.min(b.0) - grow).floor())
+            | byte((a.0.max(b.0) + grow).ceil()) << 8
+            | byte((a.1.min(b.1) - grow).floor()) << 16
+            | byte((a.1.max(b.1) + grow).ceil()) << 24
+    }
+
     /// A region's words (`TerrainRegions::region`), made once.
     fn region_words(&self, key: [u32; 2]) -> Arc<[u32]> {
         if let Some(w) = self.regions.get(&key) {
@@ -593,7 +620,9 @@ impl Streams {
             if resolved(self.reach(r), cell) == 0 {
                 continue;
             }
-            for (slot, i, j) in cells_around(m.header, p, r) {
+            let shift = 16 - 2 * u32::from(r);
+            for (slot, xq, yq) in cells_around(m.header, p, r) {
+                let (i, j) = (xq >> shift, yq >> shift);
                 for dj in -1..=1 {
                     for di in -1..=1 {
                         let n = self.side(r);
@@ -611,8 +640,13 @@ impl Streams {
                             last = Some((key, self.region_words(key)));
                         }
                         let words = &last.as_ref().unwrap().1;
-                        let s = unpack(&words[record * RECORD_WORDS..][..RECORD_WORDS]);
-                        if s.kind != Kind::Stream || !near_box(&s, p) {
+                        let w = &words[record * RECORD_WORDS..][..RECORD_WORDS];
+                        // The record's box first: one word, most cells' last.
+                        if w[10] == 0 || !in_box(w[12], xq - (ci << shift), yq - (cj << shift), shift) {
+                            continue;
+                        }
+                        let s = unpack(w);
+                        if !near_box(&s, p) {
                             continue;
                         }
                         let at = surface(&s, p, bent, cell);
@@ -718,13 +752,14 @@ pub fn level_reach(header: &[[i32; 4]; planet_maps::MAP_HEADER], r: u8) -> i32 {
     header[4][3] >> (2 * u32::from(r))
 }
 
-/// The level-`r` cells holding domain point `p` on its face and on the
-/// faces it lies within a cell of (near edges and corners): slot and cell.
+/// Domain point `p` on its face and on the faces it lies within a
+/// level-`r` cell of (near edges and corners): slot and texel coordinates
+/// (Q16) there.
 fn cells_around(header: &[[i32; 4]; planet_maps::MAP_HEADER], p: IVec3, r: u8) -> Vec<(u8, i32, i32)> {
     let shift = 16 - 2 * u32::from(r);
     let n = header[0][1] << (2 * u32::from(r));
     let (slot, xq, yq) = planet_maps::coords(header, p);
-    let mut out = vec![(slot as u8, xq >> shift, yq >> shift)];
+    let mut out = vec![(slot as u8, xq, yq)];
     if header[2][0] > 0 {
         return out;
     }
@@ -735,7 +770,7 @@ fn cells_around(header: &[[i32; 4]; planet_maps::MAP_HEADER], p: IVec3, r: u8) -
         if side != 0 {
             let face = planet_maps::face_of_normal(axis * side);
             let (_, x, y) = planet_maps::coords_on(header, p, face);
-            out.push((face as u8, x >> shift, y >> shift));
+            out.push((face as u8, x, y));
         }
     }
     out
@@ -743,22 +778,33 @@ fn cells_around(header: &[[i32; 4]; planet_maps::MAP_HEADER], p: IVec3, r: u8) -
 
 /// Words of a stream record in a region (`map_stream` in WGSL): node,
 /// target, beds, floodplain, channel | depth << 17, reach (0: none), cap |
-/// wall << 24.
-pub const RECORD_WORDS: usize = 12;
+/// wall << 24, and its box on its face (`in_box`).
+pub const RECORD_WORDS: usize = 13;
 /// Records of a region: a parent cell's 16 cells, then (texels) its stem.
 pub const REGION_RECORDS: usize = 17;
-pub const REGION_WORDS: usize = 208;
+pub const REGION_WORDS: usize = 224;
+
+/// Whether a point `(du, dv)` (Q16 texel units) from a level's cell
+/// (`shift`: 16 less twice the level) lies in a record's box: signed bytes
+/// of thirty-seconds of a cell from the cell's corner, u min and max, v min
+/// and max (`stream_in_box` in WGSL).
+fn in_box(b: u32, du: i32, dv: i32, shift: u32) -> bool {
+    let (u, v) = ((du << 5) >> shift, (dv << 5) >> shift);
+    let at = |k: u32| i32::from((b >> (8 * k)) as u8 as i8);
+    u >= at(0) && u <= at(1) && v >= at(2) && v <= at(3)
+}
 
 /// A region's key: its parent cell (`map_stream_key` in WGSL).
 pub fn region_key(level: u8, slot: u8, i: i32, j: i32) -> [u32; 2] {
     [u32::from(level) | u32::from(slot) << 2 | (i as u32) << 5, j as u32]
 }
 
-fn pack(s: &Stream, out: &mut [u32]) {
+fn pack(s: &Stream, b: u32, out: &mut [u32]) {
     if s.kind != Kind::Stream {
         out.fill(0);
         return;
     }
+    out[12] = b;
     out[0..3].copy_from_slice(&s.node.to_array().map(|v| v as u32));
     out[3..6].copy_from_slice(&s.target.to_array().map(|v| v as u32));
     out[6] = s.bed[0] as u32;
@@ -809,8 +855,10 @@ impl crate::terrain::TerrainRegions for Streams {
             // The cells around the footprint, two over (halos, features'
             // ground reads), per face it meets.
             let mut boxes: Vec<(u8, [i32; 4])> = Vec::new();
+            let shift = 16 - 2 * u32::from(r);
             for &p in &corners {
-                for (slot, ci, cj) in cells_around(header, p, r) {
+                for (slot, xq, yq) in cells_around(header, p, r) {
+                    let (ci, cj) = (xq >> shift, yq >> shift);
                     match boxes.iter_mut().find(|b| b.0 == slot) {
                         Some(b) => b.1 = [b.1[0].min(ci), b.1[1].min(cj), b.1[2].max(ci), b.1[3].max(cj)],
                         None => boxes.push((slot, [ci, cj, ci, cj])),
@@ -849,12 +897,14 @@ impl crate::terrain::TerrainRegions for Streams {
         if u32::from(level) < self.levels {
             for k in 0..(SPLIT * SPLIT) as usize {
                 let c = Cell { level: level + 1, slot, i: i * SPLIT + k as i32 % SPLIT, j: j * SPLIT + k as i32 / SPLIT };
-                pack(&self.stream(c), &mut out[k * RECORD_WORDS..][..RECORD_WORDS]);
+                let s = self.stream(c);
+                pack(&s, self.record_box(c, &s), &mut out[k * RECORD_WORDS..][..RECORD_WORDS]);
             }
         }
         if level == 0 {
-            let stem = self.stream(Cell { level: 0, slot, i, j });
-            pack(&stem, &mut out[16 * RECORD_WORDS..][..RECORD_WORDS]);
+            let c = Cell { level: 0, slot, i, j };
+            let stem = self.stream(c);
+            pack(&stem, self.record_box(c, &stem), &mut out[16 * RECORD_WORDS..][..RECORD_WORDS]);
         }
     }
 }
@@ -1006,7 +1056,8 @@ mod tests {
                         if resolved(s.reach(r), cell) == 0 {
                             continue;
                         }
-                        for (slot, i, j) in cells_around(header, p, r) {
+                        for (slot, xq, yq) in cells_around(header, p, r) {
+                            let (i, j) = (xq >> (16 - 2 * u32::from(r)), yq >> (16 - 2 * u32::from(r)));
                             for (ci, cj) in (-1..=1).flat_map(|b| (-1..=1).map(move |a| (i + a, j + b))) {
                                 let n = s.side(r);
                                 if !(0..n).contains(&ci) || !(0..n).contains(&cj) {

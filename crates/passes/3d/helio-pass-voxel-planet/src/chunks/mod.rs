@@ -47,8 +47,8 @@ const RANGE_WORDS: usize = 16;
 type Quarters = [Option<Ranges>; 4];
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
-/// Terrain regions kept on the GPU (`engine::RegionPool`; streams: 832
-/// bytes each, 27 MB).
+/// Terrain regions kept on the GPU (`engine::RegionPool`; streams: 896
+/// bytes each, 29 MB).
 const REGION_CAPACITY: usize = 32768;
 /// Chunk slots by default (`Capacity::chunks`), within what the device can
 /// bind.
