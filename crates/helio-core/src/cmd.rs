@@ -96,9 +96,7 @@ impl<'a> RenderCmds<'a> {
         desc: &wgpu::RenderPassDescriptor<'_>,
     ) -> RenderCmds<'a> {
         // SAFETY: see `render!`.
-        unsafe { stream.as_mut() }.push(Cmd::BeginRenderPass(Box::new(
-            cmd_ir::RenderPassDesc::capture(desc),
-        )));
+        unsafe { stream.as_mut() }.begin_render_pass(desc);
         RenderCmds {
             inner: RenderInner::Recorded {
                 stream,
@@ -137,7 +135,7 @@ impl<'a> RenderCmds<'a> {
             Cmd::SetBindGroup {
                 index,
                 group: group.cloned(),
-                offsets: offsets.to_vec(),
+                offsets: smallvec::SmallVec::from_slice(offsets),
             }
         })
     }
@@ -210,7 +208,7 @@ impl<'a> RenderCmds<'a> {
             |p| p.set_immediates(offset, data),
             Cmd::SetImmediates {
                 offset,
-                data: data.to_vec(),
+                data: smallvec::SmallVec::from_slice(data),
             }
         )
     }
@@ -480,7 +478,7 @@ impl<'a> ComputeCmds<'a> {
             Cmd::SetBindGroup {
                 index,
                 group: group.cloned(),
-                offsets: offsets.to_vec(),
+                offsets: smallvec::SmallVec::from_slice(offsets),
             }
         })
     }
@@ -491,7 +489,7 @@ impl<'a> ComputeCmds<'a> {
             |p| p.set_immediates(offset, data),
             Cmd::SetImmediates {
                 offset,
-                data: data.to_vec(),
+                data: smallvec::SmallVec::from_slice(data),
             }
         )
     }
@@ -1053,6 +1051,17 @@ fn fs() -> @location(0) vec4f { return vec4f(0.0, 1.0, 0.0, 1.0); }
             &w,
         );
         assert_eq!(stream, again);
+        // Clearing scratch storage must preserve recording behavior when it
+        // recycles render-pass descriptors and their attachment vectors.
+        again.clear();
+        record(
+            &mut CommandRecorder::from_stream(NonNull::from(&mut again)),
+            &w,
+        );
+        assert_eq!(stream, again);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        cmd_ir::encode(&again, &mut encoder);
+        assert_eq!(direct, run(&device, &queue, &w, encoder));
         let other = work(&device);
         let mut changed = Stream::new();
         record(

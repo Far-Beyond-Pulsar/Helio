@@ -2,6 +2,42 @@
 //! the same handles, and rebuilds when either changes.
 
 use helio_core::CachedBindGroup;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+
+struct CountedAllocator;
+thread_local! {
+    static ALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+fn count_allocation() {
+    let _ = ALLOCATIONS.try_with(|count| {
+        if let Some(value) = count.get() {
+            count.set(Some(value + 1));
+        }
+    });
+}
+
+unsafe impl GlobalAlloc for CountedAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count_allocation();
+        unsafe { System.alloc(layout) }
+    }
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count_allocation();
+        unsafe { System.alloc_zeroed(layout) }
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        count_allocation();
+        unsafe { System.realloc(ptr, layout, size) }
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountedAllocator = CountedAllocator;
 
 fn device() -> Option<wgpu::Device> {
     pollster::block_on(async {
@@ -72,6 +108,18 @@ fn reused_until_a_bound_resource_or_the_layout_changes() {
     let first = group(&mut cache, &device, &layout_a, &buffer_a);
     let again = group(&mut cache, &device, &layout_a, &buffer_a);
     assert!(first == again, "same layout and buffer: reused");
+
+    // Count only this thread, after device creation and the first cache miss.
+    // A steady hit must not allocate an owned resource key or a new group.
+    ALLOCATIONS.with(|count| count.set(Some(0)));
+    for _ in 0..1_000 {
+        let _ = group(&mut cache, &device, &layout_a, &buffer_a);
+    }
+    let allocations = ALLOCATIONS.with(|count| count.replace(None).unwrap());
+    assert_eq!(
+        allocations, 0,
+        "warmed bind-group cache hits allocate nothing"
+    );
 
     let buffer_b = buffer(&device);
     let rebuilt = group(&mut cache, &device, &layout_a, &buffer_b);
