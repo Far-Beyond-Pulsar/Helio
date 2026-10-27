@@ -184,6 +184,20 @@ pub struct Planner {
     occluder: Option<f64>,
     /// The last plan's frame + 1 (0: none yet).
     last_plan: u64,
+    scratch: PlanScratch,
+}
+
+/// Work lists belong to the planner, rather than being allocated for every
+/// camera update. Clearing them drops old keys; capacity follows peak work.
+#[derive(Default)]
+struct PlanScratch {
+    tiles: Vec<i32>,
+    wanted: Vec<(f64, NodeKey)>,
+    priority_order: Vec<usize>,
+    stack: Vec<NodeKey>,
+    decisions: FxHashMap<(Footprint, i32), Decision>,
+    order: FxHashMap<Footprint, usize>,
+    request_groups: Vec<Vec<NodeKey>>,
 }
 
 impl Planner {
@@ -208,6 +222,7 @@ impl Planner {
             edits,
             occluder,
             last_plan: 0,
+            scratch: PlanScratch::default(),
         };
         planner.place_roots(grid);
         planner
@@ -408,10 +423,10 @@ impl Planner {
     /// The layers (level cells) the chunks of nodes `members` (a band)
     /// occupy, once every one's result came back (the same whether
     /// generated or restored).
-    fn occupied_of(&self, members: &[NodeKey]) -> Option<(i32, i32)> {
+    fn occupied_of(&self, members: impl Iterator<Item = NodeKey>) -> Option<(i32, i32)> {
         let mut occupied: Option<(i32, i32)> = None;
         for m in members {
-            match self.nodes.get(m) {
+            match self.nodes.get(&m) {
                 Some(n) if n.generated && n.empty => {}
                 Some(Node {
                     generated: true,
@@ -448,11 +463,11 @@ impl Planner {
         // included (under a hovering eye, more than its cells' own distance
         // asks); the plan's worst cell, to the cells drawn (`cells`).
         let layers = (band.0 * CHUNK, (band.1 + 1) * CHUNK);
-        let members: Vec<NodeKey> = (band.0..=band.1).map(|cz| fp.node(cz)).collect();
+        let members = (band.0..=band.1).map(|cz| fp.node(cz));
         let error = self.error_box(grid, fp, layers, eyes);
         let now = self.error_box(grid, fp, layers, &eyes[..1]);
         let cells = self
-            .occupied_of(&members)
+            .occupied_of(members.clone())
             .map(|o| self.error_box(grid, fp, o, &eyes[..1]));
         // In view: the band's nearest point within the cone (generous for
         // its extent: anything beside it is near it).
@@ -468,14 +483,14 @@ impl Planner {
         // Met by rays lately (or no ray report yet): as fine as wanted.
         let met = !self.rays
             || self.config.unseen_pixels <= 1.0
-            || members.iter().any(|m| {
+            || members.clone().any(|m| {
                 self.seen
-                    .get(m)
+                    .get(&m)
                     .is_some_and(|&f| f + self.config.seen_frames >= frame)
             });
         let refined = members
-            .iter()
-            .any(|m| self.nodes.get(m).is_some_and(|n| n.refined));
+            .clone()
+            .any(|m| self.nodes.get(&m).is_some_and(|n| n.refined));
         // Rays not meeting a band only keep it from refining: a refined
         // band they stop meeting (its children hidden) stays refined, or its
         // coarser cells, poking out, would be met and refine it again.
@@ -511,9 +526,8 @@ impl Planner {
         let mut ready = refine;
         if refine {
             self.estimate_children(key, frame);
-            for &m in &members {
-                let below: Vec<NodeKey> = m.children(tiles[m.level as usize - 1]).collect();
-                for child in below {
+            for m in members {
+                for child in m.children(tiles[m.level as usize - 1]) {
                     let kind = self.kind(child);
                     let needs = kind != Kind::Empty && self.needs_data(grid, child, kind, &eyes[0]);
                     let entry = self.nodes.entry(child).or_default();
@@ -537,9 +551,8 @@ impl Planner {
             let mut at = key;
             loop {
                 let near = |k: &NodeKey| tile_distance(grid, k.footprint(), k.layers(), &eyes[0]);
-                let below: Vec<NodeKey> = at.children(tiles[at.level as usize - 1]).collect();
                 let mut next = None;
-                for c in below {
+                for c in at.children(tiles[at.level as usize - 1]) {
                     if self.kind(c) == Kind::Mixed
                         && next.is_none_or(|n: NodeKey| near(&c) < near(&n))
                     {
@@ -554,8 +567,7 @@ impl Planner {
                     break;
                 }
                 self.estimate_children(next, frame);
-                let below: Vec<NodeKey> = next.children(tiles[next.level as usize - 1]).collect();
-                for c in below {
+                for c in next.children(tiles[next.level as usize - 1]) {
                     let kind = self.kind(c);
                     let needs = kind != Kind::Empty && self.needs_data(grid, c, kind, &eyes[0]);
                     let entry = self.nodes.entry(c).or_default();
@@ -611,13 +623,24 @@ impl Planner {
                 .min(std::f64::consts::PI)
                 .cos()
         });
-        let tiles: Vec<i32> = (0..=self.root_level).map(|l| tiles_at(grid, l)).collect();
+        let PlanScratch {
+            mut tiles,
+            mut wanted,
+            mut priority_order,
+            mut stack,
+            decisions: mut groups,
+            mut order,
+            request_groups: mut requests,
+        } = std::mem::take(&mut self.scratch);
+        tiles.clear();
+        tiles.extend((0..=self.root_level).map(|l| tiles_at(grid, l)));
         let mut drawn_in_view = 0usize;
         let mut plan = Plan::default();
-        let mut wanted: Vec<(f64, NodeKey)> = Vec::new();
+        wanted.clear();
         let mut coarse = 0usize;
-        let mut stack: Vec<NodeKey> = self.roots.clone();
-        let mut groups: FxHashMap<(Footprint, i32), Decision> = FxHashMap::default();
+        stack.clear();
+        stack.extend_from_slice(&self.roots);
+        groups.clear();
         while let Some(key) = stack.pop() {
             if let Some(fp) = self.footprints.get_mut(&key.footprint()) {
                 fp.used = frame;
@@ -686,11 +709,6 @@ impl Planner {
             let (error, seen, allowance, ready) = (d.error, d.seen, d.allowance, d.ready);
             let shows = seen && !hidden;
             let (exact, guess) = (d.exact, d.guess);
-            let children: Vec<NodeKey> = if ready {
-                key.children(tiles[key.level as usize - 1]).collect()
-            } else {
-                Vec::new()
-            };
             // A switch shows where the last plan drew the side it leaves.
             let last = self.last_plan;
             let shown = |nodes: &FxHashMap<NodeKey, Node>, k: &NodeKey| {
@@ -715,16 +733,21 @@ impl Planner {
                 plan.worst_wanted = plan.worst_wanted.max(cells / allowance);
                 if cells > plan.worst_px {
                     plan.worst_px = cells;
-                    let below: Vec<NodeKey> = key.children(tiles[key.level as usize - 1]).collect();
-                    let generated = below
-                        .iter()
-                        .filter(|c| self.nodes.get(c).is_some_and(|n| n.generated))
-                        .count();
+                    let (children, generated) = key.children(tiles[key.level as usize - 1]).fold(
+                        (0, 0),
+                        |(count, generated), c| {
+                            (
+                                count + 1,
+                                generated
+                                    + usize::from(self.nodes.get(&c).is_some_and(|n| n.generated)),
+                            )
+                        },
+                    );
                     plan.worst = Some(Worst {
                         key,
                         exact,
                         guess,
-                        children: below.len(),
+                        children,
                         generated,
                     });
                 }
@@ -732,7 +755,7 @@ impl Planner {
             let n = self.nodes.get_mut(&key).unwrap();
             n.refined = ready;
             if ready {
-                stack.extend(children);
+                stack.extend(key.children(tiles[key.level as usize - 1]));
             } else {
                 if shows {
                     n.drawn = frame + 1;
@@ -752,20 +775,43 @@ impl Planner {
             wanted.select_nth_unstable_by(MAX_REQUESTS, |a, b| b.0.total_cmp(&a.0));
             wanted.truncate(MAX_REQUESTS);
         }
-        wanted.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // Preserve the stable priority order without stable sort's temporary
+        // heap buffer: the original position breaks ties in the index list.
+        priority_order.clear();
+        priority_order.extend(0..wanted.len());
+        priority_order
+            .sort_unstable_by(|&a, &b| wanted[b].0.total_cmp(&wanted[a].0).then(a.cmp(&b)));
         // A footprint's nodes together, where its most wanted one is.
-        let mut order: FxHashMap<Footprint, usize> = FxHashMap::default();
-        let mut groups: Vec<Vec<NodeKey>> = Vec::new();
-        for (_, key) in wanted {
+        order.clear();
+        let mut group_count = 0;
+        for &index in &priority_order {
+            let key = wanted[index].1;
             let n = *order.entry(key.footprint()).or_insert_with(|| {
-                groups.push(Vec::new());
-                groups.len() - 1
+                if group_count == requests.len() {
+                    requests.push(Vec::new());
+                }
+                group_count += 1;
+                group_count - 1
             });
-            if !groups[n].contains(&key) {
-                groups[n].push(key);
+            if !requests[n].contains(&key) {
+                requests[n].push(key);
             }
         }
-        plan.requests = groups.into_iter().flatten().collect();
+        plan.requests.extend(
+            requests[..group_count]
+                .iter_mut()
+                .flat_map(|group| group.drain(..)),
+        );
+        wanted.clear();
+        self.scratch = PlanScratch {
+            tiles,
+            wanted,
+            priority_order,
+            stack,
+            decisions: groups,
+            order,
+            request_groups: requests,
+        };
         plan.coarse_share = coarse as f64 / drawn_in_view.max(1) as f64;
         self.last_plan = frame + 1;
         plan
