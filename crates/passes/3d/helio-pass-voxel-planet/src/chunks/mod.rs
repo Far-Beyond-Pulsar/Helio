@@ -1824,6 +1824,9 @@ pub struct ChunkWorld {
     /// A batch's jobs and scratch, shared by the volumes (one generates a
     /// frame).
     tile_jobs: wgpu::Buffer,
+    /// The batch's two-rate nodes (`tile_nodes` of the generation shaders),
+    /// for the largest program of the volumes.
+    tile_node_data: wgpu::Buffer,
     slope_lattice: wgpu::Buffer,
     // The batch's chunk jobs' columns features changed (a bit each).
     job_features: wgpu::Buffer,
@@ -2936,6 +2939,7 @@ impl ChunkWorld {
                 (TILE_BATCH * std::mem::size_of::<TileJob>()) as u64,
                 s,
             ),
+            tile_node_data: buffer("chunk tile nodes", 16, wgpu::BufferUsages::STORAGE),
             slope_lattice: buffer(
                 "chunk slope lattices",
                 TILE_BATCH as u64 * SLOPE_LATTICE * 4,
@@ -3353,7 +3357,7 @@ impl ChunkWorld {
                 entry(16, &vol.terrain),
                 entry(2, &self.tile_jobs),
                 entry(3, &vol.tile_data),
-                entry(25, &vol.tile_node_data),
+                entry(25, &self.tile_node_data),
                 entry(26, &vol.tile_halo_data),
                 entry(34, &vol.tile_slope_data),
                 entry(35, &self.slope_lattice),
@@ -4387,29 +4391,38 @@ impl ChunkWorld {
         // Slots and leaf pages kept free for a frame's generation and
         // more: short of either, its pool grows (doubling, up to its most);
         // at its most, the least recently visited nodes go.
+        // Pages: an eighth of the pool, and two batches' at their average
+        // (no more than half the pool).
         let reserve = |slots: usize| (slots / 8).max(2 * CHUNK_BATCH);
+        let page_reserve = |leaves: u64| {
+            let pages = leaves / LEAF_PAGE;
+            (pages / 8)
+                .max(2 * CHUNK_BATCH as u64 * LEAVES_PER_SLOT / LEAF_PAGE)
+                .min(pages / 2)
+        };
         if self.free_slots.len() + evictions.len() < reserve(self.slot_capacity)
             && self.slot_capacity < self.max_chunks
         {
             self.grow_slots();
         }
-        if self.free_pages_seen < self.leaf_capacity / LEAF_PAGE / 8
+        if self.free_pages_seen < page_reserve(self.leaf_capacity)
             && self.leaf_capacity < self.leaf_max
         {
             self.grow_leaves();
         }
-        let reserve = reserve(self.slot_capacity);
         for vol in self.volumes.iter_mut().flatten() {
             if vol.pool.pressed && vol.pool.len() < vol.pool_max {
                 vol.grow_footprints(&self.device, &self.queue);
             }
         }
+        let reserve = reserve(self.slot_capacity);
         let mut need = reserve.saturating_sub(self.free_slots.len() + evictions.len());
         let pages = self.leaf_capacity / LEAF_PAGE;
-        if self.free_pages_seen < pages / 8 && !self.nodes.is_empty() {
+        let page_reserve = page_reserve(self.leaf_capacity);
+        if self.free_pages_seen < page_reserve && !self.nodes.is_empty() {
             let per_node =
                 ((pages - self.free_pages_seen) as f64 / self.nodes.len() as f64).max(1.0);
-            need = need.max(((pages / 8 - self.free_pages_seen) as f64 / per_node).ceil() as usize);
+            need = need.max(((page_reserve - self.free_pages_seen) as f64 / per_node).ceil() as usize);
         }
         // Each volume frees its share, by the chunks it holds.
         let mut held: FxHashMap<u16, usize> = FxHashMap::default();
@@ -5427,16 +5440,29 @@ impl ChunkWorld {
     /// What keeps the world from settling ([`Self::settled`]'s terms), for
     /// diagnostics.
     pub fn settle_report(&self) -> String {
+        let volumes: Vec<String> = self
+            .volumes
+            .iter()
+            .flatten()
+            .map(|v| {
+                format!(
+                    "volume {}: current {} requests {} urgent {} stale {}",
+                    v.tag,
+                    v.planned_for.is_some_and(|p| p.edits == v.edits.version),
+                    v.last_requests,
+                    v.urgent.len(),
+                    v.stale.len(),
+                )
+            })
+            .collect();
         format!(
-            "current {} pending {} readbacks {} requests {} urgent {} stale {} fading {} reports {:?}/{}",
-            self.planned_for.is_some_and(|p| p.edits == self.edits.version),
+            "{}; unplanned {} pending {} readbacks {} fading {} reports {:?}/{}",
+            volumes.join("; "),
+            self.unplanned.len(),
             self.pending.is_some(),
             self.readbacks.len(),
-            self.last_requests,
-            self.urgent.len(),
-            self.stale.len(),
             self.drawn_set.fading(),
-            self.planned_for.map(|p| p.reports_seen),
+            self.planned.map(|p| p.1),
             self.quiet_from + REPORT_FRAMES,
         )
     }

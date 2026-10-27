@@ -119,10 +119,9 @@ pub(super) struct Volume {
     pub terrain: wgpu::Buffer,
     pub materials: wgpu::Buffer,
     pub views: VolumeViews,
-    /// Its footprint pool: columns, two-rate nodes (the batch's), halos,
-    /// material slopes, feature placements and candidate blocks.
+    /// Its footprint pool: columns, halos, material slopes, feature
+    /// placements and candidate blocks.
     pub tile_data: wgpu::Buffer,
-    pub tile_node_data: wgpu::Buffer,
     pub tile_halo_data: wgpu::Buffer,
     pub tile_slope_data: wgpu::Buffer,
     pub feature_set: wgpu::Buffer,
@@ -928,6 +927,23 @@ impl ChunkWorld {
                 + 64
                 + planet.features().above,
         );
+        // The batch's two-rate nodes, shared (one volume generates a
+        // frame): the tiles', the scratch nodes, the tiles' slope lattice
+        // rings, the block jobs' node quads, and the 8 a column's node words
+        // read past the last, for the largest program.
+        let node_bytes = (2 * TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2))
+            + u64::from(crate::engine::NODE_SCRATCH)
+            + if features.is_empty() {
+                0
+            } else {
+                4 * (candidates::BLOCK_JOBS * candidates::BLOCK_READS) as u64
+            }
+            + 8)
+            * u64::from(crate::engine::node_words(&program))
+            * 4;
+        if node_bytes > self.tile_node_data.size() {
+            self.tile_node_data = buffer("chunk tile nodes", node_bytes, wgpu::BufferUsages::STORAGE);
+        }
         // Its planner from the next update (with that update's settings).
         self.unplanned.push(index16);
         self.motion_version += 1;
@@ -966,23 +982,6 @@ impl ChunkWorld {
                 sun: params("chunk sun params"),
             },
             tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, g),
-            // The tiles' nodes, the scratch nodes, the tiles' slope lattice
-            // rings, the block jobs' node quads, and the 8 a column's node
-            // words read past the last.
-            tile_node_data: buffer(
-                "chunk tile nodes",
-                (2 * TILE_BATCH as u64 * u64::from(crate::engine::TILE_NODES.pow(2))
-                    + u64::from(crate::engine::NODE_SCRATCH)
-                    + if features.is_empty() {
-                        0
-                    } else {
-                        4 * (candidates::BLOCK_JOBS * candidates::BLOCK_READS) as u64
-                    }
-                    + 8)
-                    * u64::from(crate::engine::node_words(&program))
-                    * 4,
-                wgpu::BufferUsages::STORAGE,
-            ),
             tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, g),
             tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, g),
             feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
