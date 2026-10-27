@@ -2805,8 +2805,8 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         // across a texel do not shade it, and from as far up the sun as a
         // walk starts (past the steps it stands among). Not there yet: its
         // own walk.
-        let from = to_world(at_hit + f.normal * (0.5 * f.cell) + sun * skip_along(f, sun));
-        lit = sun_by_pages(from, to_world(f.shading), footprint);
+        let lifted = to_world(at_hit + f.normal * (0.5 * f.cell) + sun * skip_along(f, sun));
+        lit = sun_by_pages(lifted, to_world(f.shading), footprint);
         own = 1.0;
         walks = lit < 0.0;
     } else {
