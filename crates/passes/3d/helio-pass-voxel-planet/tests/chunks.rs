@@ -2036,7 +2036,7 @@ fn large_sculpt_strokes_settle() {
 /// frame's hits (every fourth pixel each way) are kept, then judged
 /// against the burst's own settled frame (CPU ray casts of the Moon cost
 /// a third of a second each): coarse pixels (drawn three levels or more
-/// coarser than settled there), wrong ones after the last stroke (off by
+/// coarser than their distance wants), wrong ones after the last stroke (off by
 /// more than a metre and 2%, or a hit where there is none or none where
 /// there is one), pixels drawing material 0 (magenta), and the frames
 /// after the last stroke until the view is right again (`BURST_FRAMES=<dir>`
@@ -2144,10 +2144,14 @@ fn sculpt_bursts_while_they_happen() {
         let (mut coarse_sum, mut coarse_max, mut magenta_sum) = (0, 0, 0);
         let (mut wrong_after, mut right_after) = (0, None);
         for (n, hits) in frames.iter().enumerate() {
+            // Three levels or more coarser than its distance wants.
             let coarse = hits
                 .iter()
-                .zip(&settled)
-                .filter(|(a, b)| matches!((a, b), (Some(a), Some(b)) if a.level >= b.level + 3))
+                .flatten()
+                .filter(|h| {
+                    let wanted = (h.distance * view.pixel_angle() / voxel).log2().floor().max(0.0);
+                    f64::from(h.level) >= wanted + 3.0
+                })
                 .count();
             coarse_sum += coarse;
             coarse_max = coarse_max.max(coarse);

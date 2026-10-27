@@ -95,7 +95,13 @@ struct Node {
     /// its parent back, so an edit never shows a coarse ancestor in its
     /// place.
     stand_in: Option<Kind>,
+    /// The frame an edit last marked it.
+    edited: u64,
 }
+
+/// Frames rock an edit added stays air while its footprint's new surface
+/// is generated, at most (`Planner::surface_pending`).
+const ADDED_ROCK_WAITS: u64 = 120;
 
 struct Fp {
     ranges: Ranges,
@@ -432,7 +438,18 @@ impl Planner {
         occupied
     }
 
+    /// Whether a Mixed node of `fp` (classified) is not generated yet.
+    fn surface_pending(&self, fp: Footprint) -> bool {
+        let Some((_, class)) = self.footprints.get(&fp).and_then(|f| f.class.as_ref()) else {
+            return false;
+        };
+        class.mixed.iter().any(|&(a, b)| {
+            (a..=b).any(|cz| !self.nodes.get(&fp.node(cz)).is_some_and(|n| n.generated))
+        })
+    }
+
     /// Whether `key`'s band (`band`, its footprint's layers) is refined,
+
     /// from its box: its error, in view, allowances; ready once every Mixed
     /// child of every node in it is generated (the children wanted, and the
     /// nodes under the eye when it is far too coarse, are queued in
@@ -532,6 +549,7 @@ impl Planner {
                     if !entry.generated && needs {
                         if entry.stand_in.is_none() {
                             entry.stand_in = inherited;
+                            entry.edited = frame;
                         }
                         // A Buried child is rock meanwhile, an edited one
                         // what it was; another Mixed one has no stand-in
@@ -649,6 +667,18 @@ impl Planner {
                 continue;
             }
             if !self.needs_data(grid, key, kind, &eyes[0]) {
+                // Rock an edit added where there was air (a mound's inside)
+                // stays air until its footprint's new surface is generated:
+                // drawn at once, its boxes covered the view while the
+                // surface came.
+                if kind != Kind::Empty
+                    && node.stand_in == Some(Kind::Empty)
+                    && frame < node.edited + ADDED_ROCK_WAITS
+                    && self.surface_pending(key.footprint())
+                {
+                    self.nodes.get_mut(&key).unwrap().leaf = Some((Kind::Empty, this_plan));
+                    continue;
+                }
                 let n = self.nodes.get_mut(&key).unwrap();
                 n.stand_in = None;
                 n.leaf = Some((kind, this_plan));
@@ -656,14 +686,47 @@ impl Planner {
                 continue;
             }
             if !node.generated {
-                // An edited node is drawn as it was until its chunk comes;
-                // a Buried node a ray met, or holding the eye, is rock (it
+                // An edited node too coarse for the eye in view hands what
+                // it stands in as to its children, which are visited in its
+                // place: the edit is generated at the level the eye wants,
+                // not first at the coarse level it was drawn at (a 60 m
+                // stroke drew rock boxes 200 m across, then refined).
+                if let Some(shown) = node.stand_in.filter(|_| key.level > 0) {
+                    let fp = key.footprint();
+                    let in_view = view.is_none_or(|v| {
+                        let offset = eyes[0].toward(grid, fp, key.layers());
+                        let length = offset.length();
+                        let size = grid.level_size(fp.level) * f64::from(CHUNK) * 1.5;
+                        length < size || offset.dot(v.forward) > guarded * length - size
+                    });
+                    let exact = self.footprints.get(&fp).is_some_and(|f| f.exact);
+                    if in_view
+                        && self.error(grid, key, &eyes) > 1.0
+                        && (exact || self.guess_of(key) < GUESS_LEVELS)
+                    {
+                        self.estimate_children(key, frame);
+                        self.nodes.get_mut(&key).unwrap().refined = true;
+                        for child in key.children(tiles[key.level as usize - 1]) {
+                            let edited = node.edited;
+                            let c = self.nodes.entry(child).or_default();
+                            if !c.generated && c.stand_in.is_none() {
+                                c.stand_in = Some(shown);
+                                c.edited = edited;
+                            }
+                            stack.push(child);
+                        }
+                        continue;
+                    }
+                }
+                // Else it is drawn as it was until its chunk comes; a
+                // Buried node a ray met, or holding the eye, is rock (it
                 // never holds its parent back). Else only a root can be
                 // ungenerated here: children are visited once every Mixed
                 // one is generated or stands in.
                 let shown = node
                     .stand_in
                     .or((kind == Kind::Buried).then_some(Kind::Buried));
+
                 if let Some(shown) = shown {
                     self.nodes.get_mut(&key).unwrap().leaf = Some((shown, this_plan));
                     if shown != Kind::Empty {
@@ -859,6 +922,7 @@ impl Planner {
                 let last = self.last_plan;
                 for k in keys {
                     let n = self.nodes.get_mut(&k).unwrap();
+                    n.edited = frame;
                     // Drawn as it was until it is generated again: air (one
                     // generated empty: its chunk dropped, known only here)
                     // or rock.

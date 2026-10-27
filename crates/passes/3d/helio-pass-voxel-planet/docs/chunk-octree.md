@@ -214,9 +214,12 @@ A `ChunkWorld` follows a published planet's edits by difference
   until its new one is generated; a node an edit made Mixed (a crater's
   floor, a mound over the ground) is drawn as it was (rock or air: the
   planner's `stand_in`, handed down to its children) without holding its
-  parent back. So an edit never shows a coarse ancestor in its place (it
-  once drew flat polygons hundreds of metres across for seconds after a
-  big stroke). Rock a ray meets (Solid and Buried nodes) draws the brush
+  parent back; one too coarse for the eye in view hands that to its
+  children instead, so the edit is generated at the level the eye wants.
+  Rock an edit added where there was air (a mound's inside) stays air
+  while its footprint's new surface is generated (`ADDED_ROCK_WAITS`). So
+  an edit never shows a coarse ancestor in its place (it once drew flat
+  polygons hundreds of metres across for seconds after a big stroke). Rock a ray meets (Solid and Buried nodes) draws the brush
   that filled it or the terrain's rock (`Planet::rock_material`, in the
   table entry): it drew material 0, magenta, where an edit uncovered it.
 - Changed baked columns regenerate the nodes over them within the budget.
