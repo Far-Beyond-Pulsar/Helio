@@ -4770,3 +4770,116 @@ fn ground_probes_meet_the_drawn_surface() {
     assert!(moved > 20, "{moved} answers changed over the pit");
     assert_eq!(wrong, 0);
 }
+
+/// The Moon's pole over the crater-strewn plain as voxel_flight's moon
+/// preset draws it (seed 75; the renderer's residency and near plane, a
+/// quarter of the height over the ground: 74 m), the eye on the plane
+/// between the face's middle columns. Pixels seeded by any of the many
+/// boxes the cull counts as holding the eye once walked from that box,
+/// past the ground in front: chunk-sized walls and slabs. Rays nearly
+/// parallel to that plane, seeded in a box they never enter in its frame,
+/// once crossed it untraced and ended on the Solid node under the ground.
+/// Once residency settles, no primary ray ends on a Solid or Buried node,
+/// and every drawn hit is a solid cell entered from air as the cut draws
+/// it (at the level of the chunk the ray came from).
+#[test]
+fn moon_pole_rays_end_on_chunks() {
+    use rayon::prelude::*;
+    let Some(gpu) = gpu() else { return };
+    let voxel = 0.1;
+    let planet = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        voxel_size_m: voxel,
+        terrain: TerrainLayers::moon().source(75),
+        features: helio_pass_voxel_planet::feature_recipe::FeatureRecipe::moon().grow(voxel, 75),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut view = View::new(DVec3::new(0.0, 1_738_104.0, 0.0), Vec3::new(-0.073_291_83, -0.573_576_45, 0.815_866_65), [1600, 900]);
+    // The camera's near plane as hosts set it (a quarter of the height
+    // over the ground).
+    view.near = (planet.air_clearance(view.eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+    eprintln!("near plane {:.2} m", view.near);
+    // The view settles with ~37k chunks resident (past TEST_CAPACITY's).
+    let mut world = World::with_capacity(&gpu, &planet, Capacity { chunks: 49152, detail_pages: 32768, counters: true, ..TEST_CAPACITY });
+    world.jitter = Some(0);
+    // Residency as the renderer's pass runs it (generation within its
+    // budget a frame, over hundreds of frames).
+    let config = ResidencyConfig {
+        plan: residency::PlanConfig { pixel_angle: view.pixel_angle(), ..ResidencyConfig::default().plan },
+        ..ResidencyConfig::default()
+    };
+    let started = world.frame;
+    while !world.chunks.settled() {
+        let stats = world.frame_with(&gpu, &planet, &view, &config);
+        world.chunks.take_counts();
+        assert!(world.frame - started < 4000, "residency did not settle: {stats:?}");
+    }
+    let mut ends = [0u32; 2];
+    for _ in 0..30 {
+        world.frame_with(&gpu, &planet, &view, &config);
+        let counts = world.chunks.take_counts();
+        ends = [0, 1].map(|b| ends[b] + counts.rock_ends[b]);
+        if counts.rock_ends != [0, 0] {
+            eprintln!("rock/buried ends {:?} at pixels {:?}, nodes {:?}", counts.rock_ends, counts.rock_pixels, counts.rock_nodes);
+        }
+    }
+    // Every 2nd pixel's hit against the CPU's cells at its level.
+    let hits = world.chunks.read_hits();
+    let [w, h] = view.size;
+    let wrong: Vec<_> = (0..(w / 2) * (h / 2))
+        .into_par_iter()
+        .filter_map(|n| {
+            let (x, y) = ((n % (w / 2)) * 2, (n / (w / 2)) * 2);
+            let hit = hits[(y * w + x) as usize]?;
+            let c = hit.cell;
+            let solid = |level: u32, cell: [i32; 3]| planet.sample_kind(level, c.face, cell[0], cell[1], cell[2]).0 == 1;
+            let mut before = [c.i, c.j, c.k];
+            if let Some(code) = hit.entered {
+                before[(code >> 1) as usize] += if code & 1 == 1 { -1 } else { 1 };
+            }
+            // Entered from air: at its level, or across a switch from a
+            // level beside it (a coarser cell rounds its top down, a finer
+            // one holds air the coarse cell does not).
+            let from_air = || {
+                !solid(hit.level, before)
+                    || !solid(hit.level + 1, before.map(|v| v >> 1))
+                    || hit.level > 0
+                        && (0..8).any(|n| !solid(hit.level - 1, [0, 1, 2].map(|a| before[a] * 2 + (n >> a & 1))))
+            };
+            let right = solid(hit.level, [c.i, c.j, c.k]) && (hit.entered.is_none() || from_air());
+            (!right).then_some((x, y, hit))
+        })
+        .collect();
+    // Of those, the ones entered from a cell the cut draws as solid: at the
+    // level of the drawn chunk it lies in (none: air, an Empty node's).
+    let wrong: Vec<_> = wrong
+        .into_iter()
+        .filter(|(_, _, hit)| {
+            let c = hit.cell;
+            let mut before = [c.i, c.j, c.k];
+            if let Some(code) = hit.entered {
+                before[(code >> 1) as usize] += if code & 1 == 1 { -1 } else { 1 };
+            }
+            if planet.sample_kind(hit.level, c.face, c.i, c.j, c.k).0 != 1 {
+                return true;
+            }
+            // The base cell at the middle of the one entered from.
+            let base = before.map(|v| (v << hit.level) + ((1 << hit.level) >> 1));
+            world
+                .chunks
+                .chunks_over(VolumeId(0), c.face, base[0], base[1])
+                .into_iter()
+                .find(|(key, _, drawn)| *drawn && (base[2] >> key.level).div_euclid(64) == key.cz)
+                .is_some_and(|(key, _, _)| planet.sample_kind(key.level, c.face, base[0] >> key.level, base[1] >> key.level, base[2] >> key.level).0 == 1)
+        })
+        .collect();
+    let view_proj = view.view_proj(&planet);
+    for &(x, y, hit) in wrong.iter().take(8) {
+        let cpu = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 600.0);
+        eprintln!("pixel {x},{y}: drawn {hit:?}; cpu {:?}", cpu.map(|c| (c.distance, c.cell, c.previous)));
+    }
+    eprintln!("settled in {} frames; rock/buried ends over 30 frames {ends:?}; {} of {} hits wrong", world.frame - started - 30, wrong.len(), (w / 2) * (h / 2));
+    assert_eq!(ends, [0, 0], "rays ended on rock and buried boxes");
+    assert!(wrong.is_empty(), "{} hits on cells the CPU has as air, or entered from cells the cut draws as rock", wrong.len());
+}

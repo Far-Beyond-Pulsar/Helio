@@ -431,10 +431,19 @@ once. A plan that changes a switch under way ends it at once.
    top); a fragment writes only the box's index. Boxes do not overlap, so
    with the depth test on box faces each pixel keeps the nearest box its
    ray enters and hidden boxes never run. Boxes holding the eye draw their
-   back faces. A box past the pixel's mesh (the scene's depth before the
-   chunks publish, read by the fragment, not depth-tested: see Publish) is
-   marked hidden rather than discarded: the pixel traces nothing, and
-   keeps the box as its frame chunk for the mesh point's walks (3, 4).
+   back faces, at the nearest depth. The cull takes every box within twice
+   the near plane's distance of the eye (the near plane may cut its front
+   faces): with the near plane a quarter of the height over the ground,
+   many boxes beside the eye, all tied at that depth, any of them winning a
+   pixel over the boxes in front of it. A pixel such a box seeds
+   (`INSIDE_SEED`) starts its walk in the node of the cut where its ray
+   starts (`point_start`, as a mesh point's walk), never at the seed: from
+   the seed the ray went on from the box behind the ground in front, whose
+   cells drew as chunk-sized walls and slabs (the Moon pole's box faces).
+   A box past the pixel's mesh (the scene's depth before the chunks
+   publish, read by the fragment, not depth-tested: see Publish) is marked
+   hidden rather than discarded: the pixel traces nothing, and keeps the
+   box as its frame chunk for the mesh point's walks (3, 4).
 2. **Trace** (compute): each pixel's ray walks the cut from its seed box
    (`walk`). Inside a chunk, an integer DDA through the 64-tree: an empty
    child crossed in one step, a full one a hit where the ray enters. Past a
@@ -451,7 +460,18 @@ once. A plan that changes a switch under way ends it at once.
    layers, and the rock beside them (Buried nodes) has no box, so a ray
    seeded by the boxes started past them.
    Across a cube face's edge the walk continues on the face beyond
-   (`across_edge`: equal-angle faces meet cell for cell on the edge). Over
+   (`across_edge`: equal-angle faces meet cell for cell on the edge). Each
+   chunk's frame is its own f32 transform, so two chunks place their shared
+   side apart by rounding, and the raster's sub-pixel snapping seeds a ray
+   within about 1/256 of a pixel of a shared edge in either box: a ray
+   nearly parallel to the side can be seeded or stepped into a box it never
+   enters in that box's frame. A box the ray does not cross (it enters no
+   slab before it leaves another) passes it on to the box beside, at the
+   cell it runs past in once it has entered every slab it crosses, where
+   the box's frame is exact (`passes_beside`); it was walked as crossing it
+   to its far sides, past the ground in the box beside (rays along the
+   plane through the Moon pole's eye ended on the Solid node under it). The
+   walk looks the next box up where the ray is, never back along it. Over
    the ceiling (`Planet::outer_radius` and 16 m) and rising, a ray meets
    nothing more and ends: the sky. A ray ends a thousandth past its
    pixel's mesh (`MESH_MARGIN`; the shading tells which of a mesh and a hit
