@@ -21,7 +21,8 @@ pub const MAX_VOLUMES: usize = 4096;
 pub(super) struct GenPipelines {
     pub tile_nodes: wgpu::ComputePipeline,
     pub tile_columns: wgpu::ComputePipeline,
-    pub tile_halo: wgpu::ComputePipeline,
+    pub tile_caves: wgpu::ComputePipeline,
+    pub tile_volumes: wgpu::ComputePipeline,
     pub tile_slope_nodes: wgpu::ComputePipeline,
     pub tile_slope_heights: wgpu::ComputePipeline,
     pub tile_slopes: wgpu::ComputePipeline,
@@ -65,7 +66,8 @@ impl GenPipelines {
         Self {
             tile_nodes: compute(gen_layout, "tile_nodes_main"),
             tile_columns: compute(gen_layout, "tile_columns_main"),
-            tile_halo: compute(gen_layout, "tile_halo_main"),
+            tile_caves: compute(gen_layout, "tile_caves_main"),
+            tile_volumes: compute(gen_layout, "tile_volumes_main"),
             tile_slope_nodes: compute(gen_layout, "tile_slope_nodes_main"),
             tile_slope_heights: compute(gen_layout, "tile_slope_heights_main"),
             tile_slopes: compute(gen_layout, "tile_slopes_main"),
@@ -110,6 +112,9 @@ pub(super) struct Volume {
     /// Height over the datum above which nothing is solid (terrain,
     /// overhangs, edits), with a margin: rays rising past it end.
     pub ceiling: f64,
+    /// What Solid and Buried nodes not added by a brush show where a ray
+    /// meets them (`Planet::rock_material`).
+    pub rock: u8,
     /// The world's height range in base layers (the roots' estimate).
     pub height_layers: (i32, i32),
     /// What its packs depend on (`kept_chunks`).
@@ -117,12 +122,15 @@ pub(super) struct Volume {
     pub gen: std::sync::Arc<GenPipelines>,
     pub world: wgpu::Buffer,
     pub terrain: wgpu::Buffer,
+    /// The volume layer's constants (`crate::volumes::VolumeConstants`).
+    pub volumes: wgpu::Buffer,
     pub materials: wgpu::Buffer,
     pub views: VolumeViews,
-    /// Its footprint pool: columns, halos, material slopes, feature
-    /// placements and candidate blocks.
+    /// Its footprint pool: columns, cave primitives
+    /// (`crate::volumes::CAVE_SLOT_WORDS` a footprint), material slopes,
+    /// feature placements and candidate blocks.
     pub tile_data: wgpu::Buffer,
-    pub tile_halo_data: wgpu::Buffer,
+    pub tile_cave_data: wgpu::Buffer,
     pub tile_slope_data: wgpu::Buffer,
     pub feature_set: wgpu::Buffer,
     pub tile_placements: wgpu::Buffer,
@@ -149,9 +157,6 @@ pub(super) struct Volume {
     /// coarsest first), drawn ones the frame they change; under baked
     /// edits that changed, as budget allows.
     pub urgent: FxHashSet<NodeKey>,
-    /// Urgent nodes the planner hides until they are generated again
-    /// (`residency::Event::Stale`).
-    pub hidden: FxHashSet<NodeKey>,
     /// Urgent nodes' distances from the eye when first ranked.
     pub urgent_distance: FxHashMap<NodeKey, f64>,
     pub stale: FxHashSet<NodeKey>,
@@ -256,6 +261,8 @@ impl DrawLayouts {
                     },
                     count: None,
                 },
+                // The meshes' depth: rays end at it.
+                texture_entry(27, wgpu::TextureSampleType::Depth, c),
             ],
         });
         let seed = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -272,6 +279,12 @@ impl DrawLayouts {
                     wgpu::ShaderStages::FRAGMENT,
                 ),
                 storage(22, true, wgpu::ShaderStages::VERTEX),
+                // The meshes' depth: boxes behind it are marked hidden.
+                texture_entry(
+                    27,
+                    wgpu::TextureSampleType::Depth,
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
             ],
         });
         let cull = [
@@ -477,7 +490,7 @@ impl DrawLayouts {
 }
 
 impl Volume {
-    /// Its footprint pool doubled (up to its most): columns, halos, slopes
+    /// Its footprint pool doubled (up to its most): columns, caves, slopes
     /// and placements copied into buffers twice the size (submitted at
     /// once, before the update records anything), the new slots free.
     pub fn grow_footprints(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -487,8 +500,8 @@ impl Volume {
         let e = &mut encoder;
         self.tile_data =
             regrown(device, e, &self.tile_data, "chunk footprint columns", n * TILE_COLUMNS * 16);
-        self.tile_halo_data =
-            regrown(device, e, &self.tile_halo_data, "chunk footprint halos", n * 40 * 40 * 4);
+        self.tile_cave_data =
+            regrown(device, e, &self.tile_cave_data, "chunk footprint caves", n * CAVE_SLOT_BYTES);
         self.tile_slope_data =
             regrown(device, e, &self.tile_slope_data, "chunk footprint slopes", n * SLOPE_STRIDE * 4);
         self.tile_placements = regrown(
@@ -870,11 +883,14 @@ impl ChunkWorld {
             }
         };
         // What generated packs depend on: the generation shaders, the
-        // terrain's constants and the world (`kept_chunks`).
+        // terrain's and volume layer's constants and the world
+        // (`kept_chunks`).
+        let volume_constants = crate::engine::volume_constants(planet);
         let fingerprint = {
             let mut bytes =
                 format!("chunk packs {KEPT_FORMAT} {DETAIL_LEVELS} {}", gen_source).into_bytes();
             bytes.extend_from_slice(&terrain_bytes(&program));
+            bytes.extend_from_slice(bytemuck::bytes_of(&volume_constants));
             bytes.extend_from_slice(bytemuck::bytes_of(&WorldGpu::new(planet)));
             crate::record::fnv64(&bytes)
         };
@@ -902,12 +918,15 @@ impl ChunkWorld {
         let g = s | wgpu::BufferUsages::COPY_SRC;
         // Brushes kept analytic: the large ones, then the recent ones.
         let edits = planet.edits();
-        let view = std::sync::Arc::new(edit_view(
-            planet,
-            0,
-            None,
-            std::sync::Arc::new(classify::BrickIndex::new(&grid, &edits.baked, index16)),
-        ));
+        let view = std::sync::Arc::new(
+            edit_view(
+                planet,
+                0,
+                None,
+                std::sync::Arc::new(classify::BrickIndex::new(&grid, &edits.baked, index16)),
+            )
+            .0,
+        );
         let (brushes, brush_capacity) = brush_buffer(&device, &queue, &view.faces);
         let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
         let params = |label: &str| {
@@ -959,6 +978,7 @@ impl ChunkWorld {
             face_cells: grid.cells() as u32,
             exact_level: exact_level(&grid),
             ceiling: planet.outer_radius() - grid.radius() + CEILING_MARGIN,
+            rock: planet.rock_material() as u8,
             height_layers,
             fingerprint,
             gen,
@@ -972,6 +992,11 @@ impl ChunkWorld {
                 contents: &terrain_bytes(&program),
                 usage: wgpu::BufferUsages::UNIFORM,
             }),
+            volumes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk volumes"),
+                contents: bytemuck::bytes_of(&volume_constants),
+                usage: wgpu::BufferUsages::UNIFORM,
+            }),
             materials: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk materials"),
                 contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }),
@@ -982,7 +1007,7 @@ impl ChunkWorld {
                 sun: params("chunk sun params"),
             },
             tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, g),
-            tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, g),
+            tile_cave_data: buffer("chunk footprint caves", pool_size as u64 * CAVE_SLOT_BYTES, g),
             tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, g),
             feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk features"),
@@ -1016,7 +1041,6 @@ impl ChunkWorld {
             ),
             edit_state: EditState::of(edits),
             urgent: FxHashSet::default(),
-            hidden: FxHashSet::default(),
             urgent_distance: FxHashMap::default(),
             stale: FxHashSet::default(),
             events: Vec::new(),

@@ -60,6 +60,9 @@ const CHUNKS_START: usize = 8192;
 /// Chunk jobs of `DETAIL_LEVELS` a batch (`cell_materials` slots:
 /// `CELL_WORDS` words a column, 288 KiB each).
 const DETAIL_JOBS: usize = 128;
+/// Drawn nodes in view an edit changed, generated in the frame it is made
+/// whatever the budget (a small edit's all).
+const EDITED_NOW: usize = 48;
 /// Levels whose chunks get per-voxel materials, natural and edited: cells
 /// of 0.1-0.2 m at 0.1 m voxels, near the eye. Coarser chunks' leaves keep
 /// their pairs (an edit's top materials vote in them): a dug wall's detail
@@ -140,12 +143,15 @@ struct TileJob {
     _pad: [u32; 3],
 }
 
-/// Footprints a volume's pool holds at most by default: their columns, halos
-/// and material slopes (75 KB each), within what the device binds. A pool
+/// Footprints a volume's pool holds at most by default: their columns, cave
+/// primitives and material slopes (70 KB each), within what the device
+/// binds. A pool
 /// starts at two batches' and doubles when it would reuse a slot used in
 /// the last `FOOTPRINT_RECENT` frames (`Volume::grow_footprints`).
 const FOOTPRINT_POOL: usize = 2048;
 const FOOTPRINT_RECENT: u64 = 120;
+/// A footprint's cave primitives' bytes.
+const CAVE_SLOT_BYTES: u64 = crate::volumes::CAVE_SLOT_WORDS as u64 * 4;
 /// Material slope words a footprint (`SLOPE_STRIDE` of chunk_generate.wgsl:
 /// a level-3 footprint's 34x34 level-4 blocks).
 const SLOPE_STRIDE: u64 = 1156;
@@ -190,7 +196,7 @@ impl Default for Capacity {
 }
 
 /// GPU slots of data kept across frames by key: footprints' columns (and
-/// lean halos), so a footprint's columns are computed once while it stays
+/// cave primitives), so a footprint's columns are computed once while it stays
 /// in use, whichever of its nodes are generated when (they were 60-75 % of
 /// a chunk's generation), and feature candidate blocks
 /// (`candidates::CandidateBlocks`). Both depend only on the terrain, never
@@ -1210,16 +1216,16 @@ impl BrickCache {
 /// `bricks`, the index of its baked store when that is unchanged.
 /// The analytic brushes `planet` shows and where they are (`EditView`):
 /// the large layer's faces, then the recent brushes'. From an earlier view
-/// (`from`), its large faces and their index are reused while the large
-/// layer only extends them (seals append; an unseal or another history
-/// starts again), so an edit costs the recent brushes, and a seal the
-/// large layer's index.
+/// (`from`), its large faces (shared runs) and their index are extended
+/// while the large layer only extends them (seals append; an unseal or
+/// another history starts again), so an edit costs the recent brushes, and
+/// a seal its own large faces. Whether it extended `from`.
 fn edit_view(
     planet: &Planet,
     version: u64,
     from: Option<&EditView>,
     bricks: std::sync::Arc<classify::BrickIndex>,
-) -> EditView {
+) -> (EditView, bool) {
     let edits = planet.edits();
     let large = &edits.large;
     let n = large.len();
@@ -1234,34 +1240,34 @@ fn edit_view(
         ids.flat_map(|id| large.resolved(id as u32).faces.iter().copied())
             .collect::<Vec<FaceBrush>>()
     };
-    let (mut faces, index) =
-        match from.filter(|v| v.large_brushes <= n && prefix(v.large_brushes) == v.large_prefix) {
-            Some(v) if v.large_brushes == n => (v.faces[..v.large_faces].to_vec(), v.index.clone()),
-            Some(v) => {
-                let mut faces = v.faces[..v.large_faces].to_vec();
-                faces.extend(faces_of(v.large_brushes..n));
-                let index = std::sync::Arc::new(classify::BrushIndex::new(&faces, 0, true));
-                (faces, index)
-            }
-            None => {
-                let faces = faces_of(0..n);
-                let index = std::sync::Arc::new(classify::BrushIndex::new(&faces, 0, true));
-                (faces, index)
-            }
-        };
-    let large_faces = faces.len();
+    let from = from.filter(|v| v.large_brushes <= n && prefix(v.large_brushes) == v.large_prefix);
+    let (mut faces, mut index, large_reach, extended) = match from {
+        Some(v) => (v.faces.clone(), v.index.clone(), v.large_reach, true),
+        None => Default::default(),
+    };
+    let new_large = faces_of(from.map_or(0, |v| v.large_brushes)..n);
+    let large_reach = classify::faces_reach(large_reach, &new_large);
+    let indexed = faces.large_len();
+    faces.extend_large(new_large);
+    index.extend(&faces, indexed);
+    let large_faces = faces.large_len();
+    let mut recent = Vec::new();
     let mut recent_counts = Vec::new();
     for id in 0..edits.recent.len() as u32 {
         let resolved = &edits.recent.resolved(id).faces;
-        faces.extend(resolved.iter().copied());
+        recent.extend(resolved.iter().copied());
         recent_counts.push(resolved.len());
     }
-    let recent_index = classify::BrushIndex::new(&faces[large_faces..], large_faces as u32, false);
-    EditView {
+    let recent_index = classify::BrushIndex::new(&recent, large_faces as u32, false);
+    let reach = classify::faces_reach(large_reach, &recent);
+    faces.set_recent(recent);
+    let view = EditView {
         grid: *planet.grid(),
         faces,
         index,
         recent_index,
+        reach,
+        large_reach,
         large_faces,
         large_brushes: n,
         large_prefix: prefix(n),
@@ -1269,10 +1275,11 @@ fn edit_view(
         baked: edits.baked.clone(),
         bricks,
         version,
-        volume_depth: (i64::from(planet.field().volume_bounds().0)
+        volume_depth: (i64::from(planet.volume_bounds().0)
             / i64::from(planet.grid().layer_mm())
             + 1) as i32,
-    }
+    };
+    (view, extended)
 }
 
 /// A brush buffer for `faces` with room for twice as many (at least 64):
@@ -1280,7 +1287,7 @@ fn edit_view(
 fn brush_buffer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    faces: &[FaceBrush],
+    faces: &classify::Faces,
 ) -> (wgpu::Buffer, usize) {
     let capacity = (faces.len() * 2).max(64);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1289,16 +1296,22 @@ fn brush_buffer(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    queue.write_buffer(
-        &buffer,
-        0,
-        bytemuck::cast_slice(if faces.is_empty() {
-            &NO_BRUSH[..]
-        } else {
-            faces
-        }),
-    );
+    if faces.is_empty() {
+        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&NO_BRUSH[..]));
+    }
+    write_faces(queue, &buffer, faces, 0);
     (buffer, capacity)
+}
+
+/// `faces` from `from` on written into the brush buffer.
+fn write_faces(queue: &wgpu::Queue, buffer: &wgpu::Buffer, faces: &classify::Faces, from: usize) {
+    for (at, run) in faces.slices_from(from) {
+        queue.write_buffer(
+            buffer,
+            (at * std::mem::size_of::<FaceBrush>()) as u64,
+            bytemuck::cast_slice(run),
+        );
+    }
 }
 
 /// A batch's restore jobs (slot, pack offset, result index, flags), their
@@ -1540,11 +1553,11 @@ pub struct FrameTimings {
     /// chunk builds.
     pub stages: [f64; 3],
     /// The first stage's parts: eviction and the tiles' nodes, their
-    /// columns, their halos, their features' placements.
+    /// columns, their volumes (caves, extents), their features' placements.
     pub tile_stages: [f64; 4],
 }
 
-/// Timestamps a frame writes: generation start, tile halos end, seed start
+/// Timestamps a frame writes: generation start, tile volumes end, seed start
 /// and end, trace end, chunk columns end, chunk builds end, shadows end,
 /// tile nodes end, tile columns end, tile features end, the shadows'
 /// denoiser end; the shadows' parts: sun samples end, sky samples end,
@@ -1822,6 +1835,15 @@ struct SceneState {
     map_written: Option<scene::VoxelMaterialMap>,
     /// The bind group of the inputs' version.
     group: std::sync::Mutex<Option<((u64, u64), wgpu::BindGroup)>>,
+}
+
+/// What [`ChunkWorld::sync_edits`] did with a volume's edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditSync {
+    /// Followed from the edits it had (or unchanged).
+    Followed,
+    /// Another history: every resident node generated again in place.
+    Resynced,
 }
 
 /// Chunk trees of a scene's voxel volumes (`volumes`): one chunk pool, one
@@ -2697,9 +2719,12 @@ fn draw_source(plane: bool, counting: bool) -> String {
             heat
         }
     };
-    // The noise library (materials' patches), then the draw.
-    (format!("const DOMAIN_UNIT: f32 = {};
-", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
+    // The noise library (materials' patches), then the draw (from disk with
+    // `HELIO_SHADER_FROM_DISK`).
+    let source = |rel: &str, embedded: &'static str| {
+        helio_core::shader::hot::source_text(env!("CARGO_MANIFEST_DIR"), rel, embedded)
+    };
+    (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + &source("shaders/noise.wgsl", include_str!("../../shaders/noise.wgsl")) + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(&source("shaders/chunk_draw.wgsl", include_str!("../../shaders/chunk_draw.wgsl"))))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))
@@ -2755,6 +2780,7 @@ impl ChunkWorld {
             entries: &[
                 uniform(1, c),
                 uniform(16, c),
+                uniform(18, c),
                 storage(2, true, c),
                 storage(3, false, c),
                 storage(4, false, c),
@@ -3427,10 +3453,11 @@ impl ChunkWorld {
             entries: &[
                 entry(1, &vol.world),
                 entry(16, &vol.terrain),
+                entry(18, &vol.volumes),
                 entry(2, &self.tile_jobs),
                 entry(3, &vol.tile_data),
                 entry(25, &self.tile_node_data),
-                entry(26, &vol.tile_halo_data),
+                entry(26, &vol.tile_cave_data),
                 entry(34, &vol.tile_slope_data),
                 entry(35, &self.slope_lattice),
                 entry(36, &vol.feature_set),
@@ -3585,7 +3612,6 @@ impl ChunkWorld {
         stats.shown_chunks += usize::from(shown);
         stats.restored_chunks += 1;
         self.changed_nodes.insert(key);
-        vol.hidden.remove(&key);
         vol.events.push(residency::Event::Generated(key));
         true
     }
@@ -3687,7 +3713,7 @@ impl ChunkWorld {
             )
         };
         let edits = vol.edits.clone();
-        let baked = edits.bricks.footprints.contains(&fp);
+        let baked = edits.bricks.holds(&fp);
         // Each chunk's brushes (from those over the footprint:
         // `BrushIndex`); at `DETAIL_LEVELS` each takes a `cell_materials`
         // slot of the batch's (its leaves get per-voxel materials): the
@@ -3833,7 +3859,6 @@ impl ChunkWorld {
             }
             stats.shown_chunks += usize::from(shown);
             self.changed_nodes.insert(key);
-            vol.hidden.remove(&key);
             vol.events.push(residency::Event::Generated(key));
         }
         stats.generated_chunks += queued;
@@ -3843,25 +3868,27 @@ impl ChunkWorld {
     /// Follow `planet`'s edits in volume `id` (its recipe unchanged):
     /// resident nodes under brushes that came or went are generated again
     /// in the next update; under baked edits that changed (a seal's coarser
-    /// levels), within the budget. False when its edits do not follow these
-    /// (another history, or no such volume): add the volume again.
-    pub fn sync_edits(&mut self, id: VolumeId, planet: &Planet) -> bool {
-        let Some(mut vol) = self.take_volume(id.0) else {
-            return false;
-        };
-        let followed = self.sync_volume_edits(&mut vol, planet);
+    /// levels), within the budget. Edits the change log cannot bridge
+    /// (another history, or one past the changes it keeps) regenerate the
+    /// volume's resident nodes in place ([`Self::resync_edits`]):
+    /// [`EditSync::Resynced`] (a host may load the chunks it kept for that
+    /// history, `load_kept`). None when there is no such volume.
+    pub fn sync_edits(&mut self, id: VolumeId, planet: &Planet) -> Option<EditSync> {
+        let mut vol = self.take_volume(id.0)?;
+        let sync = self.sync_volume_edits(&mut vol, planet);
         self.put_volume(vol);
-        followed
+        Some(sync)
     }
 
-    fn sync_volume_edits(&mut self, vol: &mut volumes::Volume, planet: &Planet) -> bool {
+    fn sync_volume_edits(&mut self, vol: &mut volumes::Volume, planet: &Planet) -> EditSync {
         let edits = planet.edits();
         let state = EditState::of(edits);
         if state == vol.edit_state {
-            return true;
+            return EditSync::Followed;
         }
         let Some(changes) = edits.baked_changes_since(vol.edit_state.sealed) else {
-            return false;
+            self.resync_edits(vol, planet, state);
+            return EditSync::Resynced;
         };
         let columns: Vec<ColumnKey> = changes
             .restated
@@ -3887,21 +3914,24 @@ impl ChunkWorld {
                 vol.index,
             ))
         };
-        let view = edit_view(planet, vol.edits.version + 1, Some(&vol.edits), bricks);
+        let (view, extended) = edit_view(planet, vol.edits.version + 1, Some(&vol.edits), bricks);
         // Brushes in one list and not the other: past the lists' common
-        // start (the large layer's, at least, but for a seal's own).
-        let same = vol
-            .edits
-            .faces
-            .iter()
-            .zip(&view.faces)
-            .take_while(|(a, b)| a == b)
-            .count();
+        // start (the old view's large faces, when the new one extends
+        // them; a seal's own may match further).
+        let start = if extended { vol.edits.large_faces } else { 0 };
+        let same = start
+            + vol
+                .edits
+                .faces
+                .iter_from(start)
+                .zip(view.faces.iter_from(start))
+                .take_while(|(a, b)| a == b)
+                .count();
         let mut count: FxHashMap<[u32; 12], i32> = FxHashMap::default();
-        for fb in &vol.edits.faces[same..] {
+        for fb in vol.edits.faces.iter_from(same) {
             *count.entry(bytemuck::cast(*fb)).or_default() -= 1;
         }
-        for fb in &view.faces[same..] {
+        for fb in view.faces.iter_from(same) {
             *count.entry(bytemuck::cast(*fb)).or_default() += 1;
         }
         // Recent brushes sealed into the baked store left the list, not the
@@ -3912,7 +3942,7 @@ impl ChunkWorld {
             .saturating_sub(vol.edit_state.sealed.sealed);
         let sealed_faces: usize = vol.edits.recent_counts.iter().take(sealed).sum();
         let large = vol.edits.large_faces;
-        for fb in &vol.edits.faces[large..large + sealed_faces] {
+        for fb in vol.edits.faces.iter_from(large).take(sealed_faces) {
             if let Some(n) = count.get_mut(&bytemuck::cast::<FaceBrush, [u32; 12]>(*fb)) {
                 if *n < 0 {
                     *n += 1;
@@ -3957,7 +3987,58 @@ impl ChunkWorld {
         vol.ceiling = planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN;
         vol.bounds = crate::volume::bounding_radius(planet);
         self.motion_version += 1;
-        true
+        EditSync::Followed
+    }
+
+    /// Edits unrelated to the ones volume `vol` followed: what changed is
+    /// unknown, so its every resident node is generated again in place
+    /// (drawn ones keep showing their chunks until their new ones come, the
+    /// others go), what was kept of it goes, and its planner classifies
+    /// every node again, drawing those edits made Mixed as they were until
+    /// generated. The pools, residency and measured footprints stay.
+    fn resync_edits(&mut self, vol: &mut volumes::Volume, planet: &Planet, state: EditState) {
+        let grid = vol.grid;
+        let volume = vol.index;
+        let bricks = std::sync::Arc::new(classify::BrickIndex::new(
+            &grid,
+            &planet.edits().baked,
+            volume,
+        ));
+        vol.edits = std::sync::Arc::new(edit_view(planet, vol.edits.version + 1, None, bricks).0);
+        self.drop_kept_where(|k| k.volume == volume);
+        let resident: Vec<NodeKey> = self
+            .nodes
+            .keys()
+            .filter(|k| k.volume == volume)
+            .copied()
+            .collect();
+        self.mark_resident(vol, resident);
+        // Every node of every level, as an edit marks those under it.
+        let everywhere: std::sync::Arc<[residency::NodeBox]> = (0..grid.levels())
+            .map(|level| residency::NodeBox {
+                level,
+                x: [i32::MIN, i32::MAX],
+                y: [i32::MIN, i32::MAX],
+                z: [i32::MIN, i32::MAX],
+            })
+            .collect();
+        for &face in grid.faces() {
+            vol.events
+                .push(residency::Event::Edited(face, everywhere.clone()));
+        }
+        // Drawn uniform nodes Mixed now: their chunks drawn when generated.
+        let uniform: Vec<NodeKey> = self
+            .drawn_set
+            .uniform_nodes()
+            .filter(|k| k.volume == volume)
+            .collect();
+        vol.urgent.extend(uniform);
+        self.write_brushes(vol, 0);
+        vol.edits_unsent = Some(vol.edits.clone());
+        vol.edit_state = state;
+        vol.ceiling = planet.outer_radius() - grid.radius() + CEILING_MARGIN;
+        vol.bounds = crate::volume::bounding_radius(planet);
+        self.motion_version += 1;
     }
 
     /// The brush buffer for `self.edits`: its faces from `from` on written
@@ -3966,12 +4047,8 @@ impl ChunkWorld {
         let faces = &vol.edits.faces;
         if faces.len() > vol.brush_capacity {
             (vol.brushes, vol.brush_capacity) = brush_buffer(&self.device, &self.queue, faces);
-        } else if from < faces.len() {
-            self.queue.write_buffer(
-                &vol.brushes,
-                (from * std::mem::size_of::<FaceBrush>()) as u64,
-                bytemuck::cast_slice(&faces[from..]),
-            );
+        } else {
+            write_faces(&self.queue, &vol.brushes, faces, from);
         }
     }
 
@@ -4438,7 +4515,6 @@ impl ChunkWorld {
                 stats.evicted_unseen += usize::from(!old.shown);
                 stats.evicted_chunks += 1;
             }
-            vol.hidden.remove(&key);
             vol.urgent.remove(&key);
             vol.stale.remove(&key);
             self.changed_nodes.insert(key);
@@ -4648,34 +4724,50 @@ impl ChunkWorld {
                         && fixed + tiles as f64 * tile + batch.chunk_jobs.len() as f64 * chunk >= ms
                 })
         };
-        // Nodes edits changed: coarsest first, then drawn ones, nearest
-        // first, within the frame's budget. A blast shows at once in coarse
-        // nodes; those left for later frames are hidden meanwhile (their
-        // nearest generated ancestor drawn in their place) and refine as
-        // they come. Then stale nodes.
-        let mut edited: Vec<(NodeKey, bool, f64)> = Vec::with_capacity(vol.urgent.len());
+        // Nodes edits changed: those drawn in view first, nearest first,
+        // then the rest drawn, then the cut's ancestors. Each keeps showing
+        // its old chunk until its new one is generated (never a coarse
+        // ancestor in its place); drawn ones in view are generated this
+        // frame past the budget, up to `EDITED_NOW`, so a small edit shows
+        // the frame it is made. Then stale nodes.
+        let local_view = view.map(|v| (vol.transform.dir_to_local(v.forward), v.cos_half));
+        let in_view = |k: &NodeKey| {
+            local_view.is_none_or(|(forward, cos_half)| {
+                let offset = local_eye.toward(&grid, k.footprint(), k.layers());
+                let length = offset.length();
+                let size = grid.level_size(k.level) * f64::from(CHUNK) * 1.5;
+                length < size || offset.dot(forward) > cos_half * length - size
+            })
+        };
+        let mut edited: Vec<(NodeKey, u8, f64)> = Vec::with_capacity(vol.urgent.len());
         for k in vol.urgent.drain() {
             let distance = *vol
                 .urgent_distance
                 .entry(k)
                 .or_insert_with(|| tile_distance(&grid, k.footprint(), k.layers(), &local_eye));
-            edited.push((k, !self.drawn_set.holds(k), distance));
+            let rank = if !self.drawn_set.holds(k) {
+                2
+            } else if in_view(&k) {
+                0
+            } else {
+                1
+            };
+            edited.push((k, rank, distance));
         }
-
-        edited.sort_unstable_by(|a, b| {
-            b.0.level
-                .cmp(&a.0.level)
-                .then(a.1.cmp(&b.1))
-                .then(a.2.total_cmp(&b.2))
-        });
-        let edited: Vec<(NodeKey, bool)> = edited
+        edited.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        let edited: Vec<(NodeKey, Option<u8>)> = edited
             .into_iter()
-            .map(|(k, ..)| (k, true))
-            .chain(vol.stale.iter().map(|k| (*k, false)))
+            .map(|(k, rank, _)| (k, Some(rank)))
+            .chain(vol.stale.iter().map(|k| (*k, None)))
             .collect();
+        let mut now = 0;
         for (key, urgent) in edited {
-            if full(&batch) || stats.out_of_slots {
-                if urgent {
+            let forced = urgent == Some(0) && now < EDITED_NOW;
+            let hard_full = batch.footprints() >= TILE_BATCH
+                || batch.chunk_jobs.len() >= CHUNK_BATCH
+                || stats.out_of_slots;
+            if hard_full || (!forced && full(&batch)) {
+                if urgent.is_some() {
                     vol.urgent.insert(key);
                     continue;
                 }
@@ -4692,21 +4784,20 @@ impl ChunkWorld {
                 &mut stats,
             ) == 0
             {
-                if urgent {
+                if urgent.is_some() {
                     vol.urgent.insert(key);
                 } else {
                     vol.stale.insert(key);
                 }
-            } else if urgent && self.drawn_set.kind(key).is_some_and(|k| k != Kind::Mixed) {
-                // A drawn uniform node an edit made Mixed: its chunk is
-                // drawn now, before the planner says so.
-                added.push((key, Kind::Mixed));
-                removed.push(key);
-            }
-        }
-        for &key in &vol.urgent {
-            if vol.hidden.insert(key) {
-                vol.events.push(residency::Event::Stale(key));
+            } else {
+                now += usize::from(forced);
+                if urgent.is_some() && self.drawn_set.kind(key).is_some_and(|k| k != Kind::Mixed)
+                {
+                    // A drawn uniform node an edit made Mixed: its chunk is
+                    // drawn now, before the planner says so.
+                    added.push((key, Kind::Mixed));
+                    removed.push(key);
+                }
             }
         }
         let urgent = &vol.urgent;
@@ -4947,17 +5038,21 @@ impl ChunkWorld {
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("chunk tile halos"),
+                label: Some("chunk tile volumes"),
                 timestamp_writes: stamp(None, 1),
             });
             pass.set_bind_group(0, &group, &[]);
             if computed_count > 0 {
-                pass.set_pipeline(&gen.tile_halo);
+                // The footprints' cave primitives, then each column's
+                // volume extent (`docs/volumes.md`).
+                pass.set_pipeline(&gen.tile_caves);
                 pass.dispatch_workgroups(
                     (computed_count as u32).min(crate::engine::HALO_GROUPS),
                     1,
                     1,
                 );
+                pass.set_pipeline(&gen.tile_volumes);
+                pass.dispatch_workgroups(64, computed_count as u32, 1);
             }
         }
         {
@@ -5162,6 +5257,16 @@ impl ChunkWorld {
                     .map_or((0.0, 64.0), |(a, b)| (f64::from(a), f64::from(b))),
             })
         };
+        // Uniform nodes show their volume's rock, or the material of the
+        // brush that added them.
+        for &(key, kind) in &added {
+            if kind != Kind::Mixed {
+                if let Some(vol) = self.volumes[usize::from(key.volume)].as_ref() {
+                    let rock = vol.edits.added_material(key).map_or(vol.rock, |m| m as u8);
+                    self.drawn_set.set_rock(key, rock);
+                }
+            }
+        }
         self.drawn_set
             .update(&added, &removed, &self.changed_nodes, frame, chunk_of);
         for (key, _) in &added {
@@ -5684,6 +5789,36 @@ impl ChunkWorld {
         self.targets.as_ref()
     }
 
+    /// The chunk an eye at `eye` in volume `vol`'s frame walks from
+    /// (`DrawParams::cut.z`, `NONE` over the ground): the finest drawn chunk
+    /// of the volume over the eye's column whose occupied layers reach above
+    /// the eye. In a cave the chunks around the eye may be air (freed) or
+    /// hold the eye under their occupied layers (out of their raster boxes),
+    /// and the rock beside them (Buried nodes) has no box: a ray seeded by
+    /// the boxes would start far away. An eye off a plane's face (beside a
+    /// placed block: `locate` clamps it onto the edge) is over no chunk.
+    fn eye_chunk(&self, vol: &volumes::Volume, eye: DVec3) -> u32 {
+        let (cell, c) = vol.grid.locate(eye);
+        let n = f64::from(vol.grid.cells());
+        if !(0.0..n).contains(&c[0]) || !(0.0..n).contains(&c[1]) {
+            return u32::MAX;
+        }
+        self.nodes
+            .iter()
+            .filter(|(k, c)| {
+                k.volume == vol.index
+                    && k.face == cell.face
+                    && (cell.i >> k.level).div_euclid(CHUNK) == k.cx
+                    && (cell.j >> k.level).div_euclid(CHUNK) == k.cy
+                    && self.drawn_set.contains(c.slot)
+                    && c.z.is_some_and(|(_, hi)| {
+                        (i64::from(k.cz * CHUNK + hi) << k.level) > i64::from(cell.k)
+                    })
+            })
+            .min_by_key(|(k, _)| k.level)
+            .map_or(u32::MAX, |(_, c)| c.slot)
+    }
+
     /// The draw parameters of view `v` (in the world frame), in volume
     /// `vol`'s frame when given (placed by its transform now, and by `prev`
     /// at the view's last frame: its points' motion), else in the world's
@@ -5784,7 +5919,10 @@ impl ChunkWorld {
             cut: [
                 grid.map_or(0, |g| g.grid.levels() - 1),
                 self.drawn_set.fading() as u32,
-                0,
+                match grid {
+                    Some(g) if v.ortho.is_none() => self.eye_chunk(g, eye),
+                    _ => u32::MAX,
+                },
                 0,
             ],
             light_eye: v.light_eye.map_or([0.0; 4], |e| e.extend(1.0).to_array()),
@@ -6118,6 +6256,7 @@ impl ChunkWorld {
                 &o.targets,
                 drawn,
                 self.rounds,
+                &self.no_scene_depth,
                 None,
             );
         }
@@ -6264,8 +6403,9 @@ impl ChunkWorld {
     /// culled and binned, then `rounds` of seed and trace into `targets`
     /// (over `DrawParams::rect`; `drawn` chunks), timed as `timing` says. Its pass
     /// (`DrawParams::volume`) keeps the hits of the volumes traced before
-    /// it that are nearer than its own. Its draw bind group, for the stages
-    /// that shade its hits.
+    /// it that are nearer than its own; the rays end at the meshes'
+    /// `scene_depth`. Its draw bind group, for the stages that shade its
+    /// hits.
     #[allow(clippy::too_many_arguments)]
     fn trace_view(
         &self,
@@ -6276,6 +6416,7 @@ impl ChunkWorld {
         targets: &Targets,
         drawn: u32,
         rounds: u32,
+        scene_depth: &wgpu::TextureView,
         timing: Option<(&wgpu::QuerySet, u32)>,
     ) -> wgpu::BindGroup {
         let pipelines = self.pipelines[usize::from(vol.grid.is_plane())]
@@ -6330,6 +6471,7 @@ impl ChunkWorld {
                 view_entry(5, &exits),
                 view_entry(4, &distance),
                 entry(22, vb.cull_state),
+                view_entry(27, scene_depth),
             ],
         });
         {
@@ -6383,6 +6525,7 @@ impl ChunkWorld {
                     binding: 26,
                     resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler),
                 },
+                view_entry(27, scene_depth),
             ],
         });
         // Rounds of seed and trace: each resolves the rays that hit in
@@ -6603,6 +6746,9 @@ impl ChunkWorld {
                 4,
             );
         }
+        // The meshes' depth (the frame's size): the rays end there, and
+        // meshes in front of the terrain walk to the sun from it.
+        let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
         let primary_vol = self.volumes[usize::from(primary)].as_ref().unwrap();
         let camera_group = self.draw_group(&self.params, primary_vol, self.camera_view(primary_vol));
         let mut groups: Vec<(u16, wgpu::BindGroup, [u32; 4])> = Vec::with_capacity(order.len());
@@ -6620,6 +6766,7 @@ impl ChunkWorld {
                 self.targets.as_ref().unwrap(),
                 drawn,
                 self.rounds,
+                scene_depth,
                 timing.map(|(set, _, ring)| (set, ring)),
             );
             groups.push((index, group, params.rect));
@@ -6627,9 +6774,7 @@ impl ChunkWorld {
         let targets = self.targets.as_ref().unwrap();
         {
             // 4. Sun shadows: samples, then every hit, and meshes before
-            // their hits (`scene_depth`: the meshes', the frame's size); each
-            // volume's hits by its own pass.
-            let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
+            // their hits; each volume's hits by its own pass.
             let occlusion = self.sun_occlusion.as_ref().unwrap();
             let (distance, visibility, samples, normal, sky) = (
                 view(&targets.distance),
@@ -7557,9 +7702,9 @@ impl ChunkWorld {
     }
 
     /// `kept`'s chunks kept, restored by copy when wanted: how many. Before
-    /// the world's first update; refused when they were made by other
-    /// generation code, terrain or world, or for another history than
-    /// `planet`'s.
+    /// the volume's first update or after `sync_edits` resynced it;
+    /// refused when they were made by other generation code, terrain or
+    /// world, or for another history than `planet`'s.
     pub fn load_kept(
         &mut self,
         id: VolumeId,
@@ -7672,7 +7817,16 @@ mod tests {
                     "chunk draw (scene materials)",
                     super::scene::scene_source(&draw, 64),
                 );
-                for (label, source) in [generate, (label, draw), textured] {
+                let verify = (
+                    "terrain verification",
+                    crate::engine::verify_source(plane, &program, false),
+                );
+                for (label, source) in [generate, (label, draw), textured, verify] {
+                    // HELIO_DUMP_SHADERS=<dir>: the sources, for offline tools.
+                    if let Some(dir) = std::env::var_os("HELIO_DUMP_SHADERS") {
+                        let name = format!("{label} {plane} {counting}.wgsl").replace(' ', "_");
+                        std::fs::write(std::path::Path::new(&dir).join(name), &source).unwrap();
+                    }
                     let module = naga::front::wgsl::parse_str(&source)
                         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&source)));
                     naga::valid::Validator::new(

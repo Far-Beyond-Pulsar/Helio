@@ -52,7 +52,11 @@ or under overhangs, and light that changes as the world is dug and built.
    directional light.
 2. **`gi_integrate`:** last frame's rays, a workgroup per probe, a lane per
    ray. A ray that hit lights its probe with radiance `albedo * (sun *
-   visible * cos / pi + probe irradiance at the hit) + gi_light`; the probes' own
+   visible * clouds * cos / pi + probe irradiance at the hit) + gi_light`, where
+   `clouds` is the share of the sun the clouds let through to the hit
+   (helio-pass-sky's `cloud_shadow`): without it, ground under a cloud was lit
+   by bounce from ground the cloud shades, as bright as in the sun, and the
+   shade read flat. The probes' own
    irradiance at the hit gives every further bounce. A back face gives
    nothing. A miss sees the sky: the atmosphere's sky table at the probe,
    cosine-convolved L2 harmonics turned back into radiance band by band.
@@ -92,7 +96,7 @@ and the probes' (`gi_light`, RGB half floats, added as is). Tracers:
   triangle's normal, turned to the side its vertex normals call outside,
   and their interpolation; a hit on the inside is a back face. The sun's
   visibility is a shadow ray through the TLAS times the sun's occlusion
-  maps (terrain, when published). Whichever hit stands (the terrain's
+  maps (terrain, when published) and the clouds' shadow. Whichever hit stands (the terrain's
   too), if it faces the ray, then takes the meshes' shadow of the sun and
   the light of one of the scene's point and spot lights: chosen in
   proportion to its unshadowed irradiance there, with a shadow ray, over

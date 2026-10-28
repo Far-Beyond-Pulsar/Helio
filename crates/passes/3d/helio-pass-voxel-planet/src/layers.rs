@@ -12,12 +12,13 @@
 //! coarser than themselves, in any layer, at every level.
 use crate::grid::{Grid, DOMAIN_UNIT};
 use crate::landform::{
-    noise_quantile, LandformConstants, LandformField, LandformVolume, Octave, PackedRule,
+    noise_quantile, LandformConstants, LandformField, Octave, PackedRule,
     StackLayer, BASIN, CONTINENT, CRATER, CRATER_RADIUS_Q19, EROSION, GRAD_SHIFT, HILLS, LAYERS,
     OCTAVES, REGION, RIDGE, ROUGHNESS, RULES, STYLE_EARTHLIKE, STYLE_LAYERED, STYLE_LUNAR,
     STYLE_RULES, WARP, WARP_OCTAVES,
 };
 use crate::noise::{FINE_ONE, ONE};
+use crate::volumes::{self, Caves, VolumeLayer, Volumes};
 use crate::terrain::{
     material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainSource, HEIGHT_ONE,
 };
@@ -369,86 +370,14 @@ impl MaterialRule {
     }
 }
 
-/// Generated caves: tunnels and caverns inside cave regions.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Caves {
-    pub enabled: bool,
-    /// Deepest cave cell below the local surface.
-    pub depth_m: f64,
-    /// Rough share of the land inside cave regions and their size.
-    pub share: f64,
-    pub region_km: f64,
-    /// Tunnel radius and the wavelength of their winding.
-    pub tunnel_radius_m: f64,
-    pub tunnel_wavelength_m: f64,
-    /// Cavern size and the rough share of the cave volume they open.
-    pub cavern_wavelength_m: f64,
-    pub cavern_share: f64,
-    /// Rock kept over every cave: tunnels and caverns close towards it
-    /// instead of breaking the surface, except at entrances.
-    pub cover_m: f64,
-    /// Rough share of a cave region where tunnels open to the surface, in
-    /// zones about `entrance_spacing_m` across.
-    pub entrance_share: f64,
-    pub entrance_spacing_m: f64,
-}
-
-impl Default for Caves {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            depth_m: 120.0,
-            share: 0.45,
-            region_km: 6.0,
-            tunnel_radius_m: 2.5,
-            tunnel_wavelength_m: 160.0,
-            cavern_wavelength_m: 160.0,
-            cavern_share: 0.04,
-            cover_m: 6.0,
-            entrance_share: 0.05,
-            entrance_spacing_m: 80.0,
-        }
-    }
-}
-
-/// Generated overhangs: steep ground leaning over, a continuous
-/// deformation of the heightfield (no floating rock).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct Overhangs {
-    pub enabled: bool,
-    /// Largest horizontal lean of the ground (and its displacement over the
-    /// heightfield).
-    pub height_m: f64,
-    /// Vertical wavelength of the lean (ledge spacing); it varies eight
-    /// times more slowly across the ground.
-    pub wavelength_m: f64,
-    /// Size and rough share of the regions with overhangs.
-    pub region_km: f64,
-    pub share: f64,
-}
-
-impl Default for Overhangs {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            height_m: 6.0,
-            wavelength_m: 6.0,
-            region_km: 3.0,
-            share: 0.3,
-        }
-    }
-}
-
 /// A world's terrain: an ordered layer stack, volumetric features and a
 /// material style (the `helio.terrain` settings JSON).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerrainLayers {
     pub layers: Vec<Layer>,
-    pub caves: Caves,
-    pub overhangs: Overhangs,
+    /// Caves and cliff shapes (`docs/volumes.md`).
+    pub volumes: Volumes,
     pub materials: MaterialStyle,
     /// Earthlike: flat ground above this height is snow.
     pub snowline_m: f64,
@@ -471,8 +400,8 @@ impl Default for TerrainLayers {
 
 impl TerrainLayers {
     /// Continents and ocean basins, ridged mountain ranges with branching
-    /// erosion gullies, hills and metre-scale roughness; caves, overhangs,
-    /// meadows, dry lands, rock, strata and snow.
+    /// erosion gullies, hills and metre-scale roughness; karst cave
+    /// networks, ledged cliffs, meadows, dry lands, rock, strata and snow.
     pub fn earth() -> Self {
         use LayerKind::*;
         Self {
@@ -490,8 +419,7 @@ impl TerrainLayers {
                     ..Layer::new(Roughness)
                 },
             ],
-            caves: Caves::default(),
-            overhangs: Overhangs::default(),
+            volumes: Volumes::default(),
             materials: MaterialStyle::Earthlike,
             snowline_m: 3_000.0,
             soil_depth_m: 0.7,
@@ -564,11 +492,27 @@ impl TerrainLayers {
             ],
             rock: "Sandstone".into(),
             snowline_m: 1.0e5,
+            // Drier karst, more of it open; sandstone ledges and undercuts.
+            volumes: Volumes {
+                caves: Caves {
+                    share: 0.35,
+                    entrances: 0.5,
+                    ..Caves::default()
+                },
+                cliffs: volumes::Cliffs {
+                    depth_m: 6.0,
+                    strata_m: 2.0,
+                    noise: 0.3,
+                    share: 0.7,
+                    ..volumes::Cliffs::default()
+                },
+            },
             ..earth
         }
     }
 
-    /// Cratered highlands and dark basalt plains over regolith, no caves.
+    /// Cratered highlands and dark basalt plains over regolith, lava tubes
+    /// under them (skylights for entrances).
     /// The basins come after the highlands, which they flatten.
     pub fn moon() -> Self {
         use LayerKind::*;
@@ -601,13 +545,9 @@ impl TerrainLayers {
                     ..Layer::default()
                 },
             ],
-            caves: Caves {
-                enabled: false,
-                ..Caves::default()
-            },
-            overhangs: Overhangs {
-                enabled: false,
-                ..Overhangs::default()
+            volumes: Volumes {
+                caves: Caves::lava_tubes(),
+                ..Volumes::none()
             },
             materials: MaterialStyle::Lunar,
             soil_depth_m: 4.0,
@@ -628,24 +568,16 @@ impl TerrainLayers {
                 height_m,
                 ..Layer::default()
             }],
-            caves: Caves {
-                enabled: false,
-                ..Caves::default()
-            },
-            overhangs: Overhangs {
-                enabled: false,
-                ..Overhangs::default()
-            },
+            volumes: Volumes::none(),
             materials: MaterialStyle::Layered,
             soil_depth_m: 1.0,
             ..Self::earth()
         }
     }
 
-    /// Without caves and overhangs: a pure heightfield.
+    /// Without caves and cliff shapes: a pure heightfield.
     pub fn heightfield(mut self) -> Self {
-        self.caves.enabled = false;
-        self.overhangs.enabled = false;
+        self.volumes = Volumes::none();
         self
     }
 
@@ -699,36 +631,7 @@ impl TerrainLayers {
                 return Err(format!("a terrain has at most one {kind:?} layer"));
             }
         }
-        let c = &self.caves;
-        let o = &self.overhangs;
-        let volume = [
-            c.depth_m,
-            c.share,
-            c.region_km,
-            c.tunnel_radius_m,
-            c.tunnel_wavelength_m,
-            c.cavern_wavelength_m,
-            c.cavern_share,
-            c.cover_m,
-            c.entrance_share,
-            c.entrance_spacing_m,
-            o.height_m,
-            o.wavelength_m,
-            o.region_km,
-            o.share,
-        ];
-        if volume.iter().any(|v| !v.is_finite() || *v < 0.0) {
-            return Err("cave and overhang settings must be finite and non-negative".into());
-        }
-        if c.region_km <= 0.0
-            || c.tunnel_wavelength_m <= 0.0
-            || c.cavern_wavelength_m <= 0.0
-            || c.entrance_spacing_m <= 0.0
-            || o.wavelength_m <= 0.0
-            || o.region_km <= 0.0
-        {
-            return Err("cave and overhang wavelengths must be positive".into());
-        }
+        self.volumes.validate()?;
         if !self.snowline_m.is_finite() || !self.soil_depth_m.is_finite() || self.soil_depth_m < 0.0
         {
             return Err("snowline and soil depth must be finite (soil depth non-negative)".into());
@@ -747,12 +650,12 @@ impl TerrainLayers {
         Ok(())
     }
 
-    /// The interpreter's constants and volumetric terms on `grid`.
+    /// The interpreter's constants and volume layer on `grid`.
     pub fn compile(
         &self,
         grid: &Grid,
         seed: u32,
-    ) -> Result<(LandformConstants, LandformVolume), String> {
+    ) -> Result<(LandformConstants, Option<VolumeLayer>), String> {
         self.validate()?;
         let units = |metres: f64| (metres * f64::from(HEIGHT_ONE)).round() as i32;
         let shift = |metres: f64| ((metres / DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as u32;
@@ -1035,18 +938,16 @@ impl TerrainLayers {
             octaves: table,
             rules,
         };
-        Ok((
-            constants,
-            LandformVolume::new(grid, &self.caves, &self.overhangs),
-        ))
+        let volumes = VolumeLayer::new(&self.volumes, grid, constants.header[3] as u32);
+        Ok((constants, (volumes.caves() || volumes.cliffs()).then_some(volumes)))
     }
 }
 
 impl TerrainLayers {
     /// The compiled field on `grid`.
     pub fn field(&self, grid: &Grid, seed: u32) -> Result<LandformField, String> {
-        let (constants, volume) = self.compile(grid, seed)?;
-        Ok(LandformField::new(grid, constants, volume))
+        let (constants, volumes) = self.compile(grid, seed)?;
+        Ok(LandformField::new(grid, constants, volumes))
     }
 
     /// A world terrain source using this stack.
@@ -1069,7 +970,7 @@ impl TerrainGenerator for LayersGenerator {
             id: ID.into(),
             version: VERSION,
             name: "Terrain layers".into(),
-            description: "An ordered stack of terrain layers (continents, mountains, erosion, hills, craters, basins, plateaus) with caves, overhangs and a material style.".into(),
+            description: "An ordered stack of terrain layers (continents, mountains, erosion, hills, craters, basins, plateaus) with cave networks, cliff shapes and a material style.".into(),
             settings_component: Some("VoxelTerrainLayersComponent".into()),
         }
     }

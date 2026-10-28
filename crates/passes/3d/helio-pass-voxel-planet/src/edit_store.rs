@@ -384,15 +384,41 @@ impl EditStore {
     /// exact containment test generation uses. Returns the base bricks it
     /// changed.
     pub fn bake(&mut self, grid: &Grid, fb: &FaceBrush, op: BrushOp) -> Vec<BrickKey> {
-        let r = fb.extent_cells();
-        let ci = i64::from(fb.center[0]) / 2;
-        let cj = i64::from(fb.center[1]) / 2;
-        let (k0, k1) = (i64::from(fb.k_lo) / 2 - 1, i64::from(fb.k_hi) / 2 + 1);
-        let ([i0, i1], [j0, j1]) = (
-            clamp_to_face(grid, 0, ci - r, ci + r),
-            clamp_to_face(grid, 0, cj - r, cj + r),
-        );
-        self.bake_box(grid, fb, op, 0, [i0, j0, k0], [i1, j1, k1])
+        let (lo, hi) = brush_box(grid, fb, 0);
+        self.bake_box(grid, fb, op, 0, lo, hi)
+    }
+
+    /// The cells of `level` brush `fb` holds, by brick: what baking it at
+    /// that level ([`Self::bake`] at the base level, [`Self::bake_at`]
+    /// above) changes. Bricks it holds no cell of are left out.
+    pub fn held(grid: &Grid, fb: &FaceBrush, level: u32) -> Vec<(BrickKey, Mask)> {
+        let (lo, hi) = brush_box(grid, fb, level);
+        let footprint = Footprint::new(grid, fb);
+        let stacks = box_stacks(lo, hi);
+        let face = fb.face();
+        par_map(&stacks, 1, |stack| {
+            stack
+                .bricks
+                .iter()
+                .zip(footprint.held(level, stack))
+                .filter(|(_, mask)| *mask != [0; 8])
+                .map(|(s, mask)| {
+                    (
+                        BrickKey {
+                            face,
+                            level: level as u8,
+                            bi: stack.bi,
+                            bj: stack.bj,
+                            bk: s.bk,
+                        },
+                        mask,
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     /// Apply a brush to the cells already baked (a brush that stays analytic
@@ -474,18 +500,8 @@ impl EditStore {
         op: BrushOp,
         level: u32,
     ) -> Vec<BrickKey> {
-        let r = (fb.extent_cells() >> level) + 1;
-        let ci = (i64::from(fb.center[0]) / 2) >> level;
-        let cj = (i64::from(fb.center[1]) / 2) >> level;
-        let (k0, k1) = (
-            (i64::from(fb.k_lo) / 2 >> level) - 1,
-            (i64::from(fb.k_hi) / 2 >> level) + 1,
-        );
-        let ([i0, i1], [j0, j1]) = (
-            clamp_to_face(grid, level, ci - r, ci + r),
-            clamp_to_face(grid, level, cj - r, cj + r),
-        );
-        self.bake_box(grid, fb, op, level, [i0, j0, k0], [i1, j1, k1])
+        let (lo, hi) = brush_box(grid, fb, level);
+        self.bake_box(grid, fb, op, level, lo, hi)
     }
 
     /// Bake `fb` into every cell of `level` inside the inclusive cell box
@@ -500,39 +516,7 @@ impl EditStore {
         lo: [i64; 3],
         hi: [i64; 3],
     ) -> Vec<BrickKey> {
-        let b = i64::from(BRICK);
-        // The box's cells of brick coordinate `v` on `axis`, in brick cells.
-        let clip = |axis: usize, v: i64| {
-            [
-                (lo[axis] - v * b).clamp(0, b),
-                (hi[axis] + 1 - v * b).clamp(0, b),
-            ]
-        };
-        let (blo, bhi) = (lo.map(|v| v.div_euclid(b)), hi.map(|v| v.div_euclid(b)));
-        let mut stacks = Vec::new();
-        for bj in blo[1]..=bhi[1] {
-            for bi in blo[0]..=bhi[0] {
-                let bricks: Vec<StackBrick> = (blo[2]..=bhi[2])
-                    .map(|bk| StackBrick {
-                        bk: bk as i32,
-                        z: clip(2, bk),
-                        cull: false,
-                    })
-                    .filter(|s| s.z[0] < s.z[1])
-                    .collect();
-                let (x, y) = (clip(0, bi), clip(1, bj));
-                if x[0] < x[1] && y[0] < y[1] && !bricks.is_empty() {
-                    stacks.push(Stack {
-                        bi: bi as i32,
-                        bj: bj as i32,
-                        x,
-                        y,
-                        bricks,
-                    });
-                }
-            }
-        }
-        self.bake_stacks(&Footprint::new(grid, fb), level, &stacks, op)
+        self.bake_stacks(&Footprint::new(grid, fb), level, &box_stacks(lo, hi), op)
     }
 
     /// Apply a brush to the cells of each stack it holds (the stacks built
@@ -703,6 +687,66 @@ impl EditStore {
     }
 }
 
+/// The inclusive box of `level` cells brush `fb` may hold (clipped to its
+/// face): the cells a bake at that level visits.
+fn brush_box(grid: &Grid, fb: &FaceBrush, level: u32) -> ([i64; 3], [i64; 3]) {
+    // At the base level its extent; above, one cell more for rounding.
+    let r = if level == 0 {
+        fb.extent_cells()
+    } else {
+        (fb.extent_cells() >> level) + 1
+    };
+    let ci = (i64::from(fb.center[0]) / 2) >> level;
+    let cj = (i64::from(fb.center[1]) / 2) >> level;
+    let (k0, k1) = (
+        (i64::from(fb.k_lo) / 2 >> level) - 1,
+        (i64::from(fb.k_hi) / 2 >> level) + 1,
+    );
+    let ([i0, i1], [j0, j1]) = (
+        clamp_to_face(grid, level, ci - r, ci + r),
+        clamp_to_face(grid, level, cj - r, cj + r),
+    );
+    ([i0, j0, k0], [i1, j1, k1])
+}
+
+/// The brick stacks of the inclusive cell box `[lo, hi]`, each clipped to
+/// the box.
+fn box_stacks(lo: [i64; 3], hi: [i64; 3]) -> Vec<Stack> {
+    let b = i64::from(BRICK);
+    // The box's cells of brick coordinate `v` on `axis`, in brick cells.
+    let clip = |axis: usize, v: i64| {
+        [
+            (lo[axis] - v * b).clamp(0, b),
+            (hi[axis] + 1 - v * b).clamp(0, b),
+        ]
+    };
+    let (blo, bhi) = (lo.map(|v| v.div_euclid(b)), hi.map(|v| v.div_euclid(b)));
+    let mut stacks = Vec::new();
+    for bj in blo[1]..=bhi[1] {
+        for bi in blo[0]..=bhi[0] {
+            let bricks: Vec<StackBrick> = (blo[2]..=bhi[2])
+                .map(|bk| StackBrick {
+                    bk: bk as i32,
+                    z: clip(2, bk),
+                    cull: false,
+                })
+                .filter(|s| s.z[0] < s.z[1])
+                .collect();
+            let (x, y) = (clip(0, bi), clip(1, bj));
+            if x[0] < x[1] && y[0] < y[1] && !bricks.is_empty() {
+                stacks.push(Stack {
+                    bi: bi as i32,
+                    bj: bj as i32,
+                    x,
+                    y,
+                    bricks,
+                });
+            }
+        }
+    }
+    stacks
+}
+
 /// The inclusive cell range `[lo, hi]` of `level` clipped to the face (not
 /// on an infinite plane).
 fn clamp_to_face(grid: &Grid, level: u32, lo: i64, hi: i64) -> [i64; 2] {
@@ -714,7 +758,8 @@ fn clamp_to_face(grid: &Grid, level: u32, lo: i64, hi: i64) -> [i64; 2] {
 
 /// A brick's cells a brush holds, one bit per cell: word `z`, bit `x + 8 y`
 /// (the cell's brick index is `64 z` plus the bit).
-type Mask = [u64; 8];
+pub type Mask = [u64; 8];
+
 
 /// One brick column's share of a brush's cells: its cell columns `x`, `y`
 /// in `[from, to)` (brick cells) and the bricks of the column to fill.

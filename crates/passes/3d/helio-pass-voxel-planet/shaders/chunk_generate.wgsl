@@ -34,7 +34,7 @@ struct TileJob {
     level: u32,
     cx: i32,
     cy: i32,
-    // Its place in the footprint pool (`tile_columns`, `tile_halo`): kept
+    // Its place in the footprint pool (`tile_columns`, `tile_caves`): kept
     // across frames, so a footprint's columns are computed once while
     // resident, whichever of its nodes are generated when.
     slot: u32,
@@ -344,7 +344,7 @@ fn material_slope(job: TileJob, i: i32, j: i32) -> i32 {
 }
 
 // A two-rate field's nodes of each tile (`generation_tile_nodes`), before
-// `tile_columns_main`: dispatch (tiles). Then `tile_halo_main`.
+// `tile_columns_main`: dispatch (tiles).
 @compute @workgroup_size(64)
 fn tile_nodes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
     let job = tile_jobs[wg.x];
@@ -373,7 +373,6 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
         // (the display field), so they sit where finer levels' terrain sits.
         let field = generation_tile_column(wg.y, job.face, i, j, job.level, job.level >= 1u);
         let p = domain_point(job.face, i, j, job.level);
-        let extent = terrain_extent(p, job.level);
         let top = div_floor(field.x, world.grid.y) >> job.level;
         // The far form over the column (`far_spawn`), once a footprint: its
         // spawn kept over the surface word, the volume's range raised over
@@ -386,11 +385,12 @@ fn tile_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoca
                 atomicMax(&w_range[1], ((canopy.z - 1) >> job.level) + 1);
             }
         }
-        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y | i32(far << 8u), extent.x, extent.y);
-        // The cell under the top holds the surface; the volume may change
-        // cells across its extent. Ranges: the volume's, the surface's.
-        atomicMin(&w_range[0], top - 1 - extent.x);
-        atomicMax(&w_range[1], top + extent.y);
+        // The volume's extent comes later (`tile_volumes_main`).
+        tile_columns[job.slot * TILE_COLUMNS + y * 64u + x] = vec4<i32>(field.x, field.y | i32(far << 8u), 0, 0);
+        // The cell under the top holds the surface. Ranges: the volume's
+        // (`tile_volumes_main` widens it), the surface's.
+        atomicMin(&w_range[0], top - 1);
+        atomicMax(&w_range[1], top);
         atomicMin(&w_range[2], top - 1);
         atomicMax(&w_range[3], top);
     } else {
@@ -571,84 +571,181 @@ fn edited_material(material: u32, job: ChunkJob, column: u32, li: u32, p: vec3<i
     return m;
 }
 
-// The field's heights at the brick column's lean lattice nodes, and
-// whether some column of it leans (`terrain::lean_height`).
-var<workgroup> w_lean: array<i32, 64>;
-var<workgroup> w_leaning: atomic<u32>;
 // Whether the chunk is air throughout (`chunk_columns_main`).
 var<workgroup> w_air: u32;
 
-// Bilinear height of the lean lattice at `xy` (Q8 level cells from node
-// (0, 0)), nodes 0..8 per axis (`terrain::lattice_bilinear`).
-fn lean_bilinear(xy: vec2<i32>, spacing: i32) -> i32 {
-    let step = spacing * 256;
-    let n = clamp(vec2<i32>(div_floor(xy.x, step), div_floor(xy.y, step)), vec2<i32>(0), vec2<i32>(6));
-    let f = clamp((xy - n * step) / spacing, vec2<i32>(0), vec2<i32>(256));
-    let h00 = w_lean[n.x + n.y * 8];
-    let h10 = w_lean[n.x + 1 + n.y * 8];
-    let h01 = w_lean[n.x + (n.y + 1) * 8];
-    let h11 = w_lean[n.x + 1 + (n.y + 1) * 8];
-    let a = h00 + (((h10 - h00) * f.x) >> 8u);
-    let b = h01 + (((h11 - h01) * f.x) >> 8u);
-    return a + (((b - a) * f.y) >> 8u);
+// Each footprint's cave primitives (`volumes::Primitive::words`), kept with
+// its columns in the pool: a count, then CAVE_SLOT primitives of 8 words,
+// horizontal coordinates from the footprint's first base cell
+// (`tile_caves_main`, docs/volumes.md).
+@group(0) @binding(26) var<storage, read_write> tile_caves: array<i32>;
+const CAVE_SLOT: u32 = 48u;
+const CAVE_SLOT_WORDS: u32 = 392u;
+
+// The first base cell of a footprint.
+fn footprint_origin(job: TileJob) -> vec2<i32> {
+    return vec2<i32>(job.cx * 64, job.cy * 64) << vec2<u32>(job.level);
 }
 
-// Height (mm) of the heightfield displaced by the program's lean under cell
-// `(i, j, k)` (`terrain::lean_height`) of a column with overhang amplitude
-// `a`; `node` is the lattice's first node.
-fn lean_height(a: i32, i: i32, j: i32, k: i32, level: u32, height: i32, spacing: i32, node: vec2<i32>) -> i32 {
-    let o = terrain_lean_offset_with(a, i, j, k, level);
-    if o.x == 0 && o.y == 0 { return height; }
-    let xy = vec2<i32>(i, j) * 256 + 128 - node * spacing * 256;
-    return lean_bilinear(xy + o, spacing) + height - lean_bilinear(xy, spacing);
+// Owner `o` of a footprint's columns (`VolumeLayer::owners`): the regions
+// under it, each row with its `-i` neighbour, then the `-j` row; z: 0 past
+// the last.
+fn cave_owner(job: TileJob, o: u32) -> vec3<i32> {
+    let origin = footprint_origin(job);
+    let r0 = origin >> vec2<u32>(volume_region_shift());
+    let r1 = (origin + (64 << job.level) - 1) >> vec2<u32>(volume_region_shift());
+    let n = r1 - r0 + 1;
+    let row = u32(n.x + 1);
+    if o < row * u32(n.y) { return vec3<i32>(r0.x - 1 + i32(o % row), r0.y + i32(o / row), 1); }
+    let rest = o - row * u32(n.y);
+    if rest < u32(n.x) { return vec3<i32>(r0.x + i32(rest), r0.y - 1, 1); }
+    return vec3<i32>(0);
 }
 
-// The field's heights at the lean lattice nodes past each tile's edges
-// that its brick columns read (`chunk_columns_main`): a square of nodes
-// from `halo_first`, at most HALO_SIDE a side (spacing >= 2: 56 / 2 + 8).
-// Evaluated once a tile (`tile_halo_main`), not once a chunk.
-const HALO_SIDE: u32 = 40u;
-@group(0) @binding(26) var<storage, read_write> tile_halo: array<i32>;
+var<workgroup> w_cave_ground: array<vec2<i32>, 48>;
+var<workgroup> w_cave_count: atomic<u32>;
+var<workgroup> w_cave_tiles: u32;
 
-fn halo_first(tile: TileJob, lean: vec2<i32>) -> vec2<i32> {
-    return vec2<i32>(div_floor(tile.cx * 64 - lean.x, lean.y), div_floor(tile.cy * 64 - lean.x, lean.y));
-}
-
-var<workgroup> w_halo_leaning: atomic<u32>;
-var<workgroup> w_halo_flag: u32;
-var<workgroup> w_halo_tiles: u32;
-
-// Tiles `wg.x`, `wg.x + HALO_GROUPS`, ..: the halo of each with a leaning
-// column. The batch's tile count is `tile_ranges`' last word.
+// Tiles `wg.x`, `wg.x + HALO_GROUPS`, ..: each footprint's primitives at
+// its level, from its owners' networks (8 at most where caves are
+// resolved). A lane a site reads its reference ground (scratch node
+// `wg.x * 64 + li`), then a lane an owner builds its network and keeps the
+// primitives over the footprint.
 @compute @workgroup_size(64)
-fn tile_halo_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
-    if li == 0u { w_halo_tiles = u32(atomicLoad(&tile_ranges[arrayLength(&tile_ranges) - 1u])); }
-    let tiles = workgroupUniformLoad(&w_halo_tiles);
+fn tile_caves_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    if li == 0u { w_cave_tiles = u32(atomicLoad(&tile_ranges[arrayLength(&tile_ranges) - 1u])); }
+    let tiles = workgroupUniformLoad(&w_cave_tiles);
     for (var t = wg.x; t < tiles; t += HALO_GROUPS) {
         let job = tile_jobs[t];
-        let lean = terrain_lean(job.level);
-        if li == 0u { atomicStore(&w_halo_leaning, 0u); }
+        let slot = job.slot * CAVE_SLOT_WORDS;
+        let caves_on = volumes_caves() && i32(job.level) <= cave_deepest_level(true);
+        if li == 0u { atomicStore(&w_cave_count, 0u); }
+        if li < 48u {
+            var g = vec2<i32>(0);
+            let owner = cave_owner(job, li / 6u);
+            if caves_on && owner.z != 0 {
+                let site = volume_site(job.face, owner.x, owner.y, li % 6u);
+                if site.used {
+                    let reference = u32(volumes.head.z);
+                    let c = generation_halo_column(t, job.face, site.x >> reference, site.y >> reference, reference, reference >= 1u, wg.x * 64u + li);
+                    g = vec2<i32>(c.x, terrain_cave_gate(u32(c.y) & 0xffu, c.x));
+                }
+            }
+            w_cave_ground[li] = g;
+        }
         workgroupBarrier();
-        if lean.x != 0 {
-            for (var c = li; c < TILE_COLUMNS; c += 64u) {
-                let column = tile_columns[job.slot * TILE_COLUMNS + c];
-                if column.x != OUTSIDE && column.w > 0 { atomicStore(&w_halo_leaning, 1u); }
+        let owner = cave_owner(job, li);
+        if caves_on && li < 8u && owner.z != 0 {
+            var ground: array<vec2<i32>, 6>;
+            for (var s = 0u; s < VOLUME_SITES; s++) { ground[s] = w_cave_ground[li * 6u + s]; }
+            let net = volume_network(job.face, owner.x, owner.y, ground, footprint_origin(job));
+            let side = 4 * (64 << job.level);
+            for (var n = 0u; n < net.count; n++) {
+                let p = net.prims[n];
+                let h = cave_reach(p).x;
+                if !cave_resolved(p, job.level) || max(p.a.x, p.b.x) + h < 0 || min(p.a.x, p.b.x) - h >= side
+                    || max(p.a.y, p.b.y) + h < 0 || min(p.a.y, p.b.y) - h >= side { continue; }
+                let at = atomicAdd(&w_cave_count, 1u);
+                if at < CAVE_SLOT {
+                    var w = cave_primitive_words(p);
+                    for (var k = 0u; k < 8u; k++) { tile_caves[slot + 8u + at * 8u + k] = w[k]; }
+                }
             }
         }
         workgroupBarrier();
-        if li == 0u { w_halo_flag = atomicLoad(&w_halo_leaning); }
-        if workgroupUniformLoad(&w_halo_flag) == 0u { continue; }
-        let first = halo_first(job, lean);
-        let side = vec2<i32>(div_floor(job.cx * 64 + 56 - lean.x, lean.y), div_floor(job.cy * 64 + 56 - lean.x, lean.y)) + 8 - first;
-        let last = (world.grid.z >> job.level) - 1;
-        for (var k = i32(li); k < side.x * side.y; k += 64) {
-            let n = first + vec2<i32>(k % side.x, k / side.x);
-            let cell = clamp(n * lean.y, vec2<i32>(0), vec2<i32>(last));
-            let local = cell - vec2<i32>(job.cx, job.cy) * 64;
-            if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) { continue; }
-            let at = job.slot * HALO_SIDE * HALO_SIDE + u32(n.y - first.y) * HALO_SIDE + u32(n.x - first.x);
-            tile_halo[at] = generation_halo_column(t, job.face, cell.x, cell.y, job.level, job.level >= 1u, wg.x * 64u + li).x;
+        if li == 0u { tile_caves[slot] = i32(min(atomicLoad(&w_cave_count), CAVE_SLOT)); }
+        workgroupBarrier();
+    }
+}
+
+// A brick column's primitives (`cull_caves`).
+var<workgroup> w_prims: array<array<i32, 8>, 48>;
+var<workgroup> w_prim_count: atomic<u32>;
+var<workgroup> w_prim_total: u32;
+
+// The primitives of the footprint in pool slot `slot` over the 8x8
+// columns of `level` from local column `first` and reaching Q2 layers
+// from `z_lo` up, into `w_prims` (every lane calls it; `enabled` false:
+// none). Returns their count.
+fn cull_caves(slot: u32, first: vec2<i32>, level: u32, z_lo: i32, li: u32, enabled: bool) -> u32 {
+    if li == 0u { atomicStore(&w_prim_count, 0u); }
+    workgroupBarrier();
+    if enabled {
+        let count = u32(tile_caves[slot * CAVE_SLOT_WORDS]);
+        if li < count {
+            var w: array<i32, 8>;
+            for (var k = 0u; k < 8u; k++) { w[k] = tile_caves[slot * CAVE_SLOT_WORDS + 8u + li * 8u + k]; }
+            let p = cave_primitive_of(w);
+            let lo = (4 * first + 2) << vec2<u32>(level);
+            let hi = (4 * (first + 7) + 2) << vec2<u32>(level);
+            let h = cave_reach(p).x;
+            if max(p.a.x, p.b.x) + h >= lo.x && min(p.a.x, p.b.x) - h <= hi.x
+                && max(p.a.y, p.b.y) + h >= lo.y && min(p.a.y, p.b.y) - h <= hi.y && cave_z_range(p).y >= z_lo {
+                w_prims[atomicAdd(&w_prim_count, 1u)] = w;
+            }
         }
+    }
+    workgroupBarrier();
+    if li == 0u { w_prim_total = atomicLoad(&w_prim_count); }
+    return workgroupUniformLoad(&w_prim_total);
+}
+
+// Whether bit `b` of a 64-bit mask is set.
+fn mask_bit(m: vec2<u32>, b: i32) -> bool {
+    if b < 32 { return ((m.x >> u32(b)) & 1u) != 0u; }
+    return ((m.y >> u32(b - 32)) & 1u) != 0u;
+}
+
+// Each column's volume extent (`Planet::volume_column`): the cells below
+// and above its top its cliff band and the cave primitives over it may
+// change, into `tile_columns.zw`, and the footprint's measured volume
+// range. One workgroup per 8x8 columns: dispatch (64, tiles).
+@compute @workgroup_size(64)
+fn tile_volumes_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_index) li: u32) {
+    let job = tile_jobs[wg.y];
+    let x = (wg.x & 7u) * 8u + (li & 7u);
+    let y = (wg.x >> 3u) * 8u + (li >> 3u);
+    let i = job.cx * 64 + i32(x);
+    let j = job.cy * 64 + i32(y);
+    if li == 0u {
+        atomicStore(&w_range[0], 0x7fffffff);
+        atomicStore(&w_range[1], -0x7fffffff);
+    }
+    let first = vec2<i32>(i32((wg.x & 7u) * 8u), i32((wg.x >> 3u) * 8u));
+    let caves = volumes_caves() && i32(job.level) <= cave_deepest_level(true);
+    let count = cull_caves(job.slot, first, job.level, -0x7fffffff, li, caves);
+    let at = job.slot * TILE_COLUMNS + y * 64u + x;
+    let column = tile_columns[at];
+    if column.x != OUTSIDE {
+        let level = job.level;
+        let top = div_floor(column.x, world.grid.y) >> level;
+        var below = 0;
+        var above = 0;
+        if volumes_cliffs() && level < CLIFF_LEVELS {
+            let cliff = volume_cliff(domain_point(job.face, i, j, level), material_slope(job, i, j), level);
+            below = cliff.cells;
+            above = cliff.cells;
+        }
+        let q = (4 * vec2<i32>(i32(x), i32(y)) + 2) << vec2<u32>(level);
+        let deepest = cave_max_depth_cells(level);
+        for (var c = 0u; c < count; c++) {
+            let p = cave_primitive_of(w_prims[c]);
+            if cave_covers(p, q.x, q.y) {
+                below = max(below, clamp(top - div_floor(cave_z_range(p).x, 4 << level), 0, deepest));
+            }
+        }
+        if below > 0 || above > 0 {
+            tile_columns[at] = vec4<i32>(column.xy, below, above);
+            atomicMin(&w_range[0], top - 1 - below);
+            atomicMax(&w_range[1], top + above);
+        }
+    }
+    workgroupBarrier();
+    // The quarter its 8x8 columns lie in (`tile_columns_main`).
+    let quarter = wg.y * RANGE_WORDS + (((wg.x & 7u) >> 2u) | ((wg.x >> 5u) << 1u)) * 4u;
+    if li == 0u {
+        atomicMin(&tile_ranges[quarter], atomicLoad(&w_range[0]));
+        atomicMax(&tile_ranges[quarter + 1u], atomicLoad(&w_range[1]));
     }
 }
 
@@ -684,33 +781,15 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
         }
         return;
     }
-    // A leaning surface (overhangs) reads the field on a global lattice:
-    // nodes every `spacing` cells from `div_floor(8 ci - reach, spacing)`,
-    // shared by the brick column's lanes, each reading one.
-    let lean = terrain_lean(level);
-    let leaning = column.x != OUTSIDE && lean.x != 0 && column.w > 0;
-    let node = vec2<i32>(div_floor((i >> 3u) * 8 - lean.x, max(lean.y, 1)), div_floor((j >> 3u) * 8 - lean.x, max(lean.y, 1)));
+    // The footprint's cave primitives over the brick column, reaching the
+    // chunk's layers or above (the natural top over it reads them too).
+    let caves_here = volumes_caves() && i32(level) <= cave_deepest_level(true);
+    let brick_first = vec2<i32>(i32((wg.x & 7u) * 8u), i32((wg.x >> 3u) * 8u));
+    let prim_count = cull_caves(tile.slot, brick_first, level, (4 * job.cz * 64) << level, li, caves_here);
     if li == 0u {
-        atomicStore(&w_leaning, 0u);
         atomicStore(&w_feature_bits[0], 0u);
         atomicStore(&w_feature_bits[1], 0u);
         atomicStore(&w_feature_parts, 0u);
-    }
-    workgroupBarrier();
-    if leaning { atomicStore(&w_leaning, 1u); }
-    workgroupBarrier();
-    if atomicLoad(&w_leaning) != 0u {
-        let last = (world.grid.z >> level) - 1;
-        let cell = vec2<i32>(clamp((node.x + i32(li & 7u)) * lean.y, 0, last), clamp((node.y + i32(li >> 3u)) * lean.y, 0, last));
-        // A node over the tile is its column's height (`tile_columns_main`,
-        // the same arguments); past the tile's edges, the tile's halo.
-        let local = cell - vec2<i32>(tile.cx, tile.cy) * 64;
-        if all(local >= vec2<i32>(0)) && all(local < vec2<i32>(64)) {
-            w_lean[li] = tile_columns[tile.slot * TILE_COLUMNS + u32(local.y) * 64u + u32(local.x)].x;
-        } else {
-            let n = node + vec2<i32>(i32(li & 7u), i32(li >> 3u)) - halo_first(tile, lean);
-            w_lean[li] = tile_halo[tile.slot * HALO_SIDE * HALO_SIDE + u32(n.y) * HALO_SIDE + u32(n.x)];
-        }
     }
     workgroupBarrier();
     let height = column.x;
@@ -735,57 +814,47 @@ fn chunk_columns_main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invoc
     }
     var mask = set_bits(vec2<u32>(0u), 0, top - k0, true);
     // Under edits, the natural top when the volume puts solid cells over
-    // the chunk (`terrain::generated_top`: the first air over the highest).
+    // the chunk (`Planet::generated_top`: the first air over the highest).
     var above_top = OUTSIDE;
     if column.z > 0 || column.w > 0 {
-        // Volume terms: the cells the program changes within its extent,
-        // stepping over rock caves cannot reach (`cave_clearance`).
+        // The volume (`Planet::column_kind`): the cliff band, then the
+        // caves over the column, within its extent.
         let k_lo = max(top - column.z, k0);
         let k_hi = min(top + column.w, k0 + 64);
-        let band_lo = select(top, top - column.w, column.w > 0);
-        // The column's own volume terms, once for all its cells.
-        let volume = column_volume(p, level);
-        // A cell's volume point from the column's domain point (`p`, the
-        // sphere mapping once a column, not once a cell).
         let half = 1 << level;
-        let step = distance(vec3<f32>(volume_point_half(p, ((top + 1) << (level + 1u)) + half)), vec3<f32>(volume_point_half(p, (top << (level + 1u)) + half))) + 2.0;
-        // Cells no cave can carve (under the rock cover, past the cave
-        // depth) keep the surface's bits, set above, out of the lean's band:
-        // the scan steps to the next cell either may change.
-        let caves = cave_window(volume, height, level);
-        // A cell's caves' noises feed both its clearance and its density,
-        // their lattice corners hashed once a lattice cell.
-        var lattice = cave_lattice();
-        var scan = k_lo;
-        loop {
-            if scan >= k_hi { break; }
-            if (scan < caves.x || scan > caves.y) && scan < band_lo {
-                scan = min(select(k_hi, caves.x, scan < caves.x), band_lo);
-                continue;
-            }
-            if (scan < caves.x || scan > caves.y) && column.w == 0 {
-                scan = select(k_hi, caves.x, scan < caves.x);
-                continue;
-            }
-            let noises = cave_noise(volume_point_half(p, (scan << (level + 1u)) + half), level, &lattice);
-            if scan < band_lo {
-                let clear = cave_clearance(noises, level, step);
-                if clear > 0 {
-                    scan = min(scan + clear + 1, band_lo);
-                    continue;
+        var cliff = Cliff(0, 0, false, false, 0);
+        if volumes_cliffs() && level < CLIFF_LEVELS {
+            cliff = volume_cliff(p, material_slope(tile, i, j), level);
+        }
+        for (var k = max(top - cliff.cells, k_lo); k < min(top + cliff.cells, k_hi); k++) {
+            let solid = volume_cliff_solid(cliff, volume_point_half(p, (k << (level + 1u)) + half), height, k, level);
+            mask = set_bits(mask, k - k0, k - k0 + 1, solid);
+        }
+        let q = (4 * vec2<i32>(i32(x), i32(y)) + 2) << vec2<u32>(level);
+        let origin = footprint_origin(tile);
+        for (var c = 0u; c < prim_count; c++) {
+            let prim = cave_primitive_of(w_prims[c]);
+            if !cave_covers(prim, q.x, q.y) { continue; }
+            let range = cave_z_range(prim);
+            let lo = max(div_floor(range.x, 4 << level), k_lo);
+            let hi = min(div_floor(range.y, 4 << level) + 1, k_hi);
+            for (var k = lo; k < hi; k++) {
+                if mask_bit(mask, k - k0) && volume_carves(prim, q.x, q.y, origin, k, level, height) {
+                    mask = set_bits(mask, k - k0, k - k0 + 1, false);
                 }
             }
-            var lean_h = height;
-            if leaning { lean_h = lean_height(volume.overhang, i, j, scan, level, height, lean.y, node); }
-            let solid = terrain_density_with(volume, noises, level, top, height, lean_h, scan) > 0;
-            mask = set_bits(mask, scan - k0, scan - k0 + 1, solid);
-            scan += 1;
         }
         if job.detail != NONE {
             for (var s = top + column.w - 1; s >= k0 + 64; s--) {
-                var lean_h = height;
-                if leaning { lean_h = lean_height(volume.overhang, i, j, s, level, height, lean.y, node); }
-                if terrain_density_with(volume, cave_noise(volume_point_half(p, (s << (level + 1u)) + half), level, &lattice), level, top, height, lean_h, s) > 0 {
+                var solid = s < top;
+                if s >= top - cliff.cells && s < top + cliff.cells {
+                    solid = volume_cliff_solid(cliff, volume_point_half(p, (s << (level + 1u)) + half), height, s, level);
+                }
+                for (var c = 0u; c < prim_count && solid; c++) {
+                    let prim = cave_primitive_of(w_prims[c]);
+                    if volume_carves(prim, q.x, q.y, origin, s, level, height) { solid = false; }
+                }
+                if solid {
                     above_top = s + 1;
                     break;
                 }

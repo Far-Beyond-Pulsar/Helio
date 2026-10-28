@@ -101,12 +101,17 @@ pub struct GBufferPass {
     pipeline_layout: wgpu::PipelineLayout,
     bind_group_layout_0: wgpu::BindGroupLayout,
     bind_group_layout_1: wgpu::BindGroupLayout,
-    /// Shared UV reference image used by the UV visualization mode.
+    /// Shared UV reference image used by the UV visualization mode
+    /// ([`UV_DEBUG_MODE`]); a white texel while that mode is off.
     uv_grid_texture: wgpu::Texture,
+    /// Pixels waiting for their upload in `prepare` (empty once uploaded).
     uv_grid_pixels: Vec<u8>,
     uv_grid_extent: (u32, u32),
+    uv_grid_bind_group_layout: wgpu::BindGroupLayout,
     uv_grid_bind_group: wgpu::BindGroup,
     uv_grid_uploaded: bool,
+    /// Whether `uv_grid_texture` holds the reference image (not the texel).
+    uv_grid_full: bool,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_0_key: Option<[wgpu::Buffer; 7]>,
@@ -292,13 +297,9 @@ impl GBufferPass {
 
         // ── Bind Group Layout 1: material + textures ──────────────────────────
         let bind_group_layout_1 = create_material_bgl(device, material_binding);
-        let (
-            uv_grid_texture,
-            uv_grid_pixels,
-            uv_grid_extent,
-            uv_grid_bind_group_layout,
-            uv_grid_bind_group,
-        ) = create_uv_grid(device);
+        let uv_grid_bind_group_layout = uv_grid_layout(device);
+        let (uv_grid_texture, uv_grid_pixels, uv_grid_extent, uv_grid_bind_group) =
+            create_uv_grid(device, &uv_grid_bind_group_layout, false);
 
         // ── Pipeline layout (shared by all pipeline variants) ─────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -371,8 +372,10 @@ impl GBufferPass {
             uv_grid_texture,
             uv_grid_pixels,
             uv_grid_extent,
+            uv_grid_bind_group_layout,
             uv_grid_bind_group,
             uv_grid_uploaded: false,
+            uv_grid_full: false,
             bind_group_0: None,
             bind_group_0_key: None,
             bind_group_1: None,
@@ -687,6 +690,18 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // The reference image exists only while its debug view is selected.
+        let uv_view = self.debug_mode == UV_DEBUG_MODE;
+        if uv_view != self.uv_grid_full {
+            (
+                self.uv_grid_texture,
+                self.uv_grid_pixels,
+                self.uv_grid_extent,
+                self.uv_grid_bind_group,
+            ) = create_uv_grid(ctx.device, &self.uv_grid_bind_group_layout, uv_view);
+            self.uv_grid_full = uv_view;
+            self.uv_grid_uploaded = false;
+        }
         if !self.uv_grid_uploaded {
             let (width, height) = self.uv_grid_extent;
             ctx.queue.write_texture(
@@ -709,6 +724,7 @@ impl RenderPass for GBufferPass {
                 },
             );
             self.uv_grid_uploaded = true;
+            self.uv_grid_pixels = Vec::new();
         }
         if let Some(pending_coordinate_spaces) = self.pending_coordinate_spaces.take() {
             let words = coordinate_space_words(&pending_coordinate_spaces);
@@ -1301,20 +1317,26 @@ impl GBufferPass {
 // Both GBufferPass and TransparentPass need the same material bind group layout.
 // This should be moved to a shared crate (helio-core or a shared pass crate) so neither
 // pass depends on the other for basic infrastructure.
+/// The debug mode that samples the UV reference image.
+const UV_DEBUG_MODE: u32 = 1;
+
+/// The UV reference image (`full`) or a white texel, its pixels (uploaded by
+/// `prepare`), size and bind group.
 fn create_uv_grid(
     device: &wgpu::Device,
-) -> (
-    wgpu::Texture,
-    Vec<u8>,
-    (u32, u32),
-    wgpu::BindGroupLayout,
-    wgpu::BindGroup,
-) {
+    layout: &wgpu::BindGroupLayout,
+    full: bool,
+) -> (wgpu::Texture, Vec<u8>, (u32, u32), wgpu::BindGroup) {
     const UV_GRID_BYTES: &[u8] = include_bytes!("../../../../../assets/UV_Grid_Sm.jpg");
-    let decoded = image::load_from_memory(UV_GRID_BYTES)
-        .expect("embedded UV reference image is valid")
-        .to_rgba8();
-    let (width, height) = decoded.dimensions();
+    let (pixels, (width, height)) = if full {
+        let decoded = image::load_from_memory(UV_GRID_BYTES)
+            .expect("embedded UV reference image is valid")
+            .to_rgba8();
+        let extent = decoded.dimensions();
+        (decoded.into_raw(), extent)
+    } else {
+        (vec![255; 4], (1, 1))
+    };
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("GBuffer UV reference image"),
         size: wgpu::Extent3d {
@@ -1339,7 +1361,25 @@ fn create_uv_grid(
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
         ..Default::default()
     });
-    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("GBuffer UV reference bind group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(&sampler),
+            },
+        ],
+    });
+    (texture, pixels, (width, height), bind_group)
+}
+
+fn uv_grid_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("GBuffer UV reference layout"),
         entries: &[
             wgpu::BindGroupLayoutEntry {
@@ -1359,28 +1399,7 @@ fn create_uv_grid(
                 count: None,
             },
         ],
-    });
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("GBuffer UV reference bind group"),
-        layout: &layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(&sampler),
-            },
-        ],
-    });
-    (
-        texture,
-        decoded.into_raw(),
-        (width, height),
-        layout,
-        bind_group,
-    )
+    })
 }
 
 pub fn create_material_bgl(

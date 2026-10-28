@@ -89,8 +89,7 @@ pub(crate) fn build_graph(
     }
 
     if lock {
-        let (width, height) = env.internal_size();
-        graph.lock(width, height);
+        graph.lock_sized(env.config.render_size());
     }
     Ok(graph)
 }

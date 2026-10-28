@@ -1427,7 +1427,7 @@ impl RenderPass for AtmosphereCompositePass {
         Ok(())
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
         self.group = None;
         self.key = None;
     }

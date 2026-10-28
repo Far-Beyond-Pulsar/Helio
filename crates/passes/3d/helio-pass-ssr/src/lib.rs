@@ -252,7 +252,8 @@ impl RenderPass for SsrPass {
         None
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.width = width.div_ceil(2);
         self.height = height.div_ceil(2);
         self.bg_1 = None;

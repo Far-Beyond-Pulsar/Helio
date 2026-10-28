@@ -1239,9 +1239,12 @@ impl RenderPass for TsrPass {
         }
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        // Histories and the resolve are at the output resolution; the input
+        // is read at whatever size the graph renders it.
+        let [width, height] = size.output;
         if let Some(right) = &mut self.xr_right {
-            right.on_resize(device, width, height);
+            right.on_resize(device, size);
         }
         self.output_width = width.max(1);
         self.output_height = height.max(1);

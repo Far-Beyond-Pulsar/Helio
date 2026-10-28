@@ -635,21 +635,6 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         false
     }
 
-    /// Whether the graph's recording cache may resubmit this pass's
-    /// command buffers while it records identical commands
-    /// (see `graph::recording_cache`).
-    ///
-    /// `execute()` still runs every frame, and a resubmitted command buffer
-    /// is validated like a new one (a buffer it uses must not be mapped), so
-    /// a pass needs no changes to be cached. Return `false` to always record
-    /// it straight into wgpu, for example to rule the cache out while
-    /// investigating a rendering difference.
-    ///
-    /// Default `true`.
-    fn supports_recording_cache(&self) -> bool {
-        true
-    }
-
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms
@@ -700,11 +685,36 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         Ok(())
     }
 
-    /// Called when the render target is resized.
+    /// Called when the graph's resolutions change (the graph resizes its
+    /// textures in place and keeps every pass). `size.internal` is what the
+    /// scene renders at, `size.output` what the frame is presented at; a pass
+    /// sized at construction uses the one it was built with.
     ///
-    /// Override to recreate size-dependent resources (pipelines, textures, bind groups).
+    /// Override to recreate size-dependent resources (textures, bind groups).
     /// The default is a no-op, so passes that don't need resize handling can ignore it.
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: crate::graph::RenderSize) {}
+
+    /// Whether this pass has work in the frame about to be recorded.
+    ///
+    /// The graph asks every pass once per frame, before anything runs. A pass
+    /// that answers `false` leaves the schedule: it is not prepared, executed
+    /// or given graph textures, and stays in the graph (configuration and
+    /// persistent state kept) until it answers `true` again. Passes whose
+    /// work depends on scene content (water volumes, decals, portals) or on a
+    /// debug mode answer from it, and allocate their content resources only
+    /// while they are members. The graph also asks once at lock, with no
+    /// scene: content questions answer "none" then.
+    ///
+    /// Default: always a member.
+    fn is_member(&mut self, _scene: &mut crate::graph::SceneContent<'_>) -> bool {
+        true
+    }
+
+    /// Called when this pass leaves the frame's schedule (see
+    /// [`is_member`](Self::is_member)), after the last frame it ran in.
+    /// Release what was allocated for content that is gone; the pass may
+    /// join again later.
+    fn on_leave(&mut self, _device: &wgpu::Device) {}
 
     /// Updates the renderer-wide debug visualisation mode.
     ///

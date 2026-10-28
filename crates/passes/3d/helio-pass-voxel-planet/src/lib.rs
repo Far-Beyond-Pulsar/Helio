@@ -4,13 +4,17 @@
 //! * [`terrain`] — pluggable terrain generators, evaluated bit-for-bit
 //!   identically on CPU and GPU, built from [`noise`]; [`layers`] is the
 //!   built-in one (ordered layer stacks, interpreted by [`landform`]).
-//! * [`edits`] — ordered brushes with exact integer containment.
+//! * [`edits`] — ordered brushes with exact integer containment;
+//!   [`edit_store`] bakes them into cells, [`edit_yield`] counts what one
+//!   changes (gameplay's blocks broken and placed).
 //! * [`planet`] — canonical queries, materials and exact ray casts.
 //! * [`features`] — procedural content (trees, rocks, buildings) generated
 //!   like the terrain (docs/features.md), from [`stamp`] models; [`flora`]
 //!   grows natural ones (trees, shrubs, boulders, craters), and a
 //!   [`feature_recipe`] describes a world's (what grows where, in metres)
 //!   for any voxel size and seed.
+//! * [`volumes`] — the terrain's volumetric shapes: cave networks and
+//!   cliff overhangs (docs/volumes.md).
 //! * [`volume`] — worlds placed in a scene by f64 transforms, any number
 //!   of them, queried by world positions.
 //! * `chunks` — chunk trees in an octree (docs/chunk-octree.md): GPU
@@ -20,6 +24,7 @@
 #[cfg(feature = "engine")]
 pub mod chunks;
 pub mod edit_store;
+pub mod edit_yield;
 pub mod edits;
 #[cfg(feature = "engine")]
 pub mod engine;
@@ -40,6 +45,7 @@ pub mod snapshot;
 pub mod stamp;
 pub mod terrain;
 pub mod volume;
+pub mod volumes;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};

@@ -237,6 +237,32 @@ impl SurfaceCapture {
         wgpu::TextureUsages::RENDER_ATTACHMENT | copy
     }
 
+    /// Renders and presents a window frame. With a capture asked for, the
+    /// frame is rendered into the surface texture itself so [`Self::frame`]
+    /// can copy it; the process exits once the frame is saved.
+    pub fn render_window_frame(
+        &mut self,
+        renderer: &mut helio::Renderer,
+        camera: &helio::Camera,
+        surface: &wgpu::Surface<'_>,
+    ) -> helio_core::Result<()> {
+        if self.path.is_none() {
+            return renderer.render_window_frame(camera, surface);
+        }
+        let output = match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            _ => return Ok(()),
+        };
+        let result = renderer.render(camera, &output.texture.create_view(&Default::default()));
+        let (device, queue) = (renderer.device().clone(), renderer.queue().clone());
+        if self.frame(&device, &queue, &output.texture) {
+            std::process::exit(0);
+        }
+        queue.present(output);
+        result
+    }
+
     /// After a frame is rendered into `texture`: on the frame asked for,
     /// saves it (RGBA8 or BGRA8) and returns true (the example then exits).
     pub fn frame(

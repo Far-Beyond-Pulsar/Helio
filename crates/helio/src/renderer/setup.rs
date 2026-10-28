@@ -265,6 +265,8 @@ impl Renderer {
             xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,
             pending_resize: None,
+            pending_rebuild: false,
+            last_resize_ms: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
             graph_rebuild_hook: None,

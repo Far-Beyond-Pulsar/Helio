@@ -214,7 +214,7 @@ impl RenderPass for FxaaPass {
         Ok(())
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
         // RenderGraph may replace `pre_aa` in the same texture-pool slot, so
         // the TextureView wrapper address is not a reliable resize generation.
         self.bind_group = None;

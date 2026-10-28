@@ -64,8 +64,7 @@ So the readback only decides which keys have regions: a key seen for the
 first time is skipped until it has one, and survivors past a region's
 capacity are skipped until it grows. A draw is never made with another key's
 pipeline. Before any key has been read back, the passes draw every group with
-the default pipeline. Because the table rarely changes, the recorded draw
-commands stay the same frame to frame and the recording cache keeps hitting.
+the default pipeline.
 
 Shadow, DepthPrepass and PortalInstances draw every group with one pipeline
 and don't use ranges.

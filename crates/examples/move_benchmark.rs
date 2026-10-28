@@ -721,50 +721,6 @@ impl Bench {
         std::fs::write(path, pixels).expect("write frame dump");
     }
 
-    /// The recording cache's hit rate so far and the passes that miss or are
-    /// recorded directly (`HELIO_RECORDING_CACHE=0` switches it off).
-    fn recording_cache_summary(&self) -> Option<String> {
-        let stats = self.renderer.recording_cache_stats();
-        if !stats.active {
-            return stats
-                .inactive_reason
-                .map(|reason| format!("recording cache inactive: {reason}"));
-        }
-        let hits: u64 = stats.units.iter().map(|u| u.hits).sum();
-        let total: u64 = stats
-            .units
-            .iter()
-            .map(|u| u.hits + u.misses + u.bypassed)
-            .sum();
-        let mut missing: Vec<_> = stats
-            .units
-            .iter()
-            .filter(|u| u.misses > 1 || u.bypassed > 0 || u.uncacheable.is_some())
-            .map(|u| match u.uncacheable {
-                Some(reason) => format!("{} (uncacheable: {reason})", u.pass),
-                None => format!(
-                    "{} ({}/{} missed, {} backed off; {})",
-                    u.pass,
-                    u.misses,
-                    u.hits + u.misses + u.bypassed,
-                    u.bypassed,
-                    u.last_miss.as_deref().unwrap_or("-")
-                ),
-            })
-            .collect();
-        missing.sort();
-        missing.extend(
-            stats
-                .direct
-                .iter()
-                .map(|(pass, reason)| format!("{pass} (recorded directly: {reason})")),
-        );
-        Some(format!(
-            "recording cache: {hits}/{total} pass-frames hit ({:.0}%)\n  {}",
-            100.0 * hits as f64 / total.max(1) as f64,
-            missing.join("\n  ")
-        ))
-    }
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {
@@ -1025,9 +981,6 @@ fn main() {
                         args.scene,
                         workload.label()
                     ));
-                }
-                if let Some(summary) = bench.recording_cache_summary() {
-                    eprintln!("{} {} {}: {summary}", args.scene, size, workload.label());
                 }
                 let median = |values: &mut Vec<f64>| {
                     values.sort_by(|a, b| a.partial_cmp(b).unwrap());

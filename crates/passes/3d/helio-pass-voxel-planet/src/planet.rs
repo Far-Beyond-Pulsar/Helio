@@ -4,7 +4,8 @@ use crate::edit_store::{ColumnKey, EditStore, StoreUndo};
 use crate::edits::{apply, center_half, Brush, EditLog, FaceBrush, ALL_LAYERS};
 use crate::features::{self, CompiledFeatures, FeatureEval, FeatureSet, PlacementCache};
 use crate::grid::{face_axes, Cell, Grid, Shape};
-use crate::terrain::{self, material, TerrainField, TerrainSource, HEIGHT_ONE};
+use crate::terrain::{self, material, Column, TerrainField, TerrainSource, HEIGHT_ONE};
+use crate::volumes::{q2_center, Primitive, VolumeColumn, VolumeLayer, CLIFF_LEVELS, SITES};
 
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
@@ -87,7 +88,7 @@ impl PlanetRecipe {
 /// brushes, looked up once.
 struct RayColumn {
     key: (u8, i32, i32, u32),
-    height: i32,
+    volume: Arc<VolumeColumn>,
     large: Vec<FaceBrush>,
     recent: Vec<FaceBrush>,
 }
@@ -154,8 +155,9 @@ pub struct Edits {
     /// Brushes sealed and the history hash after them: the baked state.
     sealed_count: usize,
     sealed_hash: u64,
-    undo_seals: VecDeque<SealUndo>,
-    changes: VecDeque<BakedChange>,
+    /// Shared by copies until one seals (a snapshot copies pointers).
+    undo_seals: Arc<VecDeque<Arc<SealUndo>>>,
+    changes: Arc<VecDeque<BakedChange>>,
 }
 
 /// A seal and what it replaced, to undo it.
@@ -272,17 +274,16 @@ impl Edits {
     }
     fn changed(&mut self, before: BakedState, columns: Vec<ChangedColumn>, world: bool) {
         let after = self.baked_state();
-        self.changes.push_back(BakedChange {
+        let changes = Arc::make_mut(&mut self.changes);
+        changes.push_back(BakedChange {
             before,
             after,
             columns: columns.into(),
             world,
         });
-        let mut kept: usize = self.changes.iter().map(|c| c.columns.len()).sum();
-        while self.changes.len() > 1
-            && (self.changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT)
-        {
-            if let Some(old) = self.changes.pop_front() {
+        let mut kept: usize = changes.iter().map(|c| c.columns.len()).sum();
+        while changes.len() > 1 && (changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT) {
+            if let Some(old) = changes.pop_front() {
                 kept -= old.columns.len();
             }
         }
@@ -372,7 +373,8 @@ pub enum Matter {
 }
 
 pub struct Planet {
-    recipe: PlanetRecipe,
+    /// Shared by copies (with features, hundreds of kilobytes).
+    recipe: Arc<PlanetRecipe>,
     /// `record::recipe_fingerprint` of the recipe, once: a recipe with
     /// features serializes to hundreds of kilobytes (renderers compare it
     /// every frame).
@@ -385,15 +387,27 @@ pub struct Planet {
     edit_top: f64,
     /// Lowest radius any remove brush reaches.
     edit_bottom: f64,
-    heights: Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>,
+    /// Column heights and feature placements: functions of the terrain
+    /// alone, so every copy of the world (a snapshot) shares them.
+    heights: Arc<Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>>,
     features: Arc<CompiledFeatures>,
-    placements: Mutex<PlacementCache>,
+    placements: Arc<Mutex<PlacementCache>>,
+    /// The field's volume layer (`docs/volumes.md`), its regions' cave
+    /// networks and the volume columns queries read (functions of the
+    /// terrain alone, shared like the caches above).
+    volumes: Option<VolumeLayer>,
+    networks: Arc<Mutex<rustc_hash::FxHashMap<(u8, i32, i32), Arc<Vec<Primitive>>>>>,
+    volume_columns: Arc<Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), Arc<VolumeColumn>>>>,
 }
 
+/// A copy shares everything but what its edits change: the recipe, field,
+/// features and caches by pointer, the edits' layers structurally
+/// (`Edits`), so publishing a snapshot costs microseconds and its queries
+/// find the caches warm.
 impl Clone for Planet {
     fn clone(&self) -> Self {
         Self {
-            recipe: self.recipe.clone(),
+            recipe: Arc::clone(&self.recipe),
             fingerprint: self.fingerprint,
             grid: self.grid,
             field: Arc::clone(&self.field),
@@ -401,9 +415,12 @@ impl Clone for Planet {
             revision: self.revision,
             edit_top: self.edit_top,
             edit_bottom: self.edit_bottom,
-            heights: Mutex::new(Default::default()),
+            heights: Arc::clone(&self.heights),
             features: Arc::clone(&self.features),
-            placements: Mutex::new(Default::default()),
+            placements: Arc::clone(&self.placements),
+            volumes: self.volumes.clone(),
+            networks: Arc::clone(&self.networks),
+            volume_columns: Arc::clone(&self.volume_columns),
         }
     }
 }
@@ -428,18 +445,25 @@ impl Planet {
             &grid,
             recipe.terrain.seed,
         )?);
+        let volumes = field
+            .volumes()
+            .filter(|v| v.caves() || v.cliffs())
+            .cloned();
         Ok(Self {
             fingerprint: crate::record::recipe_fingerprint(&recipe),
-            recipe,
+            recipe: Arc::new(recipe),
             grid,
             field,
             edits: Edits::default(),
             revision: 0,
             edit_top: 0.0,
             edit_bottom: f64::INFINITY,
-            heights: Mutex::new(Default::default()),
+            heights: Default::default(),
             features,
-            placements: Mutex::new(Default::default()),
+            placements: Default::default(),
+            volumes,
+            networks: Default::default(),
+            volume_columns: Default::default(),
         })
     }
     pub fn recipe(&self) -> &PlanetRecipe {
@@ -606,6 +630,16 @@ impl Planet {
         }
     }
 
+    /// Seal every recent brush now (a snapshot's or a benchmark's: the
+    /// world is the same, its brushes baked).
+    pub fn seal_all(&mut self) -> Result<(), String> {
+        let n = self.edits.recent.len();
+        if n > 0 {
+            self.seal(n)?;
+        }
+        Ok(())
+    }
+
     /// Undo the latest brush: a recent one, or one of the latest sealed ones
     /// (its seal is undone first); `None` past them
     /// ([`Edits::undoable`]).
@@ -632,14 +666,15 @@ impl Planet {
         edits.sealed_hash = *hashes.last().unwrap_or(&edits.sealed_hash);
         edits.recent = Edits::log(&self.grid, brushes[n..].iter().copied())?;
         let columns = changed_columns(&store, &edits.baked);
-        edits.undo_seals.push_back(SealUndo {
+        let undo_seals = Arc::make_mut(&mut edits.undo_seals);
+        undo_seals.push_back(Arc::new(SealUndo {
             brushes: brushes[..n].iter().copied().zip(hashes).collect(),
             store,
             large,
             before,
-        });
-        if edits.undo_seals.len() > UNDO_SEALS {
-            edits.undo_seals.pop_front();
+        }));
+        if undo_seals.len() > UNDO_SEALS {
+            undo_seals.pop_front();
         }
         edits.changed(before, columns, false);
         Ok(())
@@ -648,7 +683,9 @@ impl Planet {
     /// Undo the latest seal: its bricks and large brushes go back, its
     /// brushes become recent again.
     fn unseal(&mut self) -> Option<()> {
-        let undo = self.edits.undo_seals.pop_back()?;
+        let undo = Arc::make_mut(&mut self.edits.undo_seals).pop_back()?;
+        let undo = Arc::try_unwrap(undo).unwrap_or_else(|shared| (*shared).clone());
+
         let edits = &mut self.edits;
         let before = edits.baked_state();
         let undone = undo.store.clone();
@@ -677,7 +714,7 @@ impl Planet {
     }
     /// Radius below which every cell is solid (terrain and removals).
     pub fn inner_radius(&self) -> f64 {
-        let caves = f64::from(self.field.volume_bounds().0) / f64::from(HEIGHT_ONE);
+        let caves = f64::from(self.volume_bounds().0) / f64::from(HEIGHT_ONE);
         (self.grid.radius() + self.min_terrain_height() - caves - self.grid.voxel_size() * 4.0)
             .min(self.edit_bottom)
     }
@@ -691,7 +728,139 @@ impl Planet {
     }
     /// Largest rise (m) of generated overhangs over the heightfield.
     pub fn overhang_height(&self) -> f64 {
-        f64::from(self.field.volume_bounds().1) / f64::from(HEIGHT_ONE)
+        f64::from(self.volume_bounds().1) / f64::from(HEIGHT_ONE)
+    }
+    /// Largest depth (mm) under the surface and height over it at which
+    /// any level's cells may differ from the heightfield
+    /// (`VolumeLayer::bounds`).
+    pub fn volume_bounds(&self) -> (i32, i32) {
+        self.volumes.as_ref().map_or((0, 0), VolumeLayer::bounds)
+    }
+    /// The world's volume layer (`docs/volumes.md`), if it has caves or
+    /// cliff shapes.
+    pub fn volumes(&self) -> Option<&VolumeLayer> {
+        self.volumes.as_ref()
+    }
+    /// Region `(ri, rj)` of `face`'s cave network
+    /// (`VolumeLayer::network`), its reference ground read from the field.
+    pub fn cave_network(&self, face: u8, ri: i32, rj: i32) -> Arc<Vec<Primitive>> {
+        let Some(v) = &self.volumes else {
+            return Arc::default();
+        };
+        let key = (face, ri, rj);
+        if let Some(n) = self.networks.lock().expect("networks").get(&key) {
+            return Arc::clone(n);
+        }
+        let level = v.reference_level();
+        let mut ground = [(0, 0); SITES];
+        for (s, g) in v.sites(face, ri, rj).iter().zip(&mut ground) {
+            if s.used {
+                let (i, j) = (s.x >> level, s.y >> level);
+                let height = self.column_height(face, i, j, level);
+                let surface = self.field.surface(Column { face, i, j, level }, height) & 0xff;
+                *g = (height, self.field.cave_gate(surface, height));
+            }
+        }
+        let network = Arc::new(v.network(face, ri, rj, &ground));
+        let mut cache = self.networks.lock().expect("networks");
+        if cache.len() > 1 << 16 {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&network));
+        network
+    }
+    /// What the volume layer reads of level column `(i, j)` once: its
+    /// height, cliff shape and the cave primitives over it, and the cells
+    /// below and above its top they may change (`tile_volumes_main`).
+    pub fn volume_column(&self, face: u8, i: i32, j: i32, level: u32) -> Arc<VolumeColumn> {
+        let key = (face, i, j, level);
+        if let Some(c) = self.volume_columns.lock().expect("volume columns").get(&key) {
+            return Arc::clone(c);
+        }
+        let height = self.column_height(face, i, j, level);
+        let top = terrain::top_cells(&self.grid, height, level);
+        let mut c = VolumeColumn {
+            height,
+            top,
+            x: q2_center(i, level),
+            y: q2_center(j, level),
+            ..Default::default()
+        };
+        if let Some(v) = &self.volumes {
+            let half = (1 << level) >> 1;
+            let (bi, bj) = ((i << level) + half, (j << level) + half);
+            if v.cliffs() && level < CLIFF_LEVELS {
+                let slope = self.material_slope(face, bi, bj);
+                c.cliff = v.cliff(self.grid.domain_point(face, i, j, level), slope, level);
+                c.below = c.cliff.cells;
+                c.above = c.cliff.cells;
+            }
+            if v.caves() && level as i32 <= v.deepest_level(true) {
+                let rough = v.roughness();
+                for (ri, rj) in v.owners(bi, bj) {
+                    for p in self.cave_network(face, ri, rj).iter() {
+                        if v.resolved(p, level) && p.covers(c.x, c.y, rough) {
+                            c.primitives.push(*p);
+                        }
+                    }
+                }
+                let deepest = v.max_depth_cells(level);
+                for p in &c.primitives {
+                    let low = p.z_range(rough).0.div_euclid(4i64 << level) as i32;
+                    c.below = c.below.max((top - low).clamp(0, deepest));
+                }
+            }
+        }
+        let c = Arc::new(c);
+        let mut cache = self.volume_columns.lock().expect("volume columns");
+        if cache.len() > 1 << 18 {
+            cache.clear();
+        }
+        cache.insert(key, Arc::clone(&c));
+        c
+    }
+    /// Generated kind of level cell `k` of a column before edits (0 air,
+    /// 1 solid): the heightfield, its cliff shape and its caves
+    /// (`chunk_columns_main`).
+    pub fn column_kind(&self, c: &VolumeColumn, face: u8, i: i32, j: i32, k: i32, level: u32) -> u32 {
+        let Some(v) = &self.volumes else {
+            return terrain::terrain_kind(c.top, k);
+        };
+        if c.is_heightfield() || k < c.top - c.below || k >= c.top + c.above {
+            return terrain::terrain_kind(c.top, k);
+        }
+        let mut solid = k < c.top;
+        if c.cliff.rise > 0 && k >= c.top - c.cliff.cells && k < c.top + c.cliff.cells {
+            solid = v.cliff_solid(
+                &c.cliff,
+                self.grid.volume_point(face, i, j, k, level),
+                c.height,
+                k,
+                level,
+            );
+        }
+        if solid && c.primitives.iter().any(|p| v.carves(p, c.x, c.y, k, level, c.height)) {
+            solid = false;
+        }
+        u32::from(solid)
+    }
+    /// [`Self::column_kind`] of level cell `(i, j, k)`.
+    pub fn generated_kind(&self, face: u8, i: i32, j: i32, k: i32, level: u32) -> u32 {
+        let c = self.volume_column(face, i, j, level);
+        self.column_kind(&c, face, i, j, k, level)
+    }
+    /// Generated top of a column (level cells): the first air above its
+    /// highest generated solid cell, edits excluded. The heightfield's top
+    /// outside the volume's extent; material depth counts from it.
+    pub fn generated_top(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
+        let c = self.volume_column(face, i, j, level);
+        if c.is_heightfield() {
+            return c.top;
+        }
+        (c.top - c.below..c.top + c.above)
+            .rev()
+            .find(|&k| self.column_kind(&c, face, i, j, k, level) == 1)
+            .map_or(c.top - c.below, |k| k + 1)
     }
     /// Band-limited surface height of a level column, in height units.
     pub fn column_height(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
@@ -761,8 +930,7 @@ impl Planet {
         k: i32,
         matter: Matter,
     ) -> (u32, u32) {
-        let height = self.column_height(face, i, j, level);
-        let kind = terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, height);
+        let kind = self.generated_kind(face, i, j, k, level);
         let features = match matter {
             Matter::All => self.features_at(level, face, i, j, k),
             Matter::Ground => None,
@@ -851,9 +1019,9 @@ impl Planet {
                     })
                     .flatten();
                 let column = (((j - j0) * n + (i - i0)) * n) as usize;
+                let volume = self.volume_column(face, i, j, 0);
                 for k in k0..k0 + n {
-                    let generated =
-                        terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, 0, height);
+                    let generated = self.column_kind(&volume, face, i, j, k, 0);
                     let near = features[column + (k - k0) as usize];
                     let cell_features = near
                         .or_else(|| far.and_then(|cover| CompiledFeatures::far_cell(0, k, cover)));
@@ -906,7 +1074,7 @@ impl Planet {
         if column.as_ref().is_none_or(|c| c.key != key) {
             *column = Some(RayColumn {
                 key,
-                height: self.column_height(face, i, j, level),
+                volume: self.volume_column(face, i, j, level),
                 large: self.large_brushes(face, i, j, None, level),
                 recent: Self::face_brushes(&self.edits.recent, face, i, j, None, level),
             });
@@ -942,7 +1110,7 @@ impl Planet {
                 return u32::from(v.is_some());
             }
         }
-        terrain::generated_kind(&self.grid, &*self.field, face, i, j, k, level, c.height)
+        self.column_kind(&c.volume, face, i, j, k, level)
     }
     /// Slope (eighths of a cell per cell) that classifies the materials of
     /// base column (i, j), whatever level draws it: central differences of
@@ -1006,19 +1174,28 @@ impl Planet {
     /// ignored. A host deciding features from it decides a region the same
     /// whenever it does.
     pub fn terrain_top(&self, face: u8, i: i32, j: i32) -> i32 {
-        terrain::generated_top(
-            &self.grid,
-            &*self.field,
-            face,
-            i,
-            j,
-            0,
-            self.column_height(face, i, j, 0),
-        )
+        self.generated_top(face, i, j, 0)
+    }
+    /// The terrain's rock: its material 64 cells under the middle of the
+    /// first face. What a renderer shows where a ray meets ground it has
+    /// not generated yet (an edit uncovering it).
+    pub fn rock_material(&self) -> u32 {
+        let face = self.grid.faces()[0];
+        let middle = if self.grid.shape() == Shape::InfinitePlane {
+            0
+        } else {
+            (self.grid.cells() / 2) as i32
+        };
+        let top = self.terrain_top(face, middle, middle);
+        match self.terrain_material(Cell::new(face, middle, middle, top - 64)) {
+            material::AIR => material::STONE,
+            m => m,
+        }
     }
     /// The material the terrain gives base cell `cell` were it solid there,
     /// edits and features ignored.
     pub fn terrain_material(&self, cell: Cell) -> u32 {
+
         let slope = self.material_slope(cell.face, cell.i, cell.j);
         // Materials vary in 3D (`shade` samples the cell's volume point): a
         // cliff's voxels are not one column's colour.
@@ -1026,15 +1203,7 @@ impl Planet {
         let top_height = self.column_height(cell.face, cell.i, cell.j, 0);
         // Depth counts from the generated top: overhangs and the rock
         // around caves lie below it.
-        let generated = terrain::generated_top(
-            &self.grid,
-            &*self.field,
-            cell.face,
-            cell.i,
-            cell.j,
-            0,
-            top_height,
-        );
+        let generated = self.generated_top(cell.face, cell.i, cell.j, 0);
         let depth = (generated - 1 - cell.k).max(0);
         let surface = self.field.surface(
             crate::terrain::Column {
@@ -1407,7 +1576,7 @@ impl Planet {
             .baked
             .solid_top(face, 0, i, j)
             .unwrap_or(i32::MIN);
-        let mut k = (terrain::generated_top(g, &*self.field, face, i, j, 0, c.height)
+        let mut k = (self.generated_top(face, i, j, 0)
             + self.features_above_of(matter))
         .max(added)
         .max(baked);
@@ -1529,15 +1698,7 @@ impl Planet {
         let g = &self.grid;
         let (cell, _) = g.locate(eye);
         // The generated top: overhang lips and cave mouths included.
-        let top = terrain::generated_top(
-            g,
-            &*self.field,
-            cell.face,
-            cell.i,
-            cell.j,
-            0,
-            self.column_height(cell.face, cell.i, cell.j, 0),
-        );
+        let top = self.generated_top(cell.face, cell.i, cell.j, 0);
         let height = g.height(eye);
         let mut column = None;
         let solid = |column: &mut Option<RayColumn>, k: i32| {
@@ -2028,9 +2189,8 @@ mod tests {
         let mut column = None;
         for i in i0..i0 + 40 {
             for j in j0..j0 + 40 {
-                let height = p.column_height(face, i, j, 0);
                 for k in top - 24..top + 16 {
-                    let kind = terrain::generated_kind(&g, &*p.field, face, i, j, k, 0, height);
+                    let kind = p.generated_kind(face, i, j, k, 0);
                     let center = [center_half(i, 0), center_half(j, 0), center_half(k, 0)];
                     let expected = apply(
                         faces.iter().copied(),

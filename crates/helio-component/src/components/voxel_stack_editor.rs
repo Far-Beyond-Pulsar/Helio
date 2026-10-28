@@ -3,7 +3,7 @@
 //!
 //! The stack's layers and material rules are ordered lists (move up and
 //! down, remove, add); every field of a layer, a rule, the caves, the
-//! overhangs and the materials is edited by the editor registered for its
+//! cliffs and the materials is edited by the editor registered for its
 //! type, through reflection (the shared pieces in `reflected_list`).
 
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,7 @@ pub struct VoxelTerrainStackEditor {
     presets: Entity<DropdownState<Vec<SharedString>>>,
     materials: FieldRows,
     caves: FieldRows,
-    overhangs: FieldRows,
+    cliffs: FieldRows,
     layers: Vec<FieldRows>,
     rules: Vec<FieldRows>,
     this: WeakEntity<Self>,
@@ -95,21 +95,21 @@ impl VoxelTerrainStackEditor {
             &this,
             &current,
             &write_back,
-            |s| Some(s.caves.clone()),
-            |s, v| replace(&mut s.caves, v),
-            &value.caves,
+            |s| Some(s.volumes.caves.clone()),
+            |s, v| replace(&mut s.volumes.caves, v),
+            &value.volumes.caves,
             window,
             cx,
         );
-        let overhangs = Self::rows(
+        let cliffs = Self::rows(
             &id,
-            "overhangs",
+            "cliffs",
             &this,
             &current,
             &write_back,
-            |s| Some(s.overhangs.clone()),
-            |s, v| replace(&mut s.overhangs, v),
-            &value.overhangs,
+            |s| Some(s.volumes.cliffs.clone()),
+            |s, v| replace(&mut s.volumes.cliffs, v),
+            &value.volumes.cliffs,
             window,
             cx,
         );
@@ -121,7 +121,7 @@ impl VoxelTerrainStackEditor {
             presets,
             materials,
             caves,
-            overhangs,
+            cliffs,
             layers: Vec::new(),
             rules: Vec::new(),
             this,
@@ -224,7 +224,7 @@ impl VoxelTerrainStackEditor {
 
     fn refresh(&mut self, window: &mut Window, cx: &mut App) {
         self.sync_lists(window, cx);
-        for rows in [&self.materials, &self.caves, &self.overhangs]
+        for rows in [&self.materials, &self.caves, &self.cliffs]
             .into_iter()
             .chain(&self.layers)
             .chain(&self.rules)
@@ -440,8 +440,8 @@ impl gpui::Render for VoxelTerrainStackEditor {
             .child(self.add_button(List::Rules, "Add rule", cx))
             .child(Self::heading("Caves", cx))
             .children(self.caves.views())
-            .child(Self::heading("Overhangs", cx))
-            .children(self.overhangs.views())
+            .child(Self::heading("Cliffs", cx))
+            .children(self.cliffs.views())
     }
 }
 

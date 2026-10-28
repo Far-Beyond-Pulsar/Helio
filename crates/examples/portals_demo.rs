@@ -69,6 +69,7 @@ struct App {
 struct AppState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
+    capture: v3_demo_common::SurfaceCapture,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
@@ -122,6 +123,7 @@ impl ApplicationHandler for App {
             size.height.max(1),
             helio::HelioGraphicsConfig {
                 vr_support: true,
+                surface_usage: v3_demo_common::SurfaceCapture::from_env().usage(),
                 application_name: "Portals Demo".into(),
                 ..Default::default()
             },
@@ -372,6 +374,7 @@ impl ApplicationHandler for App {
         self.state = Some(AppState {
             window,
             surface,
+            capture: v3_demo_common::SurfaceCapture::from_env(),
             device,
             queue,
             surface_format: format,
@@ -448,7 +451,7 @@ impl ApplicationHandler for App {
                 state.surface.configure(
                     &state.device,
                     &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        usage: state.capture.usage(),
                         format: state.surface_format,
                         width: s.width,
                         height: s.height,
@@ -572,7 +575,10 @@ impl AppState {
         );
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
-        if let Err(e) = self.renderer.render_window_frame(&camera, &self.surface) {
+        if let Err(e) = self
+            .capture
+            .render_window_frame(&mut self.renderer, &camera, &self.surface)
+        {
             log::error!("Render error: {:?}", e);
         }
     }
