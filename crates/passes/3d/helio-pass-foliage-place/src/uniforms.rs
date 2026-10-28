@@ -93,8 +93,8 @@ pub struct FoliageCullUniforms {
     ///
     /// **This is not optional.** Until a pyramid is built from real depth its texels are
     /// whatever the graph's texture pool left there, and testing against them can cull
-    /// the entire world for that frame — and again after every resize rebuilds the
-    /// graph. `vg_cull.wgsl` carries the identical guard for the identical reason.
+    /// the entire world for that frame — and again after every resize reallocates
+    /// the graph's textures. `vg_cull.wgsl` carries the identical guard for the identical reason.
     pub hiz_valid: u32,
 
     /// Blades per cull cluster — [`crate::FoliageQuality::cluster_granularity`].
