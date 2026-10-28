@@ -804,6 +804,8 @@ pub struct GiResolvePass {
     view: wgpu::Buffer,
     debug_mode: u32,
     view_written: Option<u32>,
+    /// Its bind group, kept while it binds the same targets.
+    cache: helio_core::gpu_cache::GpuCache,
 }
 
 impl GiResolvePass {
@@ -866,6 +868,7 @@ impl GiResolvePass {
             view,
             debug_mode: 0,
             view_written: None,
+            cache: helio_core::gpu_cache::GpuCache::new(),
         }
     }
 
@@ -906,7 +909,8 @@ impl GiResolvePass {
             self.view_written = Some(self.debug_mode);
         }
         let Some((out, _)) = &self.out else { return };
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.cache.end_frame();
+        let group = self.cache.bind_group(device, &wgpu::BindGroupDescriptor {
             label: Some("GI resolve"),
             layout: &self.layout,
             entries: &[

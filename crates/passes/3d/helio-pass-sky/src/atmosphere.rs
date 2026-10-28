@@ -1126,8 +1126,9 @@ pub struct AtmosphereCompositePass {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    group: Option<wgpu::BindGroup>,
-    key: Option<(wgpu::Buffer, wgpu::Buffer, [wgpu::TextureView; 7])>,
+    /// Its bind groups: one per set of inputs (the cloud trace's alternate
+    /// frame to frame), kept while they are bound.
+    cache: helio_core::gpu_cache::GpuCache,
     active: bool,
     /// A 1x1 zero texture: no clouds (no opacity, no light), bound while no
     /// cloud pass publishes any.
@@ -1255,8 +1256,7 @@ impl AtmosphereCompositePass {
             pipeline,
             layout,
             sampler,
-            group: None,
-            key: None,
+            cache: helio_core::gpu_cache::GpuCache::new(),
             active: false,
             no_clouds,
         }
@@ -1359,76 +1359,60 @@ impl RenderPass for AtmosphereCompositePass {
         let cloud_depth = registry
             .texture_binding(ATMOSPHERE_CLOUD_DEPTH)
             .unwrap_or(&self.no_clouds);
-        let key = (
-            ctx.camera.clone(),
-            frame.clone(),
-            [
-                ctx.depth.clone(),
-                transmittance.clone(),
-                multi_scattering.clone(),
-                sky_view.clone(),
-                aerial.clone(),
-                clouds.clone(),
-                cloud_depth.clone(),
+        let group = self.cache.bind_group(ctx.device, &wgpu::BindGroupDescriptor {
+            label: Some("Atmosphere composite"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: ctx.camera.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: frame.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(transmittance),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(sky_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(aerial),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(ctx.depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::TextureView(multi_scattering),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(clouds),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(cloud_depth),
+                },
             ],
-        );
-        if self.key.as_ref() != Some(&key) {
-            self.group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Atmosphere composite"),
-                layout: &self.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ctx.camera.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: frame.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(transmittance),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(sky_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(aerial),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: wgpu::BindingResource::TextureView(ctx.depth),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::TextureView(multi_scattering),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: wgpu::BindingResource::TextureView(clouds),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: wgpu::BindingResource::TextureView(cloud_depth),
-                    },
-                ],
-            }));
-            self.key = Some(key);
-        }
+        });
+        self.cache.end_frame();
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, self.group.as_ref(), &[]);
+        pass.set_bind_group(0, Some(&group), &[]);
         pass.draw(0..3, 0..1);
         Ok(())
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
-        self.group = None;
-        self.key = None;
+        self.cache.clear();
     }
 }

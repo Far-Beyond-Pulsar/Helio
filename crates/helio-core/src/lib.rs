@@ -399,6 +399,7 @@ pub mod error;
 pub mod frame_demands;
 mod frame_inputs;
 pub mod frame_storage;
+pub mod gpu_cache;
 pub mod graph;
 pub mod instance;
 pub mod movability;

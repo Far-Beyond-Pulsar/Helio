@@ -1494,7 +1494,7 @@ impl KeptChunks {
 /// A frame's packs on their way back: each node's slot in the directory
 /// and its result flags.
 struct PackReadback {
-    buffer: wgpu::Buffer,
+    buffer: helio_core::gpu_cache::PooledBuffer,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Each node, its result flags, its footprint's measurement, and its
     /// serial when packed resident.
@@ -1642,7 +1642,7 @@ struct TimingSlot {
 
 /// One frame's generation results on their way back from the GPU.
 struct Readback {
-    buffer: wgpu::Buffer,
+    buffer: helio_core::gpu_cache::PooledBuffer,
     ready: std::sync::Arc<std::sync::atomic::AtomicBool>,
     footprints: Vec<Footprint>,
     /// Chunk jobs in order: node, slot, serial.
@@ -2063,6 +2063,11 @@ pub struct ChunkWorld {
     free_slots: Vec<u32>,
     serial: u64,
     readbacks: std::collections::VecDeque<Readback>,
+    /// The results' and packs' `MAP_READ` buffers, reused.
+    readback_pool: helio_core::gpu_cache::ReadbackPool,
+    /// The bind groups, views and placeholder buffers the world's passes
+    /// bind, kept across its frames (`submitted` ends one).
+    gpu_cache: helio_core::gpu_cache::GpuCache,
     /// This frame's drawn nodes.
     drawn_set: drawn::DrawnSet,
     /// Nodes whose chunks changed since the drawn set last saw them.
@@ -3241,6 +3246,8 @@ impl ChunkWorld {
             free_slots: (0..slots as u32).rev().collect(),
             serial: 0,
             readbacks: std::collections::VecDeque::new(),
+            readback_pool: helio_core::gpu_cache::ReadbackPool::new("chunk results"),
+            gpu_cache: helio_core::gpu_cache::GpuCache::new(),
             drawn_set,
             changed_nodes: Default::default(),
             slots_version: None,
@@ -3279,6 +3286,8 @@ impl ChunkWorld {
     /// before the update records anything: writes queued since land in the
     /// new buffers, after them.
     fn grow_slots(&mut self) {
+        // The pools are replaced: nothing bound over the old ones stays.
+        self.gpu_cache.clear();
         let old = self.slot_capacity;
         let slots = (old * 2).min(self.max_chunks);
         let device = self.device.clone();
@@ -3337,6 +3346,8 @@ impl ChunkWorld {
     /// count rises by them on the GPU (`chunk_pool.wgsl`: the GPU's count is
     /// ahead of any read back). Submitted at once, as `grow_slots`.
     fn grow_leaves(&mut self) {
+        // The pools are replaced: nothing bound over the old ones stays.
+        self.gpu_cache.clear();
         let old_pages = self.leaf_capacity / LEAF_PAGE;
         let leaves = (self.leaf_capacity * 2).min(self.leaf_max);
         let pages = leaves / LEAF_PAGE;
@@ -3373,7 +3384,7 @@ impl ChunkWorld {
             contents: bytemuck::bytes_of(&(added as i32)),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let group = self.gpu_cache.bind_group(&device, &wgpu::BindGroupDescriptor {
             label: Some("chunk pool"),
             layout: &self.pool_layout,
             entries: &[entry(0, &self.leaf_alloc), entry(1, &added_words)],
@@ -3396,6 +3407,8 @@ impl ChunkWorld {
     /// capacity raised and the overflow flag cleared before the frame's
     /// builds (`take_detail` in chunk_generate.wgsl).
     fn grow_details(&mut self, encoder: &mut helio_core::CommandRecorder<'_>) {
+        // The pools are replaced: nothing bound over the old ones stays.
+        self.gpu_cache.clear();
         let capacity = (self.detail_capacity * 2).min(self.detail_max);
         let usage = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
@@ -3438,7 +3451,7 @@ impl ChunkWorld {
         baked_refs: &wgpu::Buffer,
         baked_cells: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk generation"),
             layout: &self.gen_layout,
             entries: &[
@@ -3629,7 +3642,7 @@ impl ChunkWorld {
             "chunk restore packs",
             bytemuck::cast_slice(if data.is_empty() { &[0u32][..] } else { data }),
         );
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk keep"),
             layout: &self.keep_layout,
             entries: &[
@@ -4685,12 +4698,7 @@ impl ChunkWorld {
         let local_eye = Eye::new(&grid, vol.local_eye(eye));
         let mut batch = GenBatch::default();
         let mut readback = Readback {
-            buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("chunk results"),
-                size: 16,
-                usage: wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            }),
+            buffer: self.readback_pool.get(&self.device, 16),
             ready: Default::default(),
             footprints: Vec::new(),
             chunks: Vec::new(),
@@ -4863,16 +4871,17 @@ impl ChunkWorld {
 
         // GPU: blocks of evicted chunks back to their free lists, then the
         // tiles' columns, the chunks' columns and trees.
-        let refs_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let refs_buffer = self.gpu_cache.buffer_init(
+            &self.device,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("chunk brush refs"),
                 contents: bytemuck::cast_slice(if refs.is_empty() { &[0u32][..] } else { &refs }),
                 usage: wgpu::BufferUsages::STORAGE,
-            });
-        let evictions_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            },
+        );
+        let evictions_buffer = self.gpu_cache.buffer_init(
+            &self.device,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("chunk evictions"),
                 contents: bytemuck::cast_slice(if evictions.is_empty() {
                     &[u32::MAX][..]
@@ -4880,10 +4889,11 @@ impl ChunkWorld {
                     &evictions
                 }),
                 usage: wgpu::BufferUsages::STORAGE,
-            });
-        let baked_refs_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            },
+        );
+        let baked_refs_buffer = self.gpu_cache.buffer_init(
+            &self.device,
+            &wgpu::util::BufferInitDescriptor {
                 label: Some("chunk baked refs"),
                 contents: bytemuck::cast_slice(if baked_refs.is_empty() {
                     &[u32::MAX][..]
@@ -4891,7 +4901,8 @@ impl ChunkWorld {
                     &baked_refs
                 }),
                 usage: wgpu::BufferUsages::STORAGE,
-            });
+            },
+        );
         vol.brick_cache.upload(&self.device, &self.queue, encoder);
         let pack_group = (!packs.is_empty()).then(|| {
             let jobs: Vec<[u32; 4]> = packs.iter().map(|&(_, slot, ..)| [slot, 0, 0, 0]).collect();
@@ -5109,12 +5120,7 @@ impl ChunkWorld {
         // The packs back (mapped with the results).
         if !packs.is_empty() {
             let directory = (1 + 2 * MAX_PACKS as u64) * 4;
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("chunk packs read"),
-                size: directory + PACK_WORDS * 4,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            let buffer = self.readback_pool.get(&self.device, directory + PACK_WORDS * 4);
             encoder.copy_buffer_to_buffer(&self.pack_alloc, 0, &buffer, 0, directory);
             encoder.copy_buffer_to_buffer(&self.pack_data, 0, &buffer, directory, PACK_WORDS * 4);
             self.pack_pending = Some(PackReadback {
@@ -5131,12 +5137,7 @@ impl ChunkWorld {
         if !tile_jobs.is_empty() || !restores.jobs.is_empty() {
             let tiles = (computed_count * RANGE_WORDS * 4) as u64;
             let chunks = ((chunk_jobs.len() + restores.jobs.len()) * 16) as u64;
-            readback.buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("chunk results"),
-                size: tiles + chunks + 24,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            readback.buffer = self.readback_pool.get(&self.device, tiles + chunks + 24);
             if tiles > 0 {
                 encoder.copy_buffer_to_buffer(&self.tile_ranges, 0, &readback.buffer, 0, tiles);
             }
@@ -5278,7 +5279,7 @@ impl ChunkWorld {
                     contents: bytemuck::cast_slice(&changes),
                     usage: wgpu::BufferUsages::STORAGE,
                 });
-            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk table"),
                 layout: &self.table_layout,
                 entries: &[entry(0, &buffer), entry(1, &self.chunk_table)],
@@ -5411,6 +5412,7 @@ impl ChunkWorld {
     }
 
     pub fn submitted(&mut self) {
+        self.gpu_cache.end_frame();
         // Picks: answer those mapped, map those just copied.
         for n in 0..self.pick_slots.len() {
             match &self.pick_slots[n].state {
@@ -5561,25 +5563,11 @@ impl ChunkWorld {
             let _ = self.device.poll(wgpu::PollType::Poll);
         }
         if let Some(r) = self.pending.take() {
-            let ready = r.ready.clone();
-            r.buffer
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |result| {
-                    if result.is_ok() {
-                        ready.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                });
+            r.buffer.map_read(r.ready.clone());
             self.readbacks.push_back(r);
         }
         if let Some(r) = self.pack_pending.take() {
-            let ready = r.ready.clone();
-            r.buffer
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |result| {
-                    if result.is_ok() {
-                        ready.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                });
+            r.buffer.map_read(r.ready.clone());
             self.pack_readbacks.push_back(r);
         }
     }
@@ -6361,7 +6349,7 @@ impl ChunkWorld {
         vol: &volumes::Volume,
         vb: ViewBuffers<'_>,
     ) -> wgpu::BindGroup {
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk draw"),
             layout: &self.layouts.draw,
             entries: &[
@@ -6433,10 +6421,10 @@ impl ChunkWorld {
         }
         let group = self.draw_group(vb.params, vol, vb);
         let (depth, seed, exits, distance) = (
-            view(&targets.depth),
-            view(&targets.seed),
-            view(&targets.exits),
-            view(&targets.distance),
+            self.gpu_cache.view(&targets.depth),
+            self.gpu_cache.view(&targets.seed),
+            self.gpu_cache.view(&targets.exits),
+            self.gpu_cache.view(&targets.distance),
         );
         // Every ray starts unresolved (0).
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -6455,7 +6443,7 @@ impl ChunkWorld {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        let seed_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let seed_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk seed exits"),
             layout: &self.layouts.seed,
             entries: &[
@@ -6468,7 +6456,7 @@ impl ChunkWorld {
         {
             // 0. The draw list: the volume's drawn chunks in view, binned,
             // ordered.
-            let frames = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let frames = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk cull frames"),
                 layout: &self.layouts.cull[0],
                 entries: &[
@@ -6478,7 +6466,7 @@ impl ChunkWorld {
                     entry(11, &self.chunk_keys),
                 ],
             });
-            let lists = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let lists = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk cull"),
                 layout: &self.layouts.cull[1],
                 entries: &[
@@ -6502,13 +6490,13 @@ impl ChunkWorld {
             pass.set_pipeline(&pipelines.cull_scatter);
             pass.dispatch_workgroups(drawn.div_ceil(64), 1, 1);
         }
-        let trace_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let trace_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk trace"),
             layout: &self.layouts.trace,
             entries: &[
                 view_entry(0, &seed),
-                view_entry(1, &view(&targets.visibility)),
-                view_entry(2, &view(&targets.colour)),
+                view_entry(1, &self.gpu_cache.view(&targets.visibility)),
+                view_entry(2, &self.gpu_cache.view(&targets.colour)),
                 view_entry(3, &distance),
                 view_entry(6, &exits),
                 view_entry(25, &self.uv_grid_view),
@@ -6658,6 +6646,8 @@ impl ChunkWorld {
         };
         if self.targets.as_ref().is_none_or(|t| t.size != size) {
             self.targets = Some(Targets::new(&self.device, size));
+            // What was bound over the old targets goes with them.
+            self.gpu_cache.clear();
         }
         // GI hits and meshes near the eye see the sun by its occlusion maps
         // (`draw_sun_occlusion`; none drawn yet: lit, and meshes walk).
@@ -6667,6 +6657,7 @@ impl ChunkWorld {
         let targets = self.targets.as_mut().unwrap();
         if lights.is_some() && targets.local.is_none() {
             targets.local = Some(LocalTargets::new(&self.device, size));
+            self.gpu_cache.clear();
         }
         let eye_index = eye_index.min(1);
         if eye_index == 1 {
@@ -6768,13 +6759,13 @@ impl ChunkWorld {
             // their hits; each volume's hits by its own pass.
             let occlusion = self.sun_occlusion.as_ref().unwrap();
             let (distance, visibility, samples, normal, sky) = (
-                view(&targets.distance),
-                view(&targets.visibility),
-                view(&targets.sun_samples),
-                view(&targets.normal),
-                view(&targets.sky_samples),
+                self.gpu_cache.view(&targets.distance),
+                self.gpu_cache.view(&targets.visibility),
+                self.gpu_cache.view(&targets.sun_samples),
+                self.gpu_cache.view(&targets.normal),
+                self.gpu_cache.view(&targets.sky_samples),
             );
-            let sample_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let sample_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk sun samples"),
                 layout: &self.layouts.shadow_sample,
                 entries: &[
@@ -6783,7 +6774,7 @@ impl ChunkWorld {
                     view_entry(9, &samples),
                 ],
             });
-            let shadow_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let shadow_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow"),
                 layout: &self.layouts.shadow,
                 entries: &[
@@ -6801,7 +6792,7 @@ impl ChunkWorld {
                     view_entry(64, &targets.stochastic_view),
                 ],
             });
-            let sky_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let sky_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk sky samples"),
                 layout: &self.layouts.sky_sample,
                 entries: &[
@@ -6810,7 +6801,7 @@ impl ChunkWorld {
                     view_entry(15, &sky),
                 ],
             });
-            let fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let fallback_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk shadow fallbacks"),
                 layout: &self.layouts.shadow_fallback,
                 entries: &[
@@ -6898,7 +6889,7 @@ impl ChunkWorld {
                 timestamp_writes: end(15),
             });
             // 4b. Local lights' terrain shadows, with the hits' normals.
-            let local_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let local_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk local shadows"),
                 layout: &self.layouts.local,
                 entries: &[
@@ -6946,7 +6937,7 @@ impl ChunkWorld {
                 groups.iter().find(|(i, ..)| *i == primary),
             ) {
                 // Hits see the sun by its occlusion maps (none drawn: lit).
-                let gi_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let gi_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("chunk GI rays"),
                     layout: &self.layouts.gi,
                     entries: &[
@@ -6985,8 +6976,8 @@ impl ChunkWorld {
             .iter()
             .any(|s| matches!(s.state, ReachState::Free))
         {
-            let (distance, visibility) = (view(&targets.distance), view(&targets.visibility));
-            let feedback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let (distance, visibility) = (self.gpu_cache.view(&targets.distance), self.gpu_cache.view(&targets.visibility));
+            let feedback_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk feedback"),
                 layout: &self.layouts.feedback,
                 entries: &[
@@ -7188,7 +7179,7 @@ impl ChunkWorld {
         };
         self.queue
             .write_buffer(&self.probe_frame, 0, bytemuck::bytes_of(&frame));
-        let probe_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let probe_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk ground probes"),
             layout: &self.layouts.ground,
             entries: &[
@@ -7343,9 +7334,9 @@ impl ChunkWorld {
             (!targets.denoised[eye_index] & 1) as usize,
         );
         let (distance, visibility, normal, sun_walked) = (
-            view(&targets.distance),
-            view(&targets.visibility),
-            view(&targets.normal),
+            self.gpu_cache.view(&targets.distance),
+            self.gpu_cache.view(&targets.visibility),
+            self.gpu_cache.view(&targets.normal),
             &targets.sun_walked,
         );
         let (history_pair, geometry_pair, short_pair) = if eye_index == 1 {
@@ -7365,7 +7356,7 @@ impl ChunkWorld {
         );
         let (short, short_last) = (&short_pair[now], &short_pair[last]);
         let filtered = &targets.filtered;
-        let temporal = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let temporal = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk shadow history"),
             layout: &self.layouts.temporal,
             entries: &[
@@ -7382,7 +7373,7 @@ impl ChunkWorld {
                 entry(48, &filtered[0]),
             ],
         });
-        let first = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let first = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk shadow filter"),
             layout: &self.layouts.filter,
             entries: &[
@@ -7392,7 +7383,7 @@ impl ChunkWorld {
                 entry(48, &filtered[1]),
             ],
         });
-        let second = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let second = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk shadow filter"),
             layout: &self.layouts.filter,
             entries: &[
@@ -7402,7 +7393,7 @@ impl ChunkWorld {
                 entry(48, &filtered[0]),
             ],
         });
-        let resolve = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let resolve = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk shadow resolve"),
             layout: &self.layouts.resolve_shadows,
             entries: &[
@@ -7412,9 +7403,9 @@ impl ChunkWorld {
                 entry(40, sun_walked),
                 entry(46, &filtered[0]),
                 entry(47, geometry),
-                view_entry(2, &view(&targets.colour)),
+                view_entry(2, &self.gpu_cache.view(&targets.colour)),
                 view_entry(8, &targets.sun_view),
-                view_entry(49, &view(&targets.sky)),
+                view_entry(49, &self.gpu_cache.view(&targets.sky)),
             ],
         });
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -7438,7 +7429,7 @@ impl ChunkWorld {
             pass.dispatch_workgroups(size[0].div_ceil(16), size[1].div_ceil(16), 1);
         }
         if let (Some(lights), Some(local)) = (lights, &targets.local) {
-            let history = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let history = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk local light history"),
                 layout: &self.layouts.local_denoise[0],
                 entries: &[
@@ -7471,7 +7462,7 @@ impl ChunkWorld {
                     entry(57, &local.dispatch),
                 ],
             });
-            let gate = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let gate = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk local light gate"),
                 layout: &self.layouts.local_denoise[2],
                 entries: &[
@@ -7484,7 +7475,7 @@ impl ChunkWorld {
             pass.set_pipeline(&pipelines.local_gate);
             pass.set_bind_group(1, &gate, &[]);
             pass.dispatch_workgroups(1, 1, 1);
-            let filter = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let filter = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("chunk local light filter"),
                 layout: &self.layouts.local_denoise[1],
                 entries: &[
@@ -7545,23 +7536,23 @@ impl ChunkWorld {
         let Some(groups) = &self.last_groups else {
             return;
         };
-        let resolve_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let resolve_group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("chunk gbuffer"),
             layout: &self.layouts.resolve,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&view(&targets.distance)),
+                    resource: wgpu::BindingResource::TextureView(&self.gpu_cache.view(&targets.distance)),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
-                    resource: wgpu::BindingResource::TextureView(&view(&targets.visibility)),
+                    resource: wgpu::BindingResource::TextureView(&self.gpu_cache.view(&targets.visibility)),
                 },
                 wgpu::BindGroupEntry {
                     binding: 14,
-                    resource: wgpu::BindingResource::TextureView(&view(&targets.normal)),
+                    resource: wgpu::BindingResource::TextureView(&self.gpu_cache.view(&targets.normal)),
                 },
-                view_entry(28, &view(&targets.sky)),
+                view_entry(28, &self.gpu_cache.view(&targets.sky)),
                 view_entry(25, &self.uv_grid_view),
                 wgpu::BindGroupEntry {
                     binding: 26,
@@ -7595,7 +7586,7 @@ impl ChunkWorld {
         let scene_group = scene.as_ref().map(|(s, i)| {
             let mut cached = s.group.lock().unwrap();
             if cached.as_ref().map(|(version, _)| *version) != Some(i.version) {
-                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("chunk scene materials"),
                     layout: &s.layout,
                     entries: &[
