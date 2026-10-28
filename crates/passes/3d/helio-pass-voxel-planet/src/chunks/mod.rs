@@ -5681,10 +5681,23 @@ impl ChunkWorld {
         }
     }
 
+    /// Whether the residency has settled ([`Self::residency_settled`]) and
+    /// the sun's occlusion pages with it: none asked for and missing, none
+    /// whose terrain changed, none traced through a coarser cut still to
+    /// trace again. Shots and tests that wait for this see converged
+    /// shadows.
+    pub fn settled(&self) -> bool {
+        self.residency_settled()
+            && self.sun_occlusion.as_ref().is_none_or(|o| {
+                let s = o.pages.stats;
+                s.missing == 0 && s.stale == 0 && s.coarse == 0
+            })
+    }
+
     /// Whether nothing waits to be generated or read back, no switch
     /// between levels is fading (fades move with drawn frames), and the
     /// rays have swept the view since residency last changed.
-    pub fn settled(&self) -> bool {
+    pub fn residency_settled(&self) -> bool {
         // Every pixel reports within `REPORT_SWEEP` frames: a plan that has
         // not seen a sweep of the cut as it is may still want more where
         // rays meet what the eye's distance does not ask for.
@@ -6183,7 +6196,7 @@ impl ChunkWorld {
         stamp(self, encoder, 16);
         let mut changes = std::mem::take(&mut self.occluder_changes);
         let refined = std::mem::take(&mut self.occluder_refined);
-        let settled = self.settled();
+        let settled = self.residency_settled();
         let o = self
             .sun_occlusion
             .get_or_insert_with(|| SunOcclusion::new(&self.device, voxel));

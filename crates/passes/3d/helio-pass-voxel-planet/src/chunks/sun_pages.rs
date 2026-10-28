@@ -500,7 +500,19 @@ impl SunPages {
         }
         stats.prefetch = near.len();
         wanted.extend(near.into_iter().map(|k| (2, std::cmp::Reverse(k.level), k)));
-        wanted.sort_unstable_by_key(|&(class, coarse, k)| (class, coarse, k.page[1], k.page[0]));
+        // Background work goes by the block with the most of it: a view a
+        // frame then carries as many pages as it can.
+        let block = |k: &PageKey| (k.level, k.page.map(|p| p >> VIEW_SHIFT));
+        let mut in_block: FxHashMap<(u8, [i32; 2]), usize> = FxHashMap::default();
+        for (class, _, k) in &wanted {
+            if *class >= 2 {
+                *in_block.entry(block(k)).or_insert(0) += 1;
+            }
+        }
+        wanted.sort_unstable_by_key(|&(class, coarse, k)| {
+            let crowd = if class >= 2 { in_block[&block(&k)] } else { 0 };
+            (class, std::cmp::Reverse(crowd), coarse, k.page[1], k.page[0])
+        });
         stats.asked = e.asked.len();
         // Views: a block of pages a view, in the order their best page
         // came.
