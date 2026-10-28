@@ -13,6 +13,8 @@
 //!   grows natural ones (trees, shrubs, boulders, craters), and a
 //!   [`feature_recipe`] describes a world's (what grows where, in metres)
 //!   for any voxel size and seed.
+//! * [`volumes`] — the terrain's volumetric shapes: cave networks and
+//!   cliff overhangs (docs/volumes.md).
 //! * [`volume`] — worlds placed in a scene by f64 transforms, any number
 //!   of them, queried by world positions.
 //! * `chunks` — chunk trees in an octree (docs/chunk-octree.md): GPU
@@ -43,6 +45,7 @@ pub mod snapshot;
 pub mod stamp;
 pub mod terrain;
 pub mod volume;
+pub mod volumes;
 
 pub use edits::{Brush, BrushOp, BrushShape};
 pub use grid::{Cell, Grid};

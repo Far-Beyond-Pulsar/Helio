@@ -460,7 +460,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     .unwrap();
                 }
                 if case == 19 {
-                    pass.on_resize(&device, 64, 8);
+                    pass.on_resize(&device, helio_core::RenderSize::uniform(64, 8));
                     bind = create_bind(&pass);
                     probe_bind = create_probe_bind(&pass);
                     // Seed the replacement texture with otherwise valid history.

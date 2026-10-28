@@ -145,12 +145,15 @@ struct TileJob {
     _pad: [u32; 3],
 }
 
-/// Footprints a volume's pool holds at most by default: their columns, halos
-/// and material slopes (75 KB each), within what the device binds. A pool
+/// Footprints a volume's pool holds at most by default: their columns, cave
+/// primitives and material slopes (70 KB each), within what the device
+/// binds. A pool
 /// starts at two batches' and doubles when it would reuse a slot used in
 /// the last `FOOTPRINT_RECENT` frames (`Volume::grow_footprints`).
 const FOOTPRINT_POOL: usize = 2048;
 const FOOTPRINT_RECENT: u64 = 120;
+/// A footprint's cave primitives' bytes.
+const CAVE_SLOT_BYTES: u64 = crate::volumes::CAVE_SLOT_WORDS as u64 * 4;
 /// Material slope words a footprint (`SLOPE_STRIDE` of chunk_generate.wgsl:
 /// a level-3 footprint's 34x34 level-4 blocks).
 const SLOPE_STRIDE: u64 = 1156;
@@ -195,7 +198,7 @@ impl Default for Capacity {
 }
 
 /// GPU slots of data kept across frames by key: footprints' columns (and
-/// lean halos), so a footprint's columns are computed once while it stays
+/// cave primitives), so a footprint's columns are computed once while it stays
 /// in use, whichever of its nodes are generated when (they were 60-75 % of
 /// a chunk's generation), and feature candidate blocks
 /// (`candidates::CandidateBlocks`). Both depend only on the terrain, never
@@ -1405,7 +1408,7 @@ fn edit_view(
         baked: edits.baked.clone(),
         bricks,
         version,
-        volume_depth: (i64::from(planet.field().volume_bounds().0)
+        volume_depth: (i64::from(planet.volume_bounds().0)
             / i64::from(planet.grid().layer_mm())
             + 1) as i32,
     };
@@ -1677,11 +1680,11 @@ pub struct FrameTimings {
     /// chunk builds.
     pub stages: [f64; 3],
     /// The first stage's parts: eviction and the tiles' nodes, their
-    /// columns, their halos, their features' placements.
+    /// columns, their volumes (caves, extents), their features' placements.
     pub tile_stages: [f64; 4],
 }
 
-/// Timestamps a frame writes: generation start, tile halos end, seed start
+/// Timestamps a frame writes: generation start, tile volumes end, seed start
 /// and end, trace end, chunk columns end, chunk builds end, shadows end,
 /// tile nodes end, tile columns end, tile features end, the shadows'
 /// denoiser end; the shadows' parts: sun samples end, sky samples end,
@@ -2862,9 +2865,12 @@ fn draw_source(plane: bool, counting: bool) -> String {
             heat
         }
     };
-    // The noise library (materials' patches), then the draw.
-    (format!("const DOMAIN_UNIT: f32 = {};
-", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
+    // The noise library (materials' patches), then the draw (from disk with
+    // `HELIO_SHADER_FROM_DISK`).
+    let source = |rel: &str, embedded: &'static str| {
+        helio_core::shader::hot::source_text(env!("CARGO_MANIFEST_DIR"), rel, embedded)
+    };
+    (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + &source("shaders/noise.wgsl", include_str!("../../shaders/noise.wgsl")) + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(&source("shaders/chunk_draw.wgsl", include_str!("../../shaders/chunk_draw.wgsl"))))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))
@@ -2917,6 +2923,7 @@ impl ChunkWorld {
             entries: &[
                 uniform(1, c),
                 uniform(16, c),
+                uniform(18, c),
                 storage(2, true, c),
                 storage(3, false, c),
                 storage(4, false, c),
@@ -3592,10 +3599,11 @@ impl ChunkWorld {
             entries: &[
                 entry(1, &vol.world),
                 entry(16, &vol.terrain),
+                entry(18, &vol.volumes),
                 entry(2, &self.tile_jobs),
                 entry(3, &vol.tile_data),
                 entry(25, &self.tile_node_data),
-                entry(26, &vol.tile_halo_data),
+                entry(26, &vol.tile_cave_data),
                 entry(34, &vol.tile_slope_data),
                 entry(35, &self.slope_lattice),
                 entry(36, &vol.feature_set),
@@ -5178,17 +5186,21 @@ impl ChunkWorld {
         }
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("chunk tile halos"),
+                label: Some("chunk tile volumes"),
                 timestamp_writes: stamp(None, 1),
             });
             pass.set_bind_group(0, &group, &[]);
             if computed_count > 0 {
-                pass.set_pipeline(&gen.tile_halo);
+                // The footprints' cave primitives, then each column's
+                // volume extent (`docs/volumes.md`).
+                pass.set_pipeline(&gen.tile_caves);
                 pass.dispatch_workgroups(
                     (computed_count as u32).min(crate::engine::HALO_GROUPS),
                     1,
                     1,
                 );
+                pass.set_pipeline(&gen.tile_volumes);
+                pass.dispatch_workgroups(64, computed_count as u32, 1);
             }
         }
         {
@@ -6018,6 +6030,36 @@ impl ChunkWorld {
         self.targets.as_ref()
     }
 
+    /// The chunk an eye at `eye` in volume `vol`'s frame walks from
+    /// (`DrawParams::cut.z`, `NONE` over the ground): the finest drawn chunk
+    /// of the volume over the eye's column whose occupied layers reach above
+    /// the eye. In a cave the chunks around the eye may be air (freed) or
+    /// hold the eye under their occupied layers (out of their raster boxes),
+    /// and the rock beside them (Buried nodes) has no box: a ray seeded by
+    /// the boxes would start far away. An eye off a plane's face (beside a
+    /// placed block: `locate` clamps it onto the edge) is over no chunk.
+    fn eye_chunk(&self, vol: &volumes::Volume, eye: DVec3) -> u32 {
+        let (cell, c) = vol.grid.locate(eye);
+        let n = f64::from(vol.grid.cells());
+        if !(0.0..n).contains(&c[0]) || !(0.0..n).contains(&c[1]) {
+            return u32::MAX;
+        }
+        self.nodes
+            .iter()
+            .filter(|(k, c)| {
+                k.volume == vol.index
+                    && k.face == cell.face
+                    && (cell.i >> k.level).div_euclid(CHUNK) == k.cx
+                    && (cell.j >> k.level).div_euclid(CHUNK) == k.cy
+                    && self.drawn_set.contains(c.slot)
+                    && c.z.is_some_and(|(_, hi)| {
+                        (i64::from(k.cz * CHUNK + hi) << k.level) > i64::from(cell.k)
+                    })
+            })
+            .min_by_key(|(k, _)| k.level)
+            .map_or(u32::MAX, |(_, c)| c.slot)
+    }
+
     /// The draw parameters of view `v` (in the world frame), in volume
     /// `vol`'s frame when given (placed by its transform now, and by `prev`
     /// at the view's last frame: its points' motion), else in the world's
@@ -6118,7 +6160,10 @@ impl ChunkWorld {
             cut: [
                 grid.map_or(0, |g| g.grid.levels() - 1),
                 self.drawn_set.fading() as u32,
-                0,
+                match grid {
+                    Some(g) if v.ortho.is_none() => self.eye_chunk(g, eye),
+                    _ => u32::MAX,
+                },
                 0,
             ],
             light_eye: v.light_eye.map_or([0.0; 4], |e| e.extend(1.0).to_array()),
@@ -6643,6 +6688,7 @@ impl ChunkWorld {
                 o.targets.trace(),
                 drawn,
                 self.rounds,
+                &self.no_scene_depth,
                 None,
                 Some(&rects),
             );
@@ -6784,8 +6830,9 @@ impl ChunkWorld {
     /// `targets` (over `DrawParams::rect`; `drawn` chunks), timed as
     /// `timing` says; with `open`, only the pixels in those rects (x, y,
     /// width, height). Its pass (`DrawParams::volume`) keeps the hits of the
-    /// volumes traced before it that are nearer than its own. Its draw bind
-    /// group, for the stages that shade its hits.
+    /// volumes traced before it that are nearer than its own; the rays end
+    /// at the meshes' `scene_depth`. Its draw bind group, for the stages
+    /// that shade its hits.
     #[allow(clippy::too_many_arguments)]
     fn trace_view(
         &self,
@@ -6797,6 +6844,7 @@ impl ChunkWorld {
         targets: TraceTextures<'_>,
         drawn: u32,
         rounds: u32,
+        scene_depth: &wgpu::TextureView,
         timing: Option<(&wgpu::QuerySet, u32)>,
         open: Option<&[[u32; 4]]>,
     ) -> wgpu::BindGroup {
@@ -6880,6 +6928,7 @@ impl ChunkWorld {
                 view_entry(5, &exits),
                 view_entry(4, &distance),
                 entry(22, vb.cull_state),
+                view_entry(27, scene_depth),
             ],
         });
         {
@@ -6933,6 +6982,7 @@ impl ChunkWorld {
                     binding: 26,
                     resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler),
                 },
+                view_entry(27, scene_depth),
             ],
         });
         // Rounds of seed and trace: each resolves the rays that hit in
@@ -7161,6 +7211,9 @@ impl ChunkWorld {
                 4,
             );
         }
+        // The meshes' depth (the frame's size): the rays end there, and
+        // meshes in front of the terrain walk to the sun from it.
+        let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
         let primary_vol = self.volumes[usize::from(primary)].as_ref().unwrap();
         let camera_group = self.draw_group(&self.params, primary_vol, self.camera_view(primary_vol));
         let mut groups: Vec<(u16, wgpu::BindGroup, [u32; 4])> = Vec::with_capacity(order.len());
@@ -7179,6 +7232,7 @@ impl ChunkWorld {
                 self.targets.as_ref().unwrap().trace(),
                 drawn,
                 self.rounds,
+                scene_depth,
                 timing.map(|(set, _, ring)| (set, ring)),
                 None,
             );
@@ -7187,9 +7241,7 @@ impl ChunkWorld {
         let targets = self.targets.as_ref().unwrap();
         {
             // 4. Sun shadows: samples, then every hit, and meshes before
-            // their hits (`scene_depth`: the meshes', the frame's size); each
-            // volume's hits by its own pass.
-            let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
+            // their hits; each volume's hits by its own pass.
             let occlusion = self.sun_occlusion.as_ref().unwrap();
             let (distance, visibility, samples, normal, sky) = (
                 view(&targets.distance),
@@ -8250,7 +8302,16 @@ mod tests {
                     "chunk draw (scene materials)",
                     super::scene::scene_source(&draw, 64),
                 );
-                for (label, source) in [generate, (label, draw), textured] {
+                let verify = (
+                    "terrain verification",
+                    crate::engine::verify_source(plane, &program, false),
+                );
+                for (label, source) in [generate, (label, draw), textured, verify] {
+                    // HELIO_DUMP_SHADERS=<dir>: the sources, for offline tools.
+                    if let Some(dir) = std::env::var_os("HELIO_DUMP_SHADERS") {
+                        let name = format!("{label} {plane} {counting}.wgsl").replace(' ', "_");
+                        std::fs::write(std::path::Path::new(&dir).join(name), &source).unwrap();
+                    }
                     let module = naga::front::wgsl::parse_str(&source)
                         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&source)));
                     naga::valid::Validator::new(

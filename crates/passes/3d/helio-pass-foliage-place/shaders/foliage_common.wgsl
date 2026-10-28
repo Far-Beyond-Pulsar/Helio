@@ -101,8 +101,8 @@ struct FoliageBands {
     growth_power:  f32,
     growth_max:    f32,
     range:         f32,
-    _pad0:         u32,
-    _pad1:         u32,
+    keep_knee:     f32,
+    keep_far_power: f32,
     bands:         array<FoliageBand, 6>,
 }
 
@@ -133,7 +133,11 @@ fn foliage_band_of_slot(slot: u32) -> u32 {
 
 /// Share of the tufts drawn at `d` metres (`bands::keep`).
 fn foliage_keep(d: f32) -> f32 {
-    return min(pow(foliage_bands.keep_distance / max(d, 1.0e-3), foliage_bands.keep_power), 1.0);
+    let b = foliage_bands;
+    if d <= b.keep_knee {
+        return min(pow(b.keep_distance / max(d, 1.0e-3), b.keep_power), 1.0);
+    }
+    return min(pow(b.keep_distance / b.keep_knee, b.keep_power), 1.0) * pow(b.keep_knee / d, b.keep_far_power);
 }
 
 /// How much a surviving tuft grows at `d` metres (`bands::growth`).

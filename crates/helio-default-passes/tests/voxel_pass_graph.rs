@@ -26,6 +26,10 @@ impl helio_core::RenderPass for FinalResourceConsumer {
     fn reads(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }
+    // A resize keeps the pass: it learns the new size here.
+    fn on_resize(&mut self, _device: &wgpu::Device, size: helio_core::RenderSize) {
+        self.expected = size.internal;
+    }
     fn execute(&mut self, ctx: &mut helio_core::PassContext) -> helio_core::Result<()> {
         let texture = ctx.resource_pool.get_texture("pre_aa").unwrap();
         let extent = [texture.width(), texture.height()];
@@ -284,7 +288,8 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             .unwrap()
             .contains(&[config.internal_width(), config.internal_height()]));
 
-        // A resize rebuilds the graph; downstream passes see the new size.
+        // A resize resizes the graph in place; downstream passes see the new
+        // size.
         *source.lock().unwrap() = Some(PlanetFrame::single(eye, planet, up));
         renderer.set_render_size(320, 180);
         let resized = device.create_texture(&wgpu::TextureDescriptor {

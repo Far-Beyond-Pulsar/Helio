@@ -392,7 +392,6 @@ pub mod actor;
 pub mod asset_types;
 pub mod camera;
 pub mod cmd;
-pub(crate) mod cmd_ir;
 pub mod context;
 pub mod depth;
 pub mod entity;
@@ -481,8 +480,8 @@ pub use graph::{
     BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, DeclaredKind, DeclaredResource,
     FinishSegment, FrameDebugData, GraphTimelineData, GraphTimelinePass, PassDeclaration,
     PassIdentity, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet, PipelineHandle,
-    PipelineRecipeBuilder, PipelineRegistry, RecordingCacheStats, RenderGraph, SwapPlan,
-    SwapPolicy, UnitCacheStats,
+    PipelineRecipeBuilder, PipelineRegistry, RenderGraph, RenderSize,
+    SceneContent, SwapPlan, SwapPolicy,
 };
 pub use instance::wgpu_instance_descriptor;
 pub use profiling::{

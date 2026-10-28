@@ -108,14 +108,14 @@ impl Renderer {
         // next batch. Dropping the batch commits it.
         let batch = hot::begin_reload();
 
-        if self.pending_resize.is_some() {
-            // The pending resize rebuilds the graph from the latest sources
+        if self.pending_rebuild {
+            // The pending rebuild builds the graph from the latest sources
             // anyway (the override table is global); don't build twice.
             self.shader_reload.generation = generation;
             self.shader_reload.rebuild_error = None;
             self.shader_reload.last_reload = Some(Instant::now());
             self.shader_reload.last_mode = Some(ReloadMode::Full {
-                reason: "a resize rebuild was already pending".to_owned(),
+                reason: "a graph rebuild was already pending".to_owned(),
             });
             return;
         }

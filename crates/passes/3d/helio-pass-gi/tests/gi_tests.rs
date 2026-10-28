@@ -64,7 +64,7 @@ fn frame(
     pass.begin(&gpu.queue, eye, n, Vec3::splat(sky), Vec3::splat(sky));
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let mut cmds = helio_core::CommandRecorder::from_encoder(&mut encoder);
-    pass.record(&gpu.device, &mut cmds, None, None, lights);
+    pass.record(&gpu.device, &mut cmds, None, None, lights, None);
     drop(cmds);
     gpu.queue.submit([encoder.finish()]);
     if let Some(trace) = tracer {

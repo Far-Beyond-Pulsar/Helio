@@ -434,7 +434,8 @@ impl RenderPass for SmaaPass {
         Ok(())
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         let (et, ev, bt, bv) = Self::create_intermediate_textures(device, width, height);
         self.edge_texture = et;
         self.edge_view = ev;

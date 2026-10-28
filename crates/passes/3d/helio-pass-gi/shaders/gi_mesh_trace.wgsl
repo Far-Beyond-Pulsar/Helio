@@ -1,5 +1,6 @@
 //!use gi_common
 //!use sun_occlusion
+//!use cloud_shadow
 enable wgpu_ray_query;
 // The scene's meshes as a tracer of the probes' rays (README.md, "Tracers"),
 // after the others: a ray queries the TLAS up to the hit already written
@@ -34,7 +35,7 @@ enable wgpu_ray_query;
 @group(0) @binding(10) var<storage, read> scene_lights: array<SceneLight>;
 @group(0) @binding(11) var<uniform> sun_occlusion_frame: SunOcclusionFrame;
 @group(0) @binding(12) var sun_occlusion_maps: texture_2d<f32>;
-@group(0) @binding(16) var<storage, read> sun_occlusion_pages: array<u32>;
+@group(0) @binding(18) var<storage, read> sun_occlusion_pages: array<u32>;
 // The live point and spot lights (`gi_gather_lights`): their count, then
 // theirs.
 @group(0) @binding(13) var<storage, read_write> local_lights: LocalLights;
@@ -43,6 +44,9 @@ enable wgpu_ray_query;
 // `RAY_INSTANCE_PROXY`.
 @group(0) @binding(14) var<storage, read> proxy_vertices: array<f32>;
 @group(0) @binding(15) var<storage, read> proxy_indices: array<u32>;
+// The clouds' shadow (helio-pass-sky's `cloud_shadow`) on the sun at a hit.
+@group(0) @binding(16) var cloud_shadow_map: texture_2d<f32>;
+@group(0) @binding(17) var<uniform> cloud_shadow_frame: CloudShadowFrame;
 // Group 1: the scene's material rows and texture table, for cut-outs'
 // alpha (`helio_mats::vg_alpha`, spliced in before this file).
 
@@ -392,7 +396,7 @@ fn gi_mesh_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     let towards = dot(n, sun_towards);
     if has_sun && terrain_sun > 0.0 && towards > 0.0 {
         let through = transmittance(p + n * offset(p), sun_towards, 1e7, width, hash(seed ^ 0x2545f491u));
-        extra += albedo / PI * gi_sun[1].rgb * terrain_sun * towards * through;
+        extra += albedo / PI * gi_sun[1].rgb * cloud_shadow(ray.origin.xyz + ray.dir * hit.t) * terrain_sun * towards * through;
     }
     if local_lights.count.x > 0u {
         extra += local_light(p, n, albedo, width, seed);

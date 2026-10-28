@@ -691,7 +691,8 @@ impl RenderPass for HlfsPass {
         &["scene_lights"]
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.resize(device, width, height);
     }
     fn requires_ray_tracing(&self) -> bool {

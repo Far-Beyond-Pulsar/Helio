@@ -314,15 +314,14 @@ pub struct SpriteBatchPass {
 }
 
 /// The scene overlay variant's own state: a pipeline sampling the scene's
-/// texture table (group 1) and whether the scene holds a sprite.
+/// texture table (group 1). The pass is a graph member only while the scene
+/// holds a sprite.
 struct SceneOverlay {
     pipeline: wgpu::RenderPipeline,
     textures_bgl: wgpu::BindGroupLayout,
     textures_bg: Option<wgpu::BindGroup>,
     textures_version: Option<u64>,
     material_binding: helio_mats::MaterialBindingConfig,
-    liveness: helio_core::SceneBufferLiveness,
-    live: bool,
 }
 
 /// Outputs of a paired `helio-pass-sprite-cull` `SpriteCullPass`, wired in
@@ -626,8 +625,6 @@ impl SpriteBatchPass {
             textures_bg: None,
             textures_version: None,
             material_binding,
-            liveness: Default::default(),
-            live: false,
         });
         pass
     }
@@ -1017,6 +1014,12 @@ impl RenderPass for SpriteBatchPass {
         "SpriteBatch"
     }
 
+    /// The scene overlay is a member while some `"sprite_instances"` row is
+    /// live; a pass drawing its own sprites always is.
+    fn is_member(&mut self, scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.scene_overlay.is_none() || scene.holds_rows("sprite_instances")
+    }
+
     fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
@@ -1029,13 +1032,6 @@ impl RenderPass for SpriteBatchPass {
         // every other executor-managed pass: the descriptor only needs to live
         // for this frame's `execute()` call, and the executor drops it before
         // the next `render_pass_descriptor()`.
-        if self
-            .scene_overlay
-            .as_ref()
-            .is_some_and(|overlay| !overlay.live)
-        {
-            return None;
-        }
         let load = match self.clear_color {
             Some(color) => wgpu::LoadOp::Clear(color),
             None => wgpu::LoadOp::Load,
@@ -1067,11 +1063,6 @@ impl RenderPass for SpriteBatchPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
-        if let Some(overlay) = self.scene_overlay.as_mut() {
-            let sprites = ctx.scene_buffers.get(BufferKey::of("sprite_instances"));
-            overlay.liveness.update(ctx.device, ctx.queue, sprites);
-            overlay.live = sprites.is_some_and(|handle| overlay.liveness.maybe_live(handle));
-        }
         if ctx.width != self.last_width || ctx.height != self.last_height {
             self.last_width = ctx.width;
             self.last_height = ctx.height;

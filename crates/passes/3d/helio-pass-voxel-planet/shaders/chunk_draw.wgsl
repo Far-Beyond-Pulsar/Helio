@@ -47,7 +47,8 @@ struct DrawParams {
     // planet's (from f64).
     planet: vec4<f32>,
     // x: the octree's coarsest level; y: nodes fading (none: no switch to
-    // look past).
+    // look past); z: the chunk an eye under the ground walks from (NONE:
+    // rays start at their seed boxes).
     cut: vec4<u32>,
     // The eye in the scene lights' coordinates (xyz); w 1 when the scene's
     // lights are bound (`local_shadow`).
@@ -442,9 +443,19 @@ fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     return out;
 }
 
+// A seed box past the pixel's mesh (`scene_depth`): nothing in it is seen.
+const BEHIND_MESH: u32 = 0x80000000u;
+// Rays end a thousandth past a mesh: the shading tells which of a mesh and
+// a hit that close is in front (`shadow`).
+const MESH_MARGIN: f32 = 1.001;
+
 // Boxes the eye is outside of: the box's front face is the depth. Later
 // rounds keep only the boxes beyond where the pixel's ray left the last;
 // a later volume's pass only those nearer than an earlier volume's hit.
+// A box past the mesh there is marked (`BEHIND_MESH`), not discarded: the
+// nearest still wins, so a hidden pixel's box is the chunk nearest past
+// its mesh (`frame_chunk`). The marking reads the depth: the raster does
+// not test it (the publish's NVIDIA issue, docs/chunk-octree.md).
 @fragment
 fn seed_fragment(in: VOut) -> @location(0) u32 {
     let p = vec2<i32>(in.position.xy);
@@ -454,7 +465,9 @@ fn seed_fragment(in: VOut) -> @location(0) u32 {
         let hit = textureLoad(hit_distance, p, 0).r;
         if hit > 0.0 && ray_distance(in.world) >= hit { discard; }
     }
-    return in.instance;
+    // The reversed depth: farther, smaller.
+    let hidden = in.position.z * MESH_MARGIN < textureLoad(scene_depth, p, 0);
+    return in.instance | select(0u, BEHIND_MESH, hidden);
 }
 
 struct SeedInside {
@@ -1320,8 +1333,9 @@ struct Walk {
 }
 
 // Where a walk ended: a hit (chunk, cell, the face it entered by and its
-// side, material), or how far it went when it left the cut or ran out of
-// boxes.
+// side, material), or how far it went when it left the cut, ran out of
+// boxes or reached its end (and the chunk it was in last; NONE past the
+// ceiling).
 struct WalkEnd {
     hit: bool,
     t: f32,
@@ -1566,7 +1580,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     }
     WCOUNT(8)
     WCOUNT_BOXES
-    return WalkEnd(false, t_prev, NONE, vec3<i32>(0), 0u, 0u, 0u);
+    return WalkEnd(false, t_prev, slot, vec3<i32>(0), 0u, 0u, 0u);
 }
 
 // The camera's rays all start at the eye: their origin is a constant zero
@@ -1596,22 +1610,52 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         textureStore(out_distance, p, vec4<f32>(0.0));
         if plain_colour() { textureStore(out_colour, p, vec4<f32>(0.0)); }
     }
-    var box = textureLoad(seed, p, 0).x;
-    // No box left: the sky.
-    if box == NONE {
-        textureStore(out_exits, p, vec4<f32>(-1.0));
-        return;
-    }
-    COUNT(0)
+    let dir = pixel_ray(id.xy, size);
     // A later volume's pass: only a hit nearer than an earlier volume's.
     var limit = 1e30;
     if params.volume.y > 0u {
         let hit = textureLoad(out_distance, p).r;
         if hit > 0.0 { limit = hit; }
     }
-    let dir = pixel_ray(id.xy, size);
+    // Under the ground (a cave, a dig) the first round walks from the eye
+    // itself: the chunks around it may be air or hold it under their
+    // occupied layers, and the rock beside them has no box, so a ray seeded
+    // by the boxes would start past them. Rock at the eye: the boxes.
+    if exit == 0.0 && params.cut.z != NONE && !ortho {
+        let from_eye = point_walk(id.xy, vec3<f32>(0.0), vec2<u32>(params.cut.z, 0u), dir, limit, true);
+        if from_eye.hit && from_eye.slot != NONE {
+            store_hit(p, from_eye, dir, id.xy);
+            return;
+        }
+        if !from_eye.hit {
+            textureStore(out_exits, p, vec4<f32>(select(from_eye.t + 1e-4, -1.0, from_eye.t < 0.0 || from_eye.t >= limit)));
+            return;
+        }
+    }
+    var box = textureLoad(seed, p, 0).x;
+    // No box left: the sky.
+    if box == NONE {
+        textureStore(out_exits, p, vec4<f32>(-1.0));
+        return;
+    }
+    // Its nearest box past its mesh: hidden, the box the chunk its mesh
+    // point is placed by (the first volume's: its pass walks the meshes).
+    if (box & BEHIND_MESH) != 0u {
+        if params.volume.y == 0u {
+            textureStore(out_visibility, p, vec4<u32>(NONE, (box & ~BEHIND_MESH) + 1u, 0u, 0u));
+        }
+        textureStore(out_exits, p, vec4<f32>(-1.0));
+        return;
+    }
+    COUNT(0)
     let org = select(vec3<f32>(0.0), pixel_origin(id.xy, size), ortho);
     var t_prev = max(exit, params.sun.w);
+    // Past the pixel's mesh nothing is seen: its ray ends there.
+    var t_end = 1e30;
+    if !ortho {
+        let mesh = mesh_point(id.xy, size);
+        if mesh.w > 0.0 { t_end = length(mesh.xyz) * MESH_MARGIN; }
+    }
     // The chunk whose frame the ray is in (its last), and the box it is
     // crossing in that frame's cells: the chunk itself, or air.
     var frame = chunk_frame(box);
@@ -1650,14 +1694,28 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
             real = false;
         }
     }
-    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, limit, r, 128u, true, id.xy);
+    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, min(limit, t_end), r, 128u, true, id.xy);
     if !end.hit {
+        // At its mesh: resolved, the chunk it ended in kept (`frame_chunk`).
+        if end.t >= t_end {
+            if params.volume.y == 0u {
+                textureStore(out_visibility, p, vec4<u32>(NONE, end.slot + 1u, 0u, 0u));
+            }
+            textureStore(out_exits, p, vec4<f32>(-1.0));
+            return;
+        }
         // Unresolved: the next round seeds the boxes beyond (none past
         // the ceiling, the sky, or an earlier volume's hit).
         textureStore(out_exits, p, vec4<f32>(select(end.t + 1e-4, -1.0, end.t < 0.0 || end.t >= limit)));
         return;
     }
     COUNT(2)
+    store_hit(p, end, dir, id.xy);
+}
+
+// Pixel `p`'s hit `end` (its ray along `dir`): visibility, distance and
+// the plain colour.
+fn store_hit(p: vec2<i32>, end: WalkEnd, dir: vec3<f32>, pixel: vec2<u32>) {
     textureStore(out_exits, p, vec4<f32>(-1.0));
     let material = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
     // The material uses five bits (the voxel palette has 32 entries); six
@@ -1738,9 +1796,9 @@ fn pixel_width(q: vec2<u32>, size: vec2<u32>, t: f32) -> f32 {
 }
 
 // Material `m`'s colour varied by its patches (409 m and 25.6 m), clumps
-// (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, by
-// `voxel`), at domain point `p` for a pixel `pixel` m wide.
-fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32) -> vec3<f32> {
+// (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, in
+// [-0.5, 0.5], by `voxel`), at domain point `p` for a pixel `pixel` m wide.
+fn material_albedo(m: u32, p: vec3<i32>, blade: f32, pixel: f32, voxel: f32) -> vec3<f32> {
     let material = materials.m[min(m, 31u)];
     if material.patches[0].w <= 0.0 { return material.colour.rgb; }
     let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
@@ -1752,7 +1810,6 @@ fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32
     if pixel < 0.8 {
         clumps += 0.3 * f32(noise(p, 7u, 0x9b05688cu)) / f32(NOISE_ONE) * clamp((0.8 - pixel) / 0.4, 0.0, 1.0);
     }
-    let blade = f32(blade_hash & 255u) / 255.0 - 0.5;
     let t = clamp(0.52 + materials.detail.x * (0.7 * broad + 0.16 * patches + clumps) + materials.detail.y * blade * voxel, 0.0, 1.0);
     return select(mix(material.patches[1].rgb, material.patches[2].rgb, t * 2.0 - 1.0), mix(material.patches[0].rgb, material.patches[1].rgb, t * 2.0), t < 0.5);
 }
@@ -1830,9 +1887,15 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
     // face of it.
     let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz) * (vec3<f32>(cell) + 0.5);
     let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + centre / DOMAIN_UNIT));
+    // Each voxel's own brightness and hue, as much shared with the voxels
+    // around (0.4 m clumps) as its own: a hash a voxel alone read as a
+    // checkerboard wherever light alone shapes nothing (shade, overcast).
+    let clump = f32(noise(p, 5u, 0x3a1f9e27u)) / f32(NOISE_ONE);
     let hv = hash3(p.x, p.y, p.z, 0x68bc21ebu);
-    let pigment = 1.0 + materials.detail.y * (mix(0.5, f32(hv & 255u) / 255.0, mosaic) - 0.5);
-    let albedo = material_albedo(material, p, hash3(p.x, p.y, p.z, 0x1b873593u), pixel_m, mosaic) * pigment;
+    let shade = 0.6 * (f32(hv & 255u) / 255.0 - 0.5) + 0.4 * clump;
+    let pigment = 1.0 + materials.detail.y * shade * mosaic;
+    let hue = 0.6 * (f32(hash3(p.x, p.y, p.z, 0x1b873593u) & 255u) / 255.0 - 0.5) + 0.4 * clump;
+    let albedo = material_albedo(material, p, hue, pixel_m, mosaic) * pigment;
     // Occlusion: around the air cell in front of the face, where voxels
     // (not cells: the same at every level, as `hit_face`'s slope) are a
     // few pixels wide; under that the sky samples hold the occlusion and
@@ -2150,14 +2213,19 @@ struct Fallbacks {
 @group(1) @binding(12) var<storage, read_write> fallback_groups: array<atomic<u32>, 3>;
 
 // A hit's face: its unit normal, the length of a cell across it; the
-// normal it is lit with, and how far (cells) its sun ray ignores what it
-// meets (natural steps: `shading`); the slope's normal there (zero: none).
+// normal it is lit with, and how far (cells) its sun and sky rays ignore
+// what they meet (natural steps and cells of a pixel or less: `shading`);
+// the slope's normal there (zero: none); how far a local light's ray
+// ignores (cells of a pixel or less alone: a lamp near the ground meets
+// the real steps, and a step's skip could pass what stands beside the lamp,
+// or the lamp itself).
 struct Face {
     normal: vec3<f32>,
     cell: f32,
     shading: vec3<f32>,
     skip: f32,
     ground: vec3<f32>,
+    light_skip: f32,
 }
 
 // The top of the column `d` cells from `cell` (chunk `slot`'s cells) within
@@ -2228,8 +2296,9 @@ fn screen_ground(q: vec2<u32>, size: vec2<u32>, t: f32) -> vec3<f32> {
 
 // Hit `v` (pixels `pixel_m` wide there). Voxels a few pixels wide are lit
 // by their own faces (a slope reads as its steps, each shadowing the next);
-// a natural step (air above it) is lit partly with the slope's normal,
-// `Materials::detail.w` (step softness), its sun ray passing its own steps.
+// a natural step (air above it, its leaf storing the heightfield's slope) is
+// lit partly with the slope's normal, `Materials::detail.w` (step
+// softness), its sun ray passing its own steps.
 // Voxels of a pixel or less are lit by the slope's normal, at every level:
 // the weight follows the voxel's size on screen, not the cell's, so it is
 // the same on both sides of a switch between levels, and a coarse level's
@@ -2247,17 +2316,23 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, axis == 1u), c.m0.xyz, axis == 0u);
     let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
     let cell_m = length(axis_world);
-    var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
+    var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0), 0.0);
     let small = 1.0 - smoothstep(1.0, 3.0, params.planet.y / max(pixel_m, 1e-6));
     let coarse = max(under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6)), small);
-    let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
+    // Natural steps only: the leaf stores the heightfield's slope where it
+    // holds natural tops. A feature's cells (a boulder, a tree's leaves) or an
+    // edit's stand for no slope: softened, rock fields lost their form and
+    // shadows, and leaves' sun rays skipped the leaves around them (canopy
+    // speckle).
+    let stored = leaf_ground(v.x, cell, c);
+    let step = dot(stored, stored) > 0.0 && !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
     if !step && coarse == 0.0 { return f; }
     let w = max(select(0.0, materials.detail.w, step), coarse);
     // The heightfield's exact slope stored with the leaf; else, cells of a
     // pixel or less: the slope the hits around make (a few loads); larger
     // ones measure their column tops (`slope_normal`).
     var ground = ground_hint;
-    if dot(ground, ground) == 0.0 { ground = leaf_ground(v.x, cell, c); }
+    if dot(ground, ground) == 0.0 { ground = stored; }
     if dot(ground, ground) == 0.0 && length(c.m0.xyz) <= 1.5 * pixel_m { ground = screen_ground(q, size, t); }
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
     // A unit normal (written so NaN fails it), else the face's own.
@@ -2268,6 +2343,7 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     f.ground = ground;
     f.shading = shading * inverseSqrt(l);
     f.skip = 2.0 * w;
+    f.light_skip = 2.0 * coarse;
     return f;
 }
 
@@ -2605,25 +2681,34 @@ fn mesh_point(q: vec2<u32>, size: vec2<u32>) -> vec4<f32> {
 // Whether the mesh point `org` (eye-relative) at pixel `q` sees along `dir`
 // to distance `range` (`point_walk`).
 fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> f32 {
-    return select(1.0, 0.0, point_walk(q, org, v, dir, range).hit);
+    return select(1.0, 0.0, point_walk(q, org, v, dir, range, false).hit);
+}
+
+// The chunk pixel `v`'s points are placed by: its hit's, else the one its
+// ray ended in at its mesh or whose box past the mesh it had
+// (`trace_pixel`), else NONE.
+fn frame_chunk(v: vec2<u32>) -> u32 {
+    return select(v.y - 1u, v.x, v.x != NONE);
 }
 
 // What the point `org` (eye-relative) at pixel `q` meets along `dir` within
 // `range`: a walk from the node of the cut it is in, placed in the frame of
-// the chunk of `v` (a hit by it) to its cells' precision; without a hit
+// pixel `v`'s chunk (`frame_chunk`) to its cells' precision; without one
 // finer than the exact levels, from the exact level's node over it
 // (planet-centred: to half a metre on an Earth). In rock or a Buried node,
-// a hit at once with no chunk (slot NONE).
-fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> WalkEnd {
+// a hit at once with no chunk (slot NONE). `counted`: a primary ray's
+// walk, which reports the Buried nodes it meets.
+fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32, counted: bool) -> WalkEnd {
     let rock = WalkEnd(true, 0.0, NONE, vec3<i32>(0), 0u, 0u, 0u);
     var none = rock;
     none.hit = false;
     let r = fade_dither(q);
     var start = Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false);
     var t0 = 0.0;
-    if v.x != NONE && !exact_level(key_level(chunk_keys[v.x].x)) {
-        let key = chunk_keys[v.x];
-        let frame = chunk_frame(v.x);
+    let placed = frame_chunk(v);
+    if placed != NONE && ours(placed) && !exact_level(key_level(chunk_keys[placed].x)) {
+        let key = chunk_keys[placed];
+        let frame = chunk_frame(placed);
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         var face = key.x & 7;
         let level = key_level(key.x);
@@ -2649,9 +2734,9 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
         } else if at.level == LOST {
             return none;
         } else if exact_level(at.level) {
-            start = Walk(v.x, vec4<i32>(key_x(face, at.level), 0, 0, 0), at.lo, at.hi, false);
+            start = Walk(placed, vec4<i32>(key_x(face, at.level), 0, 0, 0), at.lo, at.hi, false);
         } else {
-            let f = select(v.x, at.frame, at.frame != NONE);
+            let f = select(placed, at.frame, at.frame != NONE);
             let fk = chunk_keys[f];
             start = Walk(f, fk, to_frame(at.lo, at.level - (key_level(fk.x)), fk, true), clip_to_face(to_frame(at.hi, at.level - (key_level(fk.x)), fk, false), fk), false);
         }
@@ -2672,7 +2757,7 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
         if !exact_level(level) { return none; }
         start.key = vec4<i32>(key_x(face_with_normal(normal), level), 0, 0, 0);
     }
-    return walk(start, org, dir, t0, range, r, 96u, false, q);
+    return walk(start, org, dir, t0, range, r, 96u, counted, q);
 }
 
 // The share of each pixel's light its sun samples give stochastically
@@ -2965,7 +3050,9 @@ fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
             faced = true;
         }
         // Short of the light: the cell a lamp stands in does not shade it.
-        if hit_walk(q, size, slot, t, face, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
+        var lit = face;
+        lit.skip = face.light_skip;
+        if hit_walk(q, size, slot, t, lit, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
     }
     return seen;
 }
@@ -4251,7 +4338,7 @@ fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
                 // already reads as the meadow.
                 let at = org - up * (end.t + 0.01 * length(f.m0.xyz));
                 let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + at / DOMAIN_UNIT));
-                let colour = material_albedo(min(m, 31u), p, 0u, 0.4, 0.0);
+                let colour = material_albedo(min(m, 31u), p, 0.0, 0.4, 0.0);
                 hit = GroundHit(bitcast<u32>(end.t + drop), pack_unit(to_world(n)), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
             }
         }

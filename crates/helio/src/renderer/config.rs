@@ -540,4 +540,13 @@ impl RendererConfig {
     pub fn internal_height(&self) -> u32 {
         (((self.height as f32) * self.render_scale).ceil() as u32).max(1)
     }
+
+    /// The graph's resolutions: rendered at the internal size, presented at
+    /// `width` x `height`.
+    pub fn render_size(&self) -> helio_core::RenderSize {
+        helio_core::RenderSize::new(
+            [self.internal_width(), self.internal_height()],
+            [self.width, self.height],
+        )
+    }
 }
