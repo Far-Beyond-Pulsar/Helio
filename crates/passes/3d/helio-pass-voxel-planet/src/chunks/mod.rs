@@ -4815,6 +4815,7 @@ impl ChunkWorld {
                 }
             }
         }
+        vol.regions.admit(self.frame_now);
         for fp in ahead {
             let keys = vol.region_keys(fp);
             vol.regions.request(&keys);

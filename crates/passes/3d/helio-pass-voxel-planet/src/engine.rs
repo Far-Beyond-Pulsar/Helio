@@ -452,8 +452,11 @@ impl RegionPool {
     }
 
     /// Regions made off the frame into the pool, as many as fit besides
-    /// those `frame` keeps (the rest wait).
-    fn admit(&mut self, frame: u64) {
+    /// those `frame` keeps (the rest wait). Each frame admits before it
+    /// asks which footprints' regions are resident: a footprint waiting on
+    /// its regions is not reserved, so `reserve` alone would never admit
+    /// the first ones.
+    pub(crate) fn admit(&mut self, frame: u64) {
         let mut done = std::mem::take(&mut *self.made.lock().unwrap_or_else(|e| e.into_inner()));
         if done.is_empty() {
             return;

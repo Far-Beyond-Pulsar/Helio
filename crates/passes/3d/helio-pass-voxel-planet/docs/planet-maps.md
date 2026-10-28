@@ -300,12 +300,19 @@ regions from the pool (896 bytes each, 32768 kept: 29 MB).
 Generation on the GPU (`voxel_flight` holds, `HELIO_VOXEL_GEN_BENCH=3`,
 RTX 3060, interleaved runs, all of a tile's generation per tile):
 
-| view | before the maps | maps (rivers, climate) | + erosion, streams (3 levels) |
-|---|---|---|---|
-| ground: all / columns (us a tile) | 32.7-34.5 / 19.4-20.3 | 36.4-36.6 / 23.4-23.5 | 45.8-46.8 / 32.3-33.2 |
-| mountain slope: all / columns | 38.2-38.7 / 20.6-20.8 | 42.7-43.2 / 25.7-26.1 | 57.4-68.3 / 39.3-47.3 |
+| view | before the maps | maps (rivers, climate) | + erosion, streams (3 levels) | + stream boxes | + straight valleys, lazy meanders |
+|---|---|---|---|---|---|
+| ground: all / columns (us a tile) | 32.7-34.5 / 19.4-20.3 | 36.4-36.6 / 23.4-23.5 | 45.8-46.8 / 32.3-33.2 | 46.3-46.5 / 32.5-32.8 | 42.3-42.7 / 29.1-29.5 |
+| mountain slope: all / columns | 38.2-38.7 / 20.6-20.8 | 42.7-43.2 / 25.7-26.1 | 57.4-68.3 / 39.3-47.3 | 59.4-59.7 / 40.3-40.4 | 50.8-51.9 / 33.7-33.9 |
+
+The last two columns are after the merge of voxel volumes (one chunk
+world, a region pool per volume) and of the edit pipeline. Stream boxes
+(`in_box`, one word for most of the cells around a column) cost nothing
+measurable: the streams' cost was their meander noise, nine noise calls
+for every column a stream level reached. Valleys now run straight along
+their segments and the channel's two bend fields are made only inside a
+floodplain, which brings streams to +6-8 us a tile over the maps without
+them (ground +16%, mountain slope +19%).
 
 Settling the held views took the same frames with and without streams
-once regions were asked for ahead (mountain slope 385 frames; 353-639
-without). Streams' columns read one box word for most of the cells around
-them (`in_box`), which the last measurements predate.
+once regions were asked for ahead (ground 553 frames, mountain slope 491).
