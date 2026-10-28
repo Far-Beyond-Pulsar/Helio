@@ -41,7 +41,7 @@ const VIEW_SHIFT: u32 = VIEW_PAGES.trailing_zeros();
 /// Trace views a frame at most (each culls the drawn chunks and seeds its
 /// rays: the per-view cost), and of those, views of background work (pages
 /// next to fresh requests, pages of a coarser cut).
-pub(super) const MAX_VIEWS: usize = 4;
+pub(super) const MAX_VIEWS: usize = 2;
 const BACKGROUND_VIEWS: usize = 1;
 /// Frames a page stays asked for after the last request naming it.
 const ASKED_FRAMES: u64 = 30;
@@ -88,6 +88,9 @@ pub(super) struct Epoch {
     created: u64,
     resident: FxHashMap<PageKey, u16>,
     asked: FxHashMap<PageKey, u64>,
+    /// Pages asked for the first time since the last plan (their
+    /// neighbours are prefetched: the view moving onto them).
+    newly: Vec<PageKey>,
     /// The latest frame whose requests were read for it.
     heard: Option<u64>,
 }
@@ -111,6 +114,7 @@ impl Epoch {
             created: frame,
             resident: FxHashMap::default(),
             asked: FxHashMap::default(),
+            newly: Vec::new(),
             heard: None,
         }
     }
@@ -368,8 +372,16 @@ impl SunPages {
                         eye[1] + (at as i32 / WINDOW) - WINDOW / 2,
                     ],
                 };
-                let f = e.asked.entry(key).or_insert(asking.frame);
-                *f = (*f).max(asking.frame);
+                match e.asked.entry(key) {
+                    std::collections::hash_map::Entry::Occupied(mut f) => {
+                        let f = f.get_mut();
+                        *f = (*f).max(asking.frame);
+                    }
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(asking.frame);
+                        e.newly.push(key);
+                    }
+                }
                 if let Some(&p) = e.resident.get(&key) {
                     let used = &mut self.physical[p as usize].used;
                     *used = (*used).max(asking.frame);
@@ -478,9 +490,19 @@ impl SunPages {
         // (class, coarser first, key): 0 missing, 1 changed, 2 next to a
         // fresh request, 3 of a coarser cut.
         let mut wanted: Vec<(u8, std::cmp::Reverse<u8>, PageKey)> = Vec::new();
-        let fresh = e.heard;
         let mut near: FxHashSet<PageKey> = FxHashSet::default();
-        for (&key, &f) in &e.asked {
+        for &key in &std::mem::take(&mut e.newly) {
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let n = PageKey {
+                    level: key.level,
+                    page: [key.page[0] + dx, key.page[1] + dy],
+                };
+                if !e.asked.contains_key(&n) && !e.resident.contains_key(&n) {
+                    near.insert(n);
+                }
+            }
+        }
+        for &key in e.asked.keys() {
             match e.resident.get(&key).map(|&p| physical[p as usize]) {
                 None => {
                     stats.missing += 1;
@@ -495,17 +517,6 @@ impl SunPages {
                     wanted.push((3, std::cmp::Reverse(key.level), key));
                 }
                 _ => {}
-            }
-            if Some(f) == fresh {
-                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                    let n = PageKey {
-                        level: key.level,
-                        page: [key.page[0] + dx, key.page[1] + dy],
-                    };
-                    if !e.asked.contains_key(&n) && !e.resident.contains_key(&n) {
-                        near.insert(n);
-                    }
-                }
             }
         }
         stats.prefetch = near.len();
@@ -556,10 +567,17 @@ impl SunPages {
         // Physical pages: those the pages hold, then free ones, then the
         // last epoch's, then the longest unused of the current's.
         let current = e.id;
+        // (Built only when a page needs one.)
+        let needs = views
+            .iter()
+            .flat_map(|v| &v.pages)
+            .any(|(k, _)| !e.resident.contains_key(k));
         let mut spare: Vec<u16> = (0..SUN_OCCLUSION_PHYSICAL as u16)
             .filter(|&p| {
                 let ph = &physical[p as usize];
-                ph.owner.is_none_or(|(id, _)| id != current) || ph.used + KEEP_FRAMES < frame
+                needs
+                    && (ph.owner.is_none_or(|(id, _)| id != current)
+                        || ph.used + KEEP_FRAMES < frame)
             })
             .collect();
         // Popped from the back: the best last.
@@ -737,7 +755,7 @@ mod tests {
                 pages.traced(v, 0.0, frame, true);
             }
             frame += 1;
-            assert!(frame < 40, "the pages around the eye took {frame} frames");
+            assert!(frame < 80, "the pages around the eye took {frame} frames");
         }
         let asking = Asking {
             epoch: pages.current().unwrap().id,
