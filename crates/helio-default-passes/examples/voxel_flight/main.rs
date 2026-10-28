@@ -1124,7 +1124,9 @@ fn chunk_dig(
     // One frame: follow the planet's edits, update, draw; GPU times and the
     // tiles generated again.
     let step = |world: &mut ChunkWorld, planet: &Planet, frame: &mut u64| {
-        assert!(world.sync_edits(VolumeId(0), planet), "edits follow");
+        world
+            .sync_edits(VolumeId(0), planet)
+            .expect("the dig's volume");
         let mut encoder = flight.device.create_command_encoder(&Default::default());
         let stats = world.update(
             &mut helio_core::CommandRecorder::from_encoder(&mut encoder),

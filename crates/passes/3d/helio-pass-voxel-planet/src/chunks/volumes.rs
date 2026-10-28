@@ -113,6 +113,9 @@ pub(super) struct Volume {
     /// Height over the datum below which nothing is seen (caves, digs),
     /// less a margin: where the sun's occlusion views end.
     pub floor: f64,
+    /// What Solid and Buried nodes not added by a brush show where a ray
+    /// meets them (`Planet::rock_material`).
+    pub rock: u8,
     /// The world's height range in base layers (the roots' estimate).
     pub height_layers: (i32, i32),
     /// What its packs depend on (`kept_chunks`).
@@ -152,9 +155,6 @@ pub(super) struct Volume {
     /// coarsest first), drawn ones the frame they change; under baked
     /// edits that changed, as budget allows.
     pub urgent: FxHashSet<NodeKey>,
-    /// Urgent nodes the planner hides until they are generated again
-    /// (`residency::Event::Stale`).
-    pub hidden: FxHashSet<NodeKey>,
     /// Urgent nodes' distances from the eye when first ranked.
     pub urgent_distance: FxHashMap<NodeKey, f64>,
     pub stale: FxHashSet<NodeKey>,
@@ -943,12 +943,15 @@ impl ChunkWorld {
         let g = s | wgpu::BufferUsages::COPY_SRC;
         // Brushes kept analytic: the large ones, then the recent ones.
         let edits = planet.edits();
-        let view = std::sync::Arc::new(edit_view(
-            planet,
-            0,
-            None,
-            std::sync::Arc::new(classify::BrickIndex::new(&grid, &edits.baked, index16)),
-        ));
+        let view = std::sync::Arc::new(
+            edit_view(
+                planet,
+                0,
+                None,
+                std::sync::Arc::new(classify::BrickIndex::new(&grid, &edits.baked, index16)),
+            )
+            .0,
+        );
         let (brushes, brush_capacity) = brush_buffer(&device, &queue, &view.faces);
         let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
         let params = |label: &str| {
@@ -1001,6 +1004,7 @@ impl ChunkWorld {
             exact_level: exact_level(&grid),
             ceiling: planet.outer_radius() - grid.radius() + CEILING_MARGIN,
             floor: planet.inner_radius() - grid.radius() - CEILING_MARGIN,
+            rock: planet.rock_material() as u8,
             height_layers,
             fingerprint,
             gen,
@@ -1058,7 +1062,6 @@ impl ChunkWorld {
             ),
             edit_state: EditState::of(edits),
             urgent: FxHashSet::default(),
-            hidden: FxHashSet::default(),
             urgent_distance: FxHashMap::default(),
             stale: FxHashSet::default(),
             events: Vec::new(),
