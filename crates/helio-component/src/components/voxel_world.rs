@@ -247,12 +247,10 @@ pub fn terrain_world(world: &World, entity: Entity) -> Result<Arc<Planet>, Strin
         {
             let start = cached.edits.len();
             if component.edits.len() > start {
-                // Scripts append edit after edit: extend the world in place
-                // while no caller still holds it, else a copy.
-                if Arc::get_mut(&mut cached.planet).is_none() {
-                    cached.planet = Arc::new((*cached.planet).clone());
-                }
-                let planet = Arc::get_mut(&mut cached.planet).expect("uniquely owned");
+                // A journal extended elsewhere (an editor's strokes): the
+                // world extended in place, or a copy of it (a copy shares
+                // its caches and most of its edits: microseconds).
+                let planet = Arc::make_mut(&mut cached.planet);
                 for edit in component.edits.iter_from(start) {
                     planet.apply(planet_brush(edit))?;
                 }
@@ -353,6 +351,12 @@ pub fn journals_to_compact(world: &World) -> Vec<(Entity, PlanetRecipe, VoxelEdi
 }
 
 /// Append edits to a terrain's journal after checking that each applies.
+/// They are applied once, to the terrain's world (`terrain_world` then
+/// finds them there), and the blocks each broke, placed and recoloured are
+/// queued as events, counted from what it baked (`Planet::edit_yield`):
+/// cell by cell for a small edit, by region past
+/// `edit_yield::EXACT_CELLS` cells, so a planet-scale blast costs what a
+/// small one does.
 pub fn append_edits(
     world: &mut World,
     entity: Entity,
@@ -360,6 +364,7 @@ pub fn append_edits(
 ) -> Result<(), String> {
     let planet = terrain_world(world, entity)?;
     let grid = *planet.grid();
+    drop(planet);
     let component = world
         .get::<VoxelTerrainComponent>(entity)
         .ok_or("the entity has no voxel terrain")?;
@@ -378,47 +383,34 @@ pub fn append_edits(
         }
         planet_brush(edit).resolve(&grid)?;
     }
-    // Simulate the validated batch in order so events describe the exact
-    // before/after state for every cell, including overlapping brushes.
+    // In order, each brush's yield taken from the world as the brushes
+    // before it left it.
     let mut broken = Vec::new();
     let mut placed = Vec::new();
     let mut changed = Vec::new();
-    let mut preview = (*planet).clone();
-    for edit in &edits {
-        let affected = affected_block_centres(&preview, edit)?;
-        let before: Vec<_> = affected
-            .into_iter()
-            .map(|(cell, center)| (cell, center, preview.material(cell)))
-            .collect();
-        preview.apply(planet_brush(edit))?;
-        for (cell, center, previous_material) in before {
-            let next_material = preview.material(cell);
-            if previous_material == next_material {
-                continue;
+    for counted in extend_world(world, entity, &edits)? {
+        for c in counted.changes {
+            let block = |material: u32| BlockData {
+                x: c.centre.x,
+                y: c.centre.y,
+                z: c.centre.z,
+                material,
+                count: c.count,
+            };
+            if c.before != material::AIR {
+                broken.push(block(c.before));
             }
-            if previous_material != material::AIR {
-                broken.push(BlockData {
-                    x: center.x,
-                    y: center.y,
-                    z: center.z,
-                    material: previous_material,
-                });
+            if c.after != material::AIR {
+                placed.push(block(c.after));
             }
-            if next_material != material::AIR {
-                placed.push(BlockData {
-                    x: center.x,
-                    y: center.y,
-                    z: center.z,
-                    material: next_material,
-                });
-            }
-            if previous_material != material::AIR && next_material != material::AIR {
+            if c.before != material::AIR && c.after != material::AIR {
                 changed.push(BlockMaterialChange {
-                    x: center.x,
-                    y: center.y,
-                    z: center.z,
-                    previous_material,
-                    material: next_material,
+                    x: c.centre.x,
+                    y: c.centre.y,
+                    z: c.centre.z,
+                    previous_material: c.before,
+                    material: c.after,
+                    count: c.count,
                 });
             }
         }
@@ -434,48 +426,30 @@ pub fn append_edits(
     Ok(())
 }
 
-/// Enumerate exact base-cell centres covered by a brush using the same
-/// resolved half-cell containment predicate as the terrain renderer.
-fn affected_block_centres(
-    planet: &Planet,
-    edit: &VoxelBrushEdit,
-) -> Result<Vec<(helio_pass_voxel_planet::Cell, DVec3)>, String> {
-    let grid = planet.grid();
-    let mut cells = std::collections::HashSet::new();
-    for face_brush in planet_brush(edit).resolve(grid)? {
-        let radius = i64::from(face_brush.radius_half);
-        let center = face_brush.center;
-        let low = center.map(|value| (i64::from(value) - radius - 1).div_euclid(2));
-        let high = center.map(|value| (i64::from(value) + radius - 1).div_euclid(2));
-        for k in low[2]..=high[2] {
-            for j in low[1]..=high[1] {
-                for i in low[0]..=high[0] {
-                    let [i, j, k] = [i as i32, j as i32, k as i32];
-                    let sample = [
-                        helio_pass_voxel_planet::edits::center_half(i, 0),
-                        helio_pass_voxel_planet::edits::center_half(j, 0),
-                        helio_pass_voxel_planet::edits::center_half(k, 0),
-                    ];
-                    if !face_brush
-                        .contains(sample, || grid.volume_point(face_brush.face(), i, j, k, 0))
-                    {
-                        continue;
-                    }
-                    let position = grid.position(
-                        face_brush.face(),
-                        [f64::from(i) + 0.5, f64::from(j) + 0.5, f64::from(k) + 0.5],
-                    );
-                    let (cell, _) = grid.locate(position);
-                    cells.insert(cell);
-                }
-            }
-        }
+/// Apply `edits` to the cached world of the terrain (in sync with its
+/// journal: `terrain_world` just made it so), recording them as applied;
+/// each one's yield.
+fn extend_world(
+    world: &World,
+    entity: Entity,
+    edits: &[VoxelBrushEdit],
+) -> Result<Vec<helio_pass_voxel_planet::edit_yield::EditYield>, String> {
+    let mut worlds = WORLDS.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (world as *const World as usize, entity.bits());
+    let cached = worlds
+        .get_or_insert_with(HashMap::new)
+        .get_mut(&key)
+        .ok_or("the terrain's world is not built")?;
+    let planet = Arc::make_mut(&mut cached.planet);
+    let mut yields = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let (_, counted) = planet.apply_counted(planet_brush(edit))?;
+        yields.push(counted);
     }
-    Ok(cells
-        .into_iter()
-        .map(|cell| (cell, grid.cell_center(cell)))
-        .collect())
+    cached.edits.extend(edits.iter().cloned());
+    Ok(yields)
 }
+
 
 /// The edit that makes the cell containing `p` exactly `material` (0 air).
 pub fn block_edit(planet: &Planet, p: DVec3, material: u32) -> VoxelBrushEdit {

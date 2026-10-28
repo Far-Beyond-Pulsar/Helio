@@ -4,7 +4,7 @@
 //! deferred lighting, its sun shadowed by walks through the chunk trees
 //! (`directional_visibility`).
 
-use super::{residency, ChunkWorld, FrameTimings, ResidencyConfig, UpdateStats, VolumeId};
+use super::{residency, ChunkWorld, EditSync, FrameTimings, ResidencyConfig, UpdateStats, VolumeId};
 use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
 use glam::{DVec3, Mat4, Vec2, Vec3};
 use helio_core::Result as HelioResult;
@@ -474,20 +474,27 @@ impl ChunkPass {
             world.set_debug_mode(self.debug_mode);
             world
         });
-        // The frame's volumes: each followed by its edits, placed by its
-        // transform; another recipe or history, the volume added again.
+        // The frame's volumes: each followed by its edits (any history, in
+        // place), placed by its transform; another recipe, the volume added
+        // again.
         let mut held = Vec::with_capacity(frame.volumes.len());
         for v in &frame.volumes {
             let planet = &v.volume.planet;
             let recipe = planet.recipe_fingerprint();
             let at = self.held.iter().position(|h| h.id == v.volume.id);
-            let followed = at.is_some_and(|n| {
-                let h = &self.held[n];
-                h.recipe == recipe && world.sync_edits(h.volume, planet)
-            });
-            if followed {
+            let synced = at
+                .filter(|&n| self.held[n].recipe == recipe)
+                .and_then(|n| world.sync_edits(self.held[n].volume, planet));
+            if let Some(sync) = synced {
                 let h = self.held.swap_remove(at.unwrap());
                 world.set_transform(h.volume, v.volume.transform);
+                // Another history (a level loaded): its saved chunks too.
+                if sync == EditSync::Resynced {
+                    self.kept_loaded = v
+                        .kept
+                        .as_ref()
+                        .map(|kept| world.load_kept(h.volume, planet, kept));
+                }
                 held.push(h);
                 continue;
             }
