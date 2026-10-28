@@ -5312,8 +5312,22 @@ impl ChunkWorld {
                 .changed_nodes
                 .iter()
                 .filter(|k| self.drawn_set.holds(**k) && !added_keys.contains(*k));
-            let finer = added_keys.iter().filter(|k| !over_removed.contains(*k));
-            for (key, refined) in changed.map(|k| (k, false)).chain(finer.map(|k| (k, true))) {
+            // A refinement draws a node's children: their parent's box once.
+            let finer: FxHashSet<NodeKey> = added_keys
+                .iter()
+                .filter(|k| !over_removed.contains(*k))
+                .map(|k| {
+                    let levels = self.volumes[usize::from(k.volume)]
+                        .as_ref()
+                        .map_or(0, |v| v.grid.levels());
+                    if k.level + 1 < levels {
+                        k.parent()
+                    } else {
+                        *k
+                    }
+                })
+                .collect();
+            for (key, refined) in changed.map(|k| (k, false)).chain(finer.iter().map(|k| (k, true))) {
                 if let Some(vol) = self.volumes[usize::from(key.volume)].as_ref() {
                     let b = world_box(node_box(&vol.grid, *key), &vol.transform);
                     if refined {
@@ -6194,6 +6208,7 @@ impl ChunkWorld {
             }
         };
         stamp(self, encoder, 16);
+        let clock = std::time::Instant::now();
         let mut changes = std::mem::take(&mut self.occluder_changes);
         let refined = std::mem::take(&mut self.occluder_refined);
         let settled = self.residency_settled();
@@ -6255,12 +6270,12 @@ impl ChunkWorld {
                 .pages
                 .traced(window, near, frame, settled);
         }
-        // HELIO_SUN_PAGES_LOG: the planner's frames that traced pages.
-        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() {
-            let stats = self.sun_occlusion.as_ref().unwrap().pages.stats;
-            if stats.traced > 0 {
-                eprintln!("SUNPAGES frame {frame}: {stats:?}");
-            }
+        // The planner's and the views' recording CPU time; with
+        // HELIO_SUN_PAGES_LOG, the frames that traced pages.
+        let o = self.sun_occlusion.as_mut().unwrap();
+        o.pages.stats.cpu_ms = clock.elapsed().as_secs_f64() * 1e3;
+        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() && o.pages.stats.traced > 0 {
+            eprintln!("SUNPAGES frame {frame}: {:?}", o.pages.stats);
         }
         // The tables' changed rows (runs of them a write), the near
         // planes, the frame; this frame's requests cleared.

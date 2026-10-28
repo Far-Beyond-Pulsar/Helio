@@ -201,6 +201,11 @@ impl ChunkPass {
         self.world.as_ref().is_some_and(ChunkWorld::settled)
     }
 
+    /// What the sun's occlusion pages did last frame (`ChunkWorld::sun_page_stats`).
+    pub fn sun_page_stats(&self) -> Option<super::SunPageStats> {
+        self.world.as_ref().and_then(ChunkWorld::sun_page_stats)
+    }
+
     /// The last frame's residency.
     pub fn stats(&self) -> &UpdateStats {
         &self.stats

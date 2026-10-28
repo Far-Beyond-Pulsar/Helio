@@ -1759,6 +1759,8 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let (mut draw_ms, mut generate_ms) = (Vec::new(), Vec::new());
     // The sun's occlusion pages traced and the hits' own sun walks, a frame.
     let (mut occlusion_ms, mut walks_ms) = (Vec::new(), Vec::new());
+    // The sun pages' planning and recording CPU, a frame.
+    let mut pages_cpu_ms = Vec::new();
     let mut worst_wanted = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
@@ -1913,6 +1915,9 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
         let s = *pass.stats();
         let pass_cpu = pass.cpu_ms();
+        if let Some(p) = pass.sun_page_stats() {
+            pages_cpu_ms.push(p.cpu_ms);
+        }
         for timing in pass.take_timings() {
             draw_ms.push(timing.draw);
             generate_ms.push(timing.generate);
@@ -2085,13 +2090,16 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let generation: f64 = generate_ms.iter().sum();
     let per_chunk = |ms: f64| ms * 1e3 / generated_chunks.max(1) as f64;
     eprintln!(
-        "CHUNKSTRESS {mode}: sun occlusion p50 {:.3} p95 {:.3} max {:.3} ms, sun walks p50 {:.3} p95 {:.3} max {:.3} ms",
+        "CHUNKSTRESS {mode}: sun occlusion p50 {:.3} p95 {:.3} max {:.3} ms, sun walks p50 {:.3} p95 {:.3} max {:.3} ms, sun pages cpu p50 {:.3} p95 {:.3} max {:.3} ms",
         percentile(&occlusion_ms, 0.5),
         percentile(&occlusion_ms, 0.95),
         percentile(&occlusion_ms, 1.0),
         percentile(&walks_ms, 0.5),
         percentile(&walks_ms, 0.95),
-        percentile(&walks_ms, 1.0)
+        percentile(&walks_ms, 1.0),
+        percentile(&pages_cpu_ms, 0.5),
+        percentile(&pages_cpu_ms, 0.95),
+        percentile(&pages_cpu_ms, 1.0)
     );
     eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {emptied_chunks} held nothing, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
     eprintln!(

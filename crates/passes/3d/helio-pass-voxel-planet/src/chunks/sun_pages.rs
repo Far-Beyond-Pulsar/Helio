@@ -193,6 +193,8 @@ pub struct SunPageStats {
     pub views: usize,
     pub epochs: usize,
     pub out_of_pages: bool,
+    /// CPU time of the frame's `draw_sun_occlusion` (ms).
+    pub cpu_ms: f64,
 }
 
 pub(super) struct SunPages {
@@ -394,6 +396,11 @@ impl SunPages {
             if e.resident.is_empty() {
                 continue;
             }
+            // Only levels holding pages are marked.
+            let mut held = [false; LEVELS];
+            for k in e.resident.keys() {
+                held[usize::from(k.level)] = true;
+            }
             let mut marked: FxHashSet<PageKey> = FxHashSet::default();
             for [lo, hi] in boxes {
                 // The box's extent across the sun (m from the anchor).
@@ -413,7 +420,7 @@ impl SunPages {
                 }
                 let span = (r[2] - r[0]).max(r[3] - r[1]).max(0.0);
                 let first = (0..LEVELS).find(|&l| span <= page_m(l)).unwrap_or(LEVELS - 1);
-                for level in first..LEVELS {
+                for level in (first..LEVELS).filter(|&l| held[l]) {
                     let m = page_m(level);
                     let (x0, y0) = ((r[0] / m).floor() as i32, (r[1] / m).floor() as i32);
                     let (x1, y1) = ((r[2] / m).floor() as i32, (r[3] / m).floor() as i32);
@@ -427,8 +434,11 @@ impl SunPages {
                     }
                 }
             }
+            if marked.is_empty() {
+                continue;
+            }
             for (key, &p) in &e.resident {
-                let hit = (usize::from(key.level)..LEVELS).any(|l| {
+                let hit = (usize::from(key.level)..LEVELS).filter(|&l| held[l]).any(|l| {
                     let up = (l - usize::from(key.level)) as u32;
                     marked.contains(&PageKey {
                         level: l as u8,
