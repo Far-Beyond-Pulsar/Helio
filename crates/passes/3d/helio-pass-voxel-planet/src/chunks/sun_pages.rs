@@ -309,12 +309,13 @@ impl SunPages {
             let texel = finest * (level as f64).exp2();
             let (t, _) = e.texel_of(eye, texel);
             let page = t.map(|t| (t >> PAGE_SHIFT) as i32);
-            let side = t.map(|t| {
-                if (t & (PAGE as i64 - 1)) < PAGE as i64 / 2 {
-                    -1
-                } else {
-                    1
-                }
+            // Toward the eye's side of its page, unless that leaves its
+            // view block: a level's four pages are then one view.
+            let side = [0, 1].map(|i| match page[i] & (VIEW_PAGES - 1) {
+                0 => 1,
+                b if b == VIEW_PAGES - 1 => -1,
+                _ if (t[i] & (PAGE as i64 - 1)) < PAGE as i64 / 2 => -1,
+                _ => 1,
             });
             for (dx, dy) in [(0, 0), (side[0], 0), (0, side[1]), (side[0], side[1])] {
                 e.asked.insert(
@@ -847,10 +848,12 @@ mod tests {
                 eye_pages: pages.eye_pages(eye),
             };
             pages.asked(&asking, &[]);
-            sun = glam::DQuat::from_rotation_y(0.0005).mul_vec3(sun);
+            // voxel_craft's day: a turn of the sun in 600 s, 60 frames a
+            // second.
+            sun = glam::DQuat::from_rotation_y(std::f64::consts::TAU / 36_000.0).mul_vec3(sun);
             assert!(pages.epochs.len() <= 2);
         }
-        // The sun turned 0.2 rad: epochs followed it within a few turns.
+        // The sun turned 0.07 rad: epochs followed it within a few turns.
         let c = pages.current().unwrap();
         assert!(
             c.sun.dot(sun).acos() < 4.0 * TURN,
