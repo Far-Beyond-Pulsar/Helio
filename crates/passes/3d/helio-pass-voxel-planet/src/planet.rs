@@ -155,8 +155,9 @@ pub struct Edits {
     /// Brushes sealed and the history hash after them: the baked state.
     sealed_count: usize,
     sealed_hash: u64,
-    undo_seals: VecDeque<SealUndo>,
-    changes: VecDeque<BakedChange>,
+    /// Shared by copies until one seals (a snapshot copies pointers).
+    undo_seals: Arc<VecDeque<Arc<SealUndo>>>,
+    changes: Arc<VecDeque<BakedChange>>,
 }
 
 /// A seal and what it replaced, to undo it.
@@ -273,17 +274,16 @@ impl Edits {
     }
     fn changed(&mut self, before: BakedState, columns: Vec<ChangedColumn>, world: bool) {
         let after = self.baked_state();
-        self.changes.push_back(BakedChange {
+        let changes = Arc::make_mut(&mut self.changes);
+        changes.push_back(BakedChange {
             before,
             after,
             columns: columns.into(),
             world,
         });
-        let mut kept: usize = self.changes.iter().map(|c| c.columns.len()).sum();
-        while self.changes.len() > 1
-            && (self.changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT)
-        {
-            if let Some(old) = self.changes.pop_front() {
+        let mut kept: usize = changes.iter().map(|c| c.columns.len()).sum();
+        while changes.len() > 1 && (changes.len() > CHANGES_KEPT || kept > CHANGES_COLUMNS_KEPT) {
+            if let Some(old) = changes.pop_front() {
                 kept -= old.columns.len();
             }
         }
@@ -373,7 +373,8 @@ pub enum Matter {
 }
 
 pub struct Planet {
-    recipe: PlanetRecipe,
+    /// Shared by copies (with features, hundreds of kilobytes).
+    recipe: Arc<PlanetRecipe>,
     /// `record::recipe_fingerprint` of the recipe, once: a recipe with
     /// features serializes to hundreds of kilobytes (renderers compare it
     /// every frame).
@@ -386,20 +387,27 @@ pub struct Planet {
     edit_top: f64,
     /// Lowest radius any remove brush reaches.
     edit_bottom: f64,
-    heights: Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>,
+    /// Column heights and feature placements: functions of the terrain
+    /// alone, so every copy of the world (a snapshot) shares them.
+    heights: Arc<Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), i32>>>,
     features: Arc<CompiledFeatures>,
-    placements: Mutex<PlacementCache>,
+    placements: Arc<Mutex<PlacementCache>>,
     /// The field's volume layer (`docs/volumes.md`), its regions' cave
-    /// networks and the volume columns queries read.
+    /// networks and the volume columns queries read (functions of the
+    /// terrain alone, shared like the caches above).
     volumes: Option<VolumeLayer>,
-    networks: Mutex<rustc_hash::FxHashMap<(u8, i32, i32), Arc<Vec<Primitive>>>>,
-    volume_columns: Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), Arc<VolumeColumn>>>,
+    networks: Arc<Mutex<rustc_hash::FxHashMap<(u8, i32, i32), Arc<Vec<Primitive>>>>>,
+    volume_columns: Arc<Mutex<rustc_hash::FxHashMap<(u8, i32, i32, u32), Arc<VolumeColumn>>>>,
 }
 
+/// A copy shares everything but what its edits change: the recipe, field,
+/// features and caches by pointer, the edits' layers structurally
+/// (`Edits`), so publishing a snapshot costs microseconds and its queries
+/// find the caches warm.
 impl Clone for Planet {
     fn clone(&self) -> Self {
         Self {
-            recipe: self.recipe.clone(),
+            recipe: Arc::clone(&self.recipe),
             fingerprint: self.fingerprint,
             grid: self.grid,
             field: Arc::clone(&self.field),
@@ -407,12 +415,12 @@ impl Clone for Planet {
             revision: self.revision,
             edit_top: self.edit_top,
             edit_bottom: self.edit_bottom,
-            heights: Mutex::new(Default::default()),
+            heights: Arc::clone(&self.heights),
             features: Arc::clone(&self.features),
-            placements: Mutex::new(Default::default()),
+            placements: Arc::clone(&self.placements),
             volumes: self.volumes.clone(),
-            networks: Mutex::new(Default::default()),
-            volume_columns: Mutex::new(Default::default()),
+            networks: Arc::clone(&self.networks),
+            volume_columns: Arc::clone(&self.volume_columns),
         }
     }
 }
@@ -443,19 +451,19 @@ impl Planet {
             .cloned();
         Ok(Self {
             fingerprint: crate::record::recipe_fingerprint(&recipe),
-            recipe,
+            recipe: Arc::new(recipe),
             grid,
             field,
             edits: Edits::default(),
             revision: 0,
             edit_top: 0.0,
             edit_bottom: f64::INFINITY,
-            heights: Mutex::new(Default::default()),
+            heights: Default::default(),
             features,
-            placements: Mutex::new(Default::default()),
+            placements: Default::default(),
             volumes,
-            networks: Mutex::new(Default::default()),
-            volume_columns: Mutex::new(Default::default()),
+            networks: Default::default(),
+            volume_columns: Default::default(),
         })
     }
     pub fn recipe(&self) -> &PlanetRecipe {
@@ -622,6 +630,16 @@ impl Planet {
         }
     }
 
+    /// Seal every recent brush now (a snapshot's or a benchmark's: the
+    /// world is the same, its brushes baked).
+    pub fn seal_all(&mut self) -> Result<(), String> {
+        let n = self.edits.recent.len();
+        if n > 0 {
+            self.seal(n)?;
+        }
+        Ok(())
+    }
+
     /// Undo the latest brush: a recent one, or one of the latest sealed ones
     /// (its seal is undone first); `None` past them
     /// ([`Edits::undoable`]).
@@ -648,14 +666,15 @@ impl Planet {
         edits.sealed_hash = *hashes.last().unwrap_or(&edits.sealed_hash);
         edits.recent = Edits::log(&self.grid, brushes[n..].iter().copied())?;
         let columns = changed_columns(&store, &edits.baked);
-        edits.undo_seals.push_back(SealUndo {
+        let undo_seals = Arc::make_mut(&mut edits.undo_seals);
+        undo_seals.push_back(Arc::new(SealUndo {
             brushes: brushes[..n].iter().copied().zip(hashes).collect(),
             store,
             large,
             before,
-        });
-        if edits.undo_seals.len() > UNDO_SEALS {
-            edits.undo_seals.pop_front();
+        }));
+        if undo_seals.len() > UNDO_SEALS {
+            undo_seals.pop_front();
         }
         edits.changed(before, columns, false);
         Ok(())
@@ -664,7 +683,9 @@ impl Planet {
     /// Undo the latest seal: its bricks and large brushes go back, its
     /// brushes become recent again.
     fn unseal(&mut self) -> Option<()> {
-        let undo = self.edits.undo_seals.pop_back()?;
+        let undo = Arc::make_mut(&mut self.edits.undo_seals).pop_back()?;
+        let undo = Arc::try_unwrap(undo).unwrap_or_else(|shared| (*shared).clone());
+
         let edits = &mut self.edits;
         let before = edits.baked_state();
         let undone = undo.store.clone();
@@ -1155,9 +1176,26 @@ impl Planet {
     pub fn terrain_top(&self, face: u8, i: i32, j: i32) -> i32 {
         self.generated_top(face, i, j, 0)
     }
+    /// The terrain's rock: its material 64 cells under the middle of the
+    /// first face. What a renderer shows where a ray meets ground it has
+    /// not generated yet (an edit uncovering it).
+    pub fn rock_material(&self) -> u32 {
+        let face = self.grid.faces()[0];
+        let middle = if self.grid.shape() == Shape::InfinitePlane {
+            0
+        } else {
+            (self.grid.cells() / 2) as i32
+        };
+        let top = self.terrain_top(face, middle, middle);
+        match self.terrain_material(Cell::new(face, middle, middle, top - 64)) {
+            material::AIR => material::STONE,
+            m => m,
+        }
+    }
     /// The material the terrain gives base cell `cell` were it solid there,
     /// edits and features ignored.
     pub fn terrain_material(&self, cell: Cell) -> u32 {
+
         let slope = self.material_slope(cell.face, cell.i, cell.j);
         // Materials vary in 3D (`shade` samples the cell's volume point): a
         // cliff's voxels are not one column's colour.

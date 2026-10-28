@@ -278,19 +278,41 @@ slot, and each chunk's occupied layers and mean top give its frame.
 
 ## Edits
 
-A `ChunkWorld` follows a published planet's edits by difference
-(`ChunkWorld::sync_edits`), by the history's hash:
+A `ChunkWorld` follows each volume's published planet edits by difference
+(`ChunkWorld::sync_edits`), by the history's hash; each volume keeps its
+own edit view, brushes, brick cache and urgent nodes, and its planner its
+stand-ins:
 
 - Brushes that came or went mark the nodes their bands cross at every
   level they apply at: drawn and visited ones regenerate (urgent), cached
-  ones not in the cut are evicted. A small dig shows the frame it is made;
-  a blast's far and hidden nodes follow over the next frames, their nearest
-  generated ancestor drawn meanwhile.
+  ones not in the cut are evicted. Urgent nodes go drawn in view first,
+  nearest first (up to `EDITED_NOW` of them past the frame's budget, so a
+  small dig shows the frame it is made), then drawn ones out of view, then
+  the cut's ancestors.
+- **What shows meanwhile.** An edited node keeps drawing its old chunk
+  until its new one is generated; a node an edit made Mixed (a crater's
+  floor, a mound over the ground) is drawn as it was (rock or air: the
+  planner's `stand_in`, handed down to its children) without holding its
+  parent back; one too coarse for the eye in view hands that to its
+  children instead, so the edit is generated at the level the eye wants.
+  Rock an edit added where there was air (a mound's inside) stays air
+  while its footprint's new surface is generated (`ADDED_ROCK_WAITS`). So
+  an edit never shows a coarse ancestor in its place (it once drew flat
+  polygons hundreds of metres across for seconds after a big stroke).
+  Rock a ray meets (Solid and Buried nodes) draws the brush that filled
+  it or the volume's rock (`Planet::rock_material`, in the table entry):
+  it drew material 0, magenta, where an edit uncovered it.
 - Changed baked columns regenerate the nodes over them within the budget.
-- Sync is incremental: while seals only append to the large layer the
-  view keeps its faces and index; an edit rebuilds the recent brushes'
-  index, diffs the lists past their common start and writes the brush
-  buffer's tail in place. An unrelated history rebuilds the world.
+- Sync is incremental: the large layer's faces live in shared runs
+  (`Faces`) and their index in runs merged like a binary counter
+  (`LargeIndex`), so a seal indexes its own large brushes; an edit
+  rebuilds the recent brushes' index, diffs the lists past the large
+  layer and writes the brush buffer's tail in place. Edits the change log
+  cannot bridge (another history, or past `CHANGES_KEPT`) regenerate the
+  volume's every resident node in place (`resync_edits`,
+  `EditSync::Resynced`): pools, residency and measured footprints stay,
+  drawn chunks show until replaced. Only another recipe adds the volume
+  again.
 - The render thread finds the brushes over a footprint through a
   `BrushIndex` (a loose grid per face, brushes kept apart by the levels
   they apply at, so a coarse footprint skips those baked cells hold). A
@@ -314,8 +336,8 @@ Saves keep them too: `ChunkWorld::keep_resident` packs the resident
 edited chunks, `kept_chunks` takes them, and `KeptChunks::to_bytes` writes
 a header (a fingerprint of the generation shaders, terrain constants and
 world, and the history's length and hash) and the chunks deflated.
-`ChunkWorld::load_kept` keeps them before a new world's first update, for
-exactly that history; others are refused. Hosts reach this through
+`ChunkWorld::load_kept` keeps a volume's before its first update or after
+a resync, for exactly that history; others are refused. Hosts reach this through
 `PlanetFrame::kept` and its export (`KeptExport`), and save them beside the
 edit snapshot (Pulsar's `VoxelKeptChunks`).
 

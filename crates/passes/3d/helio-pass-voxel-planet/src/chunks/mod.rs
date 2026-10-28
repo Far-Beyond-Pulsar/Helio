@@ -60,6 +60,9 @@ const CHUNKS_START: usize = 8192;
 /// Chunk jobs of `DETAIL_LEVELS` a batch (`cell_materials` slots:
 /// `CELL_WORDS` words a column, 288 KiB each).
 const DETAIL_JOBS: usize = 128;
+/// Drawn nodes in view an edit changed, generated in the frame it is made
+/// whatever the budget (a small edit's all).
+const EDITED_NOW: usize = 48;
 /// Levels whose chunks get per-voxel materials, natural and edited: cells
 /// of 0.1-0.2 m at 0.1 m voxels, near the eye. Coarser chunks' leaves keep
 /// their pairs (an edit's top materials vote in them): a dug wall's detail
@@ -1213,16 +1216,16 @@ impl BrickCache {
 /// `bricks`, the index of its baked store when that is unchanged.
 /// The analytic brushes `planet` shows and where they are (`EditView`):
 /// the large layer's faces, then the recent brushes'. From an earlier view
-/// (`from`), its large faces and their index are reused while the large
-/// layer only extends them (seals append; an unseal or another history
-/// starts again), so an edit costs the recent brushes, and a seal the
-/// large layer's index.
+/// (`from`), its large faces (shared runs) and their index are extended
+/// while the large layer only extends them (seals append; an unseal or
+/// another history starts again), so an edit costs the recent brushes, and
+/// a seal its own large faces. Whether it extended `from`.
 fn edit_view(
     planet: &Planet,
     version: u64,
     from: Option<&EditView>,
     bricks: std::sync::Arc<classify::BrickIndex>,
-) -> EditView {
+) -> (EditView, bool) {
     let edits = planet.edits();
     let large = &edits.large;
     let n = large.len();
@@ -1237,34 +1240,34 @@ fn edit_view(
         ids.flat_map(|id| large.resolved(id as u32).faces.iter().copied())
             .collect::<Vec<FaceBrush>>()
     };
-    let (mut faces, index) =
-        match from.filter(|v| v.large_brushes <= n && prefix(v.large_brushes) == v.large_prefix) {
-            Some(v) if v.large_brushes == n => (v.faces[..v.large_faces].to_vec(), v.index.clone()),
-            Some(v) => {
-                let mut faces = v.faces[..v.large_faces].to_vec();
-                faces.extend(faces_of(v.large_brushes..n));
-                let index = std::sync::Arc::new(classify::BrushIndex::new(&faces, 0, true));
-                (faces, index)
-            }
-            None => {
-                let faces = faces_of(0..n);
-                let index = std::sync::Arc::new(classify::BrushIndex::new(&faces, 0, true));
-                (faces, index)
-            }
-        };
-    let large_faces = faces.len();
+    let from = from.filter(|v| v.large_brushes <= n && prefix(v.large_brushes) == v.large_prefix);
+    let (mut faces, mut index, large_reach, extended) = match from {
+        Some(v) => (v.faces.clone(), v.index.clone(), v.large_reach, true),
+        None => Default::default(),
+    };
+    let new_large = faces_of(from.map_or(0, |v| v.large_brushes)..n);
+    let large_reach = classify::faces_reach(large_reach, &new_large);
+    let indexed = faces.large_len();
+    faces.extend_large(new_large);
+    index.extend(&faces, indexed);
+    let large_faces = faces.large_len();
+    let mut recent = Vec::new();
     let mut recent_counts = Vec::new();
     for id in 0..edits.recent.len() as u32 {
         let resolved = &edits.recent.resolved(id).faces;
-        faces.extend(resolved.iter().copied());
+        recent.extend(resolved.iter().copied());
         recent_counts.push(resolved.len());
     }
-    let recent_index = classify::BrushIndex::new(&faces[large_faces..], large_faces as u32, false);
-    EditView {
+    let recent_index = classify::BrushIndex::new(&recent, large_faces as u32, false);
+    let reach = classify::faces_reach(large_reach, &recent);
+    faces.set_recent(recent);
+    let view = EditView {
         grid: *planet.grid(),
         faces,
         index,
         recent_index,
+        reach,
+        large_reach,
         large_faces,
         large_brushes: n,
         large_prefix: prefix(n),
@@ -1275,7 +1278,8 @@ fn edit_view(
         volume_depth: (i64::from(planet.volume_bounds().0)
             / i64::from(planet.grid().layer_mm())
             + 1) as i32,
-    }
+    };
+    (view, extended)
 }
 
 /// A brush buffer for `faces` with room for twice as many (at least 64):
@@ -1283,7 +1287,7 @@ fn edit_view(
 fn brush_buffer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
-    faces: &[FaceBrush],
+    faces: &classify::Faces,
 ) -> (wgpu::Buffer, usize) {
     let capacity = (faces.len() * 2).max(64);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1292,16 +1296,22 @@ fn brush_buffer(
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    queue.write_buffer(
-        &buffer,
-        0,
-        bytemuck::cast_slice(if faces.is_empty() {
-            &NO_BRUSH[..]
-        } else {
-            faces
-        }),
-    );
+    if faces.is_empty() {
+        queue.write_buffer(&buffer, 0, bytemuck::cast_slice(&NO_BRUSH[..]));
+    }
+    write_faces(queue, &buffer, faces, 0);
     (buffer, capacity)
+}
+
+/// `faces` from `from` on written into the brush buffer.
+fn write_faces(queue: &wgpu::Queue, buffer: &wgpu::Buffer, faces: &classify::Faces, from: usize) {
+    for (at, run) in faces.slices_from(from) {
+        queue.write_buffer(
+            buffer,
+            (at * std::mem::size_of::<FaceBrush>()) as u64,
+            bytemuck::cast_slice(run),
+        );
+    }
 }
 
 /// A batch's restore jobs (slot, pack offset, result index, flags), their
@@ -1819,6 +1829,15 @@ struct SceneState {
     map_written: Option<scene::VoxelMaterialMap>,
     /// The bind group of the inputs' version.
     group: std::sync::Mutex<Option<((u64, u64), wgpu::BindGroup)>>,
+}
+
+/// What [`ChunkWorld::sync_edits`] did with a volume's edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditSync {
+    /// Followed from the edits it had (or unchanged).
+    Followed,
+    /// Another history: every resident node generated again in place.
+    Resynced,
 }
 
 /// Chunk trees of a scene's voxel volumes (`volumes`): one chunk pool, one
@@ -3581,7 +3600,6 @@ impl ChunkWorld {
         stats.shown_chunks += usize::from(shown);
         stats.restored_chunks += 1;
         self.changed_nodes.insert(key);
-        vol.hidden.remove(&key);
         vol.events.push(residency::Event::Generated(key));
         true
     }
@@ -3683,7 +3701,7 @@ impl ChunkWorld {
             )
         };
         let edits = vol.edits.clone();
-        let baked = edits.bricks.footprints.contains(&fp);
+        let baked = edits.bricks.holds(&fp);
         // Each chunk's brushes (from those over the footprint:
         // `BrushIndex`); at `DETAIL_LEVELS` each takes a `cell_materials`
         // slot of the batch's (its leaves get per-voxel materials): the
@@ -3829,7 +3847,6 @@ impl ChunkWorld {
             }
             stats.shown_chunks += usize::from(shown);
             self.changed_nodes.insert(key);
-            vol.hidden.remove(&key);
             vol.events.push(residency::Event::Generated(key));
         }
         stats.generated_chunks += queued;
@@ -3839,25 +3856,27 @@ impl ChunkWorld {
     /// Follow `planet`'s edits in volume `id` (its recipe unchanged):
     /// resident nodes under brushes that came or went are generated again
     /// in the next update; under baked edits that changed (a seal's coarser
-    /// levels), within the budget. False when its edits do not follow these
-    /// (another history, or no such volume): add the volume again.
-    pub fn sync_edits(&mut self, id: VolumeId, planet: &Planet) -> bool {
-        let Some(mut vol) = self.take_volume(id.0) else {
-            return false;
-        };
-        let followed = self.sync_volume_edits(&mut vol, planet);
+    /// levels), within the budget. Edits the change log cannot bridge
+    /// (another history, or one past the changes it keeps) regenerate the
+    /// volume's resident nodes in place ([`Self::resync_edits`]):
+    /// [`EditSync::Resynced`] (a host may load the chunks it kept for that
+    /// history, `load_kept`). None when there is no such volume.
+    pub fn sync_edits(&mut self, id: VolumeId, planet: &Planet) -> Option<EditSync> {
+        let mut vol = self.take_volume(id.0)?;
+        let sync = self.sync_volume_edits(&mut vol, planet);
         self.put_volume(vol);
-        followed
+        Some(sync)
     }
 
-    fn sync_volume_edits(&mut self, vol: &mut volumes::Volume, planet: &Planet) -> bool {
+    fn sync_volume_edits(&mut self, vol: &mut volumes::Volume, planet: &Planet) -> EditSync {
         let edits = planet.edits();
         let state = EditState::of(edits);
         if state == vol.edit_state {
-            return true;
+            return EditSync::Followed;
         }
         let Some(changes) = edits.baked_changes_since(vol.edit_state.sealed) else {
-            return false;
+            self.resync_edits(vol, planet, state);
+            return EditSync::Resynced;
         };
         let columns: Vec<ColumnKey> = changes
             .restated
@@ -3883,21 +3902,24 @@ impl ChunkWorld {
                 vol.index,
             ))
         };
-        let view = edit_view(planet, vol.edits.version + 1, Some(&vol.edits), bricks);
+        let (view, extended) = edit_view(planet, vol.edits.version + 1, Some(&vol.edits), bricks);
         // Brushes in one list and not the other: past the lists' common
-        // start (the large layer's, at least, but for a seal's own).
-        let same = vol
-            .edits
-            .faces
-            .iter()
-            .zip(&view.faces)
-            .take_while(|(a, b)| a == b)
-            .count();
+        // start (the old view's large faces, when the new one extends
+        // them; a seal's own may match further).
+        let start = if extended { vol.edits.large_faces } else { 0 };
+        let same = start
+            + vol
+                .edits
+                .faces
+                .iter_from(start)
+                .zip(view.faces.iter_from(start))
+                .take_while(|(a, b)| a == b)
+                .count();
         let mut count: FxHashMap<[u32; 12], i32> = FxHashMap::default();
-        for fb in &vol.edits.faces[same..] {
+        for fb in vol.edits.faces.iter_from(same) {
             *count.entry(bytemuck::cast(*fb)).or_default() -= 1;
         }
-        for fb in &view.faces[same..] {
+        for fb in view.faces.iter_from(same) {
             *count.entry(bytemuck::cast(*fb)).or_default() += 1;
         }
         // Recent brushes sealed into the baked store left the list, not the
@@ -3908,7 +3930,7 @@ impl ChunkWorld {
             .saturating_sub(vol.edit_state.sealed.sealed);
         let sealed_faces: usize = vol.edits.recent_counts.iter().take(sealed).sum();
         let large = vol.edits.large_faces;
-        for fb in &vol.edits.faces[large..large + sealed_faces] {
+        for fb in vol.edits.faces.iter_from(large).take(sealed_faces) {
             if let Some(n) = count.get_mut(&bytemuck::cast::<FaceBrush, [u32; 12]>(*fb)) {
                 if *n < 0 {
                     *n += 1;
@@ -3953,7 +3975,58 @@ impl ChunkWorld {
         vol.ceiling = planet.outer_radius() - planet.grid().radius() + CEILING_MARGIN;
         vol.bounds = crate::volume::bounding_radius(planet);
         self.motion_version += 1;
-        true
+        EditSync::Followed
+    }
+
+    /// Edits unrelated to the ones volume `vol` followed: what changed is
+    /// unknown, so its every resident node is generated again in place
+    /// (drawn ones keep showing their chunks until their new ones come, the
+    /// others go), what was kept of it goes, and its planner classifies
+    /// every node again, drawing those edits made Mixed as they were until
+    /// generated. The pools, residency and measured footprints stay.
+    fn resync_edits(&mut self, vol: &mut volumes::Volume, planet: &Planet, state: EditState) {
+        let grid = vol.grid;
+        let volume = vol.index;
+        let bricks = std::sync::Arc::new(classify::BrickIndex::new(
+            &grid,
+            &planet.edits().baked,
+            volume,
+        ));
+        vol.edits = std::sync::Arc::new(edit_view(planet, vol.edits.version + 1, None, bricks).0);
+        self.drop_kept_where(|k| k.volume == volume);
+        let resident: Vec<NodeKey> = self
+            .nodes
+            .keys()
+            .filter(|k| k.volume == volume)
+            .copied()
+            .collect();
+        self.mark_resident(vol, resident);
+        // Every node of every level, as an edit marks those under it.
+        let everywhere: std::sync::Arc<[residency::NodeBox]> = (0..grid.levels())
+            .map(|level| residency::NodeBox {
+                level,
+                x: [i32::MIN, i32::MAX],
+                y: [i32::MIN, i32::MAX],
+                z: [i32::MIN, i32::MAX],
+            })
+            .collect();
+        for &face in grid.faces() {
+            vol.events
+                .push(residency::Event::Edited(face, everywhere.clone()));
+        }
+        // Drawn uniform nodes Mixed now: their chunks drawn when generated.
+        let uniform: Vec<NodeKey> = self
+            .drawn_set
+            .uniform_nodes()
+            .filter(|k| k.volume == volume)
+            .collect();
+        vol.urgent.extend(uniform);
+        self.write_brushes(vol, 0);
+        vol.edits_unsent = Some(vol.edits.clone());
+        vol.edit_state = state;
+        vol.ceiling = planet.outer_radius() - grid.radius() + CEILING_MARGIN;
+        vol.bounds = crate::volume::bounding_radius(planet);
+        self.motion_version += 1;
     }
 
     /// The brush buffer for `self.edits`: its faces from `from` on written
@@ -3962,12 +4035,8 @@ impl ChunkWorld {
         let faces = &vol.edits.faces;
         if faces.len() > vol.brush_capacity {
             (vol.brushes, vol.brush_capacity) = brush_buffer(&self.device, &self.queue, faces);
-        } else if from < faces.len() {
-            self.queue.write_buffer(
-                &vol.brushes,
-                (from * std::mem::size_of::<FaceBrush>()) as u64,
-                bytemuck::cast_slice(&faces[from..]),
-            );
+        } else {
+            write_faces(&self.queue, &vol.brushes, faces, from);
         }
     }
 
@@ -4434,7 +4503,6 @@ impl ChunkWorld {
                 stats.evicted_unseen += usize::from(!old.shown);
                 stats.evicted_chunks += 1;
             }
-            vol.hidden.remove(&key);
             vol.urgent.remove(&key);
             vol.stale.remove(&key);
             self.changed_nodes.insert(key);
@@ -4644,34 +4712,50 @@ impl ChunkWorld {
                         && fixed + tiles as f64 * tile + batch.chunk_jobs.len() as f64 * chunk >= ms
                 })
         };
-        // Nodes edits changed: coarsest first, then drawn ones, nearest
-        // first, within the frame's budget. A blast shows at once in coarse
-        // nodes; those left for later frames are hidden meanwhile (their
-        // nearest generated ancestor drawn in their place) and refine as
-        // they come. Then stale nodes.
-        let mut edited: Vec<(NodeKey, bool, f64)> = Vec::with_capacity(vol.urgent.len());
+        // Nodes edits changed: those drawn in view first, nearest first,
+        // then the rest drawn, then the cut's ancestors. Each keeps showing
+        // its old chunk until its new one is generated (never a coarse
+        // ancestor in its place); drawn ones in view are generated this
+        // frame past the budget, up to `EDITED_NOW`, so a small edit shows
+        // the frame it is made. Then stale nodes.
+        let local_view = view.map(|v| (vol.transform.dir_to_local(v.forward), v.cos_half));
+        let in_view = |k: &NodeKey| {
+            local_view.is_none_or(|(forward, cos_half)| {
+                let offset = local_eye.toward(&grid, k.footprint(), k.layers());
+                let length = offset.length();
+                let size = grid.level_size(k.level) * f64::from(CHUNK) * 1.5;
+                length < size || offset.dot(forward) > cos_half * length - size
+            })
+        };
+        let mut edited: Vec<(NodeKey, u8, f64)> = Vec::with_capacity(vol.urgent.len());
         for k in vol.urgent.drain() {
             let distance = *vol
                 .urgent_distance
                 .entry(k)
                 .or_insert_with(|| tile_distance(&grid, k.footprint(), k.layers(), &local_eye));
-            edited.push((k, !self.drawn_set.holds(k), distance));
+            let rank = if !self.drawn_set.holds(k) {
+                2
+            } else if in_view(&k) {
+                0
+            } else {
+                1
+            };
+            edited.push((k, rank, distance));
         }
-
-        edited.sort_unstable_by(|a, b| {
-            b.0.level
-                .cmp(&a.0.level)
-                .then(a.1.cmp(&b.1))
-                .then(a.2.total_cmp(&b.2))
-        });
-        let edited: Vec<(NodeKey, bool)> = edited
+        edited.sort_unstable_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+        let edited: Vec<(NodeKey, Option<u8>)> = edited
             .into_iter()
-            .map(|(k, ..)| (k, true))
-            .chain(vol.stale.iter().map(|k| (*k, false)))
+            .map(|(k, rank, _)| (k, Some(rank)))
+            .chain(vol.stale.iter().map(|k| (*k, None)))
             .collect();
+        let mut now = 0;
         for (key, urgent) in edited {
-            if full(&batch) || stats.out_of_slots {
-                if urgent {
+            let forced = urgent == Some(0) && now < EDITED_NOW;
+            let hard_full = batch.footprints() >= TILE_BATCH
+                || batch.chunk_jobs.len() >= CHUNK_BATCH
+                || stats.out_of_slots;
+            if hard_full || (!forced && full(&batch)) {
+                if urgent.is_some() {
                     vol.urgent.insert(key);
                     continue;
                 }
@@ -4688,21 +4772,20 @@ impl ChunkWorld {
                 &mut stats,
             ) == 0
             {
-                if urgent {
+                if urgent.is_some() {
                     vol.urgent.insert(key);
                 } else {
                     vol.stale.insert(key);
                 }
-            } else if urgent && self.drawn_set.kind(key).is_some_and(|k| k != Kind::Mixed) {
-                // A drawn uniform node an edit made Mixed: its chunk is
-                // drawn now, before the planner says so.
-                added.push((key, Kind::Mixed));
-                removed.push(key);
-            }
-        }
-        for &key in &vol.urgent {
-            if vol.hidden.insert(key) {
-                vol.events.push(residency::Event::Stale(key));
+            } else {
+                now += usize::from(forced);
+                if urgent.is_some() && self.drawn_set.kind(key).is_some_and(|k| k != Kind::Mixed)
+                {
+                    // A drawn uniform node an edit made Mixed: its chunk is
+                    // drawn now, before the planner says so.
+                    added.push((key, Kind::Mixed));
+                    removed.push(key);
+                }
             }
         }
         let urgent = &vol.urgent;
@@ -5162,6 +5245,16 @@ impl ChunkWorld {
                     .map_or((0.0, 64.0), |(a, b)| (f64::from(a), f64::from(b))),
             })
         };
+        // Uniform nodes show their volume's rock, or the material of the
+        // brush that added them.
+        for &(key, kind) in &added {
+            if kind != Kind::Mixed {
+                if let Some(vol) = self.volumes[usize::from(key.volume)].as_ref() {
+                    let rock = vol.edits.added_material(key).map_or(vol.rock, |m| m as u8);
+                    self.drawn_set.set_rock(key, rock);
+                }
+            }
+        }
         self.drawn_set
             .update(&added, &removed, &self.changed_nodes, frame, chunk_of);
         for (key, _) in &added {
@@ -7584,9 +7677,9 @@ impl ChunkWorld {
     }
 
     /// `kept`'s chunks kept, restored by copy when wanted: how many. Before
-    /// the world's first update; refused when they were made by other
-    /// generation code, terrain or world, or for another history than
-    /// `planet`'s.
+    /// the volume's first update or after `sync_edits` resynced it;
+    /// refused when they were made by other generation code, terrain or
+    /// world, or for another history than `planet`'s.
     pub fn load_kept(
         &mut self,
         id: VolumeId,
