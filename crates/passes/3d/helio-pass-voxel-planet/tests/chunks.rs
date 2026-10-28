@@ -4351,14 +4351,15 @@ fn gi_rays_see_light_through_leaves() {
 /// planet-centred point `p` sees the sun, the eye at `eye`: the finest level
 /// holding it, its nearest texel against the point's distance along the sun
 /// with the shader's bias (`sun_occlusion.wgsl`, without its filter), the
-/// level, its texel (m) and how far it sees toward the sun from `p` (m);
-/// `None` outside every level, or near a texel's edge.
+/// level, its texel (m), how far it sees toward the sun from `p` (m) and
+/// the texel's centre at `p`'s depth along the sun (the point the texel
+/// holds); `None` outside every level, or near a texel's edge.
 fn occlusion_lit(
     maps: &[f32],
     frame: &helio_pass_shadow_matrix::SunOcclusionFrame,
     eye: DVec3,
     p: DVec3,
-) -> Option<(bool, usize, f32, f32)> {
+) -> Option<(bool, usize, f32, f32, DVec3)> {
     let side = frame.info[1];
     let v3 = |a: [f32; 4]| Vec3::new(a[0], a[1], a[2]);
     let rel = (p - eye).as_vec3();
@@ -4380,11 +4381,15 @@ fn occlusion_lit(
         let (x, y) = (at.x as usize, at.y as usize);
         let stored = maps[(level * side as usize + y) * side as usize + x];
         let t = d.dot(v3(l.forward));
+        // From `p` across the texel to its centre.
+        let to_centre = (at.floor() + 0.5 - at) / side * 2.0 * half;
+        let centre = p + (v3(l.right) * to_centre.x - v3(l.up) * to_centre.y).as_dvec3();
         return Some((
             stored <= 0.0 || t <= stored + 3.0 * half / side,
             level,
             2.0 * half / side,
             t,
+            centre,
         ));
     }
     None
@@ -4458,14 +4463,19 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
             if planet.solid(planet.grid().locate(p).0) || (p - base).dot(up) < 0.2 * height {
                 continue;
             }
-            let Some((lit, level, texel, reach)) = occlusion_lit(&maps, &frame, eye, p) else {
+            let Some((lit, level, texel, reach, centre)) = occlusion_lit(&maps, &frame, eye, p) else {
                 continue;
             };
             // Toward the sun the level was drawn for, as far as it sees: what
-            // lies farther is not in the maps.
+            // lies farther is not in the maps. From the texel's centre, what
+            // it holds: a tower's shadow edge crossing the texel between `p`
+            // and its centre is the maps' resolution, not their error.
             let f = frame.levels[level].forward;
             let sun = -DVec3::new(f64::from(f[0]), f64::from(f[1]), f64::from(f[2])).normalize();
-            let hit = planet.raycast(p, sun, f64::from(reach) - 1.0);
+            if planet.solid(planet.grid().locate(centre).0) {
+                continue;
+            }
+            let hit = planet.raycast(centre, sun, f64::from(reach) - 1.0);
             // Occluders within a few texels: the maps' bias and texels decide.
             if hit
                 .as_ref()
