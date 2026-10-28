@@ -148,7 +148,8 @@ impl RenderPass for PlanarReflectionPass {
         None
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.width = width;
         self.height = height;
         self.bg_1 = None;

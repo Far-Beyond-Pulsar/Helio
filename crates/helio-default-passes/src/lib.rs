@@ -1306,7 +1306,7 @@ fn build_default_graph_internal_with_lens_user(
     for factory in &final_passes {
         graph.add_pass(factory(device, queue, iw, ih));
     }
-    graph.lock(iw, ih);
+    graph.lock_sized(config.render_size());
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let effect_snippet = user_effects;
@@ -1551,7 +1551,7 @@ fn build_fxaa_graph_internal(
         debug_overlay,
     );
 
-    graph.lock(iw, ih);
+    graph.lock_sized(config.render_size());
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(
@@ -1715,7 +1715,7 @@ fn build_hlfs_graph_internal(
         debug_overlay,
     );
 
-    graph.lock(iw, ih);
+    graph.lock_sized(config.render_size());
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(
@@ -1966,7 +1966,7 @@ fn build_fxaa_hlfs_graph_internal(
         debug_overlay,
     );
 
-    graph.lock(w, h);
+    graph.lock_sized(config.render_size());
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(
@@ -2019,7 +2019,7 @@ pub fn build_simple_graph_with_context(ctx: PassBuildContext<'_>) -> RenderGraph
         ctx.config.surface_format,
     )));
     // Executing an unlocked graph panics; every other builder locks.
-    graph.lock(ctx.config.internal_width(), ctx.config.internal_height());
+    graph.lock_sized(ctx.config.render_size());
     graph
 }
 
@@ -2258,7 +2258,7 @@ fn build_forward_graph_internal(
         debug_overlay,
     );
 
-    graph.lock(iw, ih);
+    graph.lock_sized(config.render_size());
 
     let overlay_owned = debug_overlay.map(Arc::clone);
     let rebuilder: GraphRebuilder = Arc::new(

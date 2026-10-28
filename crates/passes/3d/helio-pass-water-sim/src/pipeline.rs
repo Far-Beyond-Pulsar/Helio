@@ -1,9 +1,101 @@
 use crate::simulation::{DeltaUniform, DropUniform, HitboxCountUniform};
 use crate::{
     make_caustics_grid, make_static_box_mesh, make_top_grid, vec4_vbl, WaterSimPass, BLIT_WGSL,
-    CASCADE_COUNT, MAX_SIM_VOLUMES, MAX_WATER_HITBOXES, SIM_SIZE,
+    CASCADE_COUNT, MAX_SIM_VOLUMES, MAX_WATER_HITBOXES,
 };
 use wgpu::util::DeviceExt;
+
+/// The simulation's height fields: two ping-pong arrays of one layer per
+/// volume row and cascade, `size` square.
+pub(crate) struct SimTextures {
+    pub(crate) tex_a: wgpu::Texture,
+    pub(crate) tex_b: wgpu::Texture,
+    pub(crate) array_a: wgpu::TextureView,
+    pub(crate) array_b: wgpu::TextureView,
+    pub(crate) layers_a: Vec<wgpu::TextureView>,
+    pub(crate) layers_b: Vec<wgpu::TextureView>,
+}
+
+impl SimTextures {
+    pub(crate) fn new(device: &wgpu::Device, size: u32) -> Self {
+        let total_layers = CASCADE_COUNT as u32 * MAX_SIM_VOLUMES;
+        let make_array_tex = |label| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: total_layers,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let tex_a = make_array_tex("WaterSim Tex A");
+        let tex_b = make_array_tex("WaterSim Tex B");
+        let layers = |tex: &wgpu::Texture, side: &str| -> Vec<wgpu::TextureView> {
+            (0..total_layers)
+                .map(|layer| {
+                    tex.create_view(&wgpu::TextureViewDescriptor {
+                        label: Some(&format!("WaterSim Layer {side} {layer}")),
+                        dimension: Some(wgpu::TextureViewDimension::D2),
+                        base_array_layer: layer,
+                        array_layer_count: Some(1),
+                        ..Default::default()
+                    })
+                })
+                .collect()
+        };
+        let array = |tex: &wgpu::Texture, label| {
+            tex.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(label),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                array_layer_count: Some(total_layers),
+                ..Default::default()
+            })
+        };
+        Self {
+            layers_a: layers(&tex_a, "A"),
+            layers_b: layers(&tex_b, "B"),
+            array_a: array(&tex_a, "WaterSim Array View A"),
+            array_b: array(&tex_b, "WaterSim Array View B"),
+            tex_a,
+            tex_b,
+        }
+    }
+}
+
+/// The underwater tint's scratch target at the internal resolution.
+pub(crate) fn tint_scratch(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Water Tint Scratch"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
 
 impl WaterSimPass {
     #[allow(clippy::too_many_arguments)]
@@ -235,64 +327,15 @@ impl WaterSimPass {
         let normal_pipeline = make_sim_pipeline("WaterSim Normal", &sim_pl, &normal_frag);
         let hitbox_pipeline = make_sim_pipeline("WaterSim Hitbox", &hitbox_pl, &hitbox_frag);
 
-        let total_layers = CASCADE_COUNT as u32 * MAX_SIM_VOLUMES;
-
-        let make_array_tex = |label| {
-            device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d {
-                    width: SIM_SIZE,
-                    height: SIM_SIZE,
-                    depth_or_array_layers: total_layers,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            })
-        };
-
-        let sim_tex_a = make_array_tex("WaterSim Tex A");
-        let sim_tex_b = make_array_tex("WaterSim Tex B");
-
-        let mut sim_layer_views_a = Vec::with_capacity(total_layers as usize);
-        let mut sim_layer_views_b = Vec::with_capacity(total_layers as usize);
-        for layer in 0..total_layers {
-            let va = sim_tex_a.create_view(&wgpu::TextureViewDescriptor {
-                label: Some(&format!("WaterSim Layer A {}", layer)),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: layer,
-                array_layer_count: Some(1),
-                ..Default::default()
-            });
-            let vb = sim_tex_b.create_view(&wgpu::TextureViewDescriptor {
-                label: Some(&format!("WaterSim Layer B {}", layer)),
-                dimension: Some(wgpu::TextureViewDimension::D2),
-                base_array_layer: layer,
-                array_layer_count: Some(1),
-                ..Default::default()
-            });
-            sim_layer_views_a.push(va);
-            sim_layer_views_b.push(vb);
-        }
-
-        let sim_array_view_a = sim_tex_a.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("WaterSim Array View A"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            array_layer_count: Some(total_layers),
-            ..Default::default()
-        });
-        let sim_array_view_b = sim_tex_b.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("WaterSim Array View B"),
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            array_layer_count: Some(total_layers),
-            ..Default::default()
-        });
+        // Placeholders until water exists (see `allocate_content`).
+        let SimTextures {
+            tex_a: sim_tex_a,
+            tex_b: sim_tex_b,
+            array_a: sim_array_view_a,
+            array_b: sim_array_view_b,
+            layers_a: sim_layer_views_a,
+            layers_b: sim_layer_views_b,
+        } = SimTextures::new(device, 1);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("WaterSim Internal Sampler"),
@@ -614,22 +657,7 @@ impl WaterSimPass {
             },
         );
 
-        let tint_scratch_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Water Tint Scratch"),
-            size: wgpu::Extent3d {
-                width: internal_width.max(1),
-                height: internal_height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let tint_scratch_view =
-            tint_scratch_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let (tint_scratch_tex, tint_scratch_view) = tint_scratch(device, 1, 1, surface_format);
 
         let underwater_tint_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -877,7 +905,7 @@ impl WaterSimPass {
         let (caustics_vbuf, caustics_ibuf, caustics_index_count) = make_caustics_grid(device);
 
         use std::convert::TryInto;
-        let n_updates = total_layers as usize;
+        let n_updates = CASCADE_COUNT * MAX_SIM_VOLUMES as usize;
 
         Self {
             sim_bgl,
@@ -950,9 +978,9 @@ impl WaterSimPass {
             blit_bg: None,
             blit_bg_key: None,
             water_output_view: None,
-            volume_liveness: Default::default(),
+            content_allocated: false,
             screen_active: false,
-            sim_live: true,
+            sim_live: false,
             caustics_bg_key: None,
             caustics_bg: None,
             render_bg: Default::default(),

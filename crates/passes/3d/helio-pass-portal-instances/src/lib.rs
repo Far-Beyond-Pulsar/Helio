@@ -54,6 +54,9 @@ struct ScreenSize {
 type PortalBindGroupKey = ([wgpu::Buffer; 10], wgpu::TextureView);
 
 pub struct PortalInstancePass {
+    /// Live portal chains in the host's projection (`projection_counts[1]`);
+    /// the pass is a graph member only while there are some.
+    active_chain_count: Option<u32>,
     /// The draw slots the vertex shader reads (see `helio_pass_gbuffer::DrawSlots`).
     draw_slots: helio_pass_gbuffer::DrawSlots,
     material_binding: helio_mats::MaterialBindingConfig,
@@ -151,6 +154,7 @@ impl PortalInstancePass {
         let pipeline = Self::create_pipeline(device, &pipeline_layout, &shader);
 
         Self {
+            active_chain_count: None,
             draw_slots: Default::default(),
             material_binding,
             pipeline,
@@ -411,6 +415,15 @@ impl RenderPass for PortalInstancePass {
 
     fn name(&self) -> &'static str {
         "PortalInstance"
+    }
+
+    fn set_frame_inputs(&mut self, inputs: &helio_core::RenderFrameInputs<'_>) {
+        self.active_chain_count = inputs.projection_counts.map(|counts| counts[1]);
+    }
+
+    /// A member while the host's portal projection has live chains.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.active_chain_count.unwrap_or(0) > 0
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

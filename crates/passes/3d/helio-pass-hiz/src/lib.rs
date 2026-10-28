@@ -476,7 +476,7 @@ impl RenderPass for HiZBuildPass {
             .with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST);
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
         // Graph textures are re-allocated by the pool. Clear lazy views/bind groups
         // so they are rebuilt from the new graph-owned texture in execute().
         self.mip_views.clear();

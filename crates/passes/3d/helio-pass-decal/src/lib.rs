@@ -51,10 +51,6 @@ pub struct DecalPass {
     /// inserted -- SceneDB is the only decal source this pass reads.
     /// `decal_count` is 0 whenever this is bound, so it's never dereferenced.
     fallback_decals: wgpu::Buffer,
-    /// Whether any `"decals"` row is live. Hosts register the column up
-    /// front, so the buffer's presence alone would run both full-screen
-    /// passes over empty rows, which only copy the G-buffer unchanged.
-    decal_liveness: helio_core::SceneBufferLiveness,
 }
 
 impl DecalPass {
@@ -211,7 +207,6 @@ impl DecalPass {
             last_h: 0,
             decal_count: 0,
             fallback_decals,
-            decal_liveness: Default::default(),
         }
     }
 
@@ -368,6 +363,23 @@ impl RenderPass for DecalPass {
     fn name(&self) -> &'static str {
         "DecalApply"
     }
+
+    /// A member while some `"decals"` row is live. Hosts register the column
+    /// up front, so the buffer's presence alone would run both full-screen
+    /// passes over empty rows, which only copy the G-buffer unchanged.
+    fn is_member(&mut self, scene: &mut helio_core::SceneContent<'_>) -> bool {
+        scene.holds_rows("decals")
+    }
+
+    fn on_leave(&mut self, _device: &wgpu::Device) {
+        // The full-resolution temporaries come back with the next decal.
+        self.temp_albedo = None;
+        self.temp_normal = None;
+        self.temp_orm = None;
+        self.temp_emissive = None;
+        self.last_w = 0;
+        self.last_h = 0;
+    }
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("gbuffer");
         builder.read("hiz");
@@ -386,16 +398,10 @@ impl RenderPass for DecalPass {
         // SceneDB is the only decal source: `"decals"` is a fixed-capacity
         // buffer (`MAX_DECALS`), resolved fresh from the mirror by key every
         // frame. 0 when no `DecalComponent` has ever been inserted; there is
-        // no Helio-owned decal buffer to fall back to. Also 0 once every row
-        // is known to be empty (all-zero), since the passes would then only
-        // copy the G-buffer through the temporaries unchanged.
+        // no Helio-owned decal buffer to fall back to. The graph runs the pass
+        // only while some row is live (`is_member`).
         let decals = ctx.scene_buffers.get(BufferKey::of("decals"));
-        self.decal_liveness.update(ctx.device, ctx.queue, decals);
-        self.decal_count = if decals.is_some_and(|handle| self.decal_liveness.maybe_live(handle)) {
-            MAX_DECALS
-        } else {
-            0
-        };
+        self.decal_count = if decals.is_some() { MAX_DECALS } else { 0 };
         ctx.write_buffer(
             &self.globals_buf,
             0,

@@ -225,7 +225,21 @@ pub struct PassDeclaration {
 }
 
 pub struct RenderGraph {
+    /// The scheduled passes: the members of the current frame, in build
+    /// order. Everything per pass (pipelines, caches, chains) is indexed by
+    /// position in this list.
     pub(crate) passes: Vec<Box<dyn RenderPass>>,
+    /// Build-order slot of each scheduled pass, so a repartition can merge
+    /// members and dormant passes back into build order.
+    member_slots: Vec<usize>,
+    /// Passes that are not members of the frame (see
+    /// [`RenderPass::is_member`]), with their build-order slots.
+    dormant: Vec<(usize, Box<dyn RenderPass>)>,
+    next_slot: usize,
+    /// Per-frame membership answers, kept to avoid an allocation a frame.
+    membership_scratch: Vec<bool>,
+    /// The readers behind [`SceneContent`](crate::graph::SceneContent).
+    scene_rows: crate::graph::SceneRows,
     pass_index_map: HashMap<TypeId, usize>,
     profiler: Profiler,
     pub(crate) pool: GraphTexturePool,
@@ -404,6 +418,11 @@ impl RenderGraph {
     pub fn new(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
         Self {
             passes: Vec::new(),
+            member_slots: Vec::new(),
+            dormant: Vec::new(),
+            next_slot: 0,
+            membership_scratch: Vec::new(),
+            scene_rows: Default::default(),
             pass_index_map: HashMap::new(),
             profiler: Profiler::new(device, queue),
             pool: GraphTexturePool::new(),
@@ -718,45 +737,67 @@ impl RenderGraph {
             .collect()
     }
 
+    /// [`resize`](Self::resize) to `width` x `height` at both resolutions.
     pub fn set_render_size(&mut self, width: u32, height: u32) {
-        if self.output_w == width && self.output_h == height && self.resources_allocated {
+        self.resize(crate::graph::RenderSize::uniform(width, height));
+    }
+
+    /// Resizes the graph in place: its textures are reallocated at the new
+    /// resolutions and every pass, scheduled or dormant, gets
+    /// [`RenderPass::on_resize`]. Passes, pipelines and the schedule are kept,
+    /// so a resize costs the textures, not a rebuild.
+    pub fn resize(&mut self, size: crate::graph::RenderSize) {
+        if self.render_size() == size && self.resources_allocated {
             return;
         }
-        self.internal_w = width;
-        self.internal_h = height;
-        self.output_w = width;
-        self.output_h = height;
+        self.set_size(size);
         self.resize_pending = true;
-
         if self.locked {
-            self.locked = false;
-            self.lock(width, height);
-            for pass in &mut self.passes {
-                pass.on_resize(&self.device, width, height);
-            }
+            self.reallocate_textures();
         } else {
-            self.pool.clear();
-            // Cached reflected groups may bind the textures just dropped.
-            self.reflected_group_cache.clear();
-            self.collect_declarations();
-            let (writes, reads, _) = self.chain_read_write_sets();
-            self.parallel_layers = compute_parallel_layers(&writes, &reads);
-            self.allocate_textures();
-            self.prepare_pipeline_registries();
-            self.detect_subpass_chains();
-            self.resources_allocated = true;
-            for pass in &mut self.passes {
-                pass.on_resize(&self.device, width, height);
-            }
-            self.rebuild_gpu_render_bundles();
+            self.allocate_transients();
         }
+        let device = self.device.clone();
+        for pass in self.all_passes_mut() {
+            pass.on_resize(&device, size);
+        }
+        self.gpu_render_bundles.clear();
+        self.rebuild_gpu_render_bundles();
+    }
+
+    fn set_size(&mut self, size: crate::graph::RenderSize) {
+        [self.internal_w, self.internal_h] = size.internal;
+        [self.output_w, self.output_h] = size.output;
+    }
+
+    /// Reallocates the graph textures of a locked graph at its current size,
+    /// keeping its chains and passes (the textures' alias groups depend only
+    /// on the schedule).
+    fn reallocate_textures(&mut self) {
+        self.pool.clear();
+        // Cached reflected groups may bind the textures just dropped.
+        self.reflected_group_cache.clear();
+        self.collect_declarations();
+        for rl in self.resources.values_mut() {
+            rl.chain_local = self
+                .subpass_chains
+                .iter()
+                .any(|c| c.start <= rl.first_write_pass && rl.last_read_pass < c.end);
+        }
+        self.assign_chain_aware_alias_groups();
+        self.allocate_textures();
+        self.resources_allocated = true;
+        // Recorded units bind the textures just replaced.
+        self.reset_recording_cache();
     }
 
     pub fn init_transients(&mut self, width: u32, height: u32) {
-        self.internal_w = width;
-        self.internal_h = height;
-        self.output_w = width;
-        self.output_h = height;
+        self.set_size(crate::graph::RenderSize::uniform(width, height));
+        self.allocate_transients();
+    }
+
+    /// Allocates the graph textures of a graph that is not locked.
+    fn allocate_transients(&mut self) {
         self.pool.clear();
         // Cached reflected groups may bind the textures just dropped.
         self.reflected_group_cache.clear();
@@ -791,6 +832,8 @@ impl RenderGraph {
             .entry(type_id)
             .or_insert(self.passes.len());
         self.passes.push(pass);
+        self.member_slots.push(self.next_slot);
+        self.next_slot += 1;
         self.gpu_render_bundles.push(None);
     }
 
@@ -807,40 +850,135 @@ impl RenderGraph {
         self.add_pass(pass);
         self.gpu_render_bundles.clear();
         self.pass_cache.clear();
+        let size = self.render_size();
         if let Some(pass) = self.passes.last_mut() {
-            pass.on_resize(&self.device, self.output_w, self.output_h);
+            pass.on_resize(&self.device, size);
         }
-        self.lock(self.output_w, self.output_h);
+        self.schedule();
         self.resize_pending = true;
     }
 
+    /// The first pass of type `T`, scheduled or dormant (see
+    /// [`RenderPass::is_member`]): configuration reaches a pass whether or not
+    /// the current scene uses it.
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
-        let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
-        self.passes[idx].as_any_mut().downcast_mut::<T>()
+        let slot = self.first_slot_of(TypeId::of::<T>())?;
+        self.pass_at_slot_mut(slot)?
+            .as_any_mut()
+            .downcast_mut::<T>()
     }
 
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
-        let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
-        self.passes[idx].as_any().downcast_ref::<T>()
+        let slot = self.first_slot_of(TypeId::of::<T>())?;
+        self.all_passes()
+            .find(|(s, _)| *s == slot)
+            .and_then(|(_, pass)| pass.as_any().downcast_ref::<T>())
+    }
+
+    /// Build-order slot of the first pass of `type_id`, scheduled or dormant.
+    fn first_slot_of(&self, type_id: TypeId) -> Option<usize> {
+        let member = self
+            .pass_index_map
+            .get(&type_id)
+            .map(|&index| self.member_slots[index]);
+        let dormant = self
+            .dormant
+            .iter()
+            .find(|(_, pass)| pass.as_any().type_id() == type_id)
+            .map(|(slot, _)| *slot);
+        match (member, dormant) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn pass_at_slot_mut(&mut self, slot: usize) -> Option<&mut Box<dyn RenderPass>> {
+        if let Some(index) = self.member_slots.iter().position(|&s| s == slot) {
+            return self.passes.get_mut(index);
+        }
+        self.dormant
+            .iter_mut()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, pass)| pass)
+    }
+
+    /// Every pass with its build-order slot: the scheduled ones, then the
+    /// dormant ones.
+    fn all_passes(&self) -> impl Iterator<Item = (usize, &Box<dyn RenderPass>)> {
+        self.member_slots
+            .iter()
+            .copied()
+            .zip(self.passes.iter())
+            .chain(self.dormant.iter().map(|(slot, pass)| (*slot, pass)))
+    }
+
+    fn all_passes_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn RenderPass>> {
+        self.passes
+            .iter_mut()
+            .chain(self.dormant.iter_mut().map(|(_, pass)| pass))
+    }
+
+    /// Number of passes that are not members of the current frame.
+    pub fn dormant_count(&self) -> usize {
+        self.dormant.len()
+    }
+
+    /// Names of the scheduled passes, in execution order.
+    pub fn member_names(&self) -> Vec<&'static str> {
+        self.passes.iter().map(|pass| pass.name()).collect()
     }
 
     /// Preserve opt-in streaming state when rebuilding a graph on this device.
     /// New pass configuration and graph resources remain authoritative.
+    /// Dormant passes inherit too, from scheduled or dormant predecessors.
     pub fn inherit_persistent_state(&mut self, previous: &mut RenderGraph) {
+        let size = self.render_size();
+        let device = self.device.clone();
         let mut used = std::collections::HashSet::new();
-        for pass in &mut self.passes {
-            for (index, old) in previous.passes.iter_mut().enumerate() {
+        let mut olds: Vec<&mut Box<dyn RenderPass>> = previous.all_passes_mut().collect();
+        for pass in self.all_passes_mut() {
+            for (index, old) in olds.iter_mut().enumerate() {
                 if !used.contains(&index)
                     && pass.name() == old.name()
                     && pass.as_any().type_id() == old.as_any().type_id()
-                    && pass.inherit_persistent_state(old.as_mut())
+                    && pass.inherit_persistent_state(&mut ***old)
                 {
                     used.insert(index);
-                    pass.on_resize(&self.device, self.internal_w, self.internal_h);
+                    pass.on_resize(&device, size);
                     break;
                 }
             }
         }
+        drop(olds);
+
+        // Same scene: start with the members the old graph had, and its row
+        // readers, rather than a readback later.
+        self.scene_rows = std::mem::take(&mut previous.scene_rows);
+        let members: Vec<(TypeId, &'static str)> = previous
+            .passes
+            .iter()
+            .map(|pass| (pass.as_any().type_id(), pass.name()))
+            .collect();
+        let join: Vec<bool> = self
+            .dormant
+            .iter()
+            .map(|(_, pass)| members.contains(&(pass.as_any().type_id(), pass.name())))
+            .collect();
+        if join.contains(&true) {
+            let stay = vec![true; self.passes.len()];
+            self.repartition(&stay, &join);
+            if self.locked {
+                self.reschedule_members();
+            }
+        }
+    }
+
+    /// The graph's current resolutions.
+    pub fn render_size(&self) -> crate::graph::RenderSize {
+        crate::graph::RenderSize::new(
+            [self.internal_w, self.internal_h],
+            [self.output_w, self.output_h],
+        )
     }
 
     /// Find the index of the first pass matching type `T`.
@@ -856,7 +994,7 @@ impl RenderGraph {
     /// pass types actually care. See that trait method's docs for why callers
     /// should call this every frame rather than only on the transition.
     pub fn set_editor_mode(&mut self, enabled: bool) {
-        for pass in &mut self.passes {
+        for pass in self.all_passes_mut() {
             pass.set_editor_mode(enabled);
         }
     }
@@ -866,7 +1004,7 @@ impl RenderGraph {
     /// Passes interpret only the fields they own; the graph and renderer
     /// facade never downcast into concrete pass implementations.
     pub fn set_frame_inputs(&mut self, inputs: &crate::RenderFrameInputs<'_>) {
-        for pass in &mut self.passes {
+        for pass in self.all_passes_mut() {
             pass.set_frame_inputs(inputs);
         }
     }
@@ -924,14 +1062,15 @@ impl RenderGraph {
             // Chain membership alone cannot detect stale dependent bundles.
             self.gpu_render_bundles.clear();
             self.pass_cache.clear();
+            let size = self.render_size();
             if self.locked {
-                self.passes[index].on_resize(&self.device, self.output_w, self.output_h);
+                self.passes[index].on_resize(&self.device, size);
                 self.locked = false;
-                self.lock(self.output_w, self.output_h);
+                self.schedule();
                 self.resize_pending = true;
             } else if self.resources_allocated {
-                self.passes[index].on_resize(&self.device, self.output_w, self.output_h);
-                self.init_transients(self.output_w, self.output_h);
+                self.passes[index].on_resize(&self.device, size);
+                self.allocate_transients();
                 self.resize_pending = true;
             }
         }
@@ -1032,7 +1171,7 @@ impl RenderGraph {
                 .take()
                 .expect("check_swap rejects repeated picks");
             if fresh.inherit_persistent_state(&mut *self.passes[live]) {
-                fresh.on_resize(&self.device, self.internal_w, self.internal_h);
+                fresh.on_resize(&self.device, self.render_size());
             }
             self.pipeline_cache
                 .invalidate_pass(self.passes[live].name());
@@ -1047,23 +1186,23 @@ impl RenderGraph {
         Ok(())
     }
 
+    /// Every pass of type `T`, scheduled or dormant.
     pub fn iter_passes_mut<T: RenderPass + 'static>(&mut self) -> impl Iterator<Item = &mut T> {
-        self.passes
-            .iter_mut()
+        self.all_passes_mut()
             .filter_map(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// The debug views of every pass, dormant ones included: a view joins its
+    /// pass when it is selected.
     pub fn collect_debug_views(&self) -> Vec<crate::DebugViewDescriptor> {
-        self.passes
-            .iter()
-            .flat_map(|p| p.debug_views().iter().copied())
+        self.all_passes()
+            .flat_map(|(_, p)| p.debug_views().iter().copied())
             .collect()
     }
 
     pub fn collect_debug_view_legends(&self) -> Vec<(u32, crate::DebugViewLegend)> {
-        self.passes
-            .iter()
-            .flat_map(|pass| {
+        self.all_passes()
+            .flat_map(|(_, pass)| {
                 pass.debug_views().iter().filter_map(|view| {
                     pass.debug_view_legend(view.debug_mode)
                         .map(|legend| (view.debug_mode, legend))
@@ -1073,9 +1212,8 @@ impl RenderGraph {
     }
 
     pub fn collect_debug_view_categories(&self) -> Vec<(u32, &'static str)> {
-        self.passes
-            .iter()
-            .flat_map(|pass| {
+        self.all_passes()
+            .flat_map(|(_, pass)| {
                 pass.debug_views()
                     .iter()
                     .map(|view| (view.debug_mode, pass.debug_view_category(view.debug_mode)))
@@ -1086,7 +1224,7 @@ impl RenderGraph {
 
     /// Propagate a renderer-wide debug mode change to every pass.
     pub fn set_debug_mode(&mut self, mode: u32) {
-        for pass in &mut self.passes {
+        for pass in self.all_passes_mut() {
             pass.set_debug_mode(mode);
         }
     }
@@ -1437,6 +1575,13 @@ impl RenderGraph {
             self.locked,
             "RenderGraph::execute() requires lock() to be called first"
         );
+        // The frame's members: passes join and leave with the scene's content
+        // before anything of the frame is recorded.
+        if self.update_membership(scene) {
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope!("RenderGraph: reschedule for new members");
+            self.reschedule_members();
+        }
 
         // External device owners drive wgpu polling. Consume callbacks from
         // that host cadence before reserving a bounded readback slot for this
@@ -2510,13 +2655,145 @@ impl RenderGraph {
         registry
     }
 
-    /// Finalize the graph after all passes have been added.
+    /// [`lock_sized`](Self::lock_sized) with both resolutions `width` x `height`.
     pub fn lock(&mut self, width: u32, height: u32) {
+        self.lock_sized(crate::graph::RenderSize::uniform(width, height));
+    }
+
+    /// Finishes the graph after every pass has been added: decides the first
+    /// members (with no scene yet, so passes that need scene content start
+    /// dormant; see [`RenderPass::is_member`]), then schedules them and
+    /// allocates their textures at `size`.
+    pub fn lock_sized(&mut self, size: crate::graph::RenderSize) {
         assert!(!self.locked, "RenderGraph::lock() called twice");
-        self.internal_w = width;
-        self.internal_h = height;
-        self.output_w = width;
-        self.output_h = height;
+        self.set_size(size);
+        let mut content = self.scene_rows.content(None, None, None, self.frame_count);
+        let stay: Vec<bool> = self
+            .passes
+            .iter_mut()
+            .map(|pass| pass.is_member(&mut content))
+            .collect();
+        let join: Vec<bool> = self
+            .dormant
+            .iter_mut()
+            .map(|(_, pass)| pass.is_member(&mut content))
+            .collect();
+        self.repartition(&stay, &join);
+        self.schedule();
+    }
+
+    /// Schedules the graph's new members, keeping every graph texture whose
+    /// resource is unchanged (same views, so bind groups built over them stay
+    /// valid). If one had to change, every pass is told as on a resize.
+    fn reschedule_members(&mut self) {
+        let started = std::time::Instant::now();
+        let before = self.pool.views();
+        self.pool.retire();
+        self.locked = false;
+        self.schedule_reporting(false);
+        let changed = before
+            .iter()
+            .any(|(name, view)| self.pool.get_view(name).is_some_and(|now| now != view));
+        if changed {
+            let size = self.render_size();
+            let device = self.device.clone();
+            for pass in self.all_passes_mut() {
+                pass.on_resize(&device, size);
+            }
+            self.resize_pending = true;
+        }
+        eprintln!(
+            "[RenderGraph] {} scheduled, {} dormant ({:.2} ms{}): {}",
+            self.passes.len(),
+            self.dormant.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+            if changed { ", textures moved" } else { "" },
+            self.member_names().join(", ")
+        );
+    }
+
+    /// [`schedule_reporting`](Self::schedule_reporting), printing the schedule.
+    fn schedule(&mut self) {
+        self.schedule_reporting(true);
+    }
+
+    /// Asks every pass whether it is a member of this frame and moves those
+    /// that changed. True when the members changed (the graph must be
+    /// scheduled again).
+    fn update_membership(&mut self, scene: &dyn SceneInput) -> bool {
+        let mut content = self.scene_rows.content(
+            Some(scene.device().as_ref()),
+            Some(scene.queue().as_ref()),
+            Some(scene.scene_buffers()),
+            self.frame_count,
+        );
+        let mut changed = false;
+        self.membership_scratch.clear();
+        for pass in self.passes.iter_mut() {
+            let stays = pass.is_member(&mut content);
+            changed |= !stays;
+            self.membership_scratch.push(stays);
+        }
+        let members = self.passes.len();
+        for (_, pass) in self.dormant.iter_mut() {
+            let joins = pass.is_member(&mut content);
+            changed |= joins;
+            self.membership_scratch.push(joins);
+        }
+        if !changed {
+            return false;
+        }
+        let scratch = std::mem::take(&mut self.membership_scratch);
+        self.repartition(&scratch[..members], &scratch[members..]);
+        self.membership_scratch = scratch;
+        true
+    }
+
+    /// Moves passes between the schedule and the dormant list: scheduled pass
+    /// `i` stays when `stay[i]`, dormant pass `j` joins when `join[j]`. The
+    /// schedule keeps build order. Passes that leave get
+    /// [`RenderPass::on_leave`]. The caller schedules the graph again.
+    fn repartition(&mut self, stay: &[bool], join: &[bool]) {
+        let members = std::mem::take(&mut self.passes);
+        let slots = std::mem::take(&mut self.member_slots);
+        let dormant = std::mem::take(&mut self.dormant);
+        let mut all: Vec<(usize, Box<dyn RenderPass>, bool)> =
+            Vec::with_capacity(members.len() + dormant.len());
+        for ((slot, mut pass), &stays) in slots.into_iter().zip(members).zip(stay) {
+            if !stays {
+                pass.on_leave(&self.device);
+            }
+            all.push((slot, pass, stays));
+        }
+        for ((slot, pass), &joins) in dormant.into_iter().zip(join) {
+            all.push((slot, pass, joins));
+        }
+        all.sort_by_key(|(slot, _, _)| *slot);
+        self.pass_index_map.clear();
+        for (slot, pass, member) in all {
+            if member {
+                self.pass_index_map
+                    .entry(pass.as_any().type_id())
+                    .or_insert(self.passes.len());
+                self.passes.push(pass);
+                self.member_slots.push(slot);
+            } else {
+                self.dormant.push((slot, pass));
+            }
+        }
+        // Everything per pass is rebuilt by the next schedule.
+        self.gpu_render_bundles = (0..self.passes.len()).map(|_| None).collect();
+        self.pass_cache.clear();
+        self.chain_membership.clear();
+        self.prev_chain_membership.clear();
+        self.last_bundle_chain_gen.clear();
+    }
+
+    /// Schedules the current members: their declared resources, chains,
+    /// pipelines and textures. Sizes are the graph's current ones. `report`
+    /// prints the schedule.
+    fn schedule_reporting(&mut self, report: bool) {
+        assert!(!self.locked, "RenderGraph::lock() called twice");
         self.pool.clear();
         // Cached reflected groups may bind the textures just dropped.
         self.reflected_group_cache.clear();
@@ -2719,8 +2996,9 @@ impl RenderGraph {
         self.reset_recording_cache();
 
         self.rebuild_gpu_render_bundles_incremental();
+        self.pool.drop_retired();
 
-        {
+        if report {
             let mut w_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
             let mut r_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
             for p in self.passes.iter() {

@@ -96,12 +96,10 @@ pub struct SpriteCullPass {
     /// [`SpriteCullPass::follow_target`].
     follow_target: Option<[f32; 2]>,
     target_size: (u32, u32),
-    /// Whether the scene's `"sprite_instances"` rows may hold a sprite; a
-    /// pass built with [`SpriteCullPass::skip_while_empty`] culls only
-    /// then, so an overlay over a scene without sprites records nothing.
+    /// A pass built with [`SpriteCullPass::skip_while_empty`] is a graph
+    /// member only while the scene's `"sprite_instances"` hold a sprite, so
+    /// an overlay over a scene without sprites records nothing.
     skip_while_empty: bool,
-    liveness: helio_core::SceneBufferLiveness,
-    live: bool,
 
     prepare_pipeline: wgpu::ComputePipeline,
     prepare_bind_group: wgpu::BindGroup,
@@ -342,8 +340,6 @@ impl SpriteCullPass {
             follow_target: None,
             target_size: (0, 0),
             skip_while_empty: false,
-            liveness: Default::default(),
-            live: true,
             prepare_pipeline,
             prepare_bind_group,
             sort,
@@ -415,9 +411,9 @@ impl SpriteCullPass {
         self
     }
 
-    /// Records nothing while the scene's `"sprite_instances"` hold no
-    /// sprite (or the scene has none): only the draw's instance count is
-    /// reset, so the paired batch pass draws nothing.
+    /// Leaves the graph's schedule while the scene's `"sprite_instances"`
+    /// hold no sprite (or the scene has none); pair it with a batch pass that
+    /// does the same ([`SpriteBatchPass::scene_overlay`]).
     pub fn skip_while_empty(mut self) -> Self {
         self.skip_while_empty = true;
         self
@@ -469,6 +465,10 @@ impl RenderPass for SpriteCullPass {
         &["sprite_instances"]
     }
 
+    fn is_member(&mut self, scene: &mut helio_core::SceneContent<'_>) -> bool {
+        !self.skip_while_empty || scene.holds_rows("sprite_instances")
+    }
+
     fn name(&self) -> &'static str {
         "SpriteCull"
     }
@@ -486,10 +486,6 @@ impl RenderPass for SpriteCullPass {
         let scene = ctx
             .scene_buffers
             .get(pulsar_scenedb::gpu::BufferKey::of("sprite_instances"));
-        if self.skip_while_empty {
-            self.liveness.update(ctx.device, ctx.queue, scene);
-            self.live = scene.is_some_and(|handle| self.liveness.maybe_live(handle));
-        }
         if let Some(center) = self.follow_target {
             if self.target_size != (ctx.width, ctx.height) {
                 self.target_size = (ctx.width, ctx.height);
@@ -531,15 +527,6 @@ impl RenderPass for SpriteCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        if !self.live {
-            // Nothing to draw: only the draw's instance count is reset.
-            ctx.graphics_cmds().clear_buffer(
-                &self.indirect_buf,
-                INDIRECT_INSTANCE_COUNT_OFFSET,
-                Some(4),
-            );
-            return Ok(());
-        }
         self.record(&mut ctx.graphics_cmds());
         Ok(())
     }

@@ -304,6 +304,7 @@ pub struct TextureDescriptor {
 }
 
 /// A texture allocation owned by the graph.
+#[derive(Clone)]
 pub struct GraphTexture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
@@ -320,6 +321,11 @@ pub struct GraphTexture {
 /// `wgpu::Texture` allocation, dramatically reducing peak VRAM.
 pub struct GraphTexturePool {
     textures: Vec<GraphTexture>,
+    /// The previous schedule's textures while the graph is scheduled again
+    /// (see [`retire`](Self::retire)): an allocation of the same resource on
+    /// the same physical texture takes its texture and views back, so bind
+    /// groups passes built over them stay valid.
+    retired: Vec<GraphTexture>,
     name_map: HashMap<String, usize>,
     alias_refs: HashMap<String, u32>,
     physical_allocations: usize,
@@ -330,6 +336,7 @@ impl GraphTexturePool {
     pub fn new() -> Self {
         Self {
             textures: Vec::new(),
+            retired: Vec::new(),
             name_map: HashMap::new(),
             alias_refs: HashMap::new(),
             physical_allocations: 0,
@@ -370,6 +377,17 @@ impl GraphTexturePool {
                         && candidate.desc.usage.contains(desc.usage)
                 }) {
                     let source_texture = self.textures[source_index].texture.clone();
+                    if let Some(old) = self.take_retired(&desc, Some(&source_texture)) {
+                        let idx = self.textures.len();
+                        self.textures.push(GraphTexture {
+                            desc: desc.clone(),
+                            allocation_id: self.textures[source_index].allocation_id,
+                            ..old
+                        });
+                        self.name_map.insert(desc.name.clone(), idx);
+                        *self.alias_refs.entry(group.to_owned()).or_insert(0) += 1;
+                        return &self.textures[idx];
+                    }
                     let view = if self.xr_active {
                         source_texture.create_view(&wgpu::TextureViewDescriptor {
                             label: Some(&desc.name),
@@ -402,6 +420,22 @@ impl GraphTexturePool {
                     return &self.textures[idx];
                 }
             }
+        }
+
+        if let Some(old) = self.take_retired(&desc, None) {
+            let idx = self.textures.len();
+            let allocation_id = self.physical_allocations;
+            self.physical_allocations += 1;
+            self.textures.push(GraphTexture {
+                desc: desc.clone(),
+                allocation_id,
+                ..old
+            });
+            self.name_map.insert(desc.name.clone(), idx);
+            if let Some(group) = &desc.alias_group {
+                *self.alias_refs.entry(group.clone()).or_insert(0) += 1;
+            }
+            return &self.textures[idx];
         }
 
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -530,6 +564,58 @@ impl GraphTexturePool {
         self.name_map.clear();
         self.alias_refs.clear();
         self.physical_allocations = 0;
+    }
+
+    /// Empties the pool but keeps its textures for the allocations that
+    /// follow, until [`drop_retired`](Self::drop_retired): a resource
+    /// allocated again with the same descriptor (on the same physical
+    /// texture, when it aliases) gets its old texture and views back.
+    pub fn retire(&mut self) {
+        if self.retired.is_empty() {
+            self.retired = std::mem::take(&mut self.textures);
+        }
+        self.clear();
+    }
+
+    /// Frees the retired textures no allocation took back.
+    pub fn drop_retired(&mut self) {
+        self.retired.clear();
+    }
+
+    /// A retired texture for `desc`: same name and shape, on `physical` when
+    /// the allocation aliases it, otherwise on a physical texture no current
+    /// resource uses. Views are cloned; the retired entry stays for later
+    /// rounds of the same schedule.
+    fn take_retired(
+        &self,
+        desc: &TextureDescriptor,
+        physical: Option<&wgpu::Texture>,
+    ) -> Option<GraphTexture> {
+        self.retired
+            .iter()
+            .find(|old| {
+                old.desc.name == desc.name
+                    && old.desc.format == desc.format
+                    && old.desc.width == desc.width
+                    && old.desc.height == desc.height
+                    && old.desc.depth_or_array_layers == desc.depth_or_array_layers
+                    && old.desc.mip_level_count == desc.mip_level_count
+                    && old.desc.sample_count == desc.sample_count
+                    && old.desc.usage == desc.usage
+                    && match physical {
+                        Some(physical) => old.texture == *physical,
+                        None => !self.textures.iter().any(|t| t.texture == old.texture),
+                    }
+            })
+            .cloned()
+    }
+
+    /// Each resource's view, to tell after a new schedule which ones changed.
+    pub(crate) fn views(&self) -> Vec<(String, wgpu::TextureView)> {
+        self.textures
+            .iter()
+            .map(|t| (t.desc.name.clone(), t.view.clone()))
+            .collect()
     }
 }
 

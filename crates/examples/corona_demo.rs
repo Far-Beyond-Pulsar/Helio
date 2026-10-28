@@ -46,6 +46,7 @@ struct App {
 struct AppState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
+    capture: v3_demo_common::SurfaceCapture,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
@@ -187,6 +188,7 @@ impl ApplicationHandler for App {
             size.height.max(1),
             helio::HelioGraphicsConfig {
                 vr_support: true,
+                surface_usage: v3_demo_common::SurfaceCapture::from_env().usage(),
                 application_name: "Corona Demo".into(),
                 ..Default::default()
             },
@@ -266,6 +268,7 @@ impl ApplicationHandler for App {
         self.state = Some(AppState {
             window,
             surface,
+            capture: v3_demo_common::SurfaceCapture::from_env(),
             device,
             queue,
             surface_format,
@@ -311,7 +314,7 @@ impl ApplicationHandler for App {
                 state.surface.configure(
                     &state.device,
                     &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        usage: state.capture.usage(),
                         format: state.surface_format,
                         width: size.width,
                         height: size.height,
@@ -433,7 +436,11 @@ impl ApplicationHandler for App {
                 // Upload this frame's SceneDB writes to the GPU mirror; without it they
                 // are never visible to the renderer (Helio#266).
                 v3_demo_common::flush_scene_db(&state.scene_db, state.renderer.queue());
-                if let Err(e) = state.renderer.render_window_frame(&camera, &state.surface) {
+                if let Err(e) =
+                    state
+                        .capture
+                        .render_window_frame(&mut state.renderer, &camera, &state.surface)
+                {
                     log::error!("Render error: {:?}", e);
                 }
             }

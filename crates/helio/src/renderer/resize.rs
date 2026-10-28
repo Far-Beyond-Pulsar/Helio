@@ -62,24 +62,35 @@ impl Renderer {
 
         self.clear_target_next_frame = true;
 
-        // Same recipe the current graph was built from, at the new size:
-        // one stored config, not a field per pass-specific flag, so no
-        // setting can be dropped by a rebuild (Helio#254/#255).
-        let config = RendererConfig {
-            width,
-            height,
-            ..self.renderer_config()
-        };
-        if let Some(replacement) = self.build_replacement_graph(config) {
-            self.install_replacement_graph(replacement);
-        } else {
-            self.graph.set_render_size(internal_w, internal_h);
+        // The graph resizes its textures in place and keeps every pass (and
+        // its state); only a configuration change rebuilds it. A rebuild due
+        // this frame builds at the new size, so the old graph is left alone.
+        if !self.pending_rebuild {
+            self.graph.resize(helio_core::RenderSize::new(
+                [internal_w, internal_h],
+                [width, height],
+            ));
         }
 
-        log::trace!(
-            "apply_resize_now: total resize {}ms",
-            resize_start.elapsed().as_secs_f64() * 1000.0
-        );
+        self.last_resize_ms = resize_start.elapsed().as_secs_f64() * 1000.0;
+        log::trace!("apply_resize_now: total resize {}ms", self.last_resize_ms);
+    }
+
+    /// Rebuilds the graph from [`Self::renderer_config`] (a configuration
+    /// change: the pass set or pass settings). No-op for graphs installed
+    /// without a rebuilder.
+    pub(crate) fn apply_rebuild_now(&mut self) {
+        // One stored config, not a field per pass-specific flag, so no
+        // setting can be dropped by a rebuild (Helio#254/#255).
+        if let Some(replacement) = self.build_replacement_graph(self.renderer_config()) {
+            self.install_replacement_graph(replacement);
+            self.clear_target_next_frame = true;
+        }
+    }
+
+    /// How long the last resize took on the CPU, in milliseconds.
+    pub fn last_resize_ms(&self) -> f64 {
+        self.last_resize_ms
     }
 
     /// Builds a fresh graph from `config` with the stored rebuilder, or `None`
@@ -126,6 +137,7 @@ impl Renderer {
         self.tsr_quality = quality;
         self.render_scale = scale;
         self.pending_resize = Some((self.output_width, self.output_height));
+        self.pending_rebuild = true;
     }
 
     pub fn render_scale(&self) -> f32 {

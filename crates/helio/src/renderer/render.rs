@@ -115,7 +115,7 @@ impl Renderer {
             self.poll_cull_stats_readback();
         }
 
-        // Before the resize drain: a pending resize rebuilds from the latest
+        // Before the rebuild drain: a pending rebuild builds from the latest
         // shader sources anyway, so a reload on the same frame costs nothing.
         #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
         self.poll_shader_reload();
@@ -123,6 +123,10 @@ impl Renderer {
         if let Some((w, h)) = self.pending_resize.take() {
             helio_core::cpu_scope!("Helio: apply_resize_now");
             self.apply_resize_now(w, h);
+        }
+        if std::mem::take(&mut self.pending_rebuild) {
+            helio_core::cpu_scope!("Helio: rebuild graph");
+            self.apply_rebuild_now();
         }
 
         #[cfg(feature = "bake")]
@@ -261,9 +265,8 @@ impl Renderer {
         let depth: &wgpu::TextureView = &self.depth_view;
 
         // Keep every pass's `RenderPass::set_editor_mode` in sync every
-        // frame — not just once at graph construction — because a resize
-        // (even the very first one most windowing backends fire right after
-        // window creation) rebuilds the graph from scratch via
+        // frame — not just once at graph construction — because a rebuild
+        // (a configuration change, shader reload) replaces the graph via
         // `graph_rebuilder`, producing fresh pass instances that default
         // back to game mode. Cheap: a no-op virtual call per pass for the
         // (overwhelming) majority that don't override it.
