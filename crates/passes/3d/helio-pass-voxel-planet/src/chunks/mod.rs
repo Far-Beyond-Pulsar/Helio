@@ -5285,14 +5285,32 @@ impl ChunkWorld {
                     .drain(..self.ground_changes.len() - GROUND_CHANGES);
             }
         }
-        // The occluders: chunks generated or dug in place where drawn, of
-        // every volume (a cut refining keeps its pages until they age).
+        // The occluders: chunks generated or dug in place where drawn, and
+        // chunks drawn finer than before (the cut refining: what the sun's
+        // pages were traced through changed), of every volume. A node drawn
+        // coarser in place of finer ones changes nothing worth tracing
+        // again (a still view's cut breathes; the finer pages stand).
         if self.sun_occlusion.is_some() {
-            let finer: FxHashSet<NodeKey> = added.iter().map(|a| a.0).collect();
-            for key in &self.changed_nodes {
-                if !self.drawn_set.holds(*key) || finer.contains(key) {
+            let mut over_removed = FxHashSet::default();
+            for &r in &removed {
+                let Some(vol) = self.volumes[usize::from(r.volume)].as_ref() else {
                     continue;
+                };
+                let mut k = r;
+                while k.level + 1 < vol.grid.levels() {
+                    k = k.parent();
+                    if !over_removed.insert(k) {
+                        break;
+                    }
                 }
+            }
+            let added_keys: FxHashSet<NodeKey> = added.iter().map(|a| a.0).collect();
+            let changed = self
+                .changed_nodes
+                .iter()
+                .filter(|k| self.drawn_set.holds(**k) && !added_keys.contains(*k));
+            let finer = added_keys.iter().filter(|k| !over_removed.contains(*k));
+            for key in changed.chain(finer) {
                 if let Some(vol) = self.volumes[usize::from(key.volume)].as_ref() {
                     self.occluder_changes
                         .push(world_box(node_box(&vol.grid, *key), &vol.transform));

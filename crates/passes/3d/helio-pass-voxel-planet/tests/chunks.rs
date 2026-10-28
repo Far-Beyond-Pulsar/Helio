@@ -4170,9 +4170,8 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     world.sun = (up * 0.5 + side * 0.87).normalize().as_vec3();
     world.settle(gpu, &planet, &view);
     world.settle_sun_pages(gpu, &planet, &view);
-    // A kilometre: the tallest tower's shadow under this sun, twice over.
-    const REACH: f64 = 1000.0;
     let check = |world: &World| {
+        let clock = std::time::Instant::now();
         let pages = world.chunks.read_sun_occlusion().expect("drawn");
         let mut next = xorshift(0x2545_f491_4f6c_dd1d);
         let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
@@ -4196,11 +4195,12 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
             if read.lit > 0.0 && read.lit < 1.0 {
                 continue;
             }
-            // Toward the sun the page was traced for, as far as the towers'
-            // shadows reach (`REACH`; the pages see to the ceiling, a CPU
-            // walk of 10 cm cells that far is minutes a point).
+            // Toward the sun the page was traced for, as far as the tower's
+            // shadow reaches under this 30-degree sun, twice over (the pages
+            // see to the ceiling; a CPU walk of 10 cm cells that far takes
+            // seconds a point).
             let sun = DVec3::from_array(read.sun.map(f64::from)).normalize();
-            let hit = planet.raycast(p, sun, f64::from(read.depth).min(REACH));
+            let hit = planet.raycast(p, sun, f64::from(read.depth).min(4.0 * height));
             // Occluders within a few texels: the bias and texels decide.
             if hit
                 .as_ref()
@@ -4223,7 +4223,8 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
             }
         }
         eprintln!(
-            "sun occlusion: compared {compared} by level {levels:?}, shadowed {shadowed}, wrong {wrong}"
+            "sun occlusion: compared {compared} by level {levels:?}, shadowed {shadowed}, wrong {wrong} ({:.1} s)",
+            clock.elapsed().as_secs_f64()
         );
         assert!(
             compared > 200 && shadowed > 40,
