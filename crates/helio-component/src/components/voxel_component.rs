@@ -1,4 +1,4 @@
-//! Reflected, SceneDB-owned authoring components for voxel objects and terrain.
+//! Reflected, SceneDB-owned authoring components for voxel terrain.
 //!
 //! These structs contain reflected configuration and runtime-only live data.
 //! Voxel encodings, edit batches, and generation behavior belong to the
@@ -7,28 +7,14 @@
 
 use engine_class_derive::{component_events, engine_class};
 use super::VoxelFeatureSpawn;
-use helio_voxel_data::{
-    VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal, VoxelStoredPayload,
-};
-pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
-
-/// Generic live payload storage owned by a voxel component row.
-///
-/// Keys are intentionally opaque to this crate; voxel chunk/key semantics are
-/// defined by the voxel data contract. The tuple contains the live data revision and
-/// payload map so a batch can publish both under one lock. Values are immutable
-/// so readers can retain a cheap snapshot while a writer replaces one entry.
-/// Component clones create fresh stores; callers can explicitly clone the
-/// `Arc` when shared access is intended. Four opaque words allow collision-free
-/// chunk keys (for example signed XYZ bit patterns plus an LOD word).
+use helio_voxel_data::{VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal};
 
 /// Typed payload for block lifecycle events. Coordinates are the exact
 /// world-space centre of the base cell; `material` is the material present
-/// when the event occurred (before a break, or after a placement).
+/// when the event occurred (before a break, or after a placement). An edit
+/// changing more than `helio_pass_voxel_planet::edit_yield::EXACT_CELLS`
+/// cells reports regions instead: `count` cells of that material around a
+/// brick's centre (1 for a single block).
 #[engine_class(no_register)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockData {
@@ -40,10 +26,12 @@ pub struct BlockData {
     pub z: f64,
     #[property]
     pub material: u32,
+    #[property]
+    pub count: u64,
 }
 
 /// Typed payload for a terrain cell whose material changed from one solid
-/// material to another.
+/// material to another (`count` cells of a region, as `BlockData`).
 #[engine_class(no_register)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockMaterialChange {
@@ -57,6 +45,8 @@ pub struct BlockMaterialChange {
     pub previous_material: u32,
     #[property]
     pub material: u32,
+    #[property]
+    pub count: u64,
 }
 
 #[component_events(class = "VoxelTerrainComponent")]
@@ -129,153 +119,6 @@ fn deserialize_generator_ref_json(
 )]
 #[allow(dead_code)]
 type RegisteredVoxelGeneratorRef = VoxelGeneratorRef;
-
-fn filled_cube_payload_store(dimensions: [u32; 3], slot: u8) -> VoxelPayloadStore {
-    let mut chunks = HashMap::new();
-    for z in 0..dimensions[2].div_ceil(8) {
-        for y in 0..dimensions[1].div_ceil(8) {
-            for x in 0..dimensions[0].div_ceil(8) {
-                let mut samples = [0u8; 8 * 8 * 8];
-                for local_z in 0..8 {
-                    for local_y in 0..8 {
-                        for local_x in 0..8 {
-                            if x * 8 + local_x < dimensions[0]
-                                && y * 8 + local_y < dimensions[1]
-                                && z * 8 + local_z < dimensions[2]
-                            {
-                                samples[(local_z * 64 + local_y * 8 + local_x) as usize] = slot;
-                            }
-                        }
-                    }
-                }
-                chunks.insert(
-                    [u64::from(x), u64::from(y), u64::from(z), 0],
-                    VoxelStoredPayload::raw_material(samples),
-                );
-            }
-        }
-    }
-    Arc::new(RwLock::new((0, chunks)))
-}
-
-fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
-    // `Clone` must preserve component value semantics for SceneDB snapshots
-    // and transactions. Share immutable payload allocations, but copy the
-    // mutable index/revision so two cloned entries never alias future edits.
-    let state = store
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Arc::new(RwLock::new((state.0, state.1.clone())))
-}
-
-/// Authoring component for a small deformable voxel object.
-///
-/// A newly-created object describes a cubic 16³ voxel volume. Its editable
-/// voxel contents are SceneDB-owned data managed through the voxel data API;
-/// this component stores configuration and the SceneDB material-ID palette.
-/// The host's voxel mesh renderer draws it as a mesh placed by its object
-/// ([`super::voxel_mesh`]).
-#[engine_class(category = "Voxel", debug, serialize, deserialize)]
-#[category("Volume", category_color = "#8F8F8F")]
-#[category("Rendering", category_color = "#7C9DC9")]
-#[category("Materials", category_color = "#D1A73F")]
-#[category("Editing", category_color = "#D18F6F")]
-pub struct VoxelComponent {
-    /// Runtime-only live payloads and data revision. Not an inspector
-    /// property, serialized configuration, or GPU-mirrored field. Component
-    /// clones copy the index/revision and share immutable payload allocations.
-    #[serde(skip)]
-    payloads: VoxelPayloadStore,
-    /// Whether the object participates in voxel rendering and queries.
-    #[property]
-    pub enabled: bool,
-    /// Edge length of one base-resolution voxel in world units.
-    #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "Volume")]
-    pub voxel_size: f64,
-    /// Initial cubic grid dimensions. The default is 16 × 16 × 16.
-    #[property(category = "Volume")]
-    pub dimensions: [u32; 3],
-    /// Stable renderer backend identifier. Empty leaves selection to the host.
-    #[serde(default)]
-    #[property(category = "Rendering")]
-    pub renderer_id: String,
-    /// Palette of IDs into Helio's existing SceneDB material records.
-    #[property(category = "Materials")]
-    pub material_ids: Vec<u32>,
-    /// Palette slot used for newly initialized voxels.
-    #[property(category = "Materials")]
-    pub default_material_slot: u32,
-    /// Whether external callers may submit deformation/edit batches.
-    #[property(category = "Editing")]
-    pub editable: bool,
-}
-
-impl Default for VoxelComponent {
-    fn default() -> Self {
-        Self {
-            payloads: filled_cube_payload_store([16; 3], 1),
-            enabled: true,
-            voxel_size: 1.0,
-            dimensions: [16; 3],
-            renderer_id: String::new(),
-            material_ids: vec![0],
-            default_material_slot: 1,
-            editable: true,
-        }
-    }
-}
-
-impl VoxelComponent {
-    /// Construct a filled, editable volume in the canonical 8³ material-chunk
-    /// encoding. Partial edge chunks are zero-padded; material slot zero is air.
-    pub fn filled_cube(
-        dimensions: [u32; 3],
-        material_ids: Vec<u32>,
-        slot: u8,
-    ) -> Result<Self, &'static str> {
-        if dimensions.iter().any(|&size| size == 0 || size > 256) {
-            return Err("cube dimensions must be within 1..=256 on each axis");
-        }
-        if material_ids.len() > 255 || slot == 0 || usize::from(slot) > material_ids.len() {
-            return Err("cube material slot must reference one of at most 255 material IDs");
-        }
-        Ok(Self {
-            payloads: filled_cube_payload_store(dimensions, slot),
-            enabled: true,
-            voxel_size: 1.0,
-            dimensions,
-            renderer_id: String::new(),
-            material_ids,
-            default_material_slot: u32::from(slot),
-            editable: true,
-        })
-    }
-    /// Low-level live SceneDB data capability. Normal
-    /// producers should mutate through `VoxelSourceWriter` so validation and
-    /// revision checks are preserved; scripts should export via data snapshots.
-    /// This handle carries no persistence policy.
-    pub fn payload_store(&self) -> VoxelPayloadStore {
-        Arc::clone(&self.payloads)
-    }
-}
-
-// Cloning a component preserves its live value while isolating future map
-// mutations. The immutable Arc payload allocations remain shared until one
-// entry replaces/deletes them.
-impl Clone for VoxelComponent {
-    fn clone(&self) -> Self {
-        Self {
-            payloads: clone_payload_store(&self.payloads),
-            enabled: self.enabled,
-            voxel_size: self.voxel_size,
-            dimensions: self.dimensions,
-            renderer_id: self.renderer_id.clone(),
-            material_ids: self.material_ids.clone(),
-            default_material_slot: self.default_material_slot,
-            editable: self.editable,
-        }
-    }
-}
 
 /// Overall form of a voxel world.
 #[derive(
@@ -1385,56 +1228,6 @@ impl VoxelTerrainStack {
     }
 }
 
-// SceneDB component methods are the stable scripting/registry surface for
-// individual edits and bounded brush batches. The editor uses
-// `VoxelSourceSession` for asynchronous, generation-checked brush strokes.
-#[pulsar_scenedb::component_methods]
-impl VoxelComponent {
-    #[world_method]
-    fn paint_sample(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        x: i64,
-        y: i64,
-        z: i64,
-        material_slot: u8,
-    ) -> Result<(), String> {
-        validate_paint_slot(material_slot)?;
-        edit_object_sample(world, entity, [x, y, z], material_slot)
-    }
-
-    #[world_method]
-    fn paint_samples(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        samples: Vec<[i64; 3]>,
-        material_slot: u8,
-    ) -> Result<(), String> {
-        validate_paint_slot(material_slot)?;
-        edit_object_samples(world, entity, &samples, material_slot)
-    }
-
-    #[world_method]
-    fn erase_sample(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        x: i64,
-        y: i64,
-        z: i64,
-    ) -> Result<(), String> {
-        edit_object_sample(world, entity, [x, y, z], 0)
-    }
-
-    #[world_method]
-    fn erase_samples(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        samples: Vec<[i64; 3]>,
-    ) -> Result<(), String> {
-        edit_object_samples(world, entity, &samples, 0)
-    }
-}
-
 #[pulsar_scenedb::component_methods]
 impl VoxelTerrainComponent {
     #[world_method]
@@ -1482,58 +1275,6 @@ impl VoxelTerrainComponent {
     }
 }
 
-fn edit_object_sample(
-    world: &mut pulsar_scenedb::World,
-    entity: pulsar_scenedb::Entity,
-    xyz: [i64; 3],
-    material_slot: u8,
-) -> Result<(), String> {
-    edit_object_samples(world, entity, &[xyz], material_slot)
-}
-
-fn edit_object_samples(
-    world: &mut pulsar_scenedb::World,
-    entity: pulsar_scenedb::Entity,
-    samples: &[[i64; 3]],
-    material_slot: u8,
-) -> Result<(), String> {
-    let component = world
-        .get::<VoxelComponent>(entity)
-        .ok_or_else(|| "voxel object component is absent".to_string())?;
-    if !component.enabled || !component.editable {
-        return Err("voxel object is disabled or not editable".into());
-    }
-    if component
-        .dimensions
-        .iter()
-        .any(|&size| size == 0 || size > 256)
-    {
-        return Err("voxel object dimensions must be between 1 and 256 samples".into());
-    }
-    if samples.iter().any(|sample| {
-        sample
-            .iter()
-            .enumerate()
-            .any(|(axis, &coord)| coord < 0 || coord >= i64::from(component.dimensions[axis]))
-    }) {
-        return Err("voxel sample is outside the object dimensions".into());
-    }
-    publish_samples(
-        component.payload_store(),
-        helio_voxel_data::VoxelTerrainId(u128::from(entity.bits())),
-        samples,
-        material_slot,
-        &component.material_ids,
-        helio_voxel_data::VoxelDomain::Bounded {
-            min: [0; 3],
-            max: component
-                .dimensions
-                .map(|size| i64::from(size.div_ceil(8) - 1)),
-            max_lod: 0,
-        },
-    )
-}
-
 fn edit_terrain_sample(
     world: &mut pulsar_scenedb::World,
     entity: pulsar_scenedb::Entity,
@@ -1570,48 +1311,6 @@ fn edit_terrain_samples(
     super::voxel_world::append_edits(world, entity, edits)
 }
 
-fn publish_samples(
-    store: VoxelPayloadStore,
-    terrain: helio_voxel_data::VoxelTerrainId,
-    samples: &[[i64; 3]],
-    material_slot: u8,
-    material_ids: &[u32],
-    domain: helio_voxel_data::VoxelDomain,
-) -> Result<(), String> {
-    if samples.is_empty() {
-        return Ok(());
-    }
-    if samples.len() > helio_voxel_data::VOXEL_EDIT_MAX_SAMPLES_PER_JOB {
-        return Err(format!(
-            "voxel sample batch exceeds the {} sample limit",
-            helio_voxel_data::VOXEL_EDIT_MAX_SAMPLES_PER_JOB
-        ));
-    }
-    if usize::from(material_slot) > material_ids.len() {
-        return Err(format!(
-            "material slot {material_slot} is outside the palette"
-        ));
-    }
-    let writer = helio_voxel_data::VoxelSourceWriter::new(
-        terrain,
-        helio_voxel_data::VoxelSourceId(0),
-        store,
-    );
-    let edits: Vec<_> = samples
-        .iter()
-        .copied()
-        .map(|xyz| helio_voxel_data::VoxelSampleEdit {
-            xyz,
-            lod: 0,
-            material_slot,
-        })
-        .collect();
-    writer
-        .publish_sample_edits(&edits, domain, material_ids)
-        .map(|_| ())
-        .map_err(|error| format!("voxel sample edit failed: {error:?}"))
-}
-
 fn validate_paint_slot(material_slot: u8) -> Result<(), String> {
     if material_slot == 0 {
         Err("material slot 0 is reserved for erase operations".into())
@@ -1624,44 +1323,6 @@ fn validate_paint_slot(material_slot: u8) -> Result<(), String> {
 mod tests {
     use super::*;
     use pulsar_reflection::EngineClass;
-
-    #[test]
-    fn voxel_component_starts_as_eight_filled_chunks_hidden_from_serialization() {
-        let component = VoxelComponent::default();
-        let store = component.payload_store();
-        let state = store.read().unwrap();
-        assert_eq!(state.1.len(), 8);
-        assert!(
-            state
-                .1
-                .values()
-                .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1))
-        );
-        drop(state);
-        let serialized = serde_json::to_value(&component).unwrap();
-        assert!(serialized.get("payloads").is_none());
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
-    }
-
-    #[test]
-    fn filled_cube_zero_pads_partial_edges_and_checks_palette() {
-        let cube = VoxelComponent::filled_cube([9, 1, 1], vec![7], 1).unwrap();
-        let store = cube.payload_store();
-        let state = store.read().unwrap();
-        assert_eq!(state.1.len(), 2);
-        assert_eq!(state.1[&[0, 0, 0, 0]][0], 1);
-        assert_eq!(state.1[&[0, 0, 0, 0]][1], 1);
-        assert_eq!(state.1[&[0, 0, 0, 0]][8], 0);
-        assert_eq!(state.1[&[1, 0, 0, 0]][0], 1);
-        assert_eq!(state.1[&[1, 0, 0, 0]][1], 0);
-        assert!(VoxelComponent::filled_cube([0, 1, 1], vec![7], 1).is_err());
-        assert!(VoxelComponent::filled_cube([1, 1, 1], vec![], 1).is_err());
-    }
 
     #[test]
     fn older_terrains_load_and_drop_their_chunk_fields() {
@@ -1725,36 +1386,5 @@ mod tests {
         }
         assert_eq!(VoxelAir::from_name("Mars"), Some(VoxelAir::Thin));
         assert_eq!(VoxelAir::from_name("vacuum"), None);
-    }
-
-    #[test]
-    fn cloned_component_preserves_live_state_without_aliasing_future_mutations() {
-        let original = VoxelComponent::default();
-        let chunks = original.payloads.read().unwrap().1.len();
-        let payload: Arc<[u8]> = Arc::from([1, 2, 3]);
-        original.payloads.write().unwrap().1.insert(
-            [u64::MAX, 0, 42, 7],
-            VoxelStoredPayload::raw_material(payload.clone()),
-        );
-        let clone = original.clone();
-
-        assert!(!Arc::ptr_eq(&original.payloads, &clone.payloads));
-        assert_eq!(original.payloads.read().unwrap().1.len(), chunks + 1);
-        assert_eq!(clone.payloads.read().unwrap().1.len(), chunks + 1);
-
-        clone
-            .payloads
-            .write()
-            .unwrap()
-            .1
-            .remove(&[u64::MAX, 0, 42, 7]);
-        assert_eq!(original.payloads.read().unwrap().1.len(), chunks + 1);
-
-        // Shared snapshots are explicit and retain immutable bytes cheaply.
-        let shared_handle = Arc::clone(&original.payloads);
-        let shared_payload = shared_handle.read().unwrap().1[&[u64::MAX, 0, 42, 7]]
-            .bytes
-            .clone();
-        assert!(Arc::ptr_eq(&payload, &shared_payload));
     }
 }

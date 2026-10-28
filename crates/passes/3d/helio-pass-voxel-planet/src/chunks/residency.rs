@@ -87,7 +87,21 @@ struct Node {
     /// The layers (level cells, [lo, hi)) its chunk occupies, once its
     /// result came back (generated or restored).
     occupied: Option<(i32, i32)>,
+    /// What it was drawn as when it was last a leaf of the cut (Mixed: its
+    /// chunk; Empty: air), and that plan (frame + 1).
+    leaf: Option<(Kind, u64)>,
+    /// Edits made it Mixed and its chunk is not generated yet: drawn as it
+    /// was (Empty: air; Solid or Buried: rock) meanwhile, without holding
+    /// its parent back, so an edit never shows a coarse ancestor in its
+    /// place.
+    stand_in: Option<Kind>,
+    /// The frame an edit last marked it.
+    edited: u64,
 }
+
+/// Frames rock an edit added stays air while its footprint's new surface
+/// is generated, at most (`Planner::surface_pending`).
+const ADDED_ROCK_WAITS: u64 = 120;
 
 struct Fp {
     ranges: Ranges,
@@ -167,6 +181,8 @@ pub struct Worst {
 }
 
 pub struct Planner {
+    /// The volume it plans (its keys').
+    volume: u16,
     nodes: FxHashMap<NodeKey, Node>,
     footprints: FxHashMap<Footprint, Fp>,
     /// The frame rays last met each node or a node under it.
@@ -190,13 +206,20 @@ impl Planner {
     /// Roots: every node of the coarsest level from the planet's centre (a
     /// plane's lowest ground) to its highest, and as deep and high as the
     /// edits reach, with the planet's whole height range (`range`, base
-    /// layers) as their footprints' estimate.
-    pub fn new(grid: &Grid, range: (i32, i32), config: PlanConfig, edits: Arc<EditView>) -> Self {
+    /// layers) as their footprints' estimate; nodes of volume `volume`.
+    pub fn new(
+        volume: u16,
+        grid: &Grid,
+        range: (i32, i32),
+        config: PlanConfig,
+        edits: Arc<EditView>,
+    ) -> Self {
         let level = grid.levels() - 1;
         let occluder = (!grid.is_plane())
             .then(|| grid.radius() + f64::from(range.0) * f64::from(grid.layer_mm()) * 1e-3)
             .filter(|r| *r > 0.0);
         let mut planner = Self {
+            volume,
             nodes: FxHashMap::default(),
             footprints: FxHashMap::default(),
             seen: FxHashMap::default(),
@@ -230,9 +253,9 @@ impl Planner {
             -(grid.radius() / grid.voxel_size()).ceil() as i32
         };
         let (mut lo, mut hi) = (bottom.min(self.range.0), self.range.1);
-        for fb in self.edits.faces.iter().filter(|fb| fb.op() <= 1) {
-            lo = lo.min(fb.k_lo.div_euclid(2));
-            hi = hi.max(fb.k_hi.div_euclid(2));
+        if let Some((a, b)) = self.edits.reach {
+            lo = lo.min(a);
+            hi = hi.max(b);
         }
         if let Some((a, b)) = self.edits.bricks.layers {
             lo = lo.min(a);
@@ -244,6 +267,7 @@ impl Planner {
             for cx in 0..n {
                 for cy in 0..n {
                     let fp = Footprint {
+                        volume: self.volume,
                         face,
                         level,
                         cx,
@@ -302,6 +326,7 @@ impl Planner {
         for (q, (a, b)) in [(0, 0), (1, 0), (0, 1), (1, 1)].into_iter().enumerate() {
             let ranges = quarters[q].unwrap_or(whole).child();
             let fp = Footprint {
+                volume: key.volume,
                 face: key.face,
                 level: key.level - 1,
                 cx: key.cx * 2 + a,
@@ -424,7 +449,18 @@ impl Planner {
         occupied
     }
 
+    /// Whether a Mixed node of `fp` (classified) is not generated yet.
+    fn surface_pending(&self, fp: Footprint) -> bool {
+        let Some((_, class)) = self.footprints.get(&fp).and_then(|f| f.class.as_ref()) else {
+            return false;
+        };
+        class.mixed.iter().any(|&(a, b)| {
+            (a..=b).any(|cz| !self.nodes.get(&fp.node(cz)).is_some_and(|n| n.generated))
+        })
+    }
+
     /// Whether `key`'s band (`band`, its footprint's layers) is refined,
+
     /// from its box: its error, in view, allowances; ready once every Mixed
     /// child of every node in it is generated (the children wanted, and the
     /// nodes under the eye when it is far too coarse, are queued in
@@ -512,6 +548,9 @@ impl Planner {
         if refine {
             self.estimate_children(key, frame);
             for &m in &members {
+                // A member drawn as it was before an edit hands that to its
+                // children (rock's children are rock, air's air).
+                let inherited = self.nodes.get(&m).and_then(|n| n.stand_in);
                 let below: Vec<NodeKey> = m.children(tiles[m.level as usize - 1]).collect();
                 for child in below {
                     let kind = self.kind(child);
@@ -519,9 +558,14 @@ impl Planner {
                     let entry = self.nodes.entry(child).or_default();
                     entry.used = frame;
                     if !entry.generated && needs {
-                        // A Buried child is rock meanwhile; a Mixed one has
-                        // no stand-in but its parent.
-                        if kind == Kind::Mixed {
+                        if entry.stand_in.is_none() {
+                            entry.stand_in = inherited;
+                            entry.edited = frame;
+                        }
+                        // A Buried child is rock meanwhile, an edited one
+                        // what it was; another Mixed one has no stand-in
+                        // but its parent.
+                        if kind == Kind::Mixed && entry.stand_in.is_none() {
                             ready = false;
                         }
                         wanted.push((priority, child));
@@ -624,21 +668,81 @@ impl Planner {
             }
             let kind = self.kind(key);
             let node = *self.nodes.entry(key).or_default();
-            self.nodes.get_mut(&key).unwrap().used = frame;
+            let this_plan = frame + 1;
+            let n = self.nodes.get_mut(&key).unwrap();
+            n.used = frame;
+            n.leaf = None;
             if kind == Kind::Empty {
+                n.stand_in = None;
+                n.leaf = Some((Kind::Empty, this_plan));
                 continue;
             }
             if !self.needs_data(grid, key, kind, &eyes[0]) {
+                // Rock an edit added where there was air (a mound's inside)
+                // stays air until its footprint's new surface is generated:
+                // drawn at once, its boxes covered the view while the
+                // surface came.
+                if kind != Kind::Empty
+                    && node.stand_in == Some(Kind::Empty)
+                    && frame < node.edited + ADDED_ROCK_WAITS
+                    && self.surface_pending(key.footprint())
+                {
+                    self.nodes.get_mut(&key).unwrap().leaf = Some((Kind::Empty, this_plan));
+                    continue;
+                }
+                let n = self.nodes.get_mut(&key).unwrap();
+                n.stand_in = None;
+                n.leaf = Some((kind, this_plan));
                 plan.drawn.push((key, kind));
                 continue;
             }
             if !node.generated {
-                // A Buried node a ray met, or holding the eye, is rock until
-                // its chunk comes (it never holds its parent back). Else
-                // only a root can be ungenerated here: children are visited
-                // once every Mixed one is generated.
-                if kind == Kind::Buried {
-                    plan.drawn.push((key, kind));
+                // An edited node too coarse for the eye in view hands what
+                // it stands in as to its children, which are visited in its
+                // place: the edit is generated at the level the eye wants,
+                // not first at the coarse level it was drawn at (a 60 m
+                // stroke drew rock boxes 200 m across, then refined).
+                if let Some(shown) = node.stand_in.filter(|_| key.level > 0) {
+                    let fp = key.footprint();
+                    let in_view = view.is_none_or(|v| {
+                        let offset = eyes[0].toward(grid, fp, key.layers());
+                        let length = offset.length();
+                        let size = grid.level_size(fp.level) * f64::from(CHUNK) * 1.5;
+                        length < size || offset.dot(v.forward) > guarded * length - size
+                    });
+                    let exact = self.footprints.get(&fp).is_some_and(|f| f.exact);
+                    if in_view
+                        && self.error(grid, key, &eyes) > 1.0
+                        && (exact || self.guess_of(key) < GUESS_LEVELS)
+                    {
+                        self.estimate_children(key, frame);
+                        self.nodes.get_mut(&key).unwrap().refined = true;
+                        for child in key.children(tiles[key.level as usize - 1]) {
+                            let edited = node.edited;
+                            let c = self.nodes.entry(child).or_default();
+                            if !c.generated && c.stand_in.is_none() {
+                                c.stand_in = Some(shown);
+                                c.edited = edited;
+                            }
+                            stack.push(child);
+                        }
+                        continue;
+                    }
+                }
+                // Else it is drawn as it was until its chunk comes; a
+                // Buried node a ray met, or holding the eye, is rock (it
+                // never holds its parent back). Else only a root can be
+                // ungenerated here: children are visited once every Mixed
+                // one is generated or stands in.
+                let shown = node
+                    .stand_in
+                    .or((kind == Kind::Buried).then_some(Kind::Buried));
+
+                if let Some(shown) = shown {
+                    self.nodes.get_mut(&key).unwrap().leaf = Some((shown, this_plan));
+                    if shown != Kind::Empty {
+                        plan.drawn.push((key, shown));
+                    }
                 }
                 wanted.push((f64::INFINITY, key));
                 continue;
@@ -658,7 +762,9 @@ impl Planner {
             // horizon.
             let hidden = self.beyond(grid, key.footprint(), band_layers, &eyes[0]);
             if hidden && self.beyond(grid, key.footprint(), band_layers, &eyes[1]) {
-                self.nodes.get_mut(&key).unwrap().refined = false;
+                let n = self.nodes.get_mut(&key).unwrap();
+                n.refined = false;
+                n.leaf = Some((if node.empty { Kind::Empty } else { kind }, this_plan));
                 if !node.empty {
                     plan.drawn.push((key, kind));
                 }
@@ -734,6 +840,7 @@ impl Planner {
             if ready {
                 stack.extend(children);
             } else {
+                n.leaf = Some((if node.empty { Kind::Empty } else { kind }, this_plan));
                 if shows {
                     n.drawn = frame + 1;
                     drawn_in_view += 1;
@@ -785,12 +892,14 @@ impl Planner {
                 let n = self.nodes.entry(k).or_default();
                 n.generated = true;
                 n.empty = false;
+                n.stand_in = None;
             }
             Event::Emptied(k) => {
                 let n = self.nodes.entry(k).or_default();
                 n.generated = true;
                 n.empty = true;
                 n.occupied = None;
+                n.stand_in = None;
             }
             Event::Occupied(k, layers) => {
                 if let Some(n) = self.nodes.get_mut(&k).filter(|n| n.generated) {
@@ -805,14 +914,38 @@ impl Planner {
                 }
             }
             Event::Edited(face, boxes) => {
-                for (k, n) in self.nodes.iter_mut() {
-                    if n.generated
-                        && n.empty
-                        && k.face == face
-                        && boxes.iter().any(|b| b.contains(k))
-                    {
+                // The boxes' nodes, looked up where they are fewer than the
+                // nodes known, else found by a scan.
+                let volume: u64 = boxes.iter().map(NodeBox::volume).sum();
+                let keys: Vec<NodeKey> = if volume < self.nodes.len() as u64 {
+                    boxes
+                        .iter()
+                        .flat_map(|b| b.keys(self.volume, face))
+                        .filter(|k| self.nodes.contains_key(k))
+                        .collect()
+                } else {
+                    self.nodes
+                        .keys()
+                        .filter(|k| k.face == face && boxes.iter().any(|b| b.contains(k)))
+                        .copied()
+                        .collect()
+                };
+                let last = self.last_plan;
+                for k in keys {
+                    let n = self.nodes.get_mut(&k).unwrap();
+                    n.edited = frame;
+                    // Drawn as it was until it is generated again: air (one
+                    // generated empty: its chunk dropped, known only here)
+                    // or rock.
+                    let was = n.leaf.filter(|&(_, plan)| plan == last).map(|(kind, _)| kind);
+                    if n.generated && n.empty {
                         n.generated = false;
                         n.empty = false;
+                        n.stand_in = Some(Kind::Empty);
+                    } else if !n.generated {
+                        if let Some(kind) = was.filter(|k| *k != Kind::Mixed) {
+                            n.stand_in = Some(kind);
+                        }
                     }
                 }
             }
@@ -910,8 +1043,8 @@ pub enum Event {
     /// Its chunk came back (generated or restored) occupying these layers
     /// (level cells, [lo, hi)).
     Occupied(NodeKey, (i32, i32)),
-    /// Edited and not generated again yet, or its chunk dropped: its
-    /// nearest generated ancestor is drawn until it is `Generated` again.
+    /// Its chunk dropped (out of the cut, or evicted): wanted again before
+    /// it is drawn.
     Stale(NodeKey),
     /// A footprint's ranges by quarter (`Fp::quarters`).
     Measured(Footprint, [Option<Ranges>; 4]),
@@ -935,6 +1068,27 @@ pub struct NodeBox {
 }
 
 impl NodeBox {
+    fn volume(&self) -> u64 {
+        let side = |r: [i32; 2]| (i64::from(r[1]) - i64::from(r[0]) + 1).max(0) as u64;
+        side(self.x)
+            .saturating_mul(side(self.y))
+            .saturating_mul(side(self.z))
+    }
+    /// Its nodes on `face` of `volume`.
+    fn keys(&self, volume: u16, face: u8) -> impl Iterator<Item = NodeKey> + '_ {
+        (self.x[0]..=self.x[1]).flat_map(move |cx| {
+            (self.y[0]..=self.y[1]).flat_map(move |cy| {
+                (self.z[0]..=self.z[1]).map(move |cz| NodeKey {
+                    volume,
+                    face,
+                    level: self.level,
+                    cx,
+                    cy,
+                    cz,
+                })
+            })
+        })
+    }
     pub fn contains(&self, k: &NodeKey) -> bool {
         k.level == self.level
             && (self.x[0]..=self.x[1]).contains(&k.cx)
@@ -952,8 +1106,10 @@ impl Event {
     }
 }
 
-/// A plan the worker made, and the nodes it evicted.
+/// A volume's plan the worker made, and the nodes it evicted.
 pub struct Planned {
+    /// The volume planned.
+    pub volume: u16,
     pub plan: Plan,
     /// Nodes drawn now and not by the last plan sent (or drawn as
     /// something else), and the reverse.
@@ -962,99 +1118,165 @@ pub struct Planned {
     pub evicted: Vec<NodeKey>,
     /// What the plan was made for.
     pub made_for: PlannedFor,
-    /// The frame whose eye it was made for, and the worker's milliseconds
-    /// on it (plan and eviction).
+}
+
+/// A job's plans, a volume each (the volumes the job held).
+pub struct Plans {
+    pub volumes: Vec<Planned>,
+    /// Structural events up to this number had reached the planners, and
+    /// this many frames of ray reports.
+    pub events_seen: u64,
+    pub reports_seen: u64,
+    /// The frame whose eye they were made for, and the worker's
+    /// milliseconds on them (plans and evictions).
     pub frame: u64,
     pub ms: f64,
 }
 
-/// What a plan was made for: structural events up to this number had
-/// reached the planner, and this many frames of ray reports; the eye and
-/// the view.
+/// What a volume's plan was made for: the eye and the view (in the
+/// volume's frame), and the version of the edits it classified with
+/// (`EditView::version`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PlannedFor {
-    pub events_seen: u64,
-    pub reports_seen: u64,
     pub eye: DVec3,
     pub view: Option<View>,
-    /// The version of the edits it classified with (`EditView::version`).
     pub edits: u64,
+}
+
+/// A volume's part of a plan: its eye moving at `velocity` and view (in
+/// its frame), what happened to its nodes since its last plan, generated
+/// nodes to evict for chunk slots, and its edits when they changed.
+pub struct VolumeJob {
+    pub volume: u16,
+    pub eye: DVec3,
+    pub velocity: DVec3,
+    pub view: Option<View>,
+    pub events: Vec<Event>,
+    pub need: usize,
+    pub edits: Option<Arc<EditView>>,
+}
+
+/// A volume coming or going.
+enum Change {
+    Add {
+        volume: u16,
+        grid: Grid,
+        range: (i32, i32),
+        config: PlanConfig,
+        edits: Arc<EditView>,
+    },
+    Remove(u16),
 }
 
 struct Job {
     events_seen: u64,
     reports_seen: u64,
-    eye: DVec3,
-    velocity: DVec3,
-    view: Option<View>,
     frame: u64,
-    events: Vec<Event>,
-    /// Generated nodes to evict for chunk slots.
-    need: usize,
-    edits: Option<Arc<EditView>>,
+    changes: Vec<Change>,
+    volumes: Vec<VolumeJob>,
 }
 
-/// The planner on its own thread: a job at a time, the latest plan taken
-/// without waiting.
+/// A volume's planner on the worker, and what its last plan drew.
+struct Planning {
+    grid: Grid,
+    planner: Planner,
+    drawn: FxHashMap<NodeKey, Kind>,
+}
+
+/// The planners of a world's volumes on their own thread: a job at a time
+/// (every volume's plan), the latest plans taken without waiting.
 pub struct Worker {
     jobs: std::sync::mpsc::Sender<Job>,
-    results: std::sync::Mutex<std::sync::mpsc::Receiver<Planned>>,
+    results: std::sync::Mutex<std::sync::mpsc::Receiver<Plans>>,
     busy: bool,
+    /// Volumes added or removed since the last job.
+    changes: Vec<Change>,
     /// Structural events and frames of ray reports submitted so far.
     events_sent: u64,
     reports_sent: u64,
 }
 
 impl Worker {
-    pub fn spawn(grid: Grid, range: (i32, i32), config: PlanConfig, edits: Arc<EditView>) -> Self {
+    pub fn spawn() -> Self {
         let (jobs, inbox) = std::sync::mpsc::channel::<Job>();
         let (outbox, results) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("chunk residency".into())
             .spawn(move || {
-                let mut planner = Planner::new(&grid, range, config, edits);
-                let mut drawn: FxHashMap<NodeKey, Kind> = FxHashMap::default();
+                let mut planning: FxHashMap<u16, Planning> = FxHashMap::default();
                 while let Ok(job) = inbox.recv() {
-                    if let Some(edits) = job.edits {
-                        planner.set_edits(&grid, edits);
-                    }
-                    for event in job.events {
-                        planner.apply(event, job.frame);
+                    for change in job.changes {
+                        match change {
+                            Change::Add {
+                                volume,
+                                grid,
+                                range,
+                                config,
+                                edits,
+                            } => {
+                                planning.insert(
+                                    volume,
+                                    Planning {
+                                        grid,
+                                        planner: Planner::new(volume, &grid, range, config, edits),
+                                        drawn: FxHashMap::default(),
+                                    },
+                                );
+                            }
+                            Change::Remove(volume) => {
+                                planning.remove(&volume);
+                            }
+                        }
                     }
                     let started = std::time::Instant::now();
-                    let plan = planner.plan(&grid, job.eye, job.velocity, job.view, job.frame);
-                    let evicted = planner.evict(job.frame, job.need);
-                    let now: FxHashMap<NodeKey, Kind> = plan.drawn.iter().copied().collect();
-                    let added = plan
-                        .drawn
-                        .iter()
-                        .filter(|(k, kind)| drawn.get(k) != Some(kind))
-                        .copied()
-                        .collect();
-                    let removed = drawn
-                        .iter()
-                        .filter(|(k, kind)| now.get(k) != Some(kind))
-                        .map(|(k, _)| *k)
-                        .collect();
-                    drawn = now;
-                    if outbox
-                        .send(Planned {
+                    let mut volumes = Vec::with_capacity(job.volumes.len());
+                    for v in job.volumes {
+                        let Some(p) = planning.get_mut(&v.volume) else {
+                            continue;
+                        };
+                        if let Some(edits) = v.edits {
+                            p.planner.set_edits(&p.grid, edits);
+                        }
+                        for event in v.events {
+                            p.planner.apply(event, job.frame);
+                        }
+                        let plan = p.planner.plan(&p.grid, v.eye, v.velocity, v.view, job.frame);
+                        let evicted = p.planner.evict(job.frame, v.need);
+                        let now: FxHashMap<NodeKey, Kind> = plan.drawn.iter().copied().collect();
+                        let added = plan
+                            .drawn
+                            .iter()
+                            .filter(|(k, kind)| p.drawn.get(k) != Some(kind))
+                            .copied()
+                            .collect();
+                        let removed = p
+                            .drawn
+                            .iter()
+                            .filter(|(k, kind)| now.get(k) != Some(kind))
+                            .map(|(k, _)| *k)
+                            .collect();
+                        p.drawn = now;
+                        volumes.push(Planned {
+                            volume: v.volume,
                             plan,
                             added,
                             removed,
                             evicted,
                             made_for: PlannedFor {
-                                events_seen: job.events_seen,
-                                reports_seen: job.reports_seen,
-                                eye: job.eye,
-                                view: job.view,
-                                edits: planner.edits.version,
+                                eye: v.eye,
+                                view: v.view,
+                                edits: p.planner.edits.version,
                             },
-                            frame: job.frame,
-                            ms: started.elapsed().as_secs_f64() * 1e3,
-                        })
-                        .is_err()
-                    {
+                        });
+                    }
+                    let plans = Plans {
+                        volumes,
+                        events_seen: job.events_seen,
+                        reports_seen: job.reports_seen,
+                        frame: job.frame,
+                        ms: started.elapsed().as_secs_f64() * 1e3,
+                    };
+                    if outbox.send(plans).is_err() {
                         break;
                     }
                 }
@@ -1064,51 +1286,71 @@ impl Worker {
             jobs,
             results: std::sync::Mutex::new(results),
             busy: false,
+            changes: Vec::new(),
             events_sent: 0,
             reports_sent: 0,
         }
     }
 
-    /// Plan for this eye with these events (`reports` frames of ray
-    /// reports among them; and edits, when they changed) unless a plan is
-    /// under way (then they stay with the caller).
-    #[allow(clippy::too_many_arguments)]
-    pub fn submit(
+    /// Plan volume `volume` (of `grid`, its height range `range` in base
+    /// layers, its edits `edits`) from the next job on.
+    pub fn add_volume(
         &mut self,
-        eye: DVec3,
-        velocity: DVec3,
-        view: Option<View>,
-        frame: u64,
-        events: &mut Vec<Event>,
-        reports: &mut u64,
-        need: usize,
-        edits: &mut Option<Arc<EditView>>,
+        volume: u16,
+        grid: Grid,
+        range: (i32, i32),
+        config: PlanConfig,
+        edits: Arc<EditView>,
     ) {
-        if !self.busy {
-            self.events_sent += events.iter().filter(|e| e.structural()).count() as u64;
-            self.reports_sent += std::mem::take(reports);
-            self.busy = self
-                .jobs
-                .send(Job {
-                    events_seen: self.events_sent,
-                    reports_seen: self.reports_sent,
-                    eye,
-                    velocity,
-                    view,
-                    frame,
-                    events: std::mem::take(events),
-                    need,
-                    edits: edits.take(),
-                })
-                .is_ok();
-        }
+        self.changes.push(Change::Add {
+            volume,
+            grid,
+            range,
+            config,
+            edits,
+        });
     }
 
-    /// The finished plan, if any.
-    pub fn poll(&mut self) -> Option<Planned> {
-        let planned = self.results.get_mut().ok()?.try_recv().ok()?;
+    /// Stop planning volume `volume` (its nodes' bookkeeping dropped).
+    pub fn remove_volume(&mut self, volume: u16) {
+        self.changes.push(Change::Remove(volume));
+    }
+
+    /// Whether a job is under way (a submit now would be dropped: callers
+    /// keep their events until it is not).
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// Plan every volume of `volumes` for `frame` (`reports` frames of ray
+    /// reports among their events), unless a job is under way.
+    pub fn submit(&mut self, frame: u64, reports: &mut u64, volumes: Vec<VolumeJob>) {
+        if self.busy {
+            return;
+        }
+        self.events_sent += volumes
+            .iter()
+            .flat_map(|v| &v.events)
+            .filter(|e| e.structural())
+            .count() as u64;
+        self.reports_sent += std::mem::take(reports);
+        self.busy = self
+            .jobs
+            .send(Job {
+                events_seen: self.events_sent,
+                reports_seen: self.reports_sent,
+                frame,
+                changes: std::mem::take(&mut self.changes),
+                volumes,
+            })
+            .is_ok();
+    }
+
+    /// The finished plans, if any.
+    pub fn poll(&mut self) -> Option<Plans> {
+        let plans = self.results.get_mut().ok()?.try_recv().ok()?;
         self.busy = false;
-        Some(planned)
+        Some(plans)
     }
 
     /// Structural events submitted so far ([`Event::structural`]).
@@ -1172,9 +1414,11 @@ mod tests {
     fn no_edits(grid: &Grid) -> Arc<EditView> {
         Arc::new(EditView {
             grid: *grid,
-            faces: Vec::new(),
+            faces: Default::default(),
             index: Default::default(),
             recent_index: Default::default(),
+            reach: None,
+            large_reach: None,
             large_faces: 0,
             large_brushes: 0,
             large_prefix: 0,
@@ -1197,7 +1441,7 @@ mod tests {
                 20.0,
             ],
         );
-        let planner = Planner::new(&grid, (-2000, 2000), config(), no_edits(&grid));
+        let planner = Planner::new(0, &grid, (-2000, 2000), config(), no_edits(&grid));
         (grid, eye, planner)
     }
 
@@ -1352,6 +1596,55 @@ mod tests {
         assert!(!plan.drawn.iter().any(|d| d.0 == parent));
     }
 
+    /// An edit over a node drawn as air (generated empty) wants it again
+    /// without its parent drawn in its place: it stays air until its chunk
+    /// comes, the cut as it was.
+    #[test]
+    fn an_edited_node_stands_in_as_it_was() {
+        let (grid, eye, mut planner) = setup();
+        let mut frame = 0;
+        settle(&grid, eye, None, &mut planner, &mut frame);
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        let child = plan
+            .drawn
+            .iter()
+            .find(|(k, kind)| k.level == 0 && *kind == Kind::Mixed)
+            .unwrap()
+            .0;
+        let parent = child.parent();
+        planner.apply(Event::Emptied(child), frame);
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(!plan.drawn.iter().any(|d| d.0 == child || d.0 == parent));
+        let around = |v: i32| [v, v];
+        planner.apply(
+            Event::Edited(
+                child.face,
+                vec![NodeBox {
+                    level: 0,
+                    x: around(child.cx),
+                    y: around(child.cy),
+                    z: around(child.cz),
+                }]
+                .into(),
+            ),
+            frame,
+        );
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(plan.requests.contains(&child), "the edited node is wanted");
+        assert!(
+            !plan.drawn.iter().any(|d| d.0 == child || d.0 == parent),
+            "neither it nor its parent drawn meanwhile"
+        );
+        planner.apply(Event::Generated(child), frame);
+        frame += 1;
+        let plan = planner.plan(&grid, eye, DVec3::ZERO, None, frame);
+        assert!(plan.drawn.iter().any(|d| d.0 == child));
+        assert!(!plan.drawn.iter().any(|d| d.0 == parent));
+    }
+
     /// Generated nodes stay until slots run short; then the least
     /// recently visited go, never one the plan drew.
     #[test]
@@ -1389,6 +1682,7 @@ mod tests {
         let (grid, eye, _) = setup();
         let release = 200;
         let mut planner = Planner::new(
+            0,
             &grid,
             (-2000, 2000),
             PlanConfig {
@@ -1454,6 +1748,7 @@ mod tests {
         });
         let cut = |seen: bool| {
             let mut planner = Planner::new(
+                0,
                 &grid,
                 (-2000, 2000),
                 PlanConfig {
@@ -1466,6 +1761,7 @@ mod tests {
             // One ray report somewhere else: rays are on, nothing here met.
             planner.apply(
                 Event::Seen(NodeKey {
+                    volume: 0,
                     face: 0,
                     level: 0,
                     cx: 0,
@@ -1533,7 +1829,7 @@ mod tests {
             f64::from(grid.cells()) * 0.53,
         ];
         let eye = grid.position(2, [at[0], at[1], 200.0]);
-        let mut planner = Planner::new(&grid, (-2000, 2000), config(), no_edits(&grid));
+        let mut planner = Planner::new(0, &grid, (-2000, 2000), config(), no_edits(&grid));
         let mut frame = 0;
         // Ground within a metre of layer 0 everywhere.
         loop {
@@ -1560,6 +1856,7 @@ mod tests {
         // The level-2 node holding the eye, its children dropped.
         let tiles: Vec<i32> = (0..grid.levels()).map(|l| tiles_at(&grid, l)).collect();
         let held = NodeKey {
+            volume: 0,
             face: 2,
             level: 2,
             cx: (at[0] as i32 >> 2) / CHUNK,
@@ -1598,6 +1895,7 @@ mod tests {
     fn children_are_estimated_from_their_quarter() {
         let (grid, _, mut planner) = setup();
         let key = NodeKey {
+            volume: 0,
             face: 2,
             level: 6,
             cx: 10,
@@ -1643,6 +1941,7 @@ mod tests {
         planner.estimate_children(key, 1);
         let child = |a: i32, b: i32| {
             planner.footprints[&Footprint {
+                volume: 0,
                 face: 2,
                 level: 5,
                 cx: 20 + a,

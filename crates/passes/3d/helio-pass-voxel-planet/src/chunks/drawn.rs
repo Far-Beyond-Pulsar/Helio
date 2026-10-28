@@ -9,7 +9,9 @@
 //! self's if it is drawn too, else `KIND_ANCESTOR`), whether a strict
 //! ancestor is drawn (`UNDER_DRAWN`) and its content: the
 //! box of its cells anything non-empty may occupy, `x | y << 7 | z << 14`
-//! for its low and high corners ([lo, hi); lo > hi: nothing). A drawn
+//! for its low and high corners ([lo, hi); lo > hi: nothing), and a Solid
+//! or Buried node's material in bits 24..32 of the high corner's word
+//! (what its rock shows: `DrawnSet::set_rock`). A drawn
 //! Mixed chunk's content is its occupied layers over its footprint, a
 //! Solid or Buried node's its whole box, an ancestor's the union of its
 //! children's (rounded out to its cells). Empty nodes have no entry: a
@@ -125,6 +127,8 @@ impl Content {
 struct Drawn {
     kind: Kind,
     chunk: Option<NodeChunk>,
+    /// A Solid or Buried node's material.
+    rock: u8,
 }
 
 impl Drawn {
@@ -200,6 +204,7 @@ fn children(key: NodeKey) -> impl Iterator<Item = (usize, NodeKey)> {
         (
             n,
             NodeKey {
+                volume: key.volume,
                 face: key.face,
                 level: key.level - 1,
                 cx: key.cx * 2 + (n & 1) as i32,
@@ -223,8 +228,8 @@ pub struct DrawnSet {
     fades: FxHashMap<NodeKey, Fade>,
     /// Fading nodes strictly under each node (only nodes with any).
     fade_below: FxHashMap<NodeKey, u32>,
-    /// The coarsest level.
-    top_level: u32,
+    /// Each volume's coarsest level (`ChunkWorld`'s volume indices).
+    top_levels: Vec<u32>,
     /// Entries: key then value.
     table: Vec<[i32; 4]>,
     mask: u32,
@@ -232,12 +237,14 @@ pub struct DrawnSet {
     dirty: Vec<u32>,
     /// Bumped whenever `list` changes (its slots are uploaded then).
     version: u64,
+    /// Materials of uniform nodes about to be added (`set_rock`).
+    rocks: FxHashMap<NodeKey, u8>,
 }
 
 impl DrawnSet {
-    /// `slots` chunk slots, a table of `entries` (a power of two), nodes up
-    /// to `top_level`.
-    pub fn new(slots: usize, entries: usize, top_level: u32) -> Self {
+    /// `slots` chunk slots, a table of `entries` (a power of two); each
+    /// volume's nodes up to its coarsest level ([`Self::set_top_level`]).
+    pub fn new(slots: usize, entries: usize) -> Self {
         assert!(entries.is_power_of_two());
         Self {
             list: Vec::new(),
@@ -247,16 +254,56 @@ impl DrawnSet {
             touched: Vec::new(),
             fades: FxHashMap::default(),
             fade_below: FxHashMap::default(),
-            top_level,
+            top_levels: Vec::new(),
             table: vec![EMPTY; 2 * entries],
             mask: entries as u32 - 1,
             dirty: Vec::new(),
             version: 0,
+            rocks: FxHashMap::default(),
         }
+    }
+
+    /// What Solid or Buried node `key`, added by the next update, shows
+    /// where a ray hits it (a ray meets such rock where an edit uncovers
+    /// it before its chunk is generated).
+    pub fn set_rock(&mut self, key: NodeKey, material: u8) {
+        self.rocks.insert(key, material);
+    }
+
+    /// `slots` chunk slots (no fewer than before) and a table of
+    /// `entries` (a power of two); whether the table grew (its entries
+    /// placed again: upload it whole).
+    pub fn grow(&mut self, slots: usize, entries: usize) -> bool {
+        self.position.resize(slots, NONE);
+        if entries <= self.table.len() / 2 {
+            return false;
+        }
+        let old = std::mem::replace(&mut self.table, vec![EMPTY; 2 * entries]);
+        self.mask = entries as u32 - 1;
+        for pair in old.chunks_exact(2) {
+            if pair[0][0] != -1 {
+                self.put(pair[0], pair[1]);
+            }
+        }
+        self.dirty.clear();
+        true
     }
 
     pub fn mask(&self) -> u32 {
         self.mask
+    }
+
+    /// Volume `volume`'s nodes go up to `top`.
+    pub fn set_top_level(&mut self, volume: u16, top: u32) {
+        let v = usize::from(volume);
+        if self.top_levels.len() <= v {
+            self.top_levels.resize(v + 1, 0);
+        }
+        self.top_levels[v] = top;
+    }
+
+    fn top_level(&self, volume: u16) -> u32 {
+        self.top_levels.get(usize::from(volume)).copied().unwrap_or(0)
     }
 
     /// Changes whenever the drawn chunks do.
@@ -344,8 +391,8 @@ impl DrawnSet {
                 self.add_node(
                     *key,
                     Drawn {
-                        kind: d.kind,
                         chunk: chunk_of(*key),
+                        ..d
                     },
                 );
             }
@@ -370,8 +417,10 @@ impl DrawnSet {
             } else {
                 None
             };
-            self.add_node(key, Drawn { kind, chunk });
+            let rock = self.rocks.get(&key).copied().unwrap_or(0);
+            self.add_node(key, Drawn { kind, chunk, rock });
         }
+        self.rocks.clear();
         self.settle_entries();
     }
 
@@ -434,7 +483,7 @@ impl DrawnSet {
     }
 
     fn ancestors(&self, key: NodeKey) -> impl Iterator<Item = NodeKey> + use<> {
-        let top = self.top_level;
+        let top = self.top_level(key.volume);
         std::iter::successors(Some(key), move |k| (k.level < top).then(|| k.parent())).skip(1)
     }
 
@@ -467,6 +516,11 @@ impl DrawnSet {
     /// Whether `node` is drawn or an ancestor of a drawn node.
     pub fn in_cut(&self, node: NodeKey) -> bool {
         self.entries.contains_key(&node)
+    }
+
+    /// Drawn nodes of volume `volume`.
+    pub fn nodes_of(&self, volume: u16) -> Vec<NodeKey> {
+        self.drawn.keys().filter(|k| k.volume == volume).copied().collect()
     }
 
     /// Drawn Solid and Buried nodes.
@@ -544,8 +598,10 @@ impl DrawnSet {
     /// Recompute the touched entries, finest first, and their ancestors
     /// while they change; an entry with nothing drawn under it leaves.
     fn settle_entries(&mut self) {
-        let mut by_level: Vec<FxHashSet<NodeKey>> =
-            vec![Default::default(); self.top_level as usize + 1];
+        let mut by_level: Vec<FxHashSet<NodeKey>> = vec![
+            Default::default();
+            self.top_levels.iter().max().map_or(0, |t| *t as usize) + 1
+        ];
         for key in std::mem::take(&mut self.touched) {
             by_level[key.level as usize].insert(key);
         }
@@ -573,8 +629,9 @@ impl DrawnSet {
                                 d.chunk.map_or(-1, |c| c.slot as i32),
                                 self.state_of(key),
                                 d.kind_code() | under | (lo << 8),
-                                hi,
+                                hi | (i32::from(d.rock) << 24),
                             ],
+
                             None => [-1, 0, KIND_ANCESTOR | under | (lo << 8), hi],
                         };
                         Some(Entry { content, value })
@@ -593,7 +650,7 @@ impl DrawnSet {
                         self.take(key.table_key());
                     }
                 }
-                if key.level < self.top_level {
+                if key.level < self.top_level(key.volume) {
                     by_level[level + 1].insert(key.parent());
                 }
             }
@@ -710,6 +767,7 @@ mod tests {
 
     fn node(level: u32, cx: i32, cy: i32, cz: i32) -> NodeKey {
         NodeKey {
+            volume: 0,
             face: 0,
             level,
             cx,
@@ -766,7 +824,7 @@ mod tests {
         let mut level = from;
         // Up to an entry.
         while state(level).is_none() {
-            if level >= set.top_level {
+            if level >= set.top_level(0) {
                 return Some(None);
             }
             level += 1;
@@ -775,7 +833,7 @@ mod tests {
         // show here (its finer side has no node over this point), when one
         // over it is drawn.
         if state(level) == Some(0) && under(level) {
-            for l in level + 1..=set.top_level {
+            for l in level + 1..=set.top_level(0) {
                 match state(l) {
                     Some(0) => continue,
                     Some(s) => {
@@ -806,7 +864,7 @@ mod tests {
                     way = -1;
                     level -= 1;
                 }
-                2 if level < set.top_level && way >= 0 => {
+                2 if level < set.top_level(0) && way >= 0 => {
                     way = 1;
                     level += 1;
                 }
@@ -823,7 +881,8 @@ mod tests {
     #[test]
     fn fades_show_every_cell_once() {
         let mut next = rng(0x2545_F491_4F6C_DD1D);
-        let mut set = DrawnSet::new(1 << 14, 1 << 14, 3);
+        let mut set = DrawnSet::new(1 << 14, 1 << 14);
+        set.set_top_level(0, 3);
         let mut last: Vec<(NodeKey, Kind)> = Vec::new();
         let mut slot = 0u32;
         let mut frame = 0;
@@ -898,7 +957,8 @@ mod tests {
     #[test]
     fn ancestors_hold_the_content_of_their_subtrees() {
         let mut next = rng(0x9E37_79B9_7F4A_7C15);
-        let mut set = DrawnSet::new(1 << 14, 1 << 14, 3);
+        let mut set = DrawnSet::new(1 << 14, 1 << 14);
+        set.set_top_level(0, 3);
         let mut last: Vec<(NodeKey, Kind)> = Vec::new();
         let mut slot = 0u32;
         for round in 0..100 {
@@ -986,9 +1046,10 @@ mod tests {
     }
 
     #[test]
-    fn the_table_finds_every_drawn_chunk_after_nodes_come_and_go() {
+    fn the_table_finds_every_drawn_chunk_after_nodes_come_and_go_and_it_grows() {
         // A small table so probe runs collide and wrap.
-        let mut set = DrawnSet::new(4096, 1024, 0);
+        let mut set = DrawnSet::new(4096, 1024);
+        set.set_top_level(0, 0);
         let mut next = rng(0x2545_F491_4F6C_DD1D);
         let at = |n: i32| node(0, n, n / 3, n % 5);
         let mut last: Vec<(NodeKey, Kind)> = Vec::new();
@@ -1003,6 +1064,11 @@ mod tests {
                 .map(|d| d.0)
                 .collect();
             let (added, removed) = diff(&drawn, &last);
+            // Halfway, the slots and the table grow (entries placed again).
+            if round == 100 {
+                assert!(set.grow(8192, 4096));
+                assert!(!set.grow(8192, 2048));
+            }
             set.update(&added, &removed, &changed, round, |k| {
                 Some(NodeChunk {
                     slot: k.cx as u32,

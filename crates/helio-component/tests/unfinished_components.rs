@@ -31,8 +31,6 @@ fn unfinished_components_declare_why_and_their_issue() {
         "WaterVolumeComponent",
         "FoliageComponent",
         "VoxelTerrainComponent",
-        // Drawn as a mesh since #1056.
-        "VoxelComponent",
     ] {
         assert!(
             pulsar_world_registry::unfinished_component(class).is_none(),

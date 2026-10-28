@@ -7,6 +7,64 @@ Code: `src/chunks/` (`mod.rs`: `ChunkWorld`; `classify.rs`, `residency.rs`,
 `drawn.rs`, `pass.rs`, `scene.rs`), `shaders/chunk_generate.wgsl`,
 `shaders/chunk_draw.wgsl`, `shaders/chunk_table.wgsl`.
 
+## Volumes
+
+A scene holds any number of voxel worlds (`crate::volume`): a
+`VoxelVolume` is a world (its recipe and edits, a `Planet`) and an f64
+`VolumeTransform`, a rotation then a translation that may change every
+frame. A planet, a moon, a plane and a ship-sized block are all volumes.
+Every world keeps its own frame (planet-centred, or the plane's): its
+cells, edits, CPU queries and chunks never change as it moves.
+
+One `ChunkWorld` holds them all (`ChunkWorld::add_volume`,
+`set_transform`, `remove_volume`; `ChunkPass` follows a frame's
+`PlanetFrame::volumes` by their host ids):
+
+- **One chunk pool.** A node key carries its volume (`NodeKey::volume`,
+  bits 16 and up of the chunk table's key x), so slots, leaf and detail
+  pages, the chunk table, the drawn cut, kept chunks and the readbacks are
+  shared; eviction under pressure takes each volume's share by the chunks
+  it holds.
+- **One planner.** Its thread plans every volume a job (`residency::
+  Worker`), each with the eye, view and velocity in its own frame: the eye's
+  own motion and the volume's under it (a moon's orbit), so residency
+  follows screen size in every volume alike.
+- **Generation per world.** A volume has its terrain program's pipelines
+  (shared by volumes of one program and form), its own footprint pool (no
+  larger than the footprints it has: a block's is a few slots), features,
+  brushes and baked bricks. One volume generates a frame: those with edits
+  first, then those with requests, in turn.
+- **One tracer, a pass a volume.** A view traces its volumes nearest first
+  (by their bounds; the primary one always), each by the same kernels with
+  its own `DrawParams`: the eye in its frame, the camera's projections
+  composed with its rotation, the sun and the scene's lights turned into
+  it (`to_local`), the last frame's projection from where its transform
+  had its points (moving volumes write their own motion vectors). A later
+  volume's seed keeps only boxes nearer than the hits already found, and
+  its trace walks no farther than them, so the nearest hit of any volume
+  wins per pixel, hidden volumes cost little, and volumes may overlap (a
+  ship landed in the ground). A chunk's frame stays in its volume's
+  coordinates: a moving or spinning volume rewrites none. A later pass's
+  kernels run only over its volume's rectangle on the screen
+  (`DrawParams::rect`: the projected box of its bounding ball, origin on
+  32 pixels; the whole view when the box reaches behind the eye), so a
+  volume costs by the pixels it may cover, as rasterised bodies do.
+- **Shading per volume.** Every shading kernel runs a dispatch a volume
+  and takes the hits of its pass's volume (`ours`; the pixels no volume
+  hits, the first pass's): sun, sky and local lights walk the hit's own
+  volume (a volume shadows itself exactly; one volume's shadow on another
+  is not cast yet, except through the sun's occlusion maps, which every
+  volume draws into). Normals leave in the world's axes (`to_world`); the
+  denoiser runs once in the world's frame, reprojecting each hit by its
+  volume's motion (`motions`).
+- **The primary volume** (the frame's first) is the one foliage grows on
+  and GI probes trace.
+
+CPU queries take world positions: `Volumes` (exact casts and solid tests
+over every volume a ray or point meets, nearest hit first) and
+`VolumeQueries` (each volume's `WorldQueries` bricks). Picks name the
+volume they hit (`PickHit::volume`); their cells are in its frame.
+
 ## Nodes and chunks
 
 - A **node** is a chunk: `(face, level, cx, cy, cz)`, 64³ cells of its
@@ -139,10 +197,23 @@ without waiting: its drawn set and requests as differences from the last.
 - **Eviction.** Generated nodes no plan has visited for `release_frames`
   (600 by default, `HELIO_VOXEL_CHUNKS_RELEASE_FRAMES`) are released,
   `MAX_RELEASE` a plan, least recently visited first, so residency follows
-  the cut, not the eye's history. When chunk slots or leaf pages run short,
-  the least recently visited go first (never one visited in the last
-  `IDLE_FRAMES`: it may still be fading out). Bookkeeping of nodes not
-  generated is dropped after `keep_frames`.
+  the cut, not the eye's history. When chunk slots or leaf pages run short
+  (an eighth of the pool, at least two batches' worth), the pool grows; at
+  its most (`Capacity::chunks`), the least recently visited go first (never
+  one visited in the last `IDLE_FRAMES`: it may still be fading out).
+  Bookkeeping of nodes not generated is dropped after `keep_frames`.
+- **Pools grow on demand.** The slot pool (8192 slots at first: meta, mids,
+  keys, statics, leaf page lists, draw lists) and the leaf pool (leaves,
+  their materials and normals, each page's detail page, the free stack)
+  double when short, up to `Capacity::chunks` (131072 by default): every
+  buffer is copied into one twice the size in a submit of its own, before
+  the update records anything, so writes queued after land in the new
+  buffers. The chunk table grows with the slots (rebuilt from its CPU
+  mirror and uploaded whole); the leaf stack takes the new pages under the
+  old ones and its count rises on the GPU (`chunk_pool.wgsl`: the count
+  read back lags it, and readbacks from before a growth are ignored). A
+  settled Earth view at 60 m holds a 65536-slot pool: the chunk buffers
+  take 1.5 GB of GPU memory, not the 1.9 GB of the most.
 - **Settled.** A plan counts only for the eye and view it was made for, and
   only once it saw a sweep of ray reports of the cut as it ended up: after
   residency last changed and the last fade ended (what a finer node
@@ -160,9 +231,12 @@ then drawn ones nearest first), then the plan's requests, a footprint's
 nodes together; kept chunks come back by copy.
 
 A footprint's columns depend only on the terrain, so they stay on the GPU
-in the **footprint pool** (2048 slots, about 75 KB each, least recently
-used reused, never one the batch uses): a footprint is computed once while
-it stays in use, whichever of its nodes are generated when. The batch
+in the **footprint pool** (a volume's: 1024 slots at first, doubling up to
+2048 when it would reuse a slot used in the last 120 frames; about 75 KB
+each, least recently used reused, never one the batch uses): a footprint is
+computed once while it stays in use, whichever of its nodes are generated
+when. The two-rate tile nodes are the batch's scratch, one buffer for the
+volumes' largest program. The batch
 lists the footprints it computes first, then those it reads from the pool.
 
 Kernels, a timed pass each (`FrameTimings::stages`, `tile_stages`):
@@ -201,19 +275,41 @@ slot, and each chunk's occupied layers and mean top give its frame.
 
 ## Edits
 
-A `ChunkWorld` follows a published planet's edits by difference
-(`ChunkWorld::sync_edits`), by the history's hash:
+A `ChunkWorld` follows each volume's published planet edits by difference
+(`ChunkWorld::sync_edits`), by the history's hash; each volume keeps its
+own edit view, brushes, brick cache and urgent nodes, and its planner its
+stand-ins:
 
 - Brushes that came or went mark the nodes their bands cross at every
   level they apply at: drawn and visited ones regenerate (urgent), cached
-  ones not in the cut are evicted. A small dig shows the frame it is made;
-  a blast's far and hidden nodes follow over the next frames, their nearest
-  generated ancestor drawn meanwhile.
+  ones not in the cut are evicted. Urgent nodes go drawn in view first,
+  nearest first (up to `EDITED_NOW` of them past the frame's budget, so a
+  small dig shows the frame it is made), then drawn ones out of view, then
+  the cut's ancestors.
+- **What shows meanwhile.** An edited node keeps drawing its old chunk
+  until its new one is generated; a node an edit made Mixed (a crater's
+  floor, a mound over the ground) is drawn as it was (rock or air: the
+  planner's `stand_in`, handed down to its children) without holding its
+  parent back; one too coarse for the eye in view hands that to its
+  children instead, so the edit is generated at the level the eye wants.
+  Rock an edit added where there was air (a mound's inside) stays air
+  while its footprint's new surface is generated (`ADDED_ROCK_WAITS`). So
+  an edit never shows a coarse ancestor in its place (it once drew flat
+  polygons hundreds of metres across for seconds after a big stroke).
+  Rock a ray meets (Solid and Buried nodes) draws the brush that filled
+  it or the volume's rock (`Planet::rock_material`, in the table entry):
+  it drew material 0, magenta, where an edit uncovered it.
 - Changed baked columns regenerate the nodes over them within the budget.
-- Sync is incremental: while seals only append to the large layer the
-  view keeps its faces and index; an edit rebuilds the recent brushes'
-  index, diffs the lists past their common start and writes the brush
-  buffer's tail in place. An unrelated history rebuilds the world.
+- Sync is incremental: the large layer's faces live in shared runs
+  (`Faces`) and their index in runs merged like a binary counter
+  (`LargeIndex`), so a seal indexes its own large brushes; an edit
+  rebuilds the recent brushes' index, diffs the lists past the large
+  layer and writes the brush buffer's tail in place. Edits the change log
+  cannot bridge (another history, or past `CHANGES_KEPT`) regenerate the
+  volume's every resident node in place (`resync_edits`,
+  `EditSync::Resynced`): pools, residency and measured footprints stay,
+  drawn chunks show until replaced. Only another recipe adds the volume
+  again.
 - The render thread finds the brushes over a footprint through a
   `BrushIndex` (a loose grid per face, brushes kept apart by the levels
   they apply at, so a coarse footprint skips those baked cells hold). A
@@ -237,8 +333,8 @@ Saves keep them too: `ChunkWorld::keep_resident` packs the resident
 edited chunks, `kept_chunks` takes them, and `KeptChunks::to_bytes` writes
 a header (a fingerprint of the generation shaders, terrain constants and
 world, and the history's length and hash) and the chunks deflated.
-`ChunkWorld::load_kept` keeps them before a new world's first update, for
-exactly that history; others are refused. Hosts reach this through
+`ChunkWorld::load_kept` keeps a volume's before its first update or after
+a resync, for exactly that history; others are refused. Hosts reach this through
 `PlanetFrame::kept` and its export (`KeptExport`), and save them beside the
 edit snapshot (Pulsar's `VoxelKeptChunks`).
 
