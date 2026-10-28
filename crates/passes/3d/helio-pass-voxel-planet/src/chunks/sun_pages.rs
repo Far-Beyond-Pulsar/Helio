@@ -12,9 +12,11 @@
 //! new epoch starts and asks for its own pages; readers take the last
 //! epoch's until the new one has every page asked for, then the last is
 //! dropped. A page's texels are kept until the terrain under them changes
-//! (`invalidate`: generated, dug, refined chunks' boxes, projected along
-//! the sun), it ages past [`REFRESH_FRAMES`], or nothing asks for it and
-//! its physical page is needed.
+//! (`invalidate`: generated or dug chunks' boxes and moved volumes,
+//! projected along the sun: traced again at once), the cut it was traced
+//! through refines or was still settling (traced again in the background
+//! once the world settles: a still view's breathing cut never churns), or
+//! nothing asks for it and its physical page is needed.
 
 use glam::DVec3;
 use helio_pass_shadow_matrix::{
@@ -29,14 +31,18 @@ pub(super) const LEVELS: usize = SUN_OCCLUSION_LEVELS;
 const PAGE: i32 = SUN_OCCLUSION_PAGE as i32;
 const PAGE_SHIFT: u32 = SUN_OCCLUSION_PAGE.trailing_zeros();
 const WINDOW: i32 = SUN_OCCLUSION_WINDOW as i32;
-/// Pages traced a frame at most: 64 of 64^2 texels, the 512^2 rays one
-/// level of the clipmap cost before it was paged.
-pub(super) const TRACE_PAGES: usize = 64;
+/// Pages traced a frame at most: 48 of 64^2 texels, fewer rays than the one
+/// 512^2 level a frame the clipmap cost before it was paged (pixels whose
+/// pages are not there yet walk their own sun meanwhile).
+pub(super) const TRACE_PAGES: usize = 48;
 /// A trace view's side in pages (views are aligned to these blocks).
 pub(super) const VIEW_PAGES: i32 = 8;
 const VIEW_SHIFT: u32 = VIEW_PAGES.trailing_zeros();
-/// Trace views a frame at most.
-pub(super) const MAX_VIEWS: usize = 12;
+/// Trace views a frame at most (each culls the drawn chunks and seeds its
+/// rays: the per-view cost), and of those, views of background work (pages
+/// next to fresh requests, pages of a coarser cut).
+pub(super) const MAX_VIEWS: usize = 4;
+const BACKGROUND_VIEWS: usize = 1;
 /// Frames a page stays asked for after the last request naming it.
 const ASKED_FRAMES: u64 = 30;
 /// Frames since a page was last asked for before its physical page may go
@@ -54,10 +60,16 @@ const HANDOVER_FRAMES: u64 = 120;
 /// the eye resident whether asked or not: what readers without requests
 /// (GI hits, fog) fall back on around the eye.
 const BASE_PAGE_M: f64 = 128.0;
-/// A page traced this long ago through another cut than the one drawn now
-/// is traced again when nothing else waits: the cut has refined since (a
-/// still view's cut never re-traces).
-const REFRESH_FRAMES: u64 = 240;
+
+/// Why a resident page is traced again: the terrain under it changed (at
+/// once), or it was traced through a coarser or unsettled cut than now (in
+/// the background, once the world has settled).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Stale {
+    No,
+    Coarse,
+    Changed,
+}
 
 /// A page of a level: its coordinates in the level's pages from the
 /// epoch's anchor.
@@ -129,29 +141,26 @@ impl Epoch {
         )
     }
 
-    /// Whether every page asked for is resident and current.
+    /// Whether every page asked for is resident and its terrain unchanged.
     fn complete(&self, physical: &[Physical]) -> bool {
         self.heard.is_some()
             && self.asked.keys().all(|k| {
                 self.resident
                     .get(k)
-                    .is_some_and(|&p| !physical[p as usize].stale)
+                    .is_some_and(|&p| physical[p as usize].stale != Stale::Changed)
             })
     }
 }
 
 /// A physical page: the epoch and page it holds, its near plane (planet-
 /// centred distance along its epoch's sun), the last frame it was asked
-/// for, the frame it was traced and the drawn cut it was traced through
-/// (`DrawnSet::version`), and whether the terrain under it changed since.
+/// for, and whether it is traced again ([`Stale`]).
 #[derive(Clone, Copy)]
 struct Physical {
     owner: Option<(u64, PageKey)>,
     near: f64,
     used: u64,
-    traced: u64,
-    cut: u64,
-    stale: bool,
+    stale: Stale,
 }
 
 /// A trace view of the current epoch: a level, its top-left page (a block
@@ -177,8 +186,13 @@ pub(super) struct Asking {
 pub struct SunPageStats {
     pub resident: usize,
     pub asked: usize,
+    /// Pages asked for and missing, whose terrain changed, traced through a
+    /// coarser cut (counted once the world settled), next to fresh
+    /// requests.
     pub missing: usize,
     pub stale: usize,
+    pub coarse: usize,
+    pub prefetch: usize,
     pub traced: usize,
     pub views: usize,
     pub epochs: usize,
@@ -211,9 +225,7 @@ impl SunPages {
                     owner: None,
                     near: 0.0,
                     used: 0,
-                    traced: 0,
-                    cut: 0,
-                    stale: false,
+                    stale: Stale::No,
                 };
                 SUN_OCCLUSION_PHYSICAL as usize
             ],
@@ -369,14 +381,15 @@ impl SunPages {
         }
     }
 
-    /// Pages whose rays cross any of `boxes` (world, the terrain changed in
-    /// them) traced again before others. Each box marks the pages over it
+    /// Pages whose rays cross any of `boxes` (world) traced again: before
+    /// others where the terrain changed in them, in the background where
+    /// the cut refined (`why`). Each box marks the pages over it
     /// in the levels where it spans at most 2x2 pages and every coarser
     /// one; a finer page is stale when one of its ancestors is marked (the
     /// region marked is at most a page larger than the box at that level).
     /// Hash lookups only: a settle's thousands of boxes a frame against
     /// thousands of pages stay well under a millisecond.
-    pub fn invalidate(&mut self, boxes: &[[DVec3; 2]]) {
+    pub fn invalidate(&mut self, boxes: &[[DVec3; 2]], why: Stale) {
         if boxes.is_empty() {
             return;
         }
@@ -428,7 +441,10 @@ impl SunPages {
                     })
                 });
                 if hit {
-                    self.physical[p as usize].stale = true;
+                    let stale = &mut self.physical[p as usize].stale;
+                    if why == Stale::Changed || *stale == Stale::No {
+                        *stale = why;
+                    }
                 }
             }
         }
@@ -437,13 +453,13 @@ impl SunPages {
     /// The pages to trace this frame, in views, with their physical pages
     /// (allocated, their table entries set): pages asked for and missing
     /// (coarse first: they back the finer ones' readers), pages whose
-    /// terrain changed, pages next to fresh requests (the view moving onto
-    /// them), pages aged past [`REFRESH_FRAMES`] traced through another cut
-    /// than `cut` (the drawn set's version); at most [`TRACE_PAGES`]
-    /// in [`MAX_VIEWS`] views. Physical pages come free, or from pages not
-    /// asked for in [`KEEP_FRAMES`] (the last epoch's first, then the
-    /// longest unused).
-    pub fn plan(&mut self, frame: u64, cut: u64) -> Vec<Window> {
+    /// terrain changed; then in the background ([`BACKGROUND_VIEWS`]) pages
+    /// next to fresh requests (the view moving onto them) and, once the
+    /// world has `settled`, pages of a coarser cut; at most
+    /// [`TRACE_PAGES`] in [`MAX_VIEWS`] views. Physical pages come free, or
+    /// from pages not asked for in [`KEEP_FRAMES`] (the last epoch's first,
+    /// then the longest unused).
+    pub fn plan(&mut self, frame: u64, settled: bool) -> Vec<Window> {
         let mut stats = SunPageStats {
             epochs: self.epochs.len(),
             ..Default::default()
@@ -454,8 +470,8 @@ impl SunPages {
         };
         e.asked.retain(|_, f| *f + ASKED_FRAMES >= frame);
         let physical = &self.physical;
-        // (class, coarser first, key): 0 missing, 1 stale, 2 next to a
-        // fresh request, 3 aged.
+        // (class, coarser first, key): 0 missing, 1 changed, 2 next to a
+        // fresh request, 3 of a coarser cut.
         let mut wanted: Vec<(u8, std::cmp::Reverse<u8>, PageKey)> = Vec::new();
         let fresh = e.heard;
         let mut near: FxHashSet<PageKey> = FxHashSet::default();
@@ -465,11 +481,12 @@ impl SunPages {
                     stats.missing += 1;
                     wanted.push((0, std::cmp::Reverse(key.level), key));
                 }
-                Some(p) if p.stale => {
+                Some(p) if p.stale == Stale::Changed => {
                     stats.stale += 1;
                     wanted.push((1, std::cmp::Reverse(key.level), key));
                 }
-                Some(p) if p.cut != cut && p.traced + REFRESH_FRAMES < frame => {
+                Some(p) if p.stale == Stale::Coarse && settled => {
+                    stats.coarse += 1;
                     wanted.push((3, std::cmp::Reverse(key.level), key));
                 }
                 _ => {}
@@ -486,14 +503,15 @@ impl SunPages {
                 }
             }
         }
+        stats.prefetch = near.len();
         wanted.extend(near.into_iter().map(|k| (2, std::cmp::Reverse(k.level), k)));
         wanted.sort_unstable_by_key(|&(class, coarse, k)| (class, coarse, k.page[1], k.page[0]));
         stats.asked = e.asked.len();
         // Views: a block of pages a view, in the order their best page
         // came.
         let mut views: Vec<Window> = Vec::new();
-        let mut taken = 0;
-        for &(_, _, key) in &wanted {
+        let (mut taken, mut background) = (0, 0);
+        for &(class, _, key) in &wanted {
             if taken == TRACE_PAGES {
                 break;
             }
@@ -503,7 +521,9 @@ impl SunPages {
                 .position(|v| v.level == key.level && v.origin == origin)
             {
                 Some(v) => v,
+                None if class >= 2 && background == BACKGROUND_VIEWS => continue,
                 None if views.len() < MAX_VIEWS => {
+                    background += usize::from(class >= 2);
                     views.push(Window {
                         level: key.level,
                         origin,
@@ -601,9 +621,10 @@ impl SunPages {
     }
 
     /// The pages of `window` traced this frame through a near plane `near`
-    /// (planet-centred distance along the current epoch's sun) and the cut
-    /// `cut`: resident, their table entries set.
-    pub fn traced(&mut self, window: &Window, near: f64, frame: u64, cut: u64) {
+    /// (world distance along the current epoch's sun), the world `settled`
+    /// or not (traced again in the background once it is): resident, their
+    /// table entries set.
+    pub fn traced(&mut self, window: &Window, near: f64, frame: u64, settled: bool) {
         let (id, slot) = (self.epochs[0].id, self.epochs[0].slot);
         for &(key, p) in &window.pages {
             self.epochs[0].resident.insert(key, p);
@@ -618,9 +639,7 @@ impl SunPages {
                 owner: Some((id, key)),
                 near,
                 used,
-                traced: frame,
-                cut,
-                stale: false,
+                stale: if settled { Stale::No } else { Stale::Coarse },
             };
             let i = sun_occlusion_table_index(slot, key.level as usize, key.page);
             self.table[i] = sun_occlusion_entry(key.page, u32::from(p));
@@ -682,25 +701,25 @@ mod tests {
         let sun = DVec3::new(0.3, 0.8, 0.4).normalize();
         pages.begin(0, eye, sun);
         // Base coverage only: coarse levels, four pages each.
-        let views = pages.plan(0, 0);
+        let views = pages.plan(0, true);
         let traced: usize = views.iter().map(|v| v.pages.len()).sum();
         assert!(traced > 0 && traced <= TRACE_PAGES);
         assert!(views
             .iter()
             .all(|v| pages.texel(v.level as usize) * f64::from(PAGE) >= BASE_PAGE_M));
         for v in &views {
-            pages.traced(v, 0.0, 0, 0);
+            pages.traced(v, 0.0, 0, true);
         }
         // Everything asked traced within a few frames, then nothing.
         let mut frame = 1;
         loop {
             pages.begin(frame, eye, sun);
-            let views = pages.plan(frame, 0);
+            let views = pages.plan(frame, true);
             if views.is_empty() {
                 break;
             }
             for v in &views {
-                pages.traced(v, 0.0, frame, 0);
+                pages.traced(v, 0.0, frame, true);
             }
             frame += 1;
             assert!(frame < 20);
@@ -715,7 +734,7 @@ mod tests {
         let bit = 3 * (WINDOW * WINDOW) as usize + (WINDOW / 2 * WINDOW + WINDOW / 2) as usize;
         words[bit / 32] |= 1 << (bit % 32);
         pages.asked(&asking, &words);
-        let views = pages.plan(frame, 0);
+        let views = pages.plan(frame, true);
         assert_eq!(views[0].level, 3);
         assert_eq!(views[0].pages[0].0.page, asking.eye_pages[3]);
     }
@@ -727,21 +746,24 @@ mod tests {
         let sun = DVec3::Y;
         pages.begin(0, eye, sun);
         loop {
-            let views = pages.plan(0, 0);
+            let views = pages.plan(0, true);
             if views.is_empty() {
                 break;
             }
             for v in &views {
-                pages.traced(v, 0.0, 0, 0);
+                pages.traced(v, 0.0, 0, true);
             }
         }
         let e = pages.current().unwrap();
         // A 1 m box at the eye's column: the coarse pages over it, nothing
         // far away.
         let near: Vec<PageKey> = e.resident.keys().copied().collect();
-        pages.invalidate(&[[eye - DVec3::splat(0.5), eye + DVec3::splat(0.5)]]);
+        pages.invalidate(
+            &[[eye - DVec3::splat(0.5), eye + DVec3::splat(0.5)]],
+            Stale::Changed,
+        );
         let e = pages.current().unwrap();
-        let stale = |k: &PageKey| pages.physical[e.resident[k] as usize].stale;
+        let stale = |k: &PageKey| pages.physical[e.resident[k] as usize].stale == Stale::Changed;
         let over: Vec<&PageKey> = near
             .iter()
             .filter(|k| {
@@ -761,8 +783,8 @@ mod tests {
         let mut sun = DVec3::new(0.3, 0.8, 0.4).normalize();
         for frame in 0..400 {
             pages.begin(frame, eye, sun);
-            for v in pages.plan(frame, 0) {
-                pages.traced(&v, 0.0, frame, 0);
+            for v in pages.plan(frame, true) {
+                pages.traced(&v, 0.0, frame, true);
             }
             let asking = Asking {
                 epoch: pages.current().unwrap().id,

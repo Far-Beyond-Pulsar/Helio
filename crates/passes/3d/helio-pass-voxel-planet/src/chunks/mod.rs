@@ -1979,10 +1979,12 @@ pub struct ChunkWorld {
     /// [`ChunkWorld::take_ground_changes`], and nodes whose ground changes again
     /// when their switch's fade ends (at that frame).
     ground_changes: Vec<[DVec3; 2]>,
-    /// World boxes of drawn chunks generated or dug in place since the last
-    /// [`ChunkWorld::draw_sun_occlusion`]: the sun's occlusion pages whose
-    /// rays cross them are traced again.
+    /// World boxes of drawn chunks generated or dug in place, and of chunks
+    /// drawn finer, since the last [`ChunkWorld::draw_sun_occlusion`]: the
+    /// sun's occlusion pages whose rays cross them are traced again (at
+    /// once; in the background).
     occluder_changes: Vec<[DVec3; 2]>,
+    occluder_refined: Vec<[DVec3; 2]>,
     ground_later: Vec<(u64, NodeKey)>,
     /// The GI probes' rays (`gi_trace`), from each probe's base cell
     /// (`gi_cells`, and its CPU copy) in the clipmap they were located for,
@@ -3118,6 +3120,7 @@ impl ChunkWorld {
             probe_tiles,
             ground_changes: Vec::new(),
             occluder_changes: Vec::new(),
+            occluder_refined: Vec::new(),
             ground_later: Vec::new(),
             gi_cells: buffer(
                 "chunk GI probe cells",
@@ -5310,15 +5313,20 @@ impl ChunkWorld {
                 .iter()
                 .filter(|k| self.drawn_set.holds(**k) && !added_keys.contains(*k));
             let finer = added_keys.iter().filter(|k| !over_removed.contains(*k));
-            for key in changed.chain(finer) {
+            for (key, refined) in changed.map(|k| (k, false)).chain(finer.map(|k| (k, true))) {
                 if let Some(vol) = self.volumes[usize::from(key.volume)].as_ref() {
-                    self.occluder_changes
-                        .push(world_box(node_box(&vol.grid, *key), &vol.transform));
+                    let b = world_box(node_box(&vol.grid, *key), &vol.transform);
+                    if refined {
+                        self.occluder_refined.push(b);
+                    } else {
+                        self.occluder_changes.push(b);
+                    }
                 }
             }
-            if self.occluder_changes.len() > GROUND_CHANGES {
-                self.occluder_changes
-                    .drain(..self.occluder_changes.len() - GROUND_CHANGES);
+            for list in [&mut self.occluder_changes, &mut self.occluder_refined] {
+                if list.len() > GROUND_CHANGES {
+                    list.drain(..list.len() - GROUND_CHANGES);
+                }
             }
         }
         let nodes = &self.nodes;
@@ -6174,6 +6182,8 @@ impl ChunkWorld {
         };
         stamp(self, encoder, 16);
         let mut changes = std::mem::take(&mut self.occluder_changes);
+        let refined = std::mem::take(&mut self.occluder_refined);
+        let settled = self.settled();
         let o = self
             .sun_occlusion
             .get_or_insert_with(|| SunOcclusion::new(&self.device, voxel));
@@ -6206,10 +6216,10 @@ impl ChunkWorld {
                 }
             }
         }
-        o.pages.invalidate(&changes);
+        o.pages.invalidate(&changes, sun_pages::Stale::Changed);
+        o.pages.invalidate(&refined, sun_pages::Stale::Coarse);
         o.pages.begin(frame, eye, toward);
-        let cut = self.drawn_set.version();
-        let windows = o.pages.plan(frame, cut);
+        let windows = o.pages.plan(frame, settled);
         let current = o.pages.current().unwrap();
         o.asking = Some(sun_pages::Asking {
             epoch: current.id,
@@ -6230,7 +6240,7 @@ impl ChunkWorld {
                 .as_mut()
                 .unwrap()
                 .pages
-                .traced(window, near, frame, cut);
+                .traced(window, near, frame, settled);
         }
         // HELIO_SUN_PAGES_LOG: the planner's frames that traced pages.
         if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() {

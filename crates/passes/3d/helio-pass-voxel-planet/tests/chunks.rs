@@ -261,7 +261,7 @@ impl World {
         for n in 0.. {
             self.frame(gpu, planet, view, None);
             let s = self.chunks.sun_page_stats().expect("drawn");
-            if n >= 3 && s.missing == 0 && s.stale == 0 {
+            if n >= 3 && s.missing == 0 && s.stale == 0 && s.coarse == 0 {
                 eprintln!("sun pages settled in {n} frames: {s:?}");
                 return;
             }
