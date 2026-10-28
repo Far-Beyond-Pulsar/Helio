@@ -1505,6 +1505,12 @@ pub struct TraceCounts {
     pub lost_pixel: (u32, u32),
     /// Places found lost (any walk, shadows' too), by `lost_at`'s reason.
     pub lost_sites: [u32; 7],
+    /// Walks that ended on the box of a Solid node and of a Buried one
+    /// (rock where no chunk was generated), the last of each's pixel and
+    /// node (table key: face | level << 8, cx, cy, cz).
+    pub rock_ends: [u32; 2],
+    pub rock_pixels: [(u32, u32); 2],
+    pub rock_nodes: [[i32; 4]; 2],
 }
 
 /// A frame's GPU time (milliseconds).
@@ -2706,6 +2712,9 @@ fn draw_source(plane: bool, counting: bool) -> String {
         .replace("LOST_WHERE", if counting { "atomicStore(&counters[200], u32(face | (level << 8u))); atomicStore(&counters[201], bitcast<u32>(cell.x)); atomicStore(&counters[202], bitcast<u32>(cell.y)); atomicStore(&counters[203], bitcast<u32>(cell.z));" } else { "" })
         // The last lost ray's pixel (counters[14]).
         .replace("LOST_PIXEL", if counting { "if counted { atomicStore(&counters[14], pixel.x | (pixel.y << 16u)); }" } else { "" })
+        // Walks ending on a Solid (rock) or Buried node's box, the last
+        // one's pixel and node (counters[240..250]).
+        .replace("ROCK_END", if counting { "if counted { let b = u32(next.level == BURIED); atomicAdd(&counters[240u + b], 1u); atomicStore(&counters[242u + b], pixel.x | (pixel.y << 16u)); atomicStore(&counters[244u + 3u * b], u32(next.hi.x)); atomicStore(&counters[245u + 3u * b], bitcast<u32>(next.lo.x)); atomicStore(&counters[246u + 3u * b], bitcast<u32>(next.lo.y)); atomicStore(&counters[250u + b], bitcast<u32>(next.lo.z)); }" } else { "" })
         .replace("WCOUNT_BOXES", if counting { "if counted { atomicAdd(&counters[9], chunk); }" } else { "" })
         .replace("COUNT(0)", &count(0))
         .replace("COUNT(2)", &count(2))
@@ -6896,7 +6905,7 @@ impl ChunkWorld {
     /// The traces' counts since the last call (with
     /// `HELIO_VOXEL_CHUNKS_COUNT`).
     pub fn take_counts(&self) -> TraceCounts {
-        let words: Vec<[u32; 4]> = self.read(&self.counters, 4);
+        let words: Vec<[u32; 4]> = self.read(&self.counters, 64);
         self.queue.write_buffer(&self.counters, 0, &[0u8; 1024]);
         TraceCounts {
             seeded: words[0][0],
@@ -6915,6 +6924,12 @@ impl ChunkWorld {
                 words[3][0],
                 words[3][1],
                 words[3][3],
+            ],
+            rock_ends: [words[60][0], words[60][1]],
+            rock_pixels: [words[60][2], words[60][3]].map(|p| (p & 0xffff, p >> 16)),
+            rock_nodes: [
+                [words[61][0], words[61][1], words[61][2], words[62][2]].map(|w| w as i32),
+                [words[61][3], words[62][0], words[62][1], words[62][3]].map(|w| w as i32),
             ],
         }
     }

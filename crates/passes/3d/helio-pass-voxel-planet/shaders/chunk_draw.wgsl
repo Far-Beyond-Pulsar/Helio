@@ -463,11 +463,24 @@ struct SeedInside {
 }
 
 // Boxes holding the eye, drawn first by their back faces: entered at the
-// eye, nearer than any other box (the reversed depth's nearest).
+// eye, nearer than any other box (the reversed depth's nearest), and so
+// marked (`INSIDE_SEED`).
 @fragment
 fn seed_fragment_inside(in: VOut) -> SeedInside {
-    return SeedInside(in.instance, 1.0);
+    return SeedInside(in.instance | INSIDE_SEED, 1.0);
 }
+
+// A seed from a box drawn from inside (`seed_fragment_inside`). The cull
+// takes every box within twice the near plane's distance of the eye (the
+// near plane may cut its front faces), many more than hold it when the
+// near plane is far (a quarter of the height over the ground: 74 m 300 m
+// over the Moon's pole); their back faces all win at the nearest depth,
+// over every box in front of them, and the one that won a pixel is any
+// of them. Its ray starts in the node of the cut where it starts
+// (`point_start`), not in the seed's: from the seed it went on from the
+// box behind the ground in front, whose cells drew as chunk-sized walls
+// and slabs.
+const INSIDE_SEED: u32 = 0x80000000u;
 
 // ---- 2. Trace ----
 
@@ -1222,7 +1235,7 @@ fn place_at(face: i32, level: i32, cell: vec3<i32>, frac: vec3<f32>, r: i32, cro
     if !empty {
         let v = chunk_table[e * 2u + 1u];
         let kind = entry_kind(v);
-        if kind == KIND_SOLID { return Place(NONE, ROCK, vec3<i32>(0), vec3<i32>(0), NONE); }
+        if kind == KIND_SOLID { return Place(NONE, ROCK, key.yzw, vec3<i32>(key.x, 0, 0), NONE); }
         if kind == KIND_BURIED { return Place(NONE, BURIED, key.yzw, vec3<i32>(key.x, 0, 0), NONE); }
         if v.x >= 0 { return Place(bitcast<u32>(v.x), at, vec3<i32>(0), vec3<i32>(0), NONE); }
     }
@@ -1319,6 +1332,32 @@ struct WalkEnd {
     sign: u32,
     // The hit's material pair (`Hit::material`).
     material: u32,
+}
+
+// Where a ray goes on from a box of an affine frame it does not cross in
+// that frame (o, d: the ray in its cells; `near`: the times it enters the
+// box's slabs, the latest past `leave`, the earliest it leaves one): the
+// cell of the box beside it that it passes in, where it has entered every
+// slab it does cross (none: where it is, `t`). Each chunk's frame is its
+// own f32 transform, so two chunks place their shared side apart by
+// rounding (the raster's sub-pixel snapping seeds a ray within about 1/256
+// of a pixel of a shared edge in either box; a step's cell can round over
+// the side): a ray nearly parallel to the side is then in a box it never
+// enters, for its whole length. It was walked as crossing it, to where its
+// far sides end, past the ground in the box beside (rays along the plane
+// through the Moon pole's eye ended on the Solid node under it). Beside a
+// box, the ray is close to it, where its frame is exact.
+struct Beside {
+    t: f32,
+    cell: vec3<i32>,
+    frac: vec3<f32>,
+}
+
+fn passes_beside(o: vec3<f32>, d: vec3<f32>, near: vec3<f32>, leave: f32, t: f32) -> Beside {
+    let entered = select(near, vec3<f32>(t), near >= vec3<f32>(leave));
+    let at = max(t, max(entered.x, max(entered.y, entered.z)));
+    let q = o + d * at;
+    return Beside(at, vec3<i32>(floor(q)), clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999)));
 }
 
 // The walk of ray org + t dir (org eye-relative, dir unit) from t_start to
@@ -1450,9 +1489,13 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             if real { cube_hi = clip_to_face(vec3<i32>(64), key); }
             let ca = (vec3<f32>(cube_lo) - o) * inv;
             let cb = (vec3<f32>(cube_hi) - o) * inv;
+            let cube_near = min(ca, cb);
             let cube_far = max(ca, cb);
             let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
-            if real {
+            // Whether the ray crosses the box in its frame (else it was put
+            // in it from beside it: `passes_beside`).
+            let crosses = max(cube_near.x, max(cube_near.y, cube_near.z)) < t_leave;
+            if real && crosses {
                 // The walk over the chunk's occupied layers.
                 let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
                 let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
@@ -1473,23 +1516,33 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                     }
                 }
             }
-            // The cell just past the face the ray leaves the box by, in the
-            // frame chunk's cells (exact integers far from the origin).
-            t_prev = max(t_leave, t_prev);
-            if t_prev >= t_end { break; }
-            let q = o + d * t_leave;
-            let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
-            var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
-            let c = clamp(local, vec3<i32>(0), vec3<i32>(63));
-            last = u32(c.x) | (u32(c.y) << 6u) | (u32(c.z) << 12u) | (axis << 18u) | (select(1u, 0u, d[axis] > 0.0) << 20u);
-            let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
-            if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
-            cell = key.yzw * 64 + local;
-            // Where in the next cell the ray enters: the side it crossed on
-            // the exit axis.
-            frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
-            let entry = select(0.999, 0.0, d[axis] > 0.0);
-            if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
+            if crosses {
+                // The cell just past the face the ray leaves the box by, in
+                // the frame chunk's cells (exact integers far from the
+                // origin), where the ray is (as an exact box's): never back
+                // along it.
+                t_prev = max(t_leave, t_prev);
+                if t_prev >= t_end { break; }
+                let q = o + d * t_prev;
+                let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
+                var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
+                let c = clamp(local, vec3<i32>(0), vec3<i32>(63));
+                last = u32(c.x) | (u32(c.y) << 6u) | (u32(c.z) << 12u) | (axis << 18u) | (select(1u, 0u, d[axis] > 0.0) << 20u);
+                let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
+                if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
+                cell = key.yzw * 64 + local;
+                // Where in the next cell the ray enters: the side it
+                // crossed on the exit axis.
+                frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
+                let entry = select(0.999, 0.0, d[axis] > 0.0);
+                if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
+            } else {
+                let beside = passes_beside(o, d, cube_near, t_leave, t_prev);
+                t_prev = beside.t;
+                if t_prev >= t_end { break; }
+                cell = key.yzw * 64 + beside.cell;
+                frac = beside.frac;
+            }
         }
         // Past a face's edge: the face across it (a plane's edge ends it).
         let n = i32(params.table.y >> u32(level));
@@ -1526,6 +1579,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             if next.level == BURIED || next.level == ROCK {
                 // Rock, or the field's volume not generated yet (a Buried
                 // node, reported so it is): a hit where the ray enters.
+                ROCK_END
                 if next.level == BURIED && counted {
                     let n = atomicAdd(&buried.count, 1u);
                     if n < arrayLength(&buried.keys) { buried.keys[n] = vec4<i32>(next.hi.x, next.lo); }
@@ -1590,6 +1644,8 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         textureStore(out_exits, p, vec4<f32>(-1.0));
         return;
     }
+    let inside = (box & INSIDE_SEED) != 0u;
+    box &= ~INSIDE_SEED;
     COUNT(0)
     // A later volume's pass: only a hit nearer than an earlier volume's.
     var limit = 1e30;
@@ -1611,7 +1667,7 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
     // Both levels of a switch are drawn: a box of the one this pixel does
     // not show starts the walk where the ray enters it.
     let own = find_entry(key);
-    if own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 && !exact_level(key_level(key.x)) {
+    if !inside && own != NONE && choice(chunk_table[own * 2u + 1u].y, r) != 1 && !exact_level(key_level(key.x)) {
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         let d = vec3<f32>(dot(frame.i0.xyz, dir), dot(frame.i1.xyz, dir), dot(frame.i2.xyz, dir));
         let inv = 1.0 / select(d, vec3<f32>(1e-30), d == vec3<f32>(0.0));
@@ -1638,7 +1694,14 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
             real = false;
         }
     }
-    let end = walk(Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real), org, dir, t_prev, limit, r, 128u, true, id.xy);
+    var start = Walk(bitcast<u32>(frame.box.z), key, cube_lo, cube_hi, real);
+    // Seeded from inside: where the ray starts (`INSIDE_SEED`; in rock or
+    // off the cut there, the seed's box as before).
+    if inside {
+        let at = point_start(org + dir * t_prev, box, r);
+        if at.kind == 0u { start = at.walk; }
+    }
+    let end = walk(start, org, dir, t_prev, limit, r, 128u, true, id.xy);
     if !end.hit {
         // Unresolved: the next round seeds the boxes beyond (none past
         // the ceiling, the sky, or an earlier volume's hit).
@@ -2306,9 +2369,12 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
         if real { cube_hi = clip_to_face(vec3<i32>(64), key); }
         let ca = (vec3<f32>(cube_lo) - o) * inv;
         let cb = (vec3<f32>(cube_hi) - o) * inv;
+        let cube_near = min(ca, cb);
         let cube_far = max(ca, cb);
         let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
-        if real {
+        // Whether the ray crosses the box in its frame (as `walk`).
+        let crosses = max(cube_near.x, max(cube_near.y, cube_near.z)) < t_leave;
+        if real && crosses {
             // The walk over the chunk's occupied layers.
             let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
             let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
@@ -2330,21 +2396,35 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
             }
         }
         // The cell just past the face the ray leaves the box by, in the
-        // frame chunk's cells (exact integers far from the origin).
-        t_prev = max(t_leave, t_prev);
-        if t_prev >= t_end { break; }
+        // frame chunk's cells (exact integers far from the origin), where
+        // the ray is (as `walk`); beside a box it does not cross, the
+        // cell it passes in (`passes_beside`).
         let level = key_level(key.x);
-        let q = o + d * t_leave;
-        let axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
-        var local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
-        let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
-        if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
-        var cell = key.yzw * 64 + local;
-        // Where in the next cell the ray enters: the side it crossed on
-        // the exit axis.
-        var frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
-        let entry = select(0.999, 0.0, d[axis] > 0.0);
-        if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
+        var axis = select(select(2u, 1u, cube_far.y <= cube_far.z), 0u, cube_far.x <= cube_far.y && cube_far.x <= cube_far.z);
+        var local = vec3<i32>(0);
+        var cell = vec3<i32>(0);
+        var frac = vec3<f32>(0.0);
+        if crosses {
+            t_prev = max(t_leave, t_prev);
+            if t_prev >= t_end { break; }
+            let q = o + d * t_prev;
+            local = clamp(vec3<i32>(floor(q)), cube_lo, cube_hi - 1);
+            let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
+            if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
+            cell = key.yzw * 64 + local;
+            // Where in the next cell the ray enters: the side it crossed
+            // on the exit axis.
+            frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
+            let entry = select(0.999, 0.0, d[axis] > 0.0);
+            if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
+        } else {
+            let beside = passes_beside(o, d, cube_near, t_leave, t_prev);
+            t_prev = beside.t;
+            if t_prev >= t_end { break; }
+            local = beside.cell;
+            cell = key.yzw * 64 + local;
+            frac = beside.frac;
+        }
         // Past a face's edge: the face across it (a plane's edge ends it).
         var face = key.x & 7;
         let n = i32(params.table.y >> u32(level));
@@ -2373,11 +2453,12 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
             if next.level == BURIED || next.level == ROCK {
                 // Rock, or the field's volume not generated yet (a Buried
                 // node, reported so it is): a hit where the ray enters.
+                ROCK_END
                 if next.level == BURIED && counted {
                     let n = atomicAdd(&buried.count, 1u);
                     if n < arrayLength(&buried.keys) { buried.keys[n] = vec4<i32>(next.hi.x, next.lo); }
                 }
-                return WalkEnd(true, t_leave, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), 0u);
+                return WalkEnd(true, t_prev, slot, clamp(local, vec3<i32>(0), vec3<i32>(63)), axis, select(1u, 0u, d[axis] > 0.0), 0u);
             }
             // Air, crossed in this frame or the finer one given.
             if next.frame != NONE {
@@ -2588,57 +2669,56 @@ fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: 
     return select(1.0, 0.0, point_walk(q, org, v, dir, range).hit);
 }
 
-// What the point `org` (eye-relative) at pixel `q` meets along `dir` within
-// `range`: a walk from the node of the cut it is in, placed in the frame of
-// the chunk of `v` (a hit by it) to its cells' precision; without a hit
-// finer than the exact levels, from the exact level's node over it
-// (planet-centred: to half a metre on an Earth). In rock or a Buried node,
-// a hit at once with no chunk (slot NONE).
-fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> WalkEnd {
-    let rock = WalkEnd(true, 0.0, NONE, vec3<i32>(0), 0u, 0u, 0u);
-    var none = rock;
-    none.hit = false;
-    let r = fade_dither(q);
-    var start = Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false);
-    var t0 = 0.0;
-    if v.x != NONE && !exact_level(key_level(chunk_keys[v.x].x)) {
-        let key = chunk_keys[v.x];
-        let frame = chunk_frame(v.x);
+// Where a walk from the point `org` (eye-relative) starts, for a pixel of
+// dither `r`: the node of the cut it is in, placed in the frame of chunk
+// `slot` (one near it) to its cells' precision; without one finer than the
+// exact levels, the exact level's node over it (planet-centred: to half a
+// metre on an Earth). `kind`: 0 a walk, 1 in rock or a Buried node, 2 off
+// the cut (past a corner, or a plane's edge).
+struct PointStart {
+    walk: Walk,
+    kind: u32,
+}
+
+fn point_start(org: vec3<f32>, slot: u32, r: i32) -> PointStart {
+    var out = PointStart(Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false), 2u);
+    if slot != NONE && !exact_level(key_level(chunk_keys[slot].x)) {
+        let key = chunk_keys[slot];
+        let frame = chunk_frame(slot);
         let o = vec3<f32>(frame.i0.w, frame.i1.w, frame.i2.w) + vec3<f32>(dot(frame.i0.xyz, org), dot(frame.i1.xyz, org), dot(frame.i2.xyz, org));
         var face = key.x & 7;
         let level = key_level(key.x);
         var cell = key.yzw * 64 + vec3<i32>(floor(o));
         var frac = clamp(fract(o), vec3<f32>(0.0), vec3<f32>(0.999));
         // Past a face's edge: the face across it (past a corner, or a
-        // plane's edge, nothing to shade it).
+        // plane's edge, nothing).
         let n = i32(params.table.y >> u32(level));
         let crossed = any(cell.xy < vec2<i32>(0)) || any(cell.xy >= vec2<i32>(n));
         if crossed {
-            if PLANE_WORLD { return none; }
+            if PLANE_WORLD { return out; }
             let across = across_edge(face, cell, frac, n);
-            if !across.ok { return none; }
+            if !across.ok { return out; }
             face = across.face;
             cell = across.cell;
             frac = across.frac;
         }
         let at = place_at(face, level, cell, frac, r, crossed);
+        out.kind = 0u;
         if at.slot != NONE {
-            start = Walk(at.slot, chunk_keys[at.slot], vec3<i32>(0), vec3<i32>(64), true);
+            out.walk = Walk(at.slot, chunk_keys[at.slot], vec3<i32>(0), vec3<i32>(64), true);
         } else if at.level == ROCK || at.level == BURIED {
-            return rock;
+            out.kind = 1u;
         } else if at.level == LOST {
-            return none;
+            out.kind = 2u;
         } else if exact_level(at.level) {
-            start = Walk(v.x, vec4<i32>(key_x(face, at.level), 0, 0, 0), at.lo, at.hi, false);
+            out.walk = Walk(slot, vec4<i32>(key_x(face, at.level), 0, 0, 0), at.lo, at.hi, false);
         } else {
-            let f = select(v.x, at.frame, at.frame != NONE);
+            let f = select(slot, at.frame, at.frame != NONE);
             let fk = chunk_keys[f];
-            start = Walk(f, fk, to_frame(at.lo, at.level - (key_level(fk.x)), fk, true), clip_to_face(to_frame(at.hi, at.level - (key_level(fk.x)), fk, false), fk), false);
+            out.walk = Walk(f, fk, to_frame(at.lo, at.level - (key_level(fk.x)), fk, true), clip_to_face(to_frame(at.hi, at.level - (key_level(fk.x)), fk, false), fk), false);
         }
-        // Off the surface a mesh stands on: a twentieth of the hit's cell.
-        t0 = 0.05 * length(frame.m0.xyz);
     } else {
-        if PLANE_WORLD { return none; }
+        if PLANE_WORLD { return out; }
         // The face the point is over (planet-centred).
         let c = params.up.xyz * params.up.w + org;
         let a = abs(c);
@@ -2649,10 +2729,29 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
             normal = vec3<i32>(0, select(-1, 1, c.y > 0.0), 0);
         }
         let level = min(i32(params.planet.z), i32(params.cut.x));
-        if !exact_level(level) { return none; }
-        start.key = vec4<i32>(key_x(face_with_normal(normal), level), 0, 0, 0);
+        if !exact_level(level) { return out; }
+        out.walk.key = vec4<i32>(key_x(face_with_normal(normal), level), 0, 0, 0);
+        out.kind = 0u;
     }
-    return walk(start, org, dir, t0, range, r, 96u, false, q);
+    return out;
+}
+
+// What the point `org` (eye-relative) at pixel `q` meets along `dir` within
+// `range`: a walk from where it is (`point_start`; by the chunk of `v`, a
+// hit by it). In rock or a Buried node, a hit at once with no chunk (slot
+// NONE).
+fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> WalkEnd {
+    let rock = WalkEnd(true, 0.0, NONE, vec3<i32>(0), 0u, 0u, 0u);
+    var none = rock;
+    none.hit = false;
+    let r = fade_dither(q);
+    let start = point_start(org, v.x, r);
+    if start.kind == 1u { return rock; }
+    if start.kind == 2u { return none; }
+    // Off the surface a mesh stands on: a twentieth of the hit's cell.
+    var t0 = 0.0;
+    if v.x != NONE && !exact_level(key_level(chunk_keys[v.x].x)) { t0 = 0.05 * length(chunk_frame(v.x).m0.xyz); }
+    return walk(start.walk, org, dir, t0, range, r, 96u, false, q);
 }
 
 // The share of each pixel's light its sun samples give stochastically
