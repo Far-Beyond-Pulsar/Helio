@@ -31,8 +31,11 @@ definition (its fingerprint; saves keep the recipe):
     world (`field_scale_m`, `field_threshold`);
   - ground rules: the materials it grows on, the heights (which may
     wander by noise of the world, `height_wander_m`: a tree line ragged
-    like the terrain's snowline, not a contour), the most relief between
-    its anchor's ground and its footprint's corners, how deep it sinks;
+    like the terrain's snowline, not a contour), the climate (temperature
+    and moisture ranges, the terrain's `climate` at its ground at the
+    wandered height: [`planet-maps.md`](planet-maps.md)), the most relief
+    between its anchor's ground and its footprint's corners, how deep it
+    sinks;
   - its stamps (variants chosen by hash), turned and mirrored by hash;
   - its **far form** (below): material and canopy height.
 

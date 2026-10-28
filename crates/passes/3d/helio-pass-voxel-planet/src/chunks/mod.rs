@@ -49,6 +49,9 @@ const RANGE_WORDS: usize = 16;
 type Quarters = [Option<Ranges>; 4];
 /// Chunks generated per dispatch (column masks are scratch).
 const CHUNK_BATCH: usize = 2048;
+/// Terrain regions a volume keeps on the GPU at most (`engine::RegionPool`;
+/// streams: 896 bytes each, 29 MB; none for a program without regions).
+const REGION_CAPACITY: usize = 32768;
 /// Chunk slots at most by default (`Capacity::chunks`), within what the
 /// device can bind.
 pub const DEFAULT_CHUNKS: usize = 131072;
@@ -2822,6 +2825,8 @@ impl ChunkWorld {
                 storage(37, false, c),
                 storage(38, false, c),
                 storage(39, false, c),
+                storage(40, true, c),
+                storage(41, true, c),
             ],
         });
         let gen_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3467,6 +3472,8 @@ impl ChunkWorld {
                 entry(1, &vol.world),
                 entry(16, &vol.terrain),
                 entry(18, &vol.volumes),
+                entry(40, &vol.terrain_tables),
+                entry(41, vol.regions.buffer()),
                 entry(2, &self.tile_jobs),
                 entry(3, &vol.tile_data),
                 entry(25, &self.tile_node_data),
@@ -3755,6 +3762,13 @@ impl ChunkWorld {
             chunks.push((cz, refs, detailed));
         }
         if chunks.is_empty() {
+            return 0;
+        }
+        // The terrain's regions over the footprint (its streams), resident
+        // while its tiles and chunks generate (made off the frame: the
+        // footprint waits for them).
+        let keys = vol.region_keys(fp);
+        if !vol.regions.reserve(&keys, self.frame_now) {
             return 0;
         }
         // A footprint to compute keeps its candidate blocks this frame.
@@ -4813,6 +4827,24 @@ impl ChunkWorld {
         // The plan's requests, a footprint's nodes together.
         let mut restores = Restores::default();
         let requests = std::mem::take(&mut vol.plan.requests);
+        // The terrain regions of the footprints the next frames may reach,
+        // asked for together (made off the frame); a footprint whose regions
+        // are not resident yet waits while the next ones go on.
+        let mut ahead = Vec::new();
+        for k in &requests {
+            let fp = k.footprint();
+            if ahead.last() != Some(&fp) {
+                ahead.push(fp);
+                if ahead.len() >= 4 * most {
+                    break;
+                }
+            }
+        }
+        vol.regions.admit(self.frame_now);
+        for fp in ahead {
+            let keys = vol.region_keys(fp);
+            vol.regions.request(&keys);
+        }
         let mut at = 0;
         while at < requests.len() && !full(&batch) {
             let fp = requests[at].footprint();
@@ -4820,6 +4852,11 @@ impl ChunkWorld {
                 .iter()
                 .position(|k| k.footprint() != fp)
                 .map_or(requests.len(), |n| at + n);
+            let keys = vol.region_keys(fp);
+            if !vol.regions.resident(&keys) {
+                at = end;
+                continue;
+            }
             // Generated since that plan.
             let mut czs: Vec<i32> = requests[at..end]
                 .iter()
@@ -4921,6 +4958,7 @@ impl ChunkWorld {
         });
         let restore_group = (!restores.jobs.is_empty())
             .then(|| self.keep_group(&[[0; 4]], &restores.jobs, &restores.data));
+        vol.regions.flush(&self.queue);
         let group = self.gen_group(
             &vol,
             &refs_buffer,
@@ -7174,8 +7212,10 @@ impl ChunkWorld {
                     .into_iter()
                     .map(|(u, v)| {
                         let (cell, _) = grid.locate(f.origin + f.axis_u * u + f.axis_v * v);
+                        // A bound is enough (the probe starts over it):
+                        // the field without its streams, cheap on the CPU.
                         grid.layer_radius(f64::from(
-                            planet.column_top(cell.face, cell.i, cell.j, 0),
+                            planet.column_top_bound(cell.face, cell.i, cell.j, 0),
                         )) - grid.radius()
                     })
                     .fold(f64::NEG_INFINITY, f64::max);

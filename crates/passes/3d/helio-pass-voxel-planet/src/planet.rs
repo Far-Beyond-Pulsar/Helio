@@ -499,7 +499,7 @@ impl Planet {
             if cache.len() > 1 << 20 {
                 cache.clear();
             }
-            FeatureEval::new(&self.features, &self.grid, &top, &mut cache)
+            FeatureEval::new(&self.features, &self.grid, &*self.field, &top, &mut cache)
                 .coarse_cell(face, level, i, j, k)
         };
         if near.is_some() {
@@ -515,7 +515,7 @@ impl Planet {
             self.column_height(face, i, j, level),
         );
         self.features
-            .far_cover(&self.grid, face, level, i, j, ground)
+            .far_cover(&self.grid, &*self.field, face, level, i, j, ground)
             .and_then(|cover| CompiledFeatures::far_cell(level, k, cover))
     }
     /// Layers features stand over the ground at most.
@@ -885,6 +885,26 @@ impl Planet {
     pub fn column_top(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
         terrain::top_cells(&self.grid, self.column_height(face, i, j, level), level)
     }
+    /// A layer at least [`Self::column_top`]'s, of the natural terrain
+    /// (`TerrainField::height_bound`: cheaper, for bounds).
+    pub fn column_top_bound(&self, face: u8, i: i32, j: i32, level: u32) -> i32 {
+        // Cached with the heights, keyed past the grid's levels.
+        let key = (face, i, j, level + 64);
+        let cached = self.heights.lock().ok().and_then(|c| c.get(&key).copied());
+        let h = cached.unwrap_or_else(|| {
+            let h = self
+                .field
+                .height_bound(crate::terrain::Column { face, i, j, level });
+            if let Ok(mut cache) = self.heights.lock() {
+                if cache.len() > 1 << 20 {
+                    cache.clear();
+                }
+                cache.insert(key, h);
+            }
+            h
+        });
+        terrain::top_cells(&self.grid, h, level)
+    }
     /// The brushes of `log` that can change level cell `(i, j, k)` (`k`
     /// `None`: any cell of the column), in order.
     fn face_brushes(
@@ -991,7 +1011,7 @@ impl Planet {
             if cache.len() > 1 << 20 {
                 cache.clear();
             }
-            FeatureEval::new(&self.features, &self.grid, &top, &mut cache).brick(
+            FeatureEval::new(&self.features, &self.grid, &*self.field, &top, &mut cache).brick(
                 face,
                 origin,
                 n,
@@ -1010,6 +1030,7 @@ impl Planet {
                     .then(|| {
                         self.features.far_cover(
                             &self.grid,
+                            &*self.field,
                             face,
                             0,
                             i,
@@ -1773,7 +1794,7 @@ mod tests {
             )
         };
         let mut cache = PlacementCache::default();
-        let mut eval = FeatureEval::new(&*planet.features, g, &top, &mut cache);
+        let mut eval = FeatureEval::new(&*planet.features, g, planet.field(), &top, &mut cache);
         // A feature's solid cell over the terrain, in the column of its anchor.
         let (cell, ground) = (0..planet.features.spawns.len())
             .flat_map(|s| eval.placements_near(s, face, [c0, c0 + 4000], [c0, c0 + 4000]))

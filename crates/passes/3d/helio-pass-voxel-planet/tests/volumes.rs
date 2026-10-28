@@ -434,11 +434,13 @@ fn a_planet_a_moon_and_a_block_draw_as_one_scene() {
         Arc::new(moon()),
         VolumeTransform::new(moon_at, DQuat::from_rotation_z(0.4) * DQuat::from_rotation_x(1.1)),
     );
-    // The block set into the ground 9 m ahead, turned and leaning a little:
-    // its slab's top, sides and cabin show. (A plane's underside is no
-    // world's: the CPU's casts clip a plane to its terrain's band, the draw
-    // to its root chunks.)
-    let ground = earth.surface_point(eye + across * 9.0, 0.0);
+    // The block set into the ground 9 m ahead and 5 m to the right, turned
+    // and leaning a little: its slab's top, sides and cabin show, and the
+    // ground to its left whatever the ground's relief. (A plane's underside
+    // is no world's: the CPU's casts clip a plane to its terrain's band, the
+    // draw to its root chunks.)
+    let right = forward.cross(up).normalize();
+    let ground = earth.surface_point(eye + across * 9.0 + right * 5.0, 0.0);
     let block_at = ground - up * 1.0;
     let block = VoxelVolume::new(
         5,

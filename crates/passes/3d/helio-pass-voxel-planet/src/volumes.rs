@@ -795,6 +795,27 @@ impl VolumeLayer {
         [(ri, rj), (ri - 1, rj), (ri, rj - 1)]
     }
 
+    /// The reference-level columns `[i0, i1] x [j0, j1]` whose ground the
+    /// networks over base columns `[x0, x1] x [y0, y1]` at `level` read
+    /// (their owners' sites, links into the next regions included; none
+    /// where caves are not resolved): what generation keeps resident for
+    /// them (a field's regions).
+    pub fn ground_columns(&self, level: u32, x: [i32; 2], y: [i32; 2]) -> Option<([i32; 2], [i32; 2])> {
+        if !self.caves() || level as i32 > self.deepest_level(true) {
+            return None;
+        }
+        let (r, reference) = (self.region_shift(), self.reference_level());
+        // Regions past the face have no network (`inside`).
+        let last = (self.k.cliff_mix[2] >> reference) - 1;
+        let span = |a: [i32; 2]| {
+            [
+                (((a[0] >> r) - 1) << r >> reference).max(0),
+                ((((a[1] >> r) + 2) << r) - 1 >> reference).min(last),
+            ]
+        };
+        Some((span(x), span(y)))
+    }
+
     /// The cliff shape of a column at `level` (domain point `p`, material
     /// slope `slope` in eighths).
     pub fn cliff(&self, p: IVec3, slope: i32, level: u32) -> Cliff {

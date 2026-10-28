@@ -11,9 +11,11 @@
 //! base columns of a face, jittered by hash in the square's middle half; a
 //! candidate grows where its hash passes the spawn's density, its noise
 //! field passes its threshold, its ground's material (the terrain's rules
-//! at its top cell on level ground), height and relief (across its
-//! footprint's corners) suit it, and its footprint (its stamp's reach each
-//! way) lies on the face: a raw candidate. It is placed unless its
+//! at its top cell on level ground), height, climate (the terrain's
+//! temperature and moisture there: forests follow the rain, tree lines the
+//! cold) and relief (across its footprint's corners) suit it, and its
+//! footprint (its stamp's reach each way) lies on the face: a raw
+//! candidate. It is placed unless its
 //! footprint meets an earlier spawn's raw candidate (exclusion reads raw
 //! candidates, never placements, so it does not chain from spawn to spawn).
 //! Spawns go from the widest spacing to the narrowest (structures before
@@ -100,8 +102,12 @@ pub struct Spawn {
     pub heights_m: [f64; 2],
     /// How far its heights wander (m) and over what distance (m; 0: they
     /// do not): a tree line follows noise as the terrain's snowline does,
-    /// not a contour.
+    /// not a contour. The climate is read at the wandered height too.
     pub height_wander_m: [f64; 2],
+    /// The climate it grows in ([`TerrainField::climate`] at its ground):
+    /// annual mean temperature (°C) and moisture (0 dry to 1 wet).
+    pub temperature_c: [f64; 2],
+    pub moisture: [f64; 2],
     /// Most layers between the grounds at its anchor and its footprint's
     /// corners (its stamp's reach each way, at least a column).
     pub max_relief: u32,
@@ -132,6 +138,8 @@ impl Default for Spawn {
             surfaces: Vec::new(),
             heights_m: [-1e9, 1e9],
             height_wander_m: [0.0, 0.0],
+            temperature_c: [-1e3, 1e3],
+            moisture: [0.0, 1.0],
             max_relief: u32::MAX,
             sink: 0,
             far_material: 0,
@@ -252,6 +260,9 @@ pub struct CompiledSpawn {
     pub tops: [i32; 2],
     pub wander: i32,
     pub wander_shift: u32,
+    /// Its climate: temperature range (1/128 °C), moisture range packed
+    /// (Q16, low and high halves); `None`: any.
+    pub climate: Option<[i32; 3]>,
     pub max_relief: i32,
     pub sink: i32,
     /// Its far form: material (0: none) and canopy height (layers), and the
@@ -267,23 +278,32 @@ pub struct CompiledSpawn {
 
 impl CompiledSpawn {
     /// Whether ground at layer `ground` of base column `(i, j)` of `face`
-    /// lies within its heights, as they wander there (`spawn_grows_at` in
-    /// chunk_generate.wgsl).
-    pub fn grows_at(&self, grid: &Grid, face: u8, i: i32, j: i32, ground: i32) -> bool {
+    /// lies within its heights and climate, as they wander there
+    /// (`spawn_grows_at` in chunk_generate.wgsl).
+    pub fn grows_at(
+        &self,
+        grid: &Grid,
+        field: &dyn TerrainField,
+        face: u8,
+        i: i32,
+        j: i32,
+        ground: i32,
+    ) -> bool {
+        let p = grid.domain_point(face, i, j, 0);
         let wander = if self.wander_shift > 0 {
-            scale(
-                noise(
-                    grid.domain_point(face, i, j, 0),
-                    self.wander_shift,
-                    self.seed ^ 0x7a3d_e1f1,
-                ),
-                self.wander,
-            )
+            scale(noise(p, self.wander_shift, self.seed ^ 0x7a3d_e1f1), self.wander)
         } else {
             0
         };
-        let ground = ground.saturating_add(wander);
-        ground >= self.tops[0] && ground <= self.tops[1]
+        let ground = ground.wrapping_add(wander);
+        if ground < self.tops[0] || ground > self.tops[1] {
+            return false;
+        }
+        let Some([lo, hi, wet]) = self.climate else {
+            return true;
+        };
+        let (t, m) = field.climate(p, ground.wrapping_mul(grid.layer_mm() as i32));
+        t >= lo && t <= hi && m >= wet & 0xffff && m <= (wet >> 16) & 0xffff
     }
 }
 
@@ -443,6 +463,17 @@ impl CompiledFeatures {
                 0
             };
             let layer = |m: f64| (m / voxel).floor().clamp(-2.0e9, 2.0e9) as i32;
+            let degrees = |c: f64| {
+                (c * f64::from(crate::planet_maps::DEGREE))
+                    .clamp(-1.0e9, 1.0e9)
+                    .round() as i32
+            };
+            let wet = |m: f64| (m.clamp(0.0, 1.0) * f64::from(crate::planet_maps::WET)).round() as i32;
+            let climate = [
+                degrees(s.temperature_c[0]),
+                degrees(s.temperature_c[1]),
+                wet(s.moisture[0]) | wet(s.moisture[1]) << 16,
+            ];
             let wander_shift = if s.height_wander_m[0] > 0.0 && s.height_wander_m[1] > 0.0 {
                 (s.height_wander_m[1] / crate::grid::DOMAIN_UNIT)
                     .log2()
@@ -469,6 +500,11 @@ impl CompiledFeatures {
                     0
                 },
                 wander_shift,
+                climate: (s.temperature_c[0] > -273.0
+                    || s.temperature_c[1] < 1e3
+                    || s.moisture[0] > 0.0
+                    || s.moisture[1] < 1.0)
+                    .then_some(climate),
                 max_relief: s.max_relief.min(i32::MAX as u32) as i32,
                 sink: s.sink,
                 far_material: s.far_material,
@@ -544,6 +580,7 @@ impl CompiledFeatures {
     pub fn far_cover(
         &self,
         grid: &Grid,
+        field: &dyn TerrainField,
         face: u8,
         level: u32,
         i: i32,
@@ -557,7 +594,7 @@ impl CompiledFeatures {
             let mid = 1 << (level - 1);
             if self.drawn(s, level)
                 || sp.far_material == 0
-                || !sp.grows_at(grid, face, (i << level) + mid, (j << level) + mid, ground)
+                || !sp.grows_at(grid, field, face, (i << level) + mid, (j << level) + mid, ground)
             {
                 continue;
             }
@@ -714,9 +751,10 @@ impl CompiledFeatures {
                 sp.cover,
                 sp.wander as u32,
                 sp.wander_shift,
-                0,
-                0,
-                0,
+                // The climate (`spawn_grows_at`): any, or its ranges.
+                sp.climate.map_or(i32::MIN, |c| c[0]) as u32,
+                sp.climate.map_or(i32::MAX, |c| c[1]) as u32,
+                sp.climate.map_or(0xffff_0000, |c| c[2] as u32),
             ]);
         }
         for (n, st) in self.stamps.iter().enumerate() {
@@ -762,6 +800,7 @@ impl CompiledFeatures {
         &self,
         s: usize,
         grid: &Grid,
+        field: &dyn TerrainField,
         top: &dyn Fn(u8, i32, i32) -> (i32, i32),
         face: u8,
         gx: i32,
@@ -795,7 +834,7 @@ impl CompiledFeatures {
             return None;
         }
         let (ground, surface) = top(face, i, j);
-        if !sp.grows_at(grid, face, i, j, ground) {
+        if !sp.grows_at(grid, field, face, i, j, ground) {
             return None;
         }
         if sp.surfaces != 0 && (surface >= 64 || sp.surfaces & (1 << surface) == 0) {
@@ -839,6 +878,7 @@ pub type PlacementCache =
 pub struct FeatureEval<'a> {
     pub features: &'a CompiledFeatures,
     pub grid: &'a Grid,
+    pub field: &'a dyn TerrainField,
     /// The ground top layer and surface material of a base column.
     pub top: &'a dyn Fn(u8, i32, i32) -> (i32, i32),
     cache: &'a mut PlacementCache,
@@ -848,12 +888,14 @@ impl<'a> FeatureEval<'a> {
     pub fn new(
         features: &'a CompiledFeatures,
         grid: &'a Grid,
+        field: &'a dyn TerrainField,
         top: &'a dyn Fn(u8, i32, i32) -> (i32, i32),
         cache: &'a mut PlacementCache,
     ) -> Self {
         Self {
             features,
             grid,
+            field,
             top,
             cache,
         }
@@ -867,7 +909,7 @@ impl<'a> FeatureEval<'a> {
         }
         let p = self
             .features
-            .candidate(s, self.grid, self.top, face, gx, gy);
+            .candidate(s, self.grid, self.field, self.top, face, gx, gy);
         self.cache.insert(key, (p, None));
         p
     }
@@ -1064,14 +1106,16 @@ mod tests {
         };
         let compiled = CompiledFeatures::new(&set, &grid, 7).unwrap();
         let (wandering, fixed) = (&compiled.spawns[0], &compiled.spawns[1]);
+        let field = crate::layers::TerrainLayers::flat().field(&grid, 7).unwrap();
+        let field = &field;
         let n = grid.cells() / 2;
         let (mut above, mut below) = (0, 0);
         for step in 0..2000 {
             let (i, j) = (n + step * 37, n - step * 23);
             for (ground_m, past) in [(110.0, true), (90.0, false)] {
                 let ground = (ground_m / 0.1) as i32;
-                assert_eq!(fixed.grows_at(&grid, 2, i, j, ground), !past);
-                match (wandering.grows_at(&grid, 2, i, j, ground), past) {
+                assert_eq!(fixed.grows_at(&grid, field, 2, i, j, ground), !past);
+                match (wandering.grows_at(&grid, field, 2, i, j, ground), past) {
                     (true, true) => above += 1,
                     (false, false) => below += 1,
                     _ => {}
@@ -1079,8 +1123,8 @@ mod tests {
             }
             // Never past the wander.
             assert!(
-                wandering.grows_at(&grid, 2, i, j, (79.0 / 0.1) as i32)
-                    && !wandering.grows_at(&grid, 2, i, j, (121.0 / 0.1) as i32)
+                wandering.grows_at(&grid, field, 2, i, j, (79.0 / 0.1) as i32)
+                    && !wandering.grows_at(&grid, field, 2, i, j, (121.0 / 0.1) as i32)
             );
         }
         assert!(
@@ -1148,7 +1192,7 @@ mod tests {
             ground(p.grid(), p.field(), f, i, j, 0, p.column_height(f, i, j, 0))
         };
         let mut cache = PlacementCache::default();
-        let mut eval = FeatureEval::new(p.features(), p.grid(), &top, &mut cache);
+        let mut eval = FeatureEval::new(p.features(), p.grid(), p.field(), &top, &mut cache);
         (0..p.features().spawns.len())
             .flat_map(|s| eval.placements_near(s, face, [i0, i0 + 40], [j0, j0 + 40]))
             .collect()
@@ -1316,7 +1360,7 @@ mod tests {
             ground(p.grid(), p.field(), f, i, j, 0, p.column_height(f, i, j, 0))
         };
         let mut cache = PlacementCache::default();
-        let trees = FeatureEval::new(fc, p.grid(), &top, &mut cache).placements_near(
+        let trees = FeatureEval::new(fc, p.grid(), p.field(), &top, &mut cache).placements_near(
             1,
             face,
             [i0, i0 + side],
@@ -1355,7 +1399,7 @@ mod tests {
                     level,
                     p.column_height(face, i, j, level),
                 );
-                let Some(cover) = fc.far_cover(p.grid(), face, level, i, j, g) else {
+                let Some(cover) = fc.far_cover(p.grid(), p.field(), face, level, i, j, g) else {
                     continue;
                 };
                 assert_eq!((cover.0, cover.2 - cover.1), (11, 9));

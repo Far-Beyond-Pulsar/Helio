@@ -2573,6 +2573,17 @@ fn skip_along(f: Face, dir: vec3<f32>) -> f32 {
     return f.skip * f.cell * clamp(0.75 / max(rise, 1e-3), 1.0, 12.0);
 }
 
+// Face `f` with its skip along `dir` (`skip_along`) no longer than `reach`
+// (m). A lamp's ray skips what lies within the hit's own pixel at most: a
+// step farther along casts a shadow wider than a pixel (a cell-high
+// riser's runs 1 / rise cells), which rough ground shows.
+fn skip_within(f: Face, dir: vec3<f32>, reach: f32) -> Face {
+    var g = f;
+    let along = skip_along(f, dir);
+    if along > reach { g.skip = f.skip * reach / along; }
+    return g;
+}
+
 // WALK {
 // Whether the hit at pixel `q` (distance `t`, face `f`) sees along `dir` to
 // distance `range` (the sun: as far as the world goes; a light: to it).
@@ -3086,6 +3097,7 @@ fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
         // Short of the light: the cell a lamp stands in does not shade it.
         var lit = face;
         lit.skip = face.light_skip;
+        lit = skip_within(lit, reach.dir, pixel_width(q, size, t));
         if hit_walk(q, size, slot, t, lit, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
     }
     return seen;

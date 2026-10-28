@@ -241,6 +241,266 @@ impl WorldGpu {
     }
 }
 
+/// The program's tables as `terrain_tables` (binding 40): at least one
+/// `vec4<u32>`, a whole number of them.
+pub(crate) fn tables_buffer(device: &wgpu::Device, program: &TerrainProgram) -> wgpu::Buffer {
+    use wgpu::util::DeviceExt;
+    let mut words = program.tables.to_vec();
+    words.resize(words.len().max(4).next_multiple_of(4), 0);
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("terrain tables"),
+        contents: bytemuck::cast_slice(&words),
+        usage: wgpu::BufferUsages::STORAGE,
+    })
+}
+
+/// Most probes a region lookup makes (`terrain_region`): the table is at
+/// most half full.
+const REGION_PROBES: usize = 64;
+
+/// A region key's hash (`terrain_region_hash` in WGSL).
+fn region_hash(key: [u32; 2]) -> u32 {
+    let h = key[0].wrapping_mul(0x9e37_79b1) ^ key[1].wrapping_mul(0x85eb_ca77);
+    (h ^ (h >> 15)).wrapping_mul(0x2c1b_3c6d) ^ (h >> 13)
+}
+
+/// A program's regions on the GPU (`terrain_regions`, binding 41;
+/// [`crate::terrain::TerrainRegions`]): an open-addressed table of the
+/// resident keys and the regions' words, which the field makes on the CPU
+/// the first time a footprint needs them. Layout (`vec4<u32>`): a head
+/// (table mask, capacity, words a region, where regions start in words /
+/// 4), the table (key, slot + 1), then the regions.
+pub(crate) struct RegionPool {
+    source: Option<crate::terrain::Regions>,
+    words: usize,
+    capacity: usize,
+    entries: usize,
+    buffer: wgpu::Buffer,
+    resident: rustc_hash::FxHashMap<[u32; 2], (u32, u64)>,
+    free: Vec<u32>,
+    /// Regions made since the last flush, and whether the table changed.
+    pending: Vec<(u32, Vec<u32>)>,
+    table_dirty: bool,
+    /// Regions being made off the frame ([`Self::reserve`]), and those made
+    /// and not yet in the pool.
+    making: rustc_hash::FxHashSet<[u32; 2]>,
+    made: std::sync::Arc<std::sync::Mutex<Vec<([u32; 2], Vec<u32>)>>>,
+}
+
+impl RegionPool {
+    /// A pool of `capacity` regions of `program`'s (none without regions:
+    /// a one-word buffer for the binding).
+    pub(crate) fn new(device: &wgpu::Device, program: &TerrainProgram, capacity: usize) -> Self {
+        let source = program.regions.clone();
+        let capacity = if source.is_some() { capacity.max(1) } else { 0 };
+        let words = source.as_ref().map_or(4, |r| r.0.words().next_multiple_of(4));
+        let entries = (2 * capacity).next_power_of_two();
+        let size = 16 * (1 + entries as u64) + 4 * (words * capacity) as u64;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("terrain regions"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: true,
+        });
+        {
+            let mut head = buffer.slice(..16).get_mapped_range_mut().expect("a mapped region head");
+            let head_words = [(entries - 1) as u32, capacity as u32, words as u32, (1 + entries) as u32];
+            head.copy_from_slice(bytemuck::cast_slice(&head_words));
+        }
+        buffer.unmap();
+        Self {
+            source,
+            words,
+            capacity,
+            entries,
+            buffer,
+            resident: Default::default(),
+            free: (0..capacity as u32).rev().collect(),
+            pending: Vec::new(),
+            table_dirty: false,
+            making: Default::default(),
+            made: Default::default(),
+        }
+    }
+
+    pub(crate) fn buffer(&self) -> &wgpu::Buffer {
+        &self.buffer
+    }
+
+    /// The regions the program reads over footprint columns `[i0, i1] x
+    /// [j0, j1]` of `face` at grid level `level` (none without regions).
+    pub(crate) fn keys(&self, grid: &crate::grid::Grid, face: u8, level: u32, i: [i32; 2], j: [i32; 2]) -> Vec<[u32; 2]> {
+        let mut out = Vec::new();
+        if let Some(r) = &self.source {
+            r.0.keys(grid, face, level, i, j, &mut out);
+        }
+        out
+    }
+
+    /// Make room for `n` more regions besides those `frame` keeps,
+    /// evicting the longest unused (an eighth of the pool at least:
+    /// evictions come in batches, not a table upload a footprint): how many
+    /// fit.
+    fn room(&mut self, n: usize, frame: u64) -> usize {
+        if self.free.len() < n {
+            let mut old: Vec<([u32; 2], u32, u64)> = self
+                .resident
+                .iter()
+                .filter(|(_, e)| e.1 < frame)
+                .map(|(k, e)| (*k, e.0, e.1))
+                .collect();
+            old.sort_unstable_by_key(|e| (e.2, e.0));
+            for e in old.iter().take((n - self.free.len()).max(self.capacity / 8)) {
+                self.resident.remove(&e.0);
+                self.free.push(e.1);
+            }
+            self.table_dirty = true;
+        }
+        n.min(self.free.len())
+    }
+
+    /// Region `key`'s words `w` into a free slot, kept through `frame`.
+    fn place(&mut self, key: [u32; 2], w: Vec<u32>, frame: u64) {
+        let slot = self.free.pop().expect("a free region slot");
+        self.resident.insert(key, (slot, frame));
+        self.pending.push((slot, w));
+        self.table_dirty = true;
+    }
+
+    /// Keep regions `keys` resident through `frame`, making the missing
+    /// ones now (on the CPU, in parallel): false when the pool cannot hold
+    /// them besides those `frame` keeps (then nothing is made).
+    pub(crate) fn reserve_now(&mut self, keys: &[[u32; 2]], frame: u64) -> bool {
+        use rayon::prelude::*;
+        let Some(source) = self.source.clone() else {
+            return true;
+        };
+        let mut missing = Vec::new();
+        for k in keys {
+            match self.resident.get_mut(k) {
+                Some(e) => e.1 = e.1.max(frame),
+                None => missing.push(*k),
+            }
+        }
+        if self.room(missing.len(), frame) < missing.len() {
+            return false;
+        }
+        let words = self.words;
+        let made: Vec<Vec<u32>> = missing
+            .par_iter()
+            .map(|k| {
+                let mut w = vec![0u32; words];
+                source.0.region(*k, &mut w[..source.0.words()]);
+                w
+            })
+            .collect();
+        for (k, w) in missing.into_iter().zip(made) {
+            self.place(k, w, frame);
+        }
+        true
+    }
+
+    /// Have regions `keys` made off the frame if they are not resident
+    /// (a footprint the frame may reach: its regions come together).
+    pub(crate) fn request(&mut self, keys: &[[u32; 2]]) {
+        let Some(source) = self.source.clone() else {
+            return;
+        };
+        for &k in keys {
+            if self.resident.contains_key(&k) || !self.making.insert(k) {
+                continue;
+            }
+            let (source, made, words) = (source.clone(), self.made.clone(), self.words);
+            rayon::spawn(move || {
+                let mut w = vec![0u32; words];
+                source.0.region(k, &mut w[..source.0.words()]);
+                made.lock().unwrap_or_else(|e| e.into_inner()).push((k, w));
+            });
+        }
+    }
+
+    /// Whether regions `keys` are all resident.
+    pub(crate) fn resident(&self, keys: &[[u32; 2]]) -> bool {
+        self.source.is_none() || keys.iter().all(|k| self.resident.contains_key(k))
+    }
+
+    /// Whether regions `keys` are all resident, kept through `frame` if
+    /// so. Missing ones are made off the frame (the thread pool) and enter
+    /// the pool on a later call: a footprint waits for its regions instead
+    /// of the frame making them.
+    pub(crate) fn reserve(&mut self, keys: &[[u32; 2]], frame: u64) -> bool {
+        let Some(source) = self.source.clone() else {
+            return true;
+        };
+        self.admit(frame);
+        let mut ready = true;
+        for &k in keys {
+            if let Some(e) = self.resident.get_mut(&k) {
+                e.1 = e.1.max(frame);
+                continue;
+            }
+            ready = false;
+            if self.making.insert(k) {
+                let (source, made, words) = (source.clone(), self.made.clone(), self.words);
+                rayon::spawn(move || {
+                    let mut w = vec![0u32; words];
+                    source.0.region(k, &mut w[..source.0.words()]);
+                    made.lock().unwrap_or_else(|e| e.into_inner()).push((k, w));
+                });
+            }
+        }
+        ready
+    }
+
+    /// Regions made off the frame into the pool, as many as fit besides
+    /// those `frame` keeps (the rest wait). Each frame admits before it
+    /// asks which footprints' regions are resident: a footprint waiting on
+    /// its regions is not reserved, so `reserve` alone would never admit
+    /// the first ones.
+    pub(crate) fn admit(&mut self, frame: u64) {
+        let mut done = std::mem::take(&mut *self.made.lock().unwrap_or_else(|e| e.into_inner()));
+        if done.is_empty() {
+            return;
+        }
+        let fit = self.room(done.len(), frame);
+        let rest = done.split_off(fit);
+        for (k, w) in done {
+            self.making.remove(&k);
+            self.place(k, w, frame);
+        }
+        self.made.lock().unwrap_or_else(|e| e.into_inner()).extend(rest);
+    }
+
+    /// Upload the regions made and the table, if it changed (before the
+    /// dispatches that read them).
+    pub(crate) fn flush(&mut self, queue: &wgpu::Queue) {
+        let base = 16 * (1 + self.entries as u64);
+        for (slot, w) in self.pending.drain(..) {
+            queue.write_buffer(&self.buffer, base + 4 * (u64::from(slot) * self.words as u64), bytemuck::cast_slice(&w));
+        }
+        if !self.table_dirty || self.capacity == 0 {
+            return;
+        }
+        let mask = self.entries - 1;
+        let mut table = vec![[0u32; 4]; self.entries];
+        let mut keys: Vec<_> = self.resident.iter().map(|(k, e)| (*k, e.0)).collect();
+        keys.sort_unstable();
+        for (k, slot) in keys {
+            let mut h = region_hash(k) as usize & mask;
+            for probe in 0.. {
+                assert!(probe < REGION_PROBES, "region table clustered");
+                if table[h][2] == 0 {
+                    table[h] = [k[0], k[1], slot + 1, 0];
+                    break;
+                }
+                h = (h + 1) & mask;
+            }
+        }
+        queue.write_buffer(&self.buffer, 16, bytemuck::cast_slice(&table));
+        self.table_dirty = false;
+    }
+}
+
 /// Terrain constants padded to a whole uniform (16-byte multiple).
 pub(crate) fn terrain_bytes(program: &TerrainProgram) -> Vec<u8> {
     let mut bytes = program.constants.clone();
@@ -290,9 +550,10 @@ fn hardware_wide(noise: &str) -> String {
 /// leaves out, the column functions ([`column_source`]; `generation`: the
 /// generation module's) and the world shape. With `wide64` the
 /// noise library's wide products use hardware 64-bit integers
-/// (`wide64.wgsl`). The program reads the `world` and `terrain` uniforms,
-/// declared here (group 0, bindings 1 and 16); the volume layer reads
-/// `volumes` (binding 18).
+/// (`wide64.wgsl`). The program reads the `world` and `terrain` uniforms
+/// and the `terrain_tables` and `terrain_regions` storage, declared here
+/// (group 0, bindings 1, 16, 40 and 41); the volume layer reads `volumes`
+/// (binding 18).
 pub(crate) fn terrain_source(
     plane: bool,
     program: &TerrainProgram,
@@ -308,6 +569,25 @@ pub(crate) fn terrain_source(
     s.push_str(include_str!("../shaders/world.wgsl"));
     s.push_str(include_str!("../shaders/material_state.wgsl"));
     s.push_str(&program.wgsl);
+    if !program.wgsl.contains("fn terrain_climate") {
+        // No climate (`TerrainField::climate`).
+        s.push_str(&format!(
+            "fn terrain_climate(p: vec3<i32>, height: i32) -> vec2<i32> {{ return vec2<i32>({}, {}); }}
+",
+            crate::terrain::DEFAULT_CLIMATE[0],
+            crate::terrain::DEFAULT_CLIMATE[1]
+        ));
+    }
+    if !program.wgsl.contains("fn terrain_erosion") {
+        // No erosion (`TerrainField::erosion`).
+        s.push_str("fn terrain_erosion(p: vec3<i32>) -> vec2<i32> { return vec2<i32>(0, i32(0x80000000u)); }
+");
+    }
+    if !program.wgsl.contains("fn terrain_drainage") {
+        // No drainage (`TerrainField::drainage`).
+        s.push_str("fn terrain_drainage(p: vec3<i32>) -> vec4<i32> { return vec4<i32>(0, 0, 0x7fffffff, 0); }
+");
+    }
     if !program.wgsl.contains("fn terrain_cave_gate") {
         // Networks wherever their share allows (`TerrainField::cave_gate`).
         s.push_str("fn terrain_cave_gate(surface: u32, height: i32) -> i32 { return 256; }\n");
@@ -318,8 +598,35 @@ pub(crate) fn terrain_source(
     s.push_str(
         "@group(0) @binding(1) var<uniform> world: World;
 @group(0) @binding(16) var<uniform> terrain: TerrainConstants;
+@group(0) @binding(40) var<storage, read> terrain_tables: array<vec4<u32>>;
+@group(0) @binding(41) var<storage, read> terrain_regions: array<vec4<u32>>;
 ",
     );
+    s.push_str(&format!(
+        "// The program's regions (`engine::RegionPool`).
+fn terrain_region_hash(key: vec2<u32>) -> u32 {{
+    let h = (key.x * 0x9e3779b1u) ^ (key.y * 0x85ebca77u);
+    return ((h ^ (h >> 15u)) * 0x2c1b3c6du) ^ (h >> 13u);
+}}
+fn terrain_region(key: vec2<u32>) -> i32 {{
+    let head = terrain_regions[0];
+    if head.y == 0u {{ return -1; }}
+    var h = terrain_region_hash(key) & head.x;
+    for (var probe = 0u; probe < {REGION_PROBES}u; probe++) {{
+        let e = terrain_regions[1u + h];
+        if e.z == 0u {{ return -1; }}
+        if e.x == key.x && e.y == key.y {{ return i32(e.z) - 1; }}
+        h = (h + 1u) & head.x;
+    }}
+    return -1;
+}}
+fn terrain_region_word(slot: u32, i: u32) -> u32 {{
+    let head = terrain_regions[0];
+    let at = head.w * 4u + slot * head.z + i;
+    return terrain_regions[at >> 2u][at & 3u];
+}}
+"
+    ));
     // World shape: 0 sphere, 1 plane.
     s.push_str(&format!("const SHAPE: u32 = {};\nconst PLANE_FACE: u32 = 2u;\nfn is_plane() -> bool {{ return SHAPE == 1u; }}\n", if plane { "1u" } else { "0u" }));
     s
@@ -540,7 +847,6 @@ pub fn verify_field(
 ) -> Result<(), String> {
     let grid = *planet.grid();
     let field = planet.field();
-    let program = field.program();
     let mut rng = 0x1234_5678u64;
     let mut next = || {
         rng ^= rng << 13;
@@ -548,11 +854,9 @@ pub fn verify_field(
         rng ^= rng << 17;
         rng
     };
-    let (lo, hi) = field.height_range();
-    let span = (i64::from(hi) - i64::from(lo) + 1).max(1) as u64;
     let volumes = planet.volumes();
     // The volume's draws come from a sequence of their own, so the
-    // columns and material inputs are the same as without volumes.
+    // columns are the same as without volumes.
     let mut vrng = 0x9E37_79B9_7F4A_7C15u64;
     let mut vnext = || {
         vrng ^= vrng << 13;
@@ -560,8 +864,7 @@ pub fn verify_field(
         vrng ^= vrng << 17;
         vrng
     };
-    let mut inputs = Vec::new();
-    let mut extra = Vec::new();
+    let mut columns = Vec::new();
     let mut volume = Vec::new();
     for s in 0..samples {
         let level = (next() % u64::from(grid.levels())) as u32;
@@ -579,12 +882,6 @@ pub fn verify_field(
         } else {
             ((next() % cells) as i32, (next() % cells) as i32)
         };
-        let material = IVec4::new(
-            (i64::from(lo) + (next() % span) as i64) as i32,
-            (next() % 40) as i32,
-            (next() % 40) as i32,
-            (next() % 200_000) as i32 - 100_000,
-        );
         // A layer near the top, and a slope for the cliff shapes (eighths).
         let column = crate::terrain::Column {
             face: face as u8,
@@ -593,14 +890,8 @@ pub fn verify_field(
             level,
         };
         let top = crate::terrain::top_cells(&grid, field.height(column), level);
-        inputs.push(IVec4::new(face, i, j, level as i32));
-        extra.push(material);
-        volume.push(IVec4::new(
-            (vnext() % 64) as i32,
-            top + (vnext() % 81) as i32 - 40,
-            0,
-            0,
-        ));
+        columns.push([face, i, j, level as i32]);
+        volume.push([(vnext() % 64) as i32, top + (vnext() % 81) as i32 - 40]);
         // Every third sample, a cell of a cave primitive as well, at a
         // level that resolves it.
         let Some(v) = volumes.filter(|v| v.caves() && s % 3 == 1) else {
@@ -620,22 +911,91 @@ pub fn verify_field(
             let at = |n: usize| p.a[n] + (p.b[n] - p.a[n]) * t / 16;
             let reach = i64::from(p.r) * ((vnext() % 5) as i64 - 2) / 2;
             let spread = i64::from(p.rv) * ((vnext() % 7) as i64 - 3) / 2;
-            inputs.push(IVec4::new(
+            columns.push([
                 face,
                 ((at(0) + reach) >> 2 >> level) as i32,
                 ((at(1) - reach) >> 2 >> level) as i32,
                 level as i32,
-            ));
-            extra.push(material);
-            volume.push(IVec4::new(
+            ]);
+            volume.push([
                 (vnext() % 64) as i32,
                 ((at(2) + spread) >> 2 >> level) as i32,
-                0,
-                0,
-            ));
+            ]);
             break;
         }
     }
+    verify_cells(device, queue, planet, &columns, &volume)
+}
+
+/// [`verify_field`] at the given columns (`[face, i, j, level]`), each at
+/// a cell near its top.
+pub fn verify_columns(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    planet: &Planet,
+    columns: &[[i32; 4]],
+) -> Result<(), String> {
+    let grid = *planet.grid();
+    let field = planet.field();
+    let mut rng = 0x5bd1_e995u64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let volume: Vec<[i32; 2]> = columns
+        .iter()
+        .map(|c| {
+            let level = c[3] as u32;
+            let column = crate::terrain::Column {
+                face: c[0] as u8,
+                i: c[1],
+                j: c[2],
+                level,
+            };
+            let top = crate::terrain::top_cells(&grid, field.height(column), level);
+            [(next() % 64) as i32, top + (next() % 81) as i32 - 40]
+        })
+        .collect();
+    verify_cells(device, queue, planet, columns, &volume)
+}
+
+/// Columns `columns` (`[face, i, j, level]`) and a cell of each (`volume`:
+/// `[slope, k]`) on the GPU and the CPU, with ground-material inputs drawn
+/// here.
+fn verify_cells(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    planet: &Planet,
+    columns: &[[i32; 4]],
+    volume: &[[i32; 2]],
+) -> Result<(), String> {
+    let grid = *planet.grid();
+    let field = planet.field();
+    let program = field.program();
+    let mut rng = 0x9e37_79b9u64;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+    let (lo, hi) = field.height_range();
+    let span = (i64::from(hi) - i64::from(lo) + 1).max(1) as u64;
+    let inputs: Vec<IVec4> = columns.iter().map(|c| IVec4::from_array(*c)).collect();
+    let extra: Vec<IVec4> = columns
+        .iter()
+        .map(|_| {
+            IVec4::new(
+                (i64::from(lo) + (next() % span) as i64) as i32,
+                (next() % 40) as i32,
+                (next() % 40) as i32,
+                (next() % 200_000) as i32 - 100_000,
+            )
+        })
+        .collect();
+    let volume: Vec<IVec4> = volume.iter().map(|v| IVec4::new(v[0], v[1], 0, 0)).collect();
     let samples = inputs.len() as u32;
     let module = helio_core::shader::module(
         device,
@@ -679,6 +1039,29 @@ pub fn verify_field(
         bytemuck::bytes_of(&volume_constants(planet)),
         wgpu::BufferUsages::UNIFORM,
     );
+    let tables = tables_buffer(device, &program);
+    // Every region the columns read, resident at once: theirs and their
+    // cave networks' reference ground.
+    let keys: Vec<[u32; 2]> = {
+        let probe = RegionPool::new(device, &program, 0);
+        let mut keys = Vec::new();
+        for c in columns {
+            let (face, level) = (c[0] as u8, c[3] as u32);
+            keys.extend(probe.keys(&grid, face, level, [c[1], c[1]], [c[2], c[2]]));
+            let base = |a: i32| [a << level, ((a + 1) << level) - 1];
+            if let Some(v) = planet.volumes() {
+                if let Some((i, j)) = v.ground_columns(level, base(c[1]), base(c[2])) {
+                    keys.extend(probe.keys(&grid, face, v.reference_level(), i, j));
+                }
+            }
+        }
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    };
+    let mut regions = RegionPool::new(device, &program, keys.len());
+    regions.reserve_now(&keys, 0);
+    regions.flush(queue);
     let ins = init(
         "verify inputs",
         bytemuck::cast_slice(&inputs),
@@ -724,6 +1107,8 @@ pub fn verify_field(
             binding(21, &ext),
             binding(22, &out),
             binding(23, &vol),
+            binding(40, &tables),
+            binding(41, regions.buffer()),
         ],
     });
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -763,11 +1148,23 @@ pub fn verify_field(
         let q = grid.volume_point(face, a.y, a.z, v.y, level);
         let surface = field.surface(column, height) & 0xff;
         let cell = verify_cell(planet, face, a.y, a.z, level, v.x, v.y, height);
+        let climate = field.climate(q, e.x);
+        let worn = field.erosion(q);
+        let drains = field.drainage(q);
         let cpu = [
             height,
             field.ground_material(p, surface, e.x, e.y, e.z, e.w) as i32,
             cell[0] + cell[1] * 2 + cell[2] * 64,
-            (q.x ^ q.y ^ q.z).wrapping_add(surface as i32 * 7919),
+            (q.x ^ q.y ^ q.z)
+                .wrapping_add(surface as i32 * 7919)
+                .wrapping_add(climate.0.wrapping_mul(524_287))
+                .wrapping_add(climate.1.wrapping_mul(8_191))
+                .wrapping_add(worn.0.wrapping_mul(3))
+                .wrapping_add(worn.1.wrapping_mul(5))
+                .wrapping_add(drains[0].wrapping_mul(17))
+                .wrapping_add(drains[1].wrapping_mul(19))
+                .wrapping_add(drains[2].wrapping_mul(23))
+                .wrapping_add(drains[3].wrapping_mul(29)),
         ];
         if *g != cpu {
             return Err(format!(
@@ -779,7 +1176,8 @@ pub fn verify_field(
 }
 
 /// The terrain verification shader of [`verify_field`]: the terrain half
-/// and a kernel comparing columns and volume cells.
+/// and a kernel comparing columns, volume cells and the climate, erosion
+/// and drainage at them.
 pub(crate) fn verify_source(plane: bool, program: &TerrainProgram, wide64: bool) -> String {
     let kernel = "
 @group(0) @binding(20) var<storage, read> verify_in: array<vec4<i32>>;
@@ -828,7 +1226,8 @@ fn verify_cell(face: u32, i: i32, j: i32, level: u32, slope: i32, k: i32, height
 }
 
 @compute @workgroup_size(64) fn verify(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= arrayLength(&verify_in) { return; }
+    // (The tables and regions stay bound for programs that read neither.)
+    if id.x >= arrayLength(&verify_in) || arrayLength(&terrain_tables) == 0u || arrayLength(&terrain_regions) == 0u { return; }
     let a = verify_in[id.x];
     let e = verify_extra[id.x];
     let v = verify_volume[id.x];
@@ -839,8 +1238,13 @@ fn verify_cell(face: u32, i: i32, j: i32, level: u32, slope: i32, k: i32, height
     let q = volume_point(u32(a.x), a.y, a.z, v.y, level);
     let cell = verify_cell(u32(a.x), a.y, a.z, level, v.x, v.y, height, p);
     let surface = u32(column.y) & 0xffu;
+    let climate = terrain_climate(q, e.x);
+    let worn = terrain_erosion(q);
+    let drains = terrain_drainage(q);
     verify_out[id.x] = vec4<i32>(height, i32(ground_material(p, surface, e.x, e.y, e.z, e.w)),
-        cell.x + cell.y * 2 + cell.z * 64, (q.x ^ q.y ^ q.z) + i32(surface) * 7919);
+        cell.x + cell.y * 2 + cell.z * 64, (q.x ^ q.y ^ q.z) + i32(surface) * 7919
+            + climate.x * 524287 + climate.y * 8191
+            + worn.x * 3 + worn.y * 5 + drains.x * 17 + drains.y * 19 + drains.z * 23 + drains.w * 29);
 }
 ";
     terrain_source(plane, program, wide64, false) + kernel

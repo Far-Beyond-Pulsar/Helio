@@ -7,7 +7,7 @@
 
 use crate::config::{PLANET_RADIUS_M, VOXEL_M, WORLD_SEED};
 use helio_pass_voxel_planet::layers::{
-    self, Layer, LayerKind, LayerMask, MaterialRule, MaterialStyle, TerrainLayers,
+    self, Climate, Layer, LayerKind, LayerMask, MaterialRule, MaterialStyle, TerrainLayers,
 };
 use helio_pass_voxel_planet::volumes::{Caves, Volumes};
 use helio_pass_voxel_planet::terrain::TerrainSource;
@@ -81,7 +81,8 @@ pub fn terrain_layers() -> TerrainLayers {
             ..Volumes::none()
         },
         materials: MaterialStyle::Rules,
-        snowline_m: 1.0e5,
+        // Half wet everywhere (a 16 km world under one sky).
+        climate: Climate::uniform(20.0, 1.0),
         soil_depth_m: 4.0,
         surface: "Grass".into(),
         soil: "Dirt".into(),

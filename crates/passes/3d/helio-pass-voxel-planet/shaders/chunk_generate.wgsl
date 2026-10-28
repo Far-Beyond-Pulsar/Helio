@@ -1769,7 +1769,8 @@ fn spawn_word(s: u32, w: u32) -> u32 {
 }
 
 // Whether ground at layer `ground` of a base column (its domain point `p`)
-// lies within spawn `s`'s heights as they wander there
+// lies within spawn `s`'s heights and climate (words 21 to 23: its
+// temperature range, moisture range) as they wander there
 // (`CompiledSpawn::grows_at`).
 fn spawn_grows_at(s: u32, p: vec3<i32>, ground: i32) -> bool {
     var g = ground;
@@ -1777,7 +1778,13 @@ fn spawn_grows_at(s: u32, p: vec3<i32>, ground: i32) -> bool {
     if shift > 0u {
         g += scale_q16(noise(p, shift, spawn_word(s, 5u) ^ 0x7a3de1f1u), bitcast<i32>(spawn_word(s, 19u)));
     }
-    return g >= bitcast<i32>(spawn_word(s, 8u)) && g <= bitcast<i32>(spawn_word(s, 9u));
+    if g < bitcast<i32>(spawn_word(s, 8u)) || g > bitcast<i32>(spawn_word(s, 9u)) { return false; }
+    let lo = bitcast<i32>(spawn_word(s, 21u));
+    let hi = bitcast<i32>(spawn_word(s, 22u));
+    let wet = spawn_word(s, 23u);
+    if lo == i32(-2147483647 - 1) && hi == 2147483647 && wet == 0xffff0000u { return true; }
+    let c = terrain_climate(p, g * world.grid.y);
+    return c.x >= lo && c.x <= hi && c.y >= i32(wet & 0xffffu) && c.y <= i32(wet >> 16u);
 }
 
 fn stamp_word(t: u32, w: u32) -> u32 {

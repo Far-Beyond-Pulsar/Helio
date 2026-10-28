@@ -347,7 +347,7 @@ edit snapshot (Pulsar's `VoxelKeptChunks`).
 
 `Planet::material` is the canonical material of a base cell (picks, a
 dig's yield, gameplay). Generation evaluates `ground_material` with the
-same inputs:
+same inputs (its climate from the planet maps, [`planet-maps.md`](planet-maps.md)):
 
 - **Point.** Each evaluation (a column's top cell, its soil and rock
   samples) uses its cell's volume point.
@@ -592,9 +592,11 @@ the grass and past it, near and from the air, and rings in lunar crater
 bowls. Natural means the leaf stores the heightfield's slope (its columns
 hold natural tops): features and edits keep their own faces (softened, a
 rock field lost its form and its shadows). Local lights' rays do not pass
-the steps (only cells of a pixel or less): a lamp near the ground meets
-the real steps, and a grazing step's skip (up to 12 cells) passed what
-stood beside the lamp, or the lamp itself.
+the steps (only cells of a pixel or less, and no farther than the hit's
+own pixel): a lamp near the ground meets the real steps, and a grazing
+step's skip (up to 12 cells) passed what stood beside the lamp, or the
+lamp itself; on rough ground (eroded slopes' single-cell steps) a step a
+cell or two along casts a shadow several pixels long.
 Helio's deferred lighting, atmosphere and TSR do the rest.
 
 It writes only the hits no mesh covers, as the shading pass found them

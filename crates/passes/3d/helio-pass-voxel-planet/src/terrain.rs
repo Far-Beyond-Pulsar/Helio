@@ -53,9 +53,32 @@
 //! fn terrain_cave_gate(surface: u32, height: i32) -> i32 // Q8, 0..=256 (default 256)
 //! ```
 //!
-//! The program reads its constants from the `terrain` uniform. It may call the
+//! The program reads its constants from the `terrain` uniform and its
+//! tables (data too large for a uniform: a world's planet maps,
+//! [`crate::planet_maps`]) from `terrain_tables` (a read-only storage
+//! buffer of `vec4<u32>`, [`TerrainProgram::tables`]). It may call the
 //! integer noise library (`shaders/noise.wgsl`, mirrored in
 //! [`crate::noise`]) and the material ids (`M_*`, see [`material`]).
+//!
+//! A program with a climate defines
+//!
+//! ```wgsl
+//! fn terrain_climate(p: vec3<i32>, height: i32) -> vec2<i32>
+//! ```
+//!
+//! the temperature (1/128 °C) and moisture (Q16, 0 dry to 65535 wet) at
+//! domain point `p` and height `height` (mm), as [`TerrainField::climate`]:
+//! features grow by it (a spawn's climate ranges). Without it the climate is
+//! 15 °C and half wet everywhere. A program with a drainage and erosion
+//! (rivers, worn ranges, sediment: what caves near water or materials of
+//! wet ground read) defines
+//!
+//! ```wgsl
+//! fn terrain_erosion(p: vec3<i32>) -> vec2<i32> // (cut, fill level), mm
+//! fn terrain_drainage(p: vec3<i32>) -> vec4<i32> // (log2 discharge, flags, river distance, bed)
+//! ```
+//!
+//! as [`TerrainField::erosion`] and [`TerrainField::drainage`].
 //! Heights are integer [`HEIGHT_ONE`] units (millimetres) above the datum;
 //! `p` is the column centre in domain units ([`crate::grid::DOMAIN_UNIT`],
 //! 1.25 cm) on the sphere of the planet's radius (a plane: its horizontal
@@ -76,6 +99,8 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 /// Heights are integer millimetres above the datum (sea level).
 pub const HEIGHT_ONE: i32 = 1000;
+/// Climate of a field without one: 15 °C (1/128 °C), half wet (Q16).
+pub const DEFAULT_CLIMATE: [i32; 2] = [15 * 128, 32_768];
 /// Largest `TerrainConstants` uniform a program may declare.
 pub const MAX_CONSTANT_BYTES: usize = 16384;
 
@@ -168,7 +193,58 @@ pub struct TerrainProgram {
     /// Bytes of the `TerrainConstants` uniform (WGSL uniform layout, at
     /// most [`MAX_CONSTANT_BYTES`]).
     pub constants: Vec<u8>,
+    /// Words of the `terrain_tables` storage buffer (may be empty), shared
+    /// by every program of the world.
+    pub tables: Arc<[u32]>,
+    /// Data the program reads by region, made on demand (`terrain_regions`;
+    /// `None`: it reads none).
+    pub regions: Option<Regions>,
 }
+
+/// Data a terrain program reads by region, too large to bake whole (a
+/// planet's streams, [`crate::streams`]): fixed-size word blocks keyed by
+/// two words, which the field makes on the CPU and the engine keeps
+/// resident on the GPU wherever it evaluates the program
+/// (`terrain_regions`, binding 41).
+///
+/// The program finds a region with `terrain_region(key: vec2<u32>) -> i32`
+/// (its slot, -1 when not resident) and reads its words with
+/// `terrain_region_word(slot: u32, i: u32) -> u32`. The engine keeps every
+/// region [`TerrainRegions::keys`] names for a footprint resident while it
+/// generates it, so a program reading only those reads what its CPU field
+/// reads.
+pub trait TerrainRegions: Send + Sync {
+    /// Words of every region.
+    fn words(&self) -> usize;
+    /// Equal for sources that make the same regions (programs compare by
+    /// it).
+    fn identity(&self) -> u64;
+    /// The regions the field reads at the columns `[i0, i1] x [j0, j1]` of
+    /// `face` at grid level `level` of `grid` (and a margin around them of
+    /// at least the program's reach at that level), appended to `out`.
+    fn keys(&self, grid: &Grid, face: u8, level: u32, i: [i32; 2], j: [i32; 2], out: &mut Vec<[u32; 2]>);
+    /// The words of region `key` into `out` (`words()` of them).
+    fn region(&self, key: [u32; 2], out: &mut [u32]);
+}
+
+/// A program's [`TerrainRegions`] (programs compare equal when they share
+/// the same source).
+#[derive(Clone)]
+pub struct Regions(pub Arc<dyn TerrainRegions>);
+
+impl std::fmt::Debug for Regions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Regions({} words)", self.0.words())
+    }
+}
+
+impl PartialEq for Regions {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.identity() == other.0.identity()
+    }
+}
+
+impl Eq for Regions {}
 
 /// A column of the world grid: its face, cell indices and level (grid
 /// levels; its footprint is `2^(level + level_offset)` reference cells).
@@ -186,6 +262,12 @@ pub trait TerrainField: Send + Sync + 'static {
     /// A field may share work between neighbouring columns of a level
     /// (the two-rate field's nodes): it is a column's, not a point's.
     fn height(&self, column: Column) -> i32;
+    /// A height at least `column`'s, cheaper where the field can leave out
+    /// terms that only lower it (a landform's streams): what bounds want
+    /// without the exact surface.
+    fn height_bound(&self, column: Column) -> i32 {
+        self.height(column)
+    }
     /// Material of a solid ground cell: `surface` is its column cell's
     /// surface word ([`Self::surface`]), `top_height` its column's top
     /// ([`HEIGHT_ONE`] units, a whole number of voxel layers), `depth` the
@@ -207,6 +289,26 @@ pub trait TerrainField: Send + Sync + 'static {
     /// inputs of the materials besides height. 0 when the program has none.
     fn surface(&self, _column: Column, _height: i32) -> u32 {
         0
+    }
+    /// Climate at domain point `p` and height `height` (mm): temperature in
+    /// 1/128 °C and moisture in Q16 (`terrain_climate` in WGSL; 15 °C and
+    /// half wet without one).
+    fn climate(&self, _p: IVec3, _height: i32) -> (i32, i32) {
+        (DEFAULT_CLIMATE[0], DEFAULT_CLIMATE[1])
+    }
+    /// The worn terrain at domain point `p` (mm): how far erosion cut it
+    /// down and the level its sediment fills up to (`terrain_erosion` in
+    /// WGSL; `(0, i32::MIN)` without: nothing worn, no sediment).
+    fn erosion(&self, _p: IVec3) -> (i32, i32) {
+        (0, i32::MIN)
+    }
+    /// The drainage at domain point `p` (`terrain_drainage` in WGSL;
+    /// [`crate::planet_maps::drainage`]): the wet area draining through it
+    /// (`log2(1 + km²)` in 1/2048), its flags (lake, ocean, river, dry
+    /// sink), the nearest river's distance (domain units, `i32::MAX`:
+    /// none) and its bed (mm).
+    fn drainage(&self, _p: IVec3) -> [i32; 4] {
+        [0, 0, i32::MAX, 0]
     }
     /// Lowest and highest height any column can have at any level.
     fn height_range(&self) -> (i32, i32);

@@ -122,6 +122,15 @@ pub(super) struct Volume {
     pub gen: std::sync::Arc<GenPipelines>,
     pub world: wgpu::Buffer,
     pub terrain: wgpu::Buffer,
+    /// Its terrain program's tables (`terrain_tables`: its planet's maps)
+    /// and regions (`terrain_regions`: its streams), kept resident for the
+    /// footprints it generates, and each footprint's region keys.
+    pub terrain_tables: wgpu::Buffer,
+    pub regions: crate::engine::RegionPool,
+    pub region_key_cache: FxHashMap<Footprint, std::sync::Arc<[[u32; 2]]>>,
+    /// Its planet's volume layer (whose cave networks read ground columns
+    /// beside a footprint: `region_keys`).
+    pub volume_layer: Option<crate::volumes::VolumeLayer>,
     /// The volume layer's constants (`crate::volumes::VolumeConstants`).
     pub volumes: wgpu::Buffer,
     pub materials: wgpu::Buffer,
@@ -178,6 +187,48 @@ impl Volume {
     /// Whether anything waits to be generated for it.
     pub fn wants_generation(&self) -> bool {
         !self.urgent.is_empty() || !self.stale.is_empty() || !self.plan.requests.is_empty()
+    }
+
+    /// The terrain regions footprint `fp`'s generation reads (near
+    /// levels' feature candidates read the ground at level 0, cave networks
+    /// their reference ground beside it), kept.
+    pub fn region_keys(&mut self, fp: Footprint) -> std::sync::Arc<[[u32; 2]]> {
+        if let Some(keys) = self.region_key_cache.get(&fp) {
+            return keys.clone();
+        }
+        if self.region_key_cache.len() >= 1 << 16 {
+            self.region_key_cache.clear();
+        }
+        let read = if self.has_features
+            && fp.level < crate::features::NEAR_LEVELS
+            && self.features.near(fp.level) > 0
+        {
+            0
+        } else {
+            fp.level
+        };
+        let up = fp.level - read;
+        let mut keys = self.regions.keys(
+            &self.grid,
+            fp.face,
+            read,
+            [fp.cx * CHUNK << up, ((fp.cx * CHUNK + CHUNK) << up) - 1],
+            [fp.cy * CHUNK << up, ((fp.cy * CHUNK + CHUNK) << up) - 1],
+        );
+        // Its cave networks' reference ground (`tile_caves_main`).
+        let base = |c: i32| [c * CHUNK << fp.level, ((c * CHUNK + CHUNK) << fp.level) - 1];
+        let ground = self.volume_layer.as_ref().and_then(|v| {
+            let (i, j) = v.ground_columns(fp.level, base(fp.cx), base(fp.cy))?;
+            Some((v.reference_level(), i, j))
+        });
+        if let Some((reference, i, j)) = ground {
+            keys.extend(self.regions.keys(&self.grid, fp.face, reference, i, j));
+            keys.sort_unstable();
+            keys.dedup();
+        }
+        let keys: std::sync::Arc<[[u32; 2]]> = keys.into();
+        self.region_key_cache.insert(fp, keys.clone());
+        keys
     }
 }
 
@@ -890,6 +941,7 @@ impl ChunkWorld {
             let mut bytes =
                 format!("chunk packs {KEPT_FORMAT} {DETAIL_LEVELS} {}", gen_source).into_bytes();
             bytes.extend_from_slice(&terrain_bytes(&program));
+            bytes.extend_from_slice(bytemuck::cast_slice(&program.tables));
             bytes.extend_from_slice(bytemuck::bytes_of(&volume_constants));
             bytes.extend_from_slice(bytemuck::bytes_of(&WorldGpu::new(planet)));
             crate::record::fnv64(&bytes)
@@ -992,6 +1044,10 @@ impl ChunkWorld {
                 contents: &terrain_bytes(&program),
                 usage: wgpu::BufferUsages::UNIFORM,
             }),
+            terrain_tables: crate::engine::tables_buffer(&device, &program),
+            regions: crate::engine::RegionPool::new(&device, &program, REGION_CAPACITY),
+            region_key_cache: Default::default(),
+            volume_layer: planet.volumes().cloned(),
             volumes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk volumes"),
                 contents: bytemuck::bytes_of(&volume_constants),

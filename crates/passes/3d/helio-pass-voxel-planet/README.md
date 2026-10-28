@@ -46,6 +46,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 | `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL), and the program contract (module docs). Registry, material ids, `check_field`. |
 | `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, desert, flat), validation and compilation. |
 | `src/landform.rs`, `shaders/landform.wgsl`, `src/ridge_envelope.rs` | The stack interpreter (CPU and WGSL): the two-rate column ([`docs/two-rate-field.md`](docs/two-rate-field.md)), octaves, layer composition, craters, erosion and material styles; coarse levels' ridge means. |
+| `src/planet_maps.rs`, `shaders/planet_maps.wgsl` | Planet maps ([`docs/planet-maps.md`](docs/planet-maps.md)): drainage, rivers, lakes and climate baked once per world; the Rivers layer's carving and climate lookups (CPU and WGSL). |
 | `src/volumes.rs`, `shaders/volumes.wgsl` | The volume layer ([`docs/volumes.md`](docs/volumes.md)): cave networks placed per region (chambers, tunnels, links, entrances) and cliff shapes (ledges, undercuts), CPU and WGSL. |
 | `shaders/world.wgsl`, `shaders/material_state.wgsl` | Grid mapping, layer quantization and material ids shared by generation and terrain programs. |
 | `src/features.rs` | Features: procedural content (trees, rocks, buildings) from the recipe's `FeatureSet`, generated like the terrain wherever a cell is asked for, on CPU and GPU bit for bit ([`docs/features.md`](docs/features.md)). |
@@ -120,9 +121,12 @@ evaluated at nodes every 16 columns of its level and blended exactly
   devices with `SHADER_INT64` that region is replaced by wide64.wgsl's
   native `u64` products, with the same bits (`tests/wide_products.rs`).
 - The built-in generator runs an ordered layer stack (`layers.rs`): Warp, Continents,
-  Mountains, Hills, Roughness, Erosion, Craters, Basins, Plateau, each with
-  a mask (everywhere, land, above deep sea), plus its volumes (cave
-  networks, cliff shapes: `volumes.rs`) and a material style (Earthlike, Lunar, Layered, Rules). The stack is data,
+  Mountains, Hills, Roughness, Erosion, Craters, Basins, Plateau, Cliffs,
+  Rivers, each with a mask (everywhere, land, above deep sea), plus its
+  volumes (cave networks, cliff shapes: `volumes.rs`), a climate and a
+  material style (Earthlike, Lunar, Layered, Rules). Rivers and the climate
+  read the world's planet maps, baked once from its seed and layers
+  ([`docs/planet-maps.md`](docs/planet-maps.md)). The stack is data,
   compiled to one octave table sorted coarse to fine; one interpreter runs
   it on CPU and GPU, so changing layers never recompiles shaders. Bounds
   (`bound_margins`, `height_range`) derive from the layers, so any stack
