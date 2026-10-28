@@ -61,11 +61,13 @@ struct SunOcclusionTexel {
     frac: vec2<f32>,
 }
 
+// (Fields are read one by one: a whole epoch copied out of the uniform in
+// a loop costs a reader like fog's several times its work.)
 fn sun_occlusion_texel(p: vec3<f32>, e: u32, level: u32) -> SunOcclusionTexel {
-    let ep = sun_occlusion_frame.epochs[e];
-    let l = ep.levels[level];
+    let l = sun_occlusion_frame.epochs[e].levels[level];
     let texel = sun_occlusion_frame.info.x * exp2(f32(level));
-    let c = vec2<f32>(dot(p, ep.right.xyz), dot(p, ep.down.xyz)) / texel + l.frac;
+    let across = vec2<f32>(dot(p, sun_occlusion_frame.epochs[e].right.xyz), dot(p, sun_occlusion_frame.epochs[e].down.xyz));
+    let c = across / texel + l.frac;
     let whole = floor(c);
     return SunOcclusionTexel(l.texel + vec2<i32>(whole), c - whole);
 }
@@ -92,28 +94,32 @@ fn sun_occlusion_physical(slot: u32, level: u32, page: vec2<i32>, eye: vec2<i32>
 // tap against the receiver's plane through it, so lit slopes keep no acne
 // at any texel size; the bias is a texel and half its slope.
 fn sun_occlusion_read_level(p: vec3<f32>, n: vec3<f32>, e: u32, level: u32) -> vec2<f32> {
-    let ep = sun_occlusion_frame.epochs[e];
     let texel = sun_occlusion_frame.info.x * exp2(f32(level));
     let at = sun_occlusion_texel(p, e, level);
     // The taps around the point: from the texel left of and above it when
     // it lies in its texel's first half.
     let shift = select(vec2<i32>(0), vec2<i32>(-1), at.frac < vec2<f32>(0.5));
     let base = at.texel + shift;
+    let eye = sun_occlusion_frame.epochs[e].levels[level].texel >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT);
+    let slot = u32(sun_occlusion_frame.epochs[e].right.w) - 1u;
+    // Not resident here: nothing more to work out.
+    var last = base >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT);
+    var physical = sun_occlusion_physical(slot, level, last, eye);
+    if physical == SUN_OCCLUSION_NONE { return vec2<f32>(1.0, 0.0); }
     let f = at.frac - 0.5 - vec2<f32>(shift);
-    let eye = ep.levels[level].texel >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT);
-    let slot = u32(ep.right.w) - 1u;
-    let toward = dot(n, ep.forward.xyz);
+    let right = sun_occlusion_frame.epochs[e].right.xyz;
+    let down = sun_occlusion_frame.epochs[e].down.xyz;
+    let forward = sun_occlusion_frame.epochs[e].forward.xyz;
+    let toward = dot(n, forward);
     var slope = vec2<f32>(0.0);
     if toward < -0.05 {
-        slope = clamp(-vec2<f32>(dot(n, ep.right.xyz), dot(n, ep.down.xyz)) / toward, vec2<f32>(-4.0), vec2<f32>(4.0));
+        slope = clamp(-vec2<f32>(dot(n, right), dot(n, down)) / toward, vec2<f32>(-4.0), vec2<f32>(4.0));
     }
     let bias = texel * (1.0 + 0.5 * (abs(slope.x) + abs(slope.y)));
-    let depth = dot(p, ep.forward.xyz);
+    let depth = dot(p, forward);
     let side = sun_occlusion_frame.atlas.x;
     let page_side = 1 << SUN_OCCLUSION_PAGE_SHIFT;
     var lit = vec4<f32>(0.0);
-    var last = vec2<i32>(-2147483647);
-    var physical = SUN_OCCLUSION_NONE;
     for (var k = 0; k < 4; k++) {
         let tap = vec2<i32>(k & 1, k >> 1);
         let t = base + tap;

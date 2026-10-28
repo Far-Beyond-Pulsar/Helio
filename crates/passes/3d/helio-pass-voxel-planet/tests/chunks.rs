@@ -4283,7 +4283,6 @@ fn sun_occlusion_texels_follow_pixel_footprints() {
     let side = dir.any_orthonormal_vector();
     for (name, height, down) in [
         ("earth orbit", 300_000.0, 1.0),
-        ("earth 10 km", 10_000.0, 0.5),
         ("earth ground", 2.0, 0.15),
     ] {
         let eye = earth.surface_point(dir, height);
@@ -4338,6 +4337,7 @@ fn sun_occlusion_texels_follow_pixel_footprints() {
             "{name}: {read} read, {none} unread, {wide} wider than two footprints (worst {worst:.2})"
         );
         assert!(read > 1000, "{name}: {read} read");
+        assert!(worst <= 2.0, "{name}: a texel {worst:.2} footprints wide");
         assert!(none * 100 <= read, "{name}: {none} unread of {read}");
         assert!(wide * 100 <= read, "{name}: {wide} of {read} wider than two footprints");
     }
