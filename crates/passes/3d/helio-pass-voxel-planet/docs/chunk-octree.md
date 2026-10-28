@@ -43,7 +43,9 @@ One `ChunkWorld` holds them all (`ChunkWorld::add_volume`,
   volume's seed keeps only boxes nearer than the hits already found, and
   its trace walks no farther than them, so the nearest hit of any volume
   wins per pixel, hidden volumes cost little, and volumes may overlap (a
-  ship landed in the ground). A chunk's frame stays in its volume's
+  ship landed in the ground). Every pass reads the meshes' depth the same
+  way (Drawing 1, 2): meshes hide every volume; only the first pass keeps a
+  hidden pixel's frame chunk (its pass walks the meshes' points). A chunk's frame stays in its volume's
   coordinates: a moving or spinning volume rewrites none. A later pass's
   kernels run only over its volume's rectangle on the screen
   (`DrawParams::rect`: the projected box of its bounding ball, origin on
@@ -429,7 +431,10 @@ once. A plan that changes a switch under way ends it at once.
    top); a fragment writes only the box's index. Boxes do not overlap, so
    with the depth test on box faces each pixel keeps the nearest box its
    ray enters and hidden boxes never run. Boxes holding the eye draw their
-   back faces.
+   back faces. A box past the pixel's mesh (the scene's depth before the
+   chunks publish, read by the fragment, not depth-tested: see Publish) is
+   marked hidden rather than discarded: the pixel traces nothing, and
+   keeps the box as its frame chunk for the mesh point's walks (3, 4).
 2. **Trace** (compute): each pixel's ray walks the cut from its seed box
    (`walk`). Inside a chunk, an integer DDA through the 64-tree: an empty
    child crossed in one step, a full one a hit where the ray enters. Past a
@@ -448,17 +453,20 @@ once. A plan that changes a switch under way ends it at once.
    Across a cube face's edge the walk continues on the face beyond
    (`across_edge`: equal-angle faces meet cell for cell on the edge). Over
    the ceiling (`Planet::outer_radius` and 16 m) and rising, a ray meets
-   nothing more and ends: the sky.
+   nothing more and ends: the sky. A ray ends a thousandth past its
+   pixel's mesh (`MESH_MARGIN`; the shading tells which of a mesh and a hit
+   that close is in front): terrain behind meshes is neither drawn nor
+   reported, and picks there find none.
 3. **Sun shadows**: walks toward the sun from a quarter of the hits (one a
    2x2 block, the pixel moving each frame), a hundredth of a cell off their
    face, each towards a point of the sun's disk (the atmosphere's angular
    radius, else Earth's 0.27 degrees; a pixel's own R2 sequence over the
    frames), so a penumbra widens with the occluder's distance. Every hit takes the sample of its block or a neighbouring one that
    walked within four of its cells; the rest (silhouettes) are listed and
-   walk in an indirect dispatch of their own. Mesh pixels nearer than the
-   terrain hit, or with only sky behind (the scene's depth before the
-   chunks publish), walk from the mesh point (`mesh_walk`), so terrain
-   shadows fall on meshes. The denoiser (7) turns the samples into
+   walk in an indirect dispatch of their own. Mesh pixels (with no hit
+   behind them, the rays ending at the mesh) walk from the mesh point
+   (`mesh_walk`), placed in the chunk the ray ended in, so terrain shadows
+   fall on meshes. The denoiser (7) turns the samples into
    Helio's `directional_visibility`; its deferred lighting applies it.
    `set_steady_shadows` walks every hit instead, 32 rays over the disk
    (the denoiser passes the walks' own on: the reference for its error).
@@ -526,6 +534,9 @@ names the node its hit's level wants there: cells of a pixel, two levels
 of margin, the hit's own node at least. A workgroup appends the distinct
 nodes of its 32x32 pixels to one list, up to a node per 8x8 pixels in all
 (the old readback's size). Rays that met Buried nodes report them too.
+Rays end at meshes, so terrain behind them reports nothing: it is neither
+seen nor reached: residency refines it only to `unseen_pixels`, and
+Buried nodes there are not generated.
 Reports come back without waiting; the planner marks the nodes and their
 ancestors seen and generates the Buried ones.
 
@@ -573,6 +584,15 @@ shadows and sky 1.72 ms. Generation in the cruise stress flight: about
 15.5 us a chunk (footprint columns most of it, chunk builds 3.5 us, chunk
 columns 1.9 us). Settled test views take 3,000 to 10,000 detail pages.
 
+Terrain behind meshes (2026-10-27, 1080p, RTX 3060): voxel_flight's
+`ground` hold in grass, chunk draw 2.44 -> 1.76 ms and shadows 3.66 ->
+2.89 ms (VoxelChunks 8.7 -> 7.2 ms); the same view bare, unchanged (2.44
+-> 2.46 ms: the seed's depth load and the walk's runtime end). voxel_craft's
+poses with grass, VoxelChunks 0.15 to 0.7 ms less; bare, within noise. A
+wall covering the nearer half of a ground view
+(`terrain_behind_meshes_is_not_traced`): half the walk steps, reports
+5,492 -> 96.
+
 Gates (`tests/chunks.rs`): drawn hits match CPU ray casts (ground, face
 edges, cave networks 600 m deep, lava tubes, cliff shapes, planes, brushes, a 600 m shaft, a 3 km
 crater, a hollowed core, an underground hall, 18 000 block edits, sealed
@@ -582,7 +602,9 @@ edits, features); `uniform_leaves_draw_canonical_materials`,
 `edited_chunks_come_back_by_copy`,
 `edited_chunks_released_by_age_come_back_by_copy` and
 `a_loaded_world_restores_its_edited_chunks` restore edited chunks with no
-generation; `terrain_shadows_fall_on_meshes_in_front_of_it`. Reports,
+generation; `terrain_shadows_fall_on_meshes_in_front_of_it`;
+`terrain_behind_meshes_is_not_traced` (hits in front of a mesh plane as
+open, none past it, half the steps and reports). Reports,
 ignored by default: `natural_cells_against_the_leaf_rule` (0 of 906k
 pixels wrong), `edit_cost_against_history`, `feature_generation_cost`.
 
@@ -607,6 +629,9 @@ the same profile: https://forums.developer.nvidia.com/t/382912.
   caves, cities): on the editor's open views, refining nothing until rays
   meet it changed nothing (`unseen_pixels` 2 covers them).
 - A footprint's first computation: progressive (parent-seeded) synthesis.
+- Seed boxes wholly behind meshes still rasterize (each fragment one depth
+  load): a HiZ cull of the boxes against the meshes' depth would save that
+  once box counts make the seed cost (0.04 to 0.09 ms at 1080p) matter.
 
 ## References
 

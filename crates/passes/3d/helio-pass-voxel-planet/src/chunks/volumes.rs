@@ -261,6 +261,8 @@ impl DrawLayouts {
                     },
                     count: None,
                 },
+                // The meshes' depth: rays end at it.
+                texture_entry(27, wgpu::TextureSampleType::Depth, c),
             ],
         });
         let seed = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -277,6 +279,12 @@ impl DrawLayouts {
                     wgpu::ShaderStages::FRAGMENT,
                 ),
                 storage(22, true, wgpu::ShaderStages::VERTEX),
+                // The meshes' depth: boxes behind it are marked hidden.
+                texture_entry(
+                    27,
+                    wgpu::TextureSampleType::Depth,
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
             ],
         });
         let cull = [

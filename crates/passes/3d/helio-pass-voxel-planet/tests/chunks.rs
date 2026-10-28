@@ -2461,7 +2461,9 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
             if blocked.is_some_and(|b| b.distance < voxel) {
                 continue;
             }
-            if hit.is_some() {
+            // Rays end at the wall: the terrain past it is the CPU's.
+            let terrain_behind = planet.raycast(point, dir, 600.0).is_some();
+            if terrain_behind {
                 before_hits += 1
             } else {
                 before_sky += 1
@@ -2471,7 +2473,7 @@ fn terrain_shadows_fall_on_meshes_in_front_of_it() {
             } else {
                 sunny += 1
             }
-            if hit.is_none() && blocked.is_some() {
+            if !terrain_behind && blocked.is_some() {
                 shaded_sky += 1
             }
             if lit[(y * view.size[0] + x) as usize] == blocked.is_some() {
@@ -2654,6 +2656,114 @@ fn publish_shows_hits_only_in_front_of_meshes() {
         "{shown} shown, {behind} behind"
     );
     assert_eq!(wrong, 0);
+}
+
+/// Terrain behind meshes is not traced: with a mesh plane across a ground
+/// view (the scene's depth one view depth everywhere), the hits in front of
+/// it are the open view's, there are none past it, the trace takes a
+/// fraction of the open view's steps, and the ray reports (the nodes hits
+/// want) come only from the terrain in front.
+#[test]
+fn terrain_behind_meshes_is_not_traced() {
+    let Some(gpu) = gpu() else { return };
+    let planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let view = ground_view(&planet, land(&planet, 4, 0.37, 0.61), [320, 180]);
+    let forward = view.forward.as_dvec3();
+    let plane_m = 10.0f32;
+    let [w, h] = view.size;
+    let depth = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("mesh plane depth"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let depth_view = depth.create_view(&Default::default());
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("mesh plane"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: &depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(view.near / plane_m),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        timestamp_writes: None,
+        occlusion_query_set: None,
+        multiview_mask: None,
+    });
+    gpu.queue.submit([encoder.finish()]);
+    let counting = Capacity {
+        counters: true,
+        ..TEST_CAPACITY
+    };
+    let mut open = World::with_capacity(gpu, &planet, counting);
+    let mut covered = World::with_capacity(gpu, &planet, counting);
+    covered.scene_depth = Some(depth_view);
+    let open_hits = open.settle(gpu, &planet, &view);
+    let covered_hits = covered.settle(gpu, &planet, &view);
+    // Settled frames' steps and ray reports.
+    let measure = |world: &mut World| {
+        world.chunks.take_counts();
+        let seen: usize = (0..16)
+            .map(|_| world.frame(gpu, &planet, &view, None).seen)
+            .sum();
+        (world.chunks.take_counts().steps, seen)
+    };
+    let (open_steps, open_seen) = measure(&mut open);
+    let (covered_steps, covered_seen) = measure(&mut covered);
+
+    let view_proj = view.view_proj(&planet);
+    let (mut front, mut past, mut wrong) = (0, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            let at = (y * w + x) as usize;
+            let t = f64::from(plane_m) / view.pixel_dir(view_proj, x, y).dot(forward);
+            let (open_hit, covered_hit) = (open_hits[at], covered_hits[at]);
+            // Within a hundredth of the plane: either answer.
+            let d = open_hit.map_or(f64::INFINITY, |h| h.distance);
+            if (d - t).abs() < 0.01 * t {
+                continue;
+            }
+            let bad = if d < t {
+                front += 1;
+                covered_hit != open_hit
+            } else {
+                past += usize::from(open_hit.is_some());
+                covered_hit.is_some()
+            };
+            if bad {
+                wrong += 1;
+                if wrong < 8 {
+                    eprintln!("pixel {x},{y}: open {open_hit:?}, covered {covered_hit:?}, plane at {t:.3}");
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{front} hits in front of the plane, {past} past it, {wrong} wrong; steps {open_steps} open, {covered_steps} covered; reports {open_seen} open, {covered_seen} covered"
+    );
+    assert!(front > 2000 && past > 10000, "{front} in front, {past} past");
+    assert!(wrong * 1000 <= front + past, "{wrong} wrong");
+    // Measured 2026-10-27: 48% of the steps, 2% of the reports.
+    assert!(
+        covered_steps * 3 < open_steps * 2,
+        "{covered_steps} steps covered, {open_steps} open"
+    );
+    assert!(
+        covered_seen * 10 < open_seen,
+        "{covered_seen} reports covered, {open_seen} open"
+    );
 }
 
 /// An Rgba8Unorm target, row by row.

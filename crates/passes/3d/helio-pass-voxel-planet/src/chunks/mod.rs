@@ -6244,6 +6244,7 @@ impl ChunkWorld {
                 &o.targets,
                 drawn,
                 self.rounds,
+                &self.no_scene_depth,
                 None,
             );
         }
@@ -6390,8 +6391,9 @@ impl ChunkWorld {
     /// culled and binned, then `rounds` of seed and trace into `targets`
     /// (over `DrawParams::rect`; `drawn` chunks), timed as `timing` says. Its pass
     /// (`DrawParams::volume`) keeps the hits of the volumes traced before
-    /// it that are nearer than its own. Its draw bind group, for the stages
-    /// that shade its hits.
+    /// it that are nearer than its own; the rays end at the meshes'
+    /// `scene_depth`. Its draw bind group, for the stages that shade its
+    /// hits.
     #[allow(clippy::too_many_arguments)]
     fn trace_view(
         &self,
@@ -6402,6 +6404,7 @@ impl ChunkWorld {
         targets: &Targets,
         drawn: u32,
         rounds: u32,
+        scene_depth: &wgpu::TextureView,
         timing: Option<(&wgpu::QuerySet, u32)>,
     ) -> wgpu::BindGroup {
         let pipelines = self.pipelines[usize::from(vol.grid.is_plane())]
@@ -6456,6 +6459,7 @@ impl ChunkWorld {
                 view_entry(5, &exits),
                 view_entry(4, &distance),
                 entry(22, vb.cull_state),
+                view_entry(27, scene_depth),
             ],
         });
         {
@@ -6509,6 +6513,7 @@ impl ChunkWorld {
                     binding: 26,
                     resource: wgpu::BindingResource::Sampler(&self.uv_grid_sampler),
                 },
+                view_entry(27, scene_depth),
             ],
         });
         // Rounds of seed and trace: each resolves the rays that hit in
@@ -6729,6 +6734,9 @@ impl ChunkWorld {
                 4,
             );
         }
+        // The meshes' depth (the frame's size): the rays end there, and
+        // meshes in front of the terrain walk to the sun from it.
+        let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
         let primary_vol = self.volumes[usize::from(primary)].as_ref().unwrap();
         let camera_group = self.draw_group(&self.params, primary_vol, self.camera_view(primary_vol));
         let mut groups: Vec<(u16, wgpu::BindGroup, [u32; 4])> = Vec::with_capacity(order.len());
@@ -6746,6 +6754,7 @@ impl ChunkWorld {
                 self.targets.as_ref().unwrap(),
                 drawn,
                 self.rounds,
+                scene_depth,
                 timing.map(|(set, _, ring)| (set, ring)),
             );
             groups.push((index, group, params.rect));
@@ -6753,9 +6762,7 @@ impl ChunkWorld {
         let targets = self.targets.as_ref().unwrap();
         {
             // 4. Sun shadows: samples, then every hit, and meshes before
-            // their hits (`scene_depth`: the meshes', the frame's size); each
-            // volume's hits by its own pass.
-            let scene_depth = scene_depth.unwrap_or(&self.no_scene_depth);
+            // their hits; each volume's hits by its own pass.
             let occlusion = self.sun_occlusion.as_ref().unwrap();
             let (distance, visibility, samples, normal, sky) = (
                 view(&targets.distance),
