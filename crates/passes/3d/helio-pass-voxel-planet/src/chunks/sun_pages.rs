@@ -56,10 +56,6 @@ const JUMP: f64 = 0.05;
 /// Frames a new epoch may take to replace the last before it is dropped
 /// anyway (pages the atlas cannot hold never complete it).
 const HANDOVER_FRAMES: u64 = 120;
-/// Levels whose pages are this wide (m) or wider keep the 2x2 pages nearest
-/// the eye resident whether asked or not: what readers without requests
-/// (GI hits, fog) fall back on around the eye.
-const BASE_PAGE_M: f64 = 128.0;
 
 /// Why a resident page is traced again: the terrain under it changed (at
 /// once), or it was traced through a coarser or unsettled cut than now (in
@@ -295,14 +291,13 @@ impl SunPages {
             self.next_epoch += 1;
             self.epochs.insert(0, Epoch::new(id, sun, eye, slot, frame));
         }
-        // The 2x2 pages nearest the eye in the coarse levels.
+        // Every level keeps the 2x2 pages nearest the eye resident whether
+        // asked or not (80 pages): what readers without requests (GI hits,
+        // fog) find around the eye at their own footprint.
         let finest = self.finest;
         let e = &mut self.epochs[0];
         for level in 0..LEVELS {
             let texel = finest * (level as f64).exp2();
-            if texel * f64::from(PAGE) < BASE_PAGE_M {
-                continue;
-            }
             let (t, _) = e.texel_of(eye, texel);
             let page = t.map(|t| (t >> PAGE_SHIFT) as i32);
             let side = t.map(|t| {
@@ -700,13 +695,11 @@ mod tests {
         let eye = DVec3::new(0.0, 1000.0, 0.0);
         let sun = DVec3::new(0.3, 0.8, 0.4).normalize();
         pages.begin(0, eye, sun);
-        // Base coverage only: coarse levels, four pages each.
+        // The pages around the eye only: coarse first, four a level.
         let views = pages.plan(0, true);
         let traced: usize = views.iter().map(|v| v.pages.len()).sum();
         assert!(traced > 0 && traced <= TRACE_PAGES);
-        assert!(views
-            .iter()
-            .all(|v| pages.texel(v.level as usize) * f64::from(PAGE) >= BASE_PAGE_M));
+        assert_eq!(usize::from(views[0].level), LEVELS - 1);
         for v in &views {
             pages.traced(v, 0.0, 0, true);
         }
@@ -722,21 +715,22 @@ mod tests {
                 pages.traced(v, 0.0, frame, true);
             }
             frame += 1;
-            assert!(frame < 20);
+            assert!(frame < 40, "the pages around the eye took {frame} frames");
         }
         let asking = Asking {
             epoch: pages.current().unwrap().id,
             frame,
             eye_pages: pages.eye_pages(eye),
         };
-        // A request: level 3, the window's centre page.
+        // A request: level 3, ten pages right of the eye's.
         let mut words = vec![0u32; LEVELS * (WINDOW * WINDOW) as usize / 32];
-        let bit = 3 * (WINDOW * WINDOW) as usize + (WINDOW / 2 * WINDOW + WINDOW / 2) as usize;
+        let bit = 3 * (WINDOW * WINDOW) as usize + (WINDOW / 2 * WINDOW + WINDOW / 2 + 10) as usize;
         words[bit / 32] |= 1 << (bit % 32);
         pages.asked(&asking, &words);
         let views = pages.plan(frame, true);
         assert_eq!(views[0].level, 3);
-        assert_eq!(views[0].pages[0].0.page, asking.eye_pages[3]);
+        let eye_page = asking.eye_pages[3];
+        assert_eq!(views[0].pages[0].0.page, [eye_page[0] + 10, eye_page[1]]);
     }
 
     #[test]
