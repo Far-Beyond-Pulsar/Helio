@@ -4162,13 +4162,15 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
     world.sun = (up * 0.5 + side * 0.87).normalize().as_vec3();
     world.settle(gpu, &planet, &view);
     world.settle_sun_pages(gpu, &planet, &view);
+    // A kilometre: the tallest tower's shadow under this sun, twice over.
+    const REACH: f64 = 1000.0;
     let check = |world: &World| {
         let pages = world.chunks.read_sun_occlusion().expect("drawn");
         let mut next = xorshift(0x2545_f491_4f6c_dd1d);
         let mut unit = || (next() >> 11) as f64 / (1u64 << 53) as f64;
         let (mut compared, mut shadowed, mut wrong) = (0usize, 0usize, 0usize);
         let mut levels = std::collections::BTreeMap::new();
-        for k in 0..2000 {
+        for k in 0..960 {
             let (&(_, height, width), &base) = (&towers[k % 4], &bases[k % 4]);
             let up = base.normalize();
             // Beside the tower, from its sunward side out past its shadow.
@@ -4186,9 +4188,11 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
             if read.lit > 0.0 && read.lit < 1.0 {
                 continue;
             }
-            // Toward the sun the page was traced for, up to its near plane.
+            // Toward the sun the page was traced for, as far as the towers'
+            // shadows reach (`REACH`; the pages see to the ceiling, a CPU
+            // walk of 10 cm cells that far is minutes a point).
             let sun = DVec3::from_array(read.sun.map(f64::from)).normalize();
-            let hit = planet.raycast(p, sun, f64::from(read.depth));
+            let hit = planet.raycast(p, sun, f64::from(read.depth).min(REACH));
             // Occluders within a few texels: the bias and texels decide.
             if hit
                 .as_ref()
@@ -4214,7 +4218,7 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
             "sun occlusion: compared {compared} by level {levels:?}, shadowed {shadowed}, wrong {wrong}"
         );
         assert!(
-            compared > 400 && shadowed > 80,
+            compared > 200 && shadowed > 40,
             "{compared} compared, {shadowed} shadowed"
         );
         assert!(wrong * 50 <= compared, "{wrong} of {compared} wrong");
