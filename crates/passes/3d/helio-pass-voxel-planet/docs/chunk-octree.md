@@ -543,9 +543,11 @@ times sky visibility, crisp edges
 while a cell spans several pixels, and the shading normal. A natural step
 (air above) may be lit partly with the slope's normal (`detail.w`, step
 softness) and its sun and sky rays pass its own steps. Local lights'
-rays do not pass the steps (only cells of a pixel or less): a lamp near
-the ground meets the real steps, and a grazing step's skip (up to 12
-cells) passed what stood beside the lamp, or the lamp itself. Helio's
+rays do not pass the steps (only cells of a pixel or less, and no farther
+than the hit's own pixel): a lamp near the ground meets the real steps,
+and a grazing step's skip (up to 12 cells) passed what stood beside the
+lamp, or the lamp itself; on rough ground (eroded slopes' single-cell
+steps) a step a cell or two along casts a shadow several pixels long. Helio's
 deferred lighting, atmosphere and TSR do the rest.
 
 It writes only the hits no mesh covers, as the shading pass found them
