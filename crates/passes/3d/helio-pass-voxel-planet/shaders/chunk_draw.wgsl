@@ -2717,14 +2717,15 @@ fn ask_sun_pages(p: vec3<f32>, footprint: f32) {
 // pages, for pixel `q` `footprint` m wide, asked for (by one pixel of each
 // 2x2 block a frame, turning: a page spans dozens of pixels): the share
 // from the first level resident from the footprint's up to `coarser`
-// levels coarser, or -1 where none is (the pixel walks).
-fn sun_by_pages(p: vec3<f32>, n: vec3<f32>, footprint: f32, q: vec2<u32>, coarser: f32) -> f32 {
+// levels coarser (no further looked at), or -1 where none is (the pixel
+// walks).
+fn sun_by_pages(p: vec3<f32>, n: vec3<f32>, footprint: f32, q: vec2<u32>, coarser: u32) -> f32 {
     let turn = params.table.w & 3u;
     if all((q & vec2<u32>(1u)) == vec2<u32>(turn & 1u, turn >> 1u)) {
         ask_sun_pages(p, footprint);
     }
-    let seen = sun_occlusion_at(p, n, footprint);
-    return select(-1.0, seen.x, seen.y > 0.0 && seen.y <= 1.0 + coarser);
+    let seen = sun_occlusion_at(p, n, footprint, coarser);
+    return select(-1.0, seen.x, seen.y > 0.0);
 }
 
 fn stochastic_share(p: vec2<i32>, size: vec2<u32>, v: vec2<u32>, mesh: vec4<f32>) -> f32 {
@@ -2758,7 +2759,7 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         textureStore(out_normal, p, vec4<f32>(0.0));
         // Meshes take a level at most one coarser (grass near the eye walks
         // rather than read texels four times its pixels).
-        let seen = sun_by_pages(to_world(mesh.xyz), vec3<f32>(0.0), pixel_width(id.xy, size, length(mesh.xyz)), id.xy, 1.0);
+        let seen = sun_by_pages(to_world(mesh.xyz), vec3<f32>(0.0), pixel_width(id.xy, size, length(mesh.xyz)), id.xy, 1u);
         if seen >= 0.0 && !steady_shadows() {
             store_walked(p, size, seen, 1.0, 0.0);
             return;
@@ -2828,7 +2829,7 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         let lifted = to_world(at_hit + f.normal * (0.5 * f.cell) + sun * skip_along(f, sun));
         // Any level resident: while a page comes the pixel reads a coarser
         // one (as virtual shadow maps fall back) rather than walk.
-        lit = sun_by_pages(lifted, to_world(f.shading), footprint, id.xy, 32.0);
+        lit = sun_by_pages(lifted, to_world(f.shading), footprint, id.xy, 32u);
         own = 1.0;
         walks = lit < 0.0;
     } else {

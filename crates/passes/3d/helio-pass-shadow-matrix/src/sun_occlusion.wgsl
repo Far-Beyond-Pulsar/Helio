@@ -143,14 +143,15 @@ fn sun_occlusion_read_level(p: vec3<f32>, n: vec3<f32>, e: u32, level: u32) -> v
 // The sun's share at camera-relative `p` (receiver normal `n`, zero for
 // none; `footprint`, m: what the reader resolves there): from the level
 // whose texel is about the footprint, else the nearest coarser level
-// resident, the current epoch's pages before the last one's. x: the
-// share; y: 1 + how many levels coarser it came from (0: none resident,
-// the share 1).
-fn sun_occlusion_at(p: vec3<f32>, n: vec3<f32>, footprint: f32) -> vec2<f32> {
+// resident (at most `climb` levels coarser), the current epoch's pages
+// before the last one's. x: the share; y: 1 + how many levels coarser it
+// came from (0: none resident, the share 1).
+fn sun_occlusion_at(p: vec3<f32>, n: vec3<f32>, footprint: f32, climb: u32) -> vec2<f32> {
     let levels = u32(sun_occlusion_frame.info.y);
     if sun_occlusion_frame.info.x <= 0.0 || levels == 0u { return vec2<f32>(1.0, 0.0); }
     let want = sun_occlusion_level(footprint);
-    for (var level = want; level < min(levels, SUN_OCCLUSION_LEVEL_COUNT); level++) {
+    let last = min(min(levels, SUN_OCCLUSION_LEVEL_COUNT), want + climb + 1u);
+    for (var level = want; level < last; level++) {
         for (var e = 0u; e < SUN_OCCLUSION_EPOCH_COUNT; e++) {
             if sun_occlusion_frame.epochs[e].right.w == 0.0 { continue; }
             let r = sun_occlusion_read_level(p, n, e, level);
@@ -164,5 +165,39 @@ fn sun_occlusion_at(p: vec3<f32>, n: vec3<f32>, footprint: f32) -> vec2<f32> {
 // `n`, zero for none, `footprint` m): 0 behind terrain, else 1, filtered
 // across the texel; 1 where no page holds it.
 fn sun_occlusion(p: vec3<f32>, n: vec3<f32>, footprint: f32) -> f32 {
-    return sun_occlusion_at(p, n, footprint).x;
+    return sun_occlusion_at(p, n, footprint, SUN_OCCLUSION_LEVEL_COUNT).x;
+}
+
+// One tap of level `level` of epoch `e` at camera-relative `p`, against a
+// texel's bias: x the share (0 or 1), y 1 when its page is resident (else
+// 0, the share 1).
+fn sun_occlusion_read_point(p: vec3<f32>, e: u32, level: u32) -> vec2<f32> {
+    let at = sun_occlusion_texel(p, e, level);
+    let eye = sun_occlusion_frame.epochs[e].levels[level].texel >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT);
+    let slot = u32(sun_occlusion_frame.epochs[e].right.w) - 1u;
+    let physical = sun_occlusion_physical(slot, level, at.texel >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT), eye);
+    if physical == SUN_OCCLUSION_NONE { return vec2<f32>(1.0, 0.0); }
+    let side = sun_occlusion_frame.atlas.x;
+    let page_side = 1 << SUN_OCCLUSION_PAGE_SHIFT;
+    let corner = vec2<i32>(i32(physical % side), i32(physical / side)) * page_side;
+    let stored = textureLoad(sun_occlusion_maps, corner + (at.texel & vec2<i32>(page_side - 1)), 0).r;
+    let near = bitcast<f32>(sun_occlusion_pages[sun_occlusion_frame.atlas.y + physical]);
+    let receiver = dot(p, sun_occlusion_frame.epochs[e].forward.xyz) - near;
+    let texel = sun_occlusion_frame.info.x * exp2(f32(level));
+    return vec2<f32>(select(0.0, 1.0, stored <= 0.0 || receiver <= stored + texel), 1.0);
+}
+
+// `sun_occlusion` without a receiver or filter, a tap: for readers that
+// average many samples themselves (fog), a quarter of the reads.
+fn sun_occlusion_point(p: vec3<f32>, footprint: f32) -> f32 {
+    let levels = u32(sun_occlusion_frame.info.y);
+    if sun_occlusion_frame.info.x <= 0.0 || levels == 0u { return 1.0; }
+    for (var level = sun_occlusion_level(footprint); level < min(levels, SUN_OCCLUSION_LEVEL_COUNT); level++) {
+        for (var e = 0u; e < SUN_OCCLUSION_EPOCH_COUNT; e++) {
+            if sun_occlusion_frame.epochs[e].right.w == 0.0 { continue; }
+            let r = sun_occlusion_read_point(p, e, level);
+            if r.y > 0.0 { return r.x; }
+        }
+    }
+    return 1.0;
 }

@@ -88,6 +88,9 @@ pub(super) struct Epoch {
     created: u64,
     resident: FxHashMap<PageKey, u16>,
     asked: FxHashMap<PageKey, u64>,
+    /// Pages asked for that may want tracing (missing, or stale), kept as
+    /// they change: a plan looks at these, not at every page asked.
+    todo: FxHashSet<PageKey>,
     /// Pages asked for the first time since the last plan (their
     /// neighbours are prefetched: the view moving onto them).
     newly: Vec<PageKey>,
@@ -114,6 +117,7 @@ impl Epoch {
             created: frame,
             resident: FxHashMap::default(),
             asked: FxHashMap::default(),
+            todo: FxHashSet::default(),
             newly: Vec::new(),
             heard: None,
         }
@@ -144,10 +148,12 @@ impl Epoch {
     /// Whether every page asked for is resident and its terrain unchanged.
     fn complete(&self, physical: &[Physical]) -> bool {
         self.heard.is_some()
-            && self.asked.keys().all(|k| {
-                self.resident
-                    .get(k)
-                    .is_some_and(|&p| physical[p as usize].stale != Stale::Changed)
+            && self.todo.iter().all(|k| {
+                !self.asked.contains_key(k)
+                    || self
+                        .resident
+                        .get(k)
+                        .is_some_and(|&p| physical[p as usize].stale != Stale::Changed)
             })
     }
 }
@@ -318,13 +324,16 @@ impl SunPages {
                 _ => 1,
             });
             for (dx, dy) in [(0, 0), (side[0], 0), (0, side[1]), (side[0], side[1])] {
-                e.asked.insert(
-                    PageKey {
-                        level: level as u8,
-                        page: [page[0] + dx, page[1] + dy],
-                    },
-                    frame,
-                );
+                let key = PageKey {
+                    level: level as u8,
+                    page: [page[0] + dx, page[1] + dy],
+                };
+                if e.asked.insert(key, frame).is_none() {
+                    e.todo.insert(key);
+                }
+                if let Some(&p) = e.resident.get(&key) {
+                    self.physical[p as usize].used = frame;
+                }
             }
         }
     }
@@ -384,6 +393,7 @@ impl SunPages {
                     std::collections::hash_map::Entry::Vacant(v) => {
                         v.insert(asking.frame);
                         e.newly.push(key);
+                        e.todo.insert(key);
                     }
                 }
                 if let Some(&p) = e.resident.get(&key) {
@@ -408,7 +418,7 @@ impl SunPages {
         }
         let finest = self.finest;
         let page_m = |level: usize| finest * (level as f64).exp2() * f64::from(PAGE);
-        for e in &self.epochs {
+        for e in &mut self.epochs {
             if e.resident.is_empty() {
                 continue;
             }
@@ -418,6 +428,8 @@ impl SunPages {
                 held[usize::from(k.level)] = true;
             }
             let mut marked: FxHashSet<PageKey> = FxHashSet::default();
+            // The levels some box's marks start at.
+            let mut starts = 0u32;
             for [lo, hi] in boxes {
                 // The box's extent across the sun (m from the anchor).
                 let mut r = [
@@ -436,7 +448,11 @@ impl SunPages {
                 }
                 let span = (r[2] - r[0]).max(r[3] - r[1]).max(0.0);
                 let first = (0..LEVELS).find(|&l| span <= page_m(l)).unwrap_or(LEVELS - 1);
-                for level in (first..LEVELS).filter(|&l| held[l]) {
+                let Some(start) = (first..LEVELS).find(|&l| held[l]) else {
+                    continue;
+                };
+                starts |= 1 << start;
+                for level in (start..LEVELS).filter(|&l| held[l]) {
                     let m = page_m(level);
                     let (x0, y0) = ((r[0] / m).floor() as i32, (r[1] / m).floor() as i32);
                     let (x1, y1) = ((r[2] / m).floor() as i32, (r[3] / m).floor() as i32);
@@ -453,18 +469,27 @@ impl SunPages {
             if marked.is_empty() {
                 continue;
             }
+            // A box marks its first level and every coarser one: a page is
+            // under it where the page itself is marked, or its ancestor at
+            // a coarser level some box starts at.
             for (key, &p) in &e.resident {
-                let hit = (usize::from(key.level)..LEVELS).filter(|&l| held[l]).any(|l| {
-                    let up = (l - usize::from(key.level)) as u32;
-                    marked.contains(&PageKey {
-                        level: l as u8,
-                        page: key.page.map(|c| c >> up),
-                    })
-                });
+                let k = usize::from(key.level);
+                let hit = std::iter::once(k)
+                    .chain((k + 1..LEVELS).filter(|&l| starts >> l & 1 == 1))
+                    .any(|l| {
+                        let up = (l - k) as u32;
+                        marked.contains(&PageKey {
+                            level: l as u8,
+                            page: key.page.map(|c| c >> up),
+                        })
+                    });
                 if hit {
                     let stale = &mut self.physical[p as usize].stale;
                     if why == Stale::Changed || *stale == Stale::No {
                         *stale = why;
+                    }
+                    if e.asked.contains_key(key) {
+                        e.todo.insert(*key);
                     }
                 }
             }
@@ -506,23 +531,30 @@ impl SunPages {
                 }
             }
         }
-        for &key in e.asked.keys() {
-            match e.resident.get(&key).map(|&p| physical[p as usize]) {
+        let (asked, resident) = (&e.asked, &e.resident);
+        e.todo.retain(|&key| {
+            if !asked.contains_key(&key) {
+                return false;
+            }
+            match resident.get(&key).map(|&p| physical[p as usize].stale) {
                 None => {
                     stats.missing += 1;
                     wanted.push((0, std::cmp::Reverse(key.level), key));
                 }
-                Some(p) if p.stale == Stale::Changed => {
+                Some(Stale::Changed) => {
                     stats.stale += 1;
                     wanted.push((1, std::cmp::Reverse(key.level), key));
                 }
-                Some(p) if p.stale == Stale::Coarse && settled => {
-                    stats.coarse += 1;
-                    wanted.push((3, std::cmp::Reverse(key.level), key));
+                Some(Stale::Coarse) => {
+                    if settled {
+                        stats.coarse += 1;
+                        wanted.push((3, std::cmp::Reverse(key.level), key));
+                    }
                 }
-                _ => {}
+                Some(Stale::No) => return false,
             }
-        }
+            true
+        });
         stats.prefetch = near.len();
         wanted.extend(near.into_iter().map(|k| (2, std::cmp::Reverse(k.level), k)));
         // Background work goes by the block with the most of it: a view a
@@ -542,37 +574,39 @@ impl SunPages {
                 ((class, std::cmp::Reverse(crowd), coarse, k.page[1], k.page[0]), (class, coarse, k))
             })
             .collect();
-        keyed.sort_unstable_by_key(|e| e.0);
-        let wanted: Vec<(u8, std::cmp::Reverse<u8>, PageKey)> = keyed.into_iter().map(|e| e.1).collect();
         stats.asked = e.asked.len();
-        // Views: a block of pages a view, in the order their best page
-        // came.
+        // Views: the block of the best page left a view, its pages in
+        // order (a selection: sorting every page wanted was most of a plan
+        // with thousands missing).
         let mut views: Vec<Window> = Vec::new();
         let (mut taken, mut background) = (0, 0);
-        for &(class, _, key) in &wanted {
-            if taken == TRACE_PAGES {
+        while views.len() < MAX_VIEWS && taken < TRACE_PAGES {
+            let Some(&(_, (class, _, key))) = keyed
+                .iter()
+                .filter(|w| w.1 .0 < 2 || background < BACKGROUND_VIEWS)
+                .min_by_key(|w| w.0)
+            else {
                 break;
-            }
-            let origin = key.page.map(|p| (p >> VIEW_SHIFT) << VIEW_SHIFT);
-            let view = match views
-                .iter_mut()
-                .position(|v| v.level == key.level && v.origin == origin)
-            {
-                Some(v) => v,
-                None if class >= 2 && background == BACKGROUND_VIEWS => continue,
-                None if views.len() < MAX_VIEWS => {
-                    background += usize::from(class >= 2);
-                    views.push(Window {
-                        level: key.level,
-                        origin,
-                        pages: Vec::new(),
-                    });
-                    views.len() - 1
-                }
-                None => continue,
             };
-            views[view].pages.push((key, u16::MAX));
-            taken += 1;
+            let origin = key.page.map(|p| (p >> VIEW_SHIFT) << VIEW_SHIFT);
+            let inside = |k: &PageKey| {
+                k.level == key.level && k.page.map(|p| (p >> VIEW_SHIFT) << VIEW_SHIFT) == origin
+            };
+            let mut pages: Vec<_> = keyed
+                .iter()
+                .filter(|w| inside(&w.1 .2))
+                .map(|w| (w.0, w.1 .2))
+                .collect();
+            pages.sort_unstable_by_key(|p| p.0);
+            pages.truncate(TRACE_PAGES - taken);
+            keyed.retain(|w| !inside(&w.1 .2));
+            background += usize::from(class >= 2);
+            taken += pages.len();
+            views.push(Window {
+                level: key.level,
+                origin,
+                pages: pages.into_iter().map(|p| (p.1, u16::MAX)).collect(),
+            });
         }
         // Physical pages: those the pages hold, then free ones, then the
         // last epoch's, then the longest unused of the current's.
@@ -648,6 +682,9 @@ impl SunPages {
                     }
                     let slot = if id == current {
                         e.resident.remove(&old);
+                        if e.asked.contains_key(&old) {
+                            e.todo.insert(old);
+                        }
                         Some(e.slot)
                     } else {
                         last_slot.filter(|(l, _)| *l == id).map(|(_, s)| s)
@@ -685,6 +722,7 @@ impl SunPages {
         let (id, slot) = (self.epochs[0].id, self.epochs[0].slot);
         for &(key, p) in &window.pages {
             self.epochs[0].resident.insert(key, p);
+            self.epochs[0].todo.remove(&key);
             // Pages traced ahead of a request are kept as if asked now.
             let used = self.epochs[0]
                 .asked
@@ -859,6 +897,69 @@ mod tests {
             c.sun.dot(sun).acos() < 4.0 * TURN,
             "{}",
             c.sun.dot(sun).acos()
+        );
+    }
+
+    /// The planner's CPU in a cruise-like flight (run with --release
+    /// --ignored --nocapture): ~3000 pages asked, the atlas full, refined
+    /// boxes every frame.
+    #[test]
+    #[ignore]
+    fn planner_cpu_in_a_flight() {
+        use std::time::Instant;
+        let mut pages = SunPages::new(0.1);
+        let sun = DVec3::new(0.3, 0.8, 0.4).normalize();
+        let mut parts = [0.0f64; 4];
+        let frames = 2000;
+        for frame in 0..frames {
+            let eye = DVec3::new(frame as f64 * 3.0, 1000.0, frame as f64 * 1.5);
+            let t = Instant::now();
+            pages.begin(frame, eye, sun);
+            let asking = Asking {
+                epoch: pages.current().unwrap().id,
+                frame,
+                eye_pages: pages.eye_pages(eye),
+            };
+            let mut words = vec![0u32; LEVELS * (WINDOW * WINDOW) as usize / 32];
+            for level in 0..LEVELS {
+                for dy in -7i32..=7 {
+                    for dx in -7i32..=7 {
+                        if dx * dx + dy * dy <= 49 {
+                            let bit = level * (WINDOW * WINDOW) as usize
+                                + ((WINDOW / 2 + dy) * WINDOW + WINDOW / 2 + dx) as usize;
+                            words[bit / 32] |= 1 << (bit % 32);
+                        }
+                    }
+                }
+            }
+            let t1 = Instant::now();
+            pages.asked(&asking, &words);
+            let t2 = Instant::now();
+            let boxes: Vec<[DVec3; 2]> = (0..200)
+                .map(|i| {
+                    let c = eye + DVec3::new((i % 20) as f64 * 7.0 - 70.0, -1000.0, (i / 20) as f64 * 7.0 - 35.0);
+                    [c, c + DVec3::splat(6.4)]
+                })
+                .collect();
+            pages.invalidate(&boxes, Stale::Coarse);
+            let t3 = Instant::now();
+            let views = pages.plan(frame, true);
+            for v in &views {
+                pages.traced(v, 0.0, frame);
+            }
+            let t4 = Instant::now();
+            let _ = pages.frame(eye);
+            let t5 = Instant::now();
+            if frame >= frames / 2 {
+                for (p, d) in parts.iter_mut().zip([t2 - t1, t3 - t2, t4 - t3, t5 - t4 + (t1 - t)]) {
+                    *p += d.as_secs_f64() * 1e3 / (frames / 2) as f64;
+                }
+            }
+        }
+        let s = pages.stats;
+        eprintln!(
+            "planner ms a frame: asked {:.3} invalidate {:.3} plan {:.3} frame+begin {:.3}; resident {} asked {} missing {} coarse {}",
+            parts[0], parts[1], parts[2], parts[3], s.resident, s.asked, s.missing, s.coarse
         );
     }
 }
