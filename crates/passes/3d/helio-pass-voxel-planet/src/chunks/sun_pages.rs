@@ -31,9 +31,9 @@ pub(super) const LEVELS: usize = SUN_OCCLUSION_LEVELS;
 const PAGE: i32 = SUN_OCCLUSION_PAGE as i32;
 const PAGE_SHIFT: u32 = SUN_OCCLUSION_PAGE.trailing_zeros();
 const WINDOW: i32 = SUN_OCCLUSION_WINDOW as i32;
-/// Pages traced a frame at most: 48 of 64^2 texels, fewer rays than the one
-/// 512^2 level a frame the clipmap cost before it was paged (pixels whose
-/// pages are not there yet walk their own sun meanwhile).
+/// Pages traced a frame at most: 48 of 64^2 texels in one view, fewer rays
+/// than the one 512^2 level a frame the clipmap cost before it was paged
+/// (pixels whose pages are not there yet read a coarser level meanwhile).
 pub(super) const TRACE_PAGES: usize = 48;
 /// A trace view's side in pages (views are aligned to these blocks).
 pub(super) const VIEW_PAGES: i32 = 8;
@@ -41,7 +41,7 @@ const VIEW_SHIFT: u32 = VIEW_PAGES.trailing_zeros();
 /// Trace views a frame at most (each culls the drawn chunks and seeds its
 /// rays: the per-view cost), and of those, views of background work (pages
 /// next to fresh requests, pages of a coarser cut).
-pub(super) const MAX_VIEWS: usize = 2;
+pub(super) const MAX_VIEWS: usize = 1;
 const BACKGROUND_VIEWS: usize = 1;
 /// Frames a page stays asked for after the last request naming it.
 const ASKED_FRAMES: u64 = 30;
@@ -576,21 +576,14 @@ impl SunPages {
         // Physical pages: those the pages hold, then free ones, then the
         // last epoch's, then the longest unused of the current's.
         let current = e.id;
-        // (Built only when a page needs one.)
+        // Only as many as the pages need, by a partial selection (a sort of
+        // the whole atlas a frame was a third of a plan).
         let needs = views
             .iter()
             .flat_map(|v| &v.pages)
-            .any(|(k, _)| !e.resident.contains_key(k));
-        let mut spare: Vec<u16> = (0..SUN_OCCLUSION_PHYSICAL as u16)
-            .filter(|&p| {
-                let ph = &physical[p as usize];
-                needs
-                    && (ph.owner.is_none_or(|(id, _)| id != current)
-                        || ph.used + KEEP_FRAMES < frame)
-            })
-            .collect();
-        // Popped from the back: the best last.
-        spare.sort_unstable_by_key(|&p| {
+            .filter(|(k, _)| !e.resident.contains_key(k))
+            .count();
+        let rank = |p: u16| {
             let ph = &physical[p as usize];
             let rank = match ph.owner {
                 None => 2,
@@ -598,7 +591,26 @@ impl SunPages {
                 _ => 0,
             };
             (rank, std::cmp::Reverse(ph.used))
-        });
+        };
+        let mut spare: Vec<u16> = if needs == 0 {
+            Vec::new()
+        } else {
+            (0..SUN_OCCLUSION_PHYSICAL as u16)
+                .filter(|&p| {
+                    let ph = &physical[p as usize];
+                    ph.owner.is_none_or(|(id, _)| id != current) || ph.used + KEEP_FRAMES < frame
+                })
+                .collect()
+        };
+        // Popped from the back: the best last (pages traced again in place
+        // may take some of them: room for those too).
+        let room = (needs + TRACE_PAGES).min(spare.len());
+        if room < spare.len() {
+            let cut = spare.len() - room;
+            spare.select_nth_unstable_by_key(cut, |&p| rank(p));
+            spare.drain(..cut);
+        }
+        spare.sort_unstable_by_key(|&p| rank(p));
         let last_slot = self.epochs.get(1).map(|l| (l.id, l.slot));
         let mut evicted: Vec<(Option<usize>, PageKey, u16)> = Vec::new();
         let e = &mut self.epochs[0];
@@ -764,7 +776,7 @@ mod tests {
                 pages.traced(v, 0.0, frame);
             }
             frame += 1;
-            assert!(frame < 80, "the pages around the eye took {frame} frames");
+            assert!(frame < 160, "the pages around the eye took {frame} frames");
         }
         let asking = Asking {
             epoch: pages.current().unwrap().id,
