@@ -4253,6 +4253,7 @@ fn sun_occlusion_matches_cpu_rays_to_the_sun() {
 #[test]
 fn sun_occlusion_texels_follow_pixel_footprints() {
     let Some(gpu) = gpu() else { return };
+    let clock = std::time::Instant::now();
     let voxel = 0.1;
     let moon = Planet::new(PlanetRecipe {
         radius_m: 1_737_400.0,
@@ -4263,6 +4264,7 @@ fn sun_occlusion_texels_follow_pixel_footprints() {
     })
     .unwrap();
     let earth = Planet::new(PlanetRecipe::default()).unwrap();
+    eprintln!("planets built: {:.1} s", clock.elapsed().as_secs_f64());
     let mut poses = vec![(
         "moon pole",
         &moon,
@@ -4302,6 +4304,7 @@ fn sun_occlusion_texels_follow_pixel_footprints() {
             .as_vec3();
         let hits = world.settle(gpu, planet, &view);
         world.settle_sun_pages(gpu, planet, &view);
+        eprintln!("{name}: settled at {:.1} s", clock.elapsed().as_secs_f64());
         let pages = world.chunks.read_sun_occlusion().expect("drawn");
         let view_proj = view.view_proj(planet);
         let (mut read, mut wide, mut none, mut worst) = (0usize, 0usize, 0usize, 0.0f64);
@@ -4310,12 +4313,16 @@ fn sun_occlusion_texels_follow_pixel_footprints() {
                 let Some(hit) = hits[(y * view.size[0] + x) as usize] else {
                     continue;
                 };
-                let footprint = hit.distance * view.pixel_angle();
+                // The pixel's width there, as the shadow pass takes it
+                // (`pixel_width`: its ray's step to the next pixel's).
+                let d = view.pixel_dir(view_proj, x, y);
+                let footprint =
+                    hit.distance * (view.pixel_dir(view_proj, x + 1, y) - d).length();
                 // Cells of a pixel and a half or more walk their own sun.
                 if planet.grid().voxel_size() * f64::from(1u32 << hit.level) >= 1.5 * footprint {
                     continue;
                 }
-                let p = view.pixel_dir(view_proj, x, y) * hit.distance;
+                let p = d * hit.distance;
                 let Some(r) = pages.read(p.as_vec3().to_array(), [0.0; 3], footprint as f32)
                 else {
                     none += 1;
