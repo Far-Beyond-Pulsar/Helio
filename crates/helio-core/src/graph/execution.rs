@@ -966,7 +966,7 @@ impl RenderGraph {
             .collect();
         if join.contains(&true) {
             let stay = vec![true; self.passes.len()];
-            self.repartition(&stay, &join);
+            self.repartition(&stay, &join, true);
             if self.locked {
                 self.reschedule_members();
             }
@@ -2678,7 +2678,8 @@ impl RenderGraph {
             .iter_mut()
             .map(|(_, pass)| pass.is_member(&mut content))
             .collect();
-        self.repartition(&stay, &join);
+        // Nothing has run yet, so nothing leaves.
+        self.repartition(&stay, &join, false);
         self.schedule();
     }
 
@@ -2744,23 +2745,23 @@ impl RenderGraph {
             return false;
         }
         let scratch = std::mem::take(&mut self.membership_scratch);
-        self.repartition(&scratch[..members], &scratch[members..]);
+        self.repartition(&scratch[..members], &scratch[members..], true);
         self.membership_scratch = scratch;
         true
     }
 
     /// Moves passes between the schedule and the dormant list: scheduled pass
     /// `i` stays when `stay[i]`, dormant pass `j` joins when `join[j]`. The
-    /// schedule keeps build order. Passes that leave get
+    /// schedule keeps build order. With `leave`, passes that leave get
     /// [`RenderPass::on_leave`]. The caller schedules the graph again.
-    fn repartition(&mut self, stay: &[bool], join: &[bool]) {
+    fn repartition(&mut self, stay: &[bool], join: &[bool], leave: bool) {
         let members = std::mem::take(&mut self.passes);
         let slots = std::mem::take(&mut self.member_slots);
         let dormant = std::mem::take(&mut self.dormant);
         let mut all: Vec<(usize, Box<dyn RenderPass>, bool)> =
             Vec::with_capacity(members.len() + dormant.len());
         for ((slot, mut pass), &stays) in slots.into_iter().zip(members).zip(stay) {
-            if !stays {
+            if leave && !stays {
                 pass.on_leave(&self.device);
             }
             all.push((slot, pass, stays));

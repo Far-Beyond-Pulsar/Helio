@@ -84,6 +84,42 @@ struct Flight {
     extra: Vec<VoxelVolume>,
 }
 
+/// The recording cache over the run: hits, misses and direct recordings by
+/// unit (`HELIO_RECORDING_CACHE=0` switches it off).
+fn recording_cache_line(renderer: &Renderer) -> String {
+    let stats = renderer.recording_cache_stats();
+    if !stats.active {
+        return format!(
+            "recording cache inactive ({})",
+            stats.inactive_reason.unwrap_or("-")
+        );
+    }
+    let sum = |f: fn(&helio_core::UnitCacheStats) -> u64| stats.units.iter().map(f).sum::<u64>();
+    let units = stats
+        .units
+        .iter()
+        .map(|u| {
+            format!(
+                "{} {}/{}/{}{}",
+                u.pass,
+                u.hits,
+                u.misses,
+                u.bypassed,
+                u.uncacheable.map_or(String::new(), |why| format!(" ({why})"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "recording cache hits {} misses {} bypassed {} variants {} direct {}; units hit/miss/bypass: {units}",
+        sum(|u| u.hits),
+        sum(|u| u.misses),
+        sum(|u| u.bypassed),
+        stats.units.iter().map(|u| u.cached_variants).sum::<usize>(),
+        stats.direct.len(),
+    )
+}
+
 /// The planet's up at `eye`.
 fn up_for(eye: DVec3) -> Vec3 {
     eye.normalize().as_vec3()
@@ -2110,6 +2146,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                 .join(", ")
         );
     }
+    eprintln!(
+        "CHUNKSTRESS {mode}: {}",
+        recording_cache_line(&flight.renderer)
+    );
     for (interval, t, altitude) in slow.iter().take(5) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
     }
