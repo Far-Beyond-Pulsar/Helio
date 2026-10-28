@@ -197,8 +197,11 @@ pub struct SunPageStats {
     pub views: usize,
     pub epochs: usize,
     pub out_of_pages: bool,
-    /// CPU time of the frame's `draw_sun_occlusion` (ms).
+    /// CPU time of the frame's sun occlusion (ms), and by part: the
+    /// update's occluder boxes, readback, invalidation, planning, the views'
+    /// recording, uploads.
     pub cpu_ms: f64,
+    pub cpu_parts: [f64; 6],
 }
 
 pub(super) struct SunPages {

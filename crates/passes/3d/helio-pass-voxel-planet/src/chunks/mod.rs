@@ -2014,6 +2014,8 @@ pub struct ChunkWorld {
     /// once; in the background).
     occluder_changes: Vec<[DVec3; 2]>,
     occluder_refined: Vec<[DVec3; 2]>,
+    /// CPU time of the last update's occluder boxes (ms; `SunPageStats`).
+    occluder_ms: f64,
     ground_later: Vec<(u64, NodeKey)>,
     /// The GI probes' rays (`gi_trace`), from each probe's base cell
     /// (`gi_cells`, and its CPU copy) in the clipmap they were located for,
@@ -3150,6 +3152,7 @@ impl ChunkWorld {
             ground_changes: Vec::new(),
             occluder_changes: Vec::new(),
             occluder_refined: Vec::new(),
+            occluder_ms: 0.0,
             ground_later: Vec::new(),
             gi_cells: buffer(
                 "chunk GI probe cells",
@@ -5387,6 +5390,7 @@ impl ChunkWorld {
         // pages were traced through changed), of every volume. A node drawn
         // coarser in place of finer ones changes nothing worth tracing
         // again (a still view's cut breathes; the finer pages stand).
+        let occluders = std::time::Instant::now();
         if self.sun_occlusion.is_some() {
             let mut over_removed = FxHashSet::default();
             for &r in &removed {
@@ -5437,6 +5441,7 @@ impl ChunkWorld {
                 }
             }
         }
+        self.occluder_ms = occluders.elapsed().as_secs_f64() * 1e3;
         let nodes = &self.nodes;
         let chunk_of = |key: NodeKey| {
             nodes.get(&key).map(|c| drawn::NodeChunk {
@@ -6353,12 +6358,15 @@ impl ChunkWorld {
                 }
             }
         }
+        let mut laps = [self.occluder_ms, clock.elapsed().as_secs_f64() * 1e3, 0.0, 0.0, 0.0, 0.0];
         o.drawn_frame = frame;
         o.settled_since = settled.then(|| o.settled_since.unwrap_or(frame));
         o.pages.invalidate(&changes, sun_pages::Stale::Changed);
         o.pages.invalidate(&refined, sun_pages::Stale::Coarse);
+        laps[2] = clock.elapsed().as_secs_f64() * 1e3;
         o.pages.begin(frame, eye, toward);
         let windows = o.pages.plan(frame, settled);
+        laps[3] = clock.elapsed().as_secs_f64() * 1e3;
         let current = o.pages.current().unwrap();
         o.asking = Some(sun_pages::Asking {
             epoch: current.id,
@@ -6381,13 +6389,7 @@ impl ChunkWorld {
                 .pages
                 .traced(window, near, frame);
         }
-        // The planner's and the views' recording CPU time; with
-        // HELIO_SUN_PAGES_LOG, the frames that traced pages.
-        let o = self.sun_occlusion.as_mut().unwrap();
-        o.pages.stats.cpu_ms = clock.elapsed().as_secs_f64() * 1e3;
-        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() && o.pages.stats.traced > 0 {
-            eprintln!("SUNPAGES frame {frame}: {:?}", o.pages.stats);
-        }
+        laps[4] = clock.elapsed().as_secs_f64() * 1e3;
         // The tables' changed rows (runs of them a write), the near
         // planes, the frame; this frame's requests cleared.
         let o = self.sun_occlusion.as_mut().unwrap();
@@ -6417,6 +6419,23 @@ impl ChunkWorld {
         self.queue
             .write_buffer(&o.frame, 0, bytemuck::bytes_of(&gpu));
         encoder.clear_buffer(&o.requests, 0, None);
+        // The planner's and the views' recording CPU time, by part (the
+        // update's occluder boxes; readback; invalidation; planning;
+        // recording; uploads); with HELIO_SUN_PAGES_LOG, the frames that
+        // traced pages.
+        laps[5] = clock.elapsed().as_secs_f64() * 1e3;
+        o.pages.stats.cpu_ms = laps[5] + laps[0];
+        o.pages.stats.cpu_parts = [
+            laps[0],
+            laps[1],
+            laps[2] - laps[1],
+            laps[3] - laps[2],
+            laps[4] - laps[3],
+            laps[5] - laps[4],
+        ];
+        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() && o.pages.stats.traced > 0 {
+            eprintln!("SUNPAGES frame {frame}: {:?}", o.pages.stats);
+        }
         stamp(self, encoder, 17);
     }
 
