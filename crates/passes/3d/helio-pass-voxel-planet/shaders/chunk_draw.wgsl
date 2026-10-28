@@ -47,7 +47,8 @@ struct DrawParams {
     // planet's (from f64).
     planet: vec4<f32>,
     // x: the octree's coarsest level; y: nodes fading (none: no switch to
-    // look past).
+    // look past); z: the chunk an eye under the ground walks from (NONE:
+    // rays start at their seed boxes).
     cut: vec4<u32>,
     // The eye in the scene lights' coordinates (xyz); w 1 when the scene's
     // lights are bound (`local_shadow`).
@@ -1596,6 +1597,28 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         textureStore(out_distance, p, vec4<f32>(0.0));
         if plain_colour() { textureStore(out_colour, p, vec4<f32>(0.0)); }
     }
+    let dir = pixel_ray(id.xy, size);
+    // A later volume's pass: only a hit nearer than an earlier volume's.
+    var limit = 1e30;
+    if params.volume.y > 0u {
+        let hit = textureLoad(out_distance, p).r;
+        if hit > 0.0 { limit = hit; }
+    }
+    // Under the ground (a cave, a dig) the first round walks from the eye
+    // itself: the chunks around it may be air or hold it under their
+    // occupied layers, and the rock beside them has no box, so a ray seeded
+    // by the boxes would start past them. Rock at the eye: the boxes.
+    if exit == 0.0 && params.cut.z != NONE && !ortho {
+        let from_eye = point_walk(id.xy, vec3<f32>(0.0), vec2<u32>(params.cut.z, 0u), dir, limit, true);
+        if from_eye.hit && from_eye.slot != NONE {
+            store_hit(p, from_eye, dir, id.xy);
+            return;
+        }
+        if !from_eye.hit {
+            textureStore(out_exits, p, vec4<f32>(select(from_eye.t + 1e-4, -1.0, from_eye.t < 0.0 || from_eye.t >= limit)));
+            return;
+        }
+    }
     var box = textureLoad(seed, p, 0).x;
     // No box left: the sky.
     if box == NONE {
@@ -1603,13 +1626,6 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         return;
     }
     COUNT(0)
-    // A later volume's pass: only a hit nearer than an earlier volume's.
-    var limit = 1e30;
-    if params.volume.y > 0u {
-        let hit = textureLoad(out_distance, p).r;
-        if hit > 0.0 { limit = hit; }
-    }
-    let dir = pixel_ray(id.xy, size);
     let org = select(vec3<f32>(0.0), pixel_origin(id.xy, size), ortho);
     var t_prev = max(exit, params.sun.w);
     // The chunk whose frame the ray is in (its last), and the box it is
@@ -1658,6 +1674,12 @@ fn trace_pixel(id: vec3<u32>, ortho: bool) {
         return;
     }
     COUNT(2)
+    store_hit(p, end, dir, id.xy);
+}
+
+// Pixel `p`'s hit `end` (its ray along `dir`): visibility, distance and
+// the plain colour.
+fn store_hit(p: vec2<i32>, end: WalkEnd, dir: vec3<f32>, pixel: vec2<u32>) {
     textureStore(out_exits, p, vec4<f32>(-1.0));
     let material = shown_material(end.material, end.slot, end.cell, end.axis == 2u && end.sign == 1u);
     // The material uses five bits (the voxel palette has 32 entries); six
@@ -2598,7 +2620,7 @@ fn mesh_point(q: vec2<u32>, size: vec2<u32>) -> vec4<f32> {
 // Whether the mesh point `org` (eye-relative) at pixel `q` sees along `dir`
 // to distance `range` (`point_walk`).
 fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> f32 {
-    return select(1.0, 0.0, point_walk(q, org, v, dir, range).hit);
+    return select(1.0, 0.0, point_walk(q, org, v, dir, range, false).hit);
 }
 
 // What the point `org` (eye-relative) at pixel `q` meets along `dir` within
@@ -2606,8 +2628,9 @@ fn mesh_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: 
 // the chunk of `v` (a hit by it) to its cells' precision; without a hit
 // finer than the exact levels, from the exact level's node over it
 // (planet-centred: to half a metre on an Earth). In rock or a Buried node,
-// a hit at once with no chunk (slot NONE).
-fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32) -> WalkEnd {
+// a hit at once with no chunk (slot NONE). `counted`: a primary ray's
+// walk, which reports the Buried nodes it meets.
+fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range: f32, counted: bool) -> WalkEnd {
     let rock = WalkEnd(true, 0.0, NONE, vec3<i32>(0), 0u, 0u, 0u);
     var none = rock;
     none.hit = false;
@@ -2665,7 +2688,7 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
         if !exact_level(level) { return none; }
         start.key = vec4<i32>(key_x(face_with_normal(normal), level), 0, 0, 0);
     }
-    return walk(start, org, dir, t0, range, r, 96u, false, q);
+    return walk(start, org, dir, t0, range, r, 96u, counted, q);
 }
 
 // The share of each pixel's light its sun samples give stochastically

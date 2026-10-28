@@ -101,14 +101,14 @@ GENBENCH):
 2. **`tile_columns_main`** blends each column's four nodes from that
    buffer, only the words its level uses. Every lane of an 8×8 workgroup
    lies in one node cell, so each word is a broadcast read.
-3. **`tile_halo_main`** evaluates, once per tile, the lean lattice's
-   heights past the tile's edges that `chunk_columns_main` reads. Columns
-   within the ring read the tile's nodes; farther ones evaluate their own
-   four into function arrays and leave the blend in a scratch node.
-   `chunk_columns_main` does not run the field.
+3. **`tile_caves_main`** evaluates, once per footprint, the cave
+   networks' reference ground at their sites (a level about an eighth of a
+   region, [`volumes.md`](volumes.md)): columns of another level evaluate
+   their own four nodes into function arrays and leave the blend in a
+   scratch node. `chunk_columns_main` does not run the field.
 
 WGSL clears every private variable an entry point can reach at each
-invocation, so node arrays live in function scope and in the halo pass:
+invocation, so node arrays live in function scope and in the scratch nodes:
 module-scope arrays reachable from the hot kernels cost them 2–3.5×.
 
 `field_height` and `generation_column` (verification, timing) evaluate

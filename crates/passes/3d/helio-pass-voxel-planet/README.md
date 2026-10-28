@@ -30,7 +30,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
   the player never sees detail arrive or levels switch: finer chunks fade in
   over coarser ones, and residency prefetches where the eye is going.
 - **Dig anything, anywhere.** Brushes from one voxel to the whole planet,
-  generated caves and overhangs. An edit shows the next frame; a dug region
+  generated cave networks and cliff overhangs. An edit shows the next frame; a dug region
   renders and streams like untouched ground, however many edits made it.
 - **One world, two consumers.** The CPU (collision, ray casts, edits,
   gameplay queries) and the GPU (generation, drawing) evaluate the same
@@ -43,9 +43,10 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 |---|---|
 | `src/grid.rs` | The canonical grid: equal-angle cube sphere (or plane), cells, levels, faces, exact cell walking maths. |
 | `src/noise.rs`, `shaders/noise.wgsl`, `shaders/wide64.wgsl` | Bit-exact integer noise (Q16 and fine Q24), with hardware 64-bit products where the device has them. The only noise terrain may use. |
-| `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL), and the program contract (module docs). Registry, material ids, `check_field`, `lean_height`. |
+| `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL), and the program contract (module docs). Registry, material ids, `check_field`. |
 | `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, desert, flat), validation and compilation. |
-| `src/landform.rs`, `shaders/landform.wgsl`, `src/ridge_envelope.rs` | The stack interpreter (CPU and WGSL): the two-rate column ([`docs/two-rate-field.md`](docs/two-rate-field.md)), octaves, layer composition, craters, erosion, caves, overhangs and material styles; coarse levels' ridge means. |
+| `src/landform.rs`, `shaders/landform.wgsl`, `src/ridge_envelope.rs` | The stack interpreter (CPU and WGSL): the two-rate column ([`docs/two-rate-field.md`](docs/two-rate-field.md)), octaves, layer composition, craters, erosion and material styles; coarse levels' ridge means. |
+| `src/volumes.rs`, `shaders/volumes.wgsl` | The volume layer ([`docs/volumes.md`](docs/volumes.md)): cave networks placed per region (chambers, tunnels, links, entrances) and cliff shapes (ledges, undercuts), CPU and WGSL. |
 | `shaders/world.wgsl`, `shaders/material_state.wgsl` | Grid mapping, layer quantization and material ids shared by generation and terrain programs. |
 | `src/features.rs` | Features: procedural content (trees, rocks, buildings) from the recipe's `FeatureSet`, generated like the terrain wherever a cell is asked for, on CPU and GPU bit for bit ([`docs/features.md`](docs/features.md)). |
 | `src/stamp.rs` | Stamps: small voxel models of material cells around an anchor, placed by features or as edits (`Stamp::brushes`). |
@@ -60,7 +61,7 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 | `src/chunks/pass.rs` | `ChunkPass`, the render-graph pass hosts add: reads a `PlanetFrame`, writes Helio's gbuffer and `directional_visibility`. |
 | `src/chunks/scene.rs`, `shaders/scene_materials.wgsl` | Voxel materials drawn with the host's scene materials (Helio material rows and textures for each material's top, side and bottom faces), on devices with texture binding arrays. |
 | `src/engine.rs` | What hosts share with the pass (`PlanetFrame`, picks, appearance) and the terrain half of the shaders (`terrain_source`), checked by `verify_field`. |
-| `shaders/chunk_generate.wgsl` | Footprint columns (two-rate nodes, material slopes, lean halos, feature placements), chunk columns (field, volume terms, lean, features, edits, materials), 64-tree build, eviction, packing and restoring kept chunks. |
+| `shaders/chunk_generate.wgsl` | Footprint columns (two-rate nodes, material slopes, cave primitives, volume extents, feature placements), chunk columns (field, cliff shapes and caves, features, edits, materials), 64-tree build, eviction, packing and restoring kept chunks. |
 | `shaders/chunk_draw.wgsl` | The cut walk, chunk tracing, fades, sun and local light shadows, sky visibility, appearance, gbuffer publish and ray reports. |
 | `shaders/chunk_table.wgsl` | Scatters a frame's chunk-table changes. |
 | `tests/chunks.rs` | GPU correctness against the CPU planet (see [Tests](#tests)). |
@@ -120,8 +121,8 @@ evaluated at nodes every 16 columns of its level and blended exactly
   native `u64` products, with the same bits (`tests/wide_products.rs`).
 - The built-in generator runs an ordered layer stack (`layers.rs`): Warp, Continents,
   Mountains, Hills, Roughness, Erosion, Craters, Basins, Plateau, each with
-  a mask (everywhere, land, above deep sea), plus caves, overhangs and a
-  material style (Earthlike, Lunar, Layered, Rules). The stack is data,
+  a mask (everywhere, land, above deep sea), plus its volumes (cave
+  networks, cliff shapes: `volumes.rs`) and a material style (Earthlike, Lunar, Layered, Rules). The stack is data,
   compiled to one octave table sorted coarse to fine; one interpreter runs
   it on CPU and GPU, so changing layers never recompiles shaders. Bounds
   (`bound_margins`, `height_range`) derive from the layers, so any stack
@@ -212,7 +213,7 @@ frame of `ChunkPass`:
    cost of a footprint's columns and of a chunk), a footprint's nodes
    together: footprint columns (field height, surface word, volume
    extent, feature placements; kept in a pool across frames), then each
-   chunk's columns as 64-bit masks (volume terms, lean, features, large
+   chunk's columns as 64-bit masks (cliff shapes, caves, features, large
    brushes, baked cells, recent brushes, materials), then the chunk's
    64-tree into leaf pages. Results come back a frame later: empty chunks
    are freed, measured footprints reclassify their nodes. Nodes no plan
@@ -247,7 +248,7 @@ frame of `ChunkPass`:
 
 ## Invariants and decisions
 
-- **CPU/GPU bit identity.** Terrain programs, noise, the lean lattice and
+- **CPU/GPU bit identity.** Terrain programs, noise, the volume layer and
   edit containment are integer and mirrored; `engine::verify_field` and
   `tests/chunks.rs` enforce it. Never introduce floats into a field.
 - **Camera-relative frames, exact coarse cells.** The host's world origin
@@ -276,19 +277,13 @@ frame of `ChunkPass`:
   last changed.
 - **A frame costs what changed.** Plans are diffs from the worker; the
   chunk table is patched on the GPU; edits regenerate the nodes they touch.
-- **Overhangs lean the heightfield.** A cell is solid where it lies below
-  the field's height at a horizontally displaced point,
-  `z < H(x + W(x, z))`: `W` (`terrain_lean_offset`) varies with height at
-  the ledge spacing and eight times more slowly across the ground, so the
-  solid is a continuous deformation of the heightfield's (no floating rock,
-  no tears). Generation evaluates the field on a global lattice per level
-  (`terrain_lean`: nodes every `spacing` cells within `reach`; a brick
-  column's 64 lanes evaluate its 8x8 nodes once) and passes the bilinear
-  height at the displaced point plus the column's own detail off the
-  lattice (`terrain::lean_height`).
-- **Caves** are a network under a rock cover: tunnels narrow to nothing
-  towards the cover and the cave depth, caverns raise their threshold as
-  they close, and the cover opens only in entrance zones.
+- **Volumes are placed, not thresholded** ([`docs/volumes.md`](docs/volumes.md)).
+  Caves are networks per region of the face (a hub, chambers, tunnels to
+  the neighbouring hubs, an entrance) carved as capsules with flat floors
+  and rough walls, at depths under the ground's reference level, closing
+  under a rock cover except along entrances. Cliff shapes displace steep
+  ground along its normal (strata ledges, undercuts, bulges), so ledges stay
+  attached to the cliff behind them.
 - **Brushes.** Cubes are tested in each face's half-cell index space (a
   one-block cube is exactly one cell); spheres are balls in the seamless
   volume space (`Grid::volume_point`), round at any size and depth, the
@@ -330,9 +325,9 @@ unit tests, `tests/chunks.rs`, `tests/wide_products.rs`) and
 
 - Field: `terrain_programs_are_bit_identical_to_cpu` (every generator and
   shape), the field's own unit tests (no steps between columns, bounds,
-  caves and overhangs without floating rock).
+  the volume layer's connectivity, cover, floors, LOD and cliff attachment).
 - Drawn hits near the eye match CPU ray casts: ground, across a face edge,
-  natural caves (shallow and 800 m deep), overhangs, planes.
+  cave networks (shallow and 600 m deep), lunar lava tubes, cliff shapes, planes.
 - Edits: brushes, flat-topped boxes, a 600 m shaft at its bottom and half
   way up, a 3 km crater's floor, 18 000 block edits, and sealed edits with
   undo under a running world.
@@ -377,15 +372,11 @@ full contract is in `terrain.rs`'s module docs. The program defines:
   stored with each column cell, so shading never runs the generator per
   pixel.
 
-Volumetric generators also define `terrain_extent` and `terrain_density`
-(and `TerrainField::extent`, `density`, `volume_bounds`), leaning ones `terrain_lean` and
-`terrain_lean_offset` (`TerrainField::lean`, `lean_offset`), and optionally
-`terrain_clearance` (cells a column's scan may step over below the lean
-band). A density is the signed distance from the cell centre to the surface
-(256 per level cell, positive inside solid): combine terms as constructive
-solid geometry on distances, and keep the extent tight, since every cell in
-it is evaluated when a chunk is generated. Return an empty extent at levels
-that cannot show a feature. Use only the integer noise library. Register it
+Caves and cliff shapes are the engine's volume layer over any field: a
+generator supplies its settings (`TerrainField::volumes`, a compiled
+`volumes::VolumeLayer`) and may gate cave networks by its own inputs
+(`TerrainField::cave_gate`, `terrain_cave_gate(surface, height)` in WGSL).
+Use only the integer noise library. Register it
 with `terrain::register`; bump its version when a released generator changes
 its output (saved edits record it). Add a test calling
 `engine::verify_field` for every shape and `terrain::check_field`.
