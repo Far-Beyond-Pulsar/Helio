@@ -542,8 +542,11 @@ around the air in front of the face (across chunks by the chunk table)
 times sky visibility, crisp edges
 while a cell spans several pixels, and the shading normal. A natural step
 (air above) may be lit partly with the slope's normal (`detail.w`, step
-softness) and its sun ray passes its own steps. Helio's deferred lighting,
-atmosphere and TSR do the rest.
+softness) and its sun and sky rays pass its own steps. Local lights'
+rays do not pass the steps (only cells of a pixel or less): a lamp near
+the ground meets the real steps, and a grazing step's skip (up to 12
+cells) passed what stood beside the lamp, or the lamp itself. Helio's
+deferred lighting, atmosphere and TSR do the rest.
 
 It writes only the hits no mesh covers, as the shading pass found them
 against the meshes' depth (a covered hit's normal is zero), and writes the

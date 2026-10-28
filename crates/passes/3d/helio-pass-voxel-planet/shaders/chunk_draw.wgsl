@@ -2143,14 +2143,19 @@ struct Fallbacks {
 @group(1) @binding(12) var<storage, read_write> fallback_groups: array<atomic<u32>, 3>;
 
 // A hit's face: its unit normal, the length of a cell across it; the
-// normal it is lit with, and how far (cells) its sun ray ignores what it
-// meets (natural steps: `shading`); the slope's normal there (zero: none).
+// normal it is lit with, and how far (cells) its sun and sky rays ignore
+// what they meet (natural steps and cells of a pixel or less: `shading`);
+// the slope's normal there (zero: none); how far a local light's ray
+// ignores (cells of a pixel or less alone: a lamp near the ground meets
+// the real steps, and a step's skip could pass what stands beside the lamp,
+// or the lamp itself).
 struct Face {
     normal: vec3<f32>,
     cell: f32,
     shading: vec3<f32>,
     skip: f32,
     ground: vec3<f32>,
+    light_skip: f32,
 }
 
 // The top of the column `d` cells from `cell` (chunk `slot`'s cells) within
@@ -2240,7 +2245,7 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, axis == 1u), c.m0.xyz, axis == 0u);
     let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
     let cell_m = length(axis_world);
-    var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
+    var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0), 0.0);
     let small = 1.0 - smoothstep(1.0, 3.0, params.planet.y / max(pixel_m, 1e-6));
     let coarse = max(under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6)), small);
     let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
@@ -2261,6 +2266,7 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     f.ground = ground;
     f.shading = shading * inverseSqrt(l);
     f.skip = 2.0 * w;
+    f.light_skip = 2.0 * coarse;
     return f;
 }
 
@@ -2901,7 +2907,9 @@ fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
             faced = true;
         }
         // Short of the light: the cell a lamp stands in does not shade it.
-        if hit_walk(q, size, slot, t, face, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
+        var lit = face;
+        lit.skip = face.light_skip;
+        if hit_walk(q, size, slot, t, lit, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
     }
     return seen;
 }
