@@ -493,6 +493,10 @@ fn ray_plane(view_proj: Mat4, size: [u32; 2]) -> [[f32; 4]; 3] {
     ]
 }
 
+/// Frames the sun's occlusion pages may take to converge after the
+/// residency settles before `ChunkWorld::settled` stops waiting for them.
+const PAGES_SETTLE_FRAMES: u64 = 180;
+
 /// A sun occlusion trace view's side in texels (`sun_pages::VIEW_PAGES`
 /// pages).
 const OCCLUSION_VIEW: u32 =
@@ -545,6 +549,10 @@ struct SunOcclusion {
     /// Each volume's placement when last seen (a move changes the
     /// occluders where it was and is).
     placed: FxHashMap<u16, crate::volume::VolumeTransform>,
+    /// The last frame drawn, and the frame since which the residency has
+    /// been settled (`ChunkWorld::settled`).
+    drawn_frame: u64,
+    settled_since: Option<u64>,
 }
 
 impl SunOcclusion {
@@ -629,6 +637,8 @@ impl SunOcclusion {
             ),
             pages: sun_pages::SunPages::new(voxel),
             placed: FxHashMap::default(),
+            drawn_frame: 0,
+            settled_since: None,
         }
     }
 }
@@ -5698,13 +5708,18 @@ impl ChunkWorld {
     /// Whether the residency has settled ([`Self::residency_settled`]) and
     /// the sun's occlusion pages with it: none asked for and missing, none
     /// whose terrain changed, none traced through a coarser cut still to
-    /// trace again. Shots and tests that wait for this see converged
+    /// trace again (or the atlas is full, or [`PAGES_SETTLE_FRAMES`] went by
+    /// since the residency settled: what it cannot finish never holds a
+    /// host's wait). Shots and tests that wait for this see converged
     /// shadows.
     pub fn settled(&self) -> bool {
         self.residency_settled()
             && self.sun_occlusion.as_ref().is_none_or(|o| {
                 let s = o.pages.stats;
-                s.missing == 0 && s.stale == 0 && s.coarse == 0
+                (s.missing == 0 && s.stale == 0 && s.coarse == 0)
+                    || s.out_of_pages
+                    || o.settled_since
+                        .is_some_and(|f| o.drawn_frame + 1 >= f + PAGES_SETTLE_FRAMES)
             })
     }
 
@@ -6244,6 +6259,8 @@ impl ChunkWorld {
                 }
             }
         }
+        o.drawn_frame = frame;
+        o.settled_since = settled.then(|| o.settled_since.unwrap_or(frame));
         o.pages.invalidate(&changes, sun_pages::Stale::Changed);
         o.pages.invalidate(&refined, sun_pages::Stale::Coarse);
         o.pages.begin(frame, eye, toward);
