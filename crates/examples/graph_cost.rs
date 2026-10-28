@@ -252,22 +252,6 @@ fn main() {
         allocations = report.allocations.len();
     }
 
-    let cache = renderer.recording_cache_stats();
-    let units: Vec<String> = cache
-        .units
-        .iter()
-        .map(|u| format!("{} {}/{}/{}", u.pass, u.hits, u.misses, u.bypassed))
-        .collect();
-    println!(
-        "GRAPHCACHE active={} hits={} misses={} variants={} direct={} units hit/miss/bypass: {}",
-        cache.active,
-        cache.units.iter().map(|u| u.hits).sum::<u64>(),
-        cache.units.iter().map(|u| u.misses).sum::<u64>(),
-        cache.units.iter().map(|u| u.cached_variants).sum::<usize>(),
-        cache.direct.len(),
-        units.join(", ")
-    );
-
     // Resize: each resized frame less a steady frame.
     let small = ((width * 4 / 5).max(1), (height * 4 / 5).max(1));
     let mut resizes = Vec::new();

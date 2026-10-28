@@ -635,21 +635,6 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         false
     }
 
-    /// Whether the graph's recording cache may resubmit this pass's
-    /// command buffers while it records identical commands
-    /// (see `graph::recording_cache`).
-    ///
-    /// `execute()` still runs every frame, and a resubmitted command buffer
-    /// is validated like a new one (a buffer it uses must not be mapped), so
-    /// a pass needs no changes to be cached. Return `false` to always record
-    /// it straight into wgpu, for example to rule the cache out while
-    /// investigating a rendering difference.
-    ///
-    /// Default `true`.
-    fn supports_recording_cache(&self) -> bool {
-        true
-    }
-
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms

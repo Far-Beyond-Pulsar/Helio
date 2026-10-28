@@ -4,7 +4,6 @@ mod execution;
 mod executor;
 mod membership;
 mod pipeline_cache;
-mod recording_cache;
 mod resource;
 mod resource_lifetime;
 mod scheduling;
@@ -25,7 +24,6 @@ pub use pipeline_cache::{
     BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
     PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
 };
-pub use recording_cache::{RecordingCacheStats, UnitCacheStats};
 pub use resource::{
     GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,
     ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize, TextureDescriptor,
