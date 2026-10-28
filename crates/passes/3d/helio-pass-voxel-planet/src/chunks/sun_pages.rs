@@ -369,49 +369,63 @@ impl SunPages {
         }
     }
 
-    /// Pages whose rays cross any of `boxes` (planet-centred, the terrain
-    /// changed in them) traced again before others.
+    /// Pages whose rays cross any of `boxes` (world, the terrain changed in
+    /// them) traced again before others. Each box marks the pages over it
+    /// in the levels where it spans at most 2x2 pages and every coarser
+    /// one; a finer page is stale when one of its ancestors is marked (the
+    /// region marked is at most a page larger than the box at that level).
+    /// Hash lookups only: a settle's thousands of boxes a frame against
+    /// thousands of pages stay well under a millisecond.
     pub fn invalidate(&mut self, boxes: &[[DVec3; 2]]) {
         if boxes.is_empty() {
             return;
         }
         let finest = self.finest;
+        let page_m = |level: usize| finest * (level as f64).exp2() * f64::from(PAGE);
         for e in &self.epochs {
-            // Each box's extent across the sun (m from the anchor).
-            let rects: Vec<[f64; 4]> = boxes
-                .iter()
-                .map(|[lo, hi]| {
-                    let mut r = [
-                        f64::INFINITY,
-                        f64::INFINITY,
-                        f64::NEG_INFINITY,
-                        f64::NEG_INFINITY,
-                    ];
-                    for c in 0..8 {
-                        let p = DVec3::new(
-                            if c & 1 == 0 { lo.x } else { hi.x },
-                            if c & 2 == 0 { lo.y } else { hi.y },
-                            if c & 4 == 0 { lo.z } else { hi.z },
-                        );
-                        let a = e.across(p);
-                        r = [
-                            r[0].min(a[0]),
-                            r[1].min(a[1]),
-                            r[2].max(a[0]),
-                            r[3].max(a[1]),
-                        ];
-                    }
-                    r
-                })
-                .collect();
-            for (key, &p) in &e.resident {
-                let extent = finest * f64::from(1u32 << key.level) * f64::from(PAGE);
-                let lo = [
-                    f64::from(key.page[0]) * extent,
-                    f64::from(key.page[1]) * extent,
+            if e.resident.is_empty() {
+                continue;
+            }
+            let mut marked: FxHashSet<PageKey> = FxHashSet::default();
+            for [lo, hi] in boxes {
+                // The box's extent across the sun (m from the anchor).
+                let mut r = [
+                    f64::INFINITY,
+                    f64::INFINITY,
+                    f64::NEG_INFINITY,
+                    f64::NEG_INFINITY,
                 ];
-                let hit = rects.iter().any(|r| {
-                    r[0] < lo[0] + extent && r[2] > lo[0] && r[1] < lo[1] + extent && r[3] > lo[1]
+                for c in 0..8 {
+                    let a = e.across(DVec3::new(
+                        if c & 1 == 0 { lo.x } else { hi.x },
+                        if c & 2 == 0 { lo.y } else { hi.y },
+                        if c & 4 == 0 { lo.z } else { hi.z },
+                    ));
+                    r = [r[0].min(a[0]), r[1].min(a[1]), r[2].max(a[0]), r[3].max(a[1])];
+                }
+                let span = (r[2] - r[0]).max(r[3] - r[1]).max(0.0);
+                let first = (0..LEVELS).find(|&l| span <= page_m(l)).unwrap_or(LEVELS - 1);
+                for level in first..LEVELS {
+                    let m = page_m(level);
+                    let (x0, y0) = ((r[0] / m).floor() as i32, (r[1] / m).floor() as i32);
+                    let (x1, y1) = ((r[2] / m).floor() as i32, (r[3] / m).floor() as i32);
+                    for y in y0..=y1.min(y0 + 1) {
+                        for x in x0..=x1.min(x0 + 1) {
+                            marked.insert(PageKey {
+                                level: level as u8,
+                                page: [x, y],
+                            });
+                        }
+                    }
+                }
+            }
+            for (key, &p) in &e.resident {
+                let hit = (usize::from(key.level)..LEVELS).any(|l| {
+                    let up = (l - usize::from(key.level)) as u32;
+                    marked.contains(&PageKey {
+                        level: l as u8,
+                        page: key.page.map(|c| c >> up),
+                    })
                 });
                 if hit {
                     self.physical[p as usize].stale = true;
@@ -704,6 +718,40 @@ mod tests {
         let views = pages.plan(frame, 0);
         assert_eq!(views[0].level, 3);
         assert_eq!(views[0].pages[0].0.page, asking.eye_pages[3]);
+    }
+
+    #[test]
+    fn changed_boxes_stale_the_pages_over_them() {
+        let mut pages = SunPages::new(0.1);
+        let eye = DVec3::new(0.0, 1000.0, 0.0);
+        let sun = DVec3::Y;
+        pages.begin(0, eye, sun);
+        loop {
+            let views = pages.plan(0, 0);
+            if views.is_empty() {
+                break;
+            }
+            for v in &views {
+                pages.traced(v, 0.0, 0, 0);
+            }
+        }
+        let e = pages.current().unwrap();
+        // A 1 m box at the eye's column: the coarse pages over it, nothing
+        // far away.
+        let near: Vec<PageKey> = e.resident.keys().copied().collect();
+        pages.invalidate(&[[eye - DVec3::splat(0.5), eye + DVec3::splat(0.5)]]);
+        let e = pages.current().unwrap();
+        let stale = |k: &PageKey| pages.physical[e.resident[k] as usize].stale;
+        let over: Vec<&PageKey> = near
+            .iter()
+            .filter(|k| {
+                let m = pages.texel(usize::from(k.level)) * f64::from(PAGE);
+                let a = e.across(eye);
+                (0..2).all(|i| (a[i] / m).floor() as i32 == k.page[i])
+            })
+            .collect();
+        assert!(!over.is_empty() && over.iter().all(|k| stale(k)));
+        assert!(near.iter().filter(|k| stale(k)).count() <= over.len() * 4);
     }
 
     #[test]

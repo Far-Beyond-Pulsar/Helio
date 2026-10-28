@@ -272,10 +272,18 @@ impl World {
     /// Frames until residency settles; every pixel's hit then.
     fn settle(&mut self, gpu: &Gpu, planet: &Planet, view: &View) -> Vec<Option<PickHit>> {
         let started = self.frame;
+        let clock = std::time::Instant::now();
         let stats = loop {
             let stats = self.frame(gpu, planet, view, None);
             if self.chunks.settled() {
                 break stats;
+            }
+            if (self.frame - started) % 500 == 0 {
+                eprintln!(
+                    "settling: {} frames, {:.1} s",
+                    self.frame - started,
+                    clock.elapsed().as_secs_f64()
+                );
             }
             assert!(
                 self.frame - started < 4000,
