@@ -576,12 +576,13 @@ shadows and sky 1.72 ms. Generation in the cruise stress flight: about
 columns 1.9 us). Settled test views take 3,000 to 10,000 detail pages.
 
 Terrain behind meshes (2026-10-27, 1080p, RTX 3060): voxel_flight's
-`ground` hold in grass, chunk draw 2.43 -> 1.75 ms and shadows 3.54 ->
-2.74 ms (VoxelChunks 8.6 -> 7.1 ms); the same view bare, unchanged (2.42
--> 2.44 ms: the seed's depth load and the walk's runtime end). voxel_craft's
-poses with grass, VoxelChunks 0.2 to 0.6 ms less. A wall covering the
-nearer half of a ground view (`terrain_behind_meshes_is_not_traced`): half
-the walk steps, reports 5,492 -> 96.
+`ground` hold in grass, chunk draw 2.44 -> 1.76 ms and shadows 3.66 ->
+2.89 ms (VoxelChunks 8.7 -> 7.2 ms); the same view bare, unchanged (2.44
+-> 2.46 ms: the seed's depth load and the walk's runtime end). voxel_craft's
+poses with grass, VoxelChunks 0.15 to 0.7 ms less; bare, within noise. A
+wall covering the nearer half of a ground view
+(`terrain_behind_meshes_is_not_traced`): half the walk steps, reports
+5,492 -> 96.
 
 Gates (`tests/chunks.rs`): drawn hits match CPU ray casts (ground, face
 edges, caves 800 m deep, overhangs, planes, brushes, a 600 m shaft, a 3 km
