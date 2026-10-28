@@ -315,13 +315,15 @@ impl SunPages {
             let texel = finest * (level as f64).exp2();
             let (t, _) = e.texel_of(eye, texel);
             let page = t.map(|t| (t >> PAGE_SHIFT) as i32);
-            // Toward the eye's side of its page, unless that leaves its
-            // view block: a level's four pages are then one view.
-            let side = [0, 1].map(|i| match page[i] & (VIEW_PAGES - 1) {
-                0 => 1,
-                b if b == VIEW_PAGES - 1 => -1,
-                _ if (t[i] & (PAGE as i64 - 1)) < PAGE as i64 / 2 => -1,
-                _ => 1,
+            // Toward the eye's side of its page (kept inside a view block,
+            // the pages a reader near the eye needs went missing at block
+            // edges: GI and fog found no level there).
+            let side = t.map(|t| {
+                if (t & (PAGE as i64 - 1)) < PAGE as i64 / 2 {
+                    -1
+                } else {
+                    1
+                }
             });
             for (dx, dy) in [(0, 0), (side[0], 0), (0, side[1]), (side[0], side[1])] {
                 let key = PageKey {
