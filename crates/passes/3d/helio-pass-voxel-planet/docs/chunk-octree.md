@@ -555,15 +555,27 @@ where tiles held more (toward the horizon): the list has no per-tile cap.
 The publish pass writes Helio's gbuffer and depth: material colour
 (`material_albedo`: per-voxel pigment and the materials' patches, clumps
 and blades from the appearance table, sampled at the cell centre's domain
-point; where cells are a pixel or less, each face's material taken at a
+point; a voxel's pigment is as much its 0.4 m clump's as its own, since a
+hash per voxel read as a checkerboard wherever the light shapes nothing,
+in shade and under cloud; where cells are a pixel or less, each face's material taken at a
 point jittered up to a leaf across it each frame, so TSR averages the
 leaves' materials into their mixture), corner occlusion from the cells
 around the air in front of the face (across chunks by the chunk table)
 times sky visibility, crisp edges
 while a cell spans several pixels, and the shading normal. A natural step
-(air above) may be lit partly with the slope's normal (`detail.w`, step
-softness) and its sun ray passes its own steps. Helio's deferred lighting,
-atmosphere and TSR do the rest.
+(air above) is lit partly with the slope's normal (`detail.w`, step
+softness: 0.75 by default) and its sun and sky rays pass its own steps.
+Lit by their own faces (step softness 0, the default from 2026-10-12 to
+2026-10-26), the 10 cm steps of a gentle slope drew each riser and the
+shadow it casts as a dark line: contour lines over every meadow, under
+the grass and past it, near and from the air, and rings in lunar crater
+bowls. Natural means the leaf stores the heightfield's slope (its columns
+hold natural tops): features and edits keep their own faces (softened, a
+rock field lost its form and its shadows). Local lights' rays do not pass
+the steps (only cells of a pixel or less): a lamp near the ground meets
+the real steps, and a grazing step's skip (up to 12 cells) passed what
+stood beside the lamp, or the lamp itself.
+Helio's deferred lighting, atmosphere and TSR do the rest.
 
 It writes only the hits no mesh covers, as the shading pass found them
 against the meshes' depth (a covered hit's normal is zero), and writes the

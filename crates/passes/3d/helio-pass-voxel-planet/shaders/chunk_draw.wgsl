@@ -1789,9 +1789,9 @@ fn pixel_width(q: vec2<u32>, size: vec2<u32>, t: f32) -> f32 {
 }
 
 // Material `m`'s colour varied by its patches (409 m and 25.6 m), clumps
-// (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, by
-// `voxel`), at domain point `p` for a pixel `pixel` m wide.
-fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32) -> vec3<f32> {
+// (6.4 m and 1.6 m, fading below a few pixels) and voxels (`blade`, in
+// [-0.5, 0.5], by `voxel`), at domain point `p` for a pixel `pixel` m wide.
+fn material_albedo(m: u32, p: vec3<i32>, blade: f32, pixel: f32, voxel: f32) -> vec3<f32> {
     let material = materials.m[min(m, 31u)];
     if material.patches[0].w <= 0.0 { return material.colour.rgb; }
     let broad = f32(noise(p, 15u, 0x3c6ef372u)) / f32(NOISE_ONE);
@@ -1803,7 +1803,6 @@ fn material_albedo(m: u32, p: vec3<i32>, blade_hash: u32, pixel: f32, voxel: f32
     if pixel < 0.8 {
         clumps += 0.3 * f32(noise(p, 7u, 0x9b05688cu)) / f32(NOISE_ONE) * clamp((0.8 - pixel) / 0.4, 0.0, 1.0);
     }
-    let blade = f32(blade_hash & 255u) / 255.0 - 0.5;
     let t = clamp(0.52 + materials.detail.x * (0.7 * broad + 0.16 * patches + clumps) + materials.detail.y * blade * voxel, 0.0, 1.0);
     return select(mix(material.patches[1].rgb, material.patches[2].rgb, t * 2.0 - 1.0), mix(material.patches[0].rgb, material.patches[1].rgb, t * 2.0), t < 0.5);
 }
@@ -1881,9 +1880,15 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
     // face of it.
     let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz) * (vec3<f32>(cell) + 0.5);
     let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + centre / DOMAIN_UNIT));
+    // Each voxel's own brightness and hue, as much shared with the voxels
+    // around (0.4 m clumps) as its own: a hash a voxel alone read as a
+    // checkerboard wherever light alone shapes nothing (shade, overcast).
+    let clump = f32(noise(p, 5u, 0x3a1f9e27u)) / f32(NOISE_ONE);
     let hv = hash3(p.x, p.y, p.z, 0x68bc21ebu);
-    let pigment = 1.0 + materials.detail.y * (mix(0.5, f32(hv & 255u) / 255.0, mosaic) - 0.5);
-    let albedo = material_albedo(material, p, hash3(p.x, p.y, p.z, 0x1b873593u), pixel_m, mosaic) * pigment;
+    let shade = 0.6 * (f32(hv & 255u) / 255.0 - 0.5) + 0.4 * clump;
+    let pigment = 1.0 + materials.detail.y * shade * mosaic;
+    let hue = 0.6 * (f32(hash3(p.x, p.y, p.z, 0x1b873593u) & 255u) / 255.0 - 0.5) + 0.4 * clump;
+    let albedo = material_albedo(material, p, hue, pixel_m, mosaic) * pigment;
     // Occlusion: around the air cell in front of the face, where voxels
     // (not cells: the same at every level, as `hit_face`'s slope) are a
     // few pixels wide; under that the sky samples hold the occlusion and
@@ -2201,14 +2206,19 @@ struct Fallbacks {
 @group(1) @binding(12) var<storage, read_write> fallback_groups: array<atomic<u32>, 3>;
 
 // A hit's face: its unit normal, the length of a cell across it; the
-// normal it is lit with, and how far (cells) its sun ray ignores what it
-// meets (natural steps: `shading`); the slope's normal there (zero: none).
+// normal it is lit with, and how far (cells) its sun and sky rays ignore
+// what they meet (natural steps and cells of a pixel or less: `shading`);
+// the slope's normal there (zero: none); how far a local light's ray
+// ignores (cells of a pixel or less alone: a lamp near the ground meets
+// the real steps, and a step's skip could pass what stands beside the lamp,
+// or the lamp itself).
 struct Face {
     normal: vec3<f32>,
     cell: f32,
     shading: vec3<f32>,
     skip: f32,
     ground: vec3<f32>,
+    light_skip: f32,
 }
 
 // The top of the column `d` cells from `cell` (chunk `slot`'s cells) within
@@ -2279,8 +2289,9 @@ fn screen_ground(q: vec2<u32>, size: vec2<u32>, t: f32) -> vec3<f32> {
 
 // Hit `v` (pixels `pixel_m` wide there). Voxels a few pixels wide are lit
 // by their own faces (a slope reads as its steps, each shadowing the next);
-// a natural step (air above it) is lit partly with the slope's normal,
-// `Materials::detail.w` (step softness), its sun ray passing its own steps.
+// a natural step (air above it, its leaf storing the heightfield's slope) is
+// lit partly with the slope's normal, `Materials::detail.w` (step
+// softness), its sun ray passing its own steps.
 // Voxels of a pixel or less are lit by the slope's normal, at every level:
 // the weight follows the voxel's size on screen, not the cell's, so it is
 // the same on both sides of a switch between levels, and a coarse level's
@@ -2298,17 +2309,23 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     let axis_world = select(select(c.m2.xyz, c.m1.xyz, axis == 1u), c.m0.xyz, axis == 0u);
     let normal = normalize(axis_world) * select(-1.0, 1.0, sign == 1u);
     let cell_m = length(axis_world);
-    var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0));
+    var f = Face(normal, cell_m, normal, 0.0, vec3<f32>(0.0), 0.0);
     let small = 1.0 - smoothstep(1.0, 3.0, params.planet.y / max(pixel_m, 1e-6));
     let coarse = max(under_refined(key, length(c.m0.xyz) / max(pixel_m, 1e-6)), small);
-    let step = !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
+    // Natural steps only: the leaf stores the heightfield's slope where it
+    // holds natural tops. A feature's cells (a boulder, a tree's leaves) or an
+    // edit's stand for no slope: softened, rock fields lost their form and
+    // shadows, and leaves' sun rays skipped the leaves around them (canopy
+    // speckle).
+    let stored = leaf_ground(v.x, cell, c);
+    let step = dot(stored, stored) > 0.0 && !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
     if !step && coarse == 0.0 { return f; }
     let w = max(select(0.0, materials.detail.w, step), coarse);
     // The heightfield's exact slope stored with the leaf; else, cells of a
     // pixel or less: the slope the hits around make (a few loads); larger
     // ones measure their column tops (`slope_normal`).
     var ground = ground_hint;
-    if dot(ground, ground) == 0.0 { ground = leaf_ground(v.x, cell, c); }
+    if dot(ground, ground) == 0.0 { ground = stored; }
     if dot(ground, ground) == 0.0 && length(c.m0.xyz) <= 1.5 * pixel_m { ground = screen_ground(q, size, t); }
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
     // A unit normal (written so NaN fails it), else the face's own.
@@ -2319,6 +2336,7 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     f.ground = ground;
     f.shading = shading * inverseSqrt(l);
     f.skip = 2.0 * w;
+    f.light_skip = 2.0 * coarse;
     return f;
 }
 
@@ -2968,7 +2986,9 @@ fn hit_lights(q: vec2<u32>, size: vec2<u32>, slot: u32, t: f32) -> u32 {
             faced = true;
         }
         // Short of the light: the cell a lamp stands in does not shade it.
-        if hit_walk(q, size, slot, t, face, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
+        var lit = face;
+        lit.skip = face.light_skip;
+        if hit_walk(q, size, slot, t, lit, reach.dir, reach.range - face.cell, reach.back) < 0.5 { seen &= ~(1u << i); }
     }
     return seen;
 }
@@ -4253,7 +4273,7 @@ fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
                 // already reads as the meadow.
                 let at = org - up * (end.t + 0.01 * length(f.m0.xyz));
                 let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + at / DOMAIN_UNIT));
-                let colour = material_albedo(min(m, 31u), p, 0u, 0.4, 0.0);
+                let colour = material_albedo(min(m, 31u), p, 0.0, 0.4, 0.0);
                 hit = GroundHit(bitcast<u32>(end.t + drop), pack_unit(to_world(n)), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
             }
         }

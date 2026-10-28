@@ -2713,9 +2713,12 @@ fn draw_source(plane: bool, counting: bool) -> String {
             heat
         }
     };
-    // The noise library (materials' patches), then the draw.
-    (format!("const DOMAIN_UNIT: f32 = {};
-", crate::grid::DOMAIN_UNIT) + include_str!("../../shaders/noise.wgsl") + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(include_str!("../../shaders/chunk_draw.wgsl")))
+    // The noise library (materials' patches), then the draw (from disk with
+    // `HELIO_SHADER_FROM_DISK`).
+    let source = |rel: &str, embedded: &'static str| {
+        helio_core::shader::hot::source_text(env!("CARGO_MANIFEST_DIR"), rel, embedded)
+    };
+    (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + &source("shaders/noise.wgsl", include_str!("../../shaders/noise.wgsl")) + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(&source("shaders/chunk_draw.wgsl", include_str!("../../shaders/chunk_draw.wgsl"))))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))

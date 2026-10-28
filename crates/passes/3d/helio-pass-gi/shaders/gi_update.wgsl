@@ -2,6 +2,7 @@
 //!use atmosphere_sky_table
 //!use gi_common
 //!use gi_sample
+//!use cloud_shadow
 // Probe updates (README.md): the sun found, last frame's rays integrated
 // into their probes, probes that came into the clipmap reset, this frame's
 // rays written for the tracers.
@@ -33,6 +34,11 @@ struct SceneLight {
 // the scene's lights on it, the light it gives off), radiance RGB in half
 // floats; zero where no tracer wrote any.
 @group(0) @binding(9) var<storage, read> gi_light: array<vec2<u32>>;
+// The clouds' shadow (helio-pass-sky's `cloud_shadow`): the sun at a hit
+// under a cloud is the cloud's share of it, so the shade under a cloud is
+// not lit by bounce from ground the cloud shades.
+@group(0) @binding(10) var cloud_shadow_map: texture_2d<f32>;
+@group(0) @binding(11) var<uniform> cloud_shadow_frame: CloudShadowFrame;
 
 const PI: f32 = 3.14159265;
 const LUMINANCE: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -114,12 +120,13 @@ fn gi_integrate(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
             // light through adds that share of its far side's light.
             let albedo = unpack4x8unorm(hit.albedo);
             let at = probe + dir * hit.t;
-            let front = gi_sun[1].rgb * albedo.a * max(dot(n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, n).rgb;
+            let sun = gi_sun[1].rgb * cloud_shadow(at);
+            let front = sun * albedo.a * max(dot(n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, n).rgb;
             let through = f32((hit.light >> 8u) & 255u) / 255.0;
             var back = vec3<f32>(0.0);
             if through > 0.0 {
                 let seen = f32((hit.light >> 16u) & 255u) / 255.0;
-                back = gi_sun[1].rgb * seen * max(dot(-n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, -n).rgb;
+                back = sun * seen * max(dot(-n, gi_sun[0].xyz), 0.0) / PI + gi_irradiance(at, -n).rgb;
             }
             // And the light it gives off, and the scene's lights' on it.
             let glow = f32(hit.light >> 24u) / 16.0;

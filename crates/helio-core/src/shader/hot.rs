@@ -865,6 +865,18 @@ fn from_disk() -> bool {
     *FROM_DISK.get_or_init(|| std::env::var("HELIO_SHADER_FROM_DISK").is_ok_and(|value| value.trim() != "0"))
 }
 
+/// A WGSL file a crate assembles itself (`include_str!`, not
+/// `include_wgsl!`): its text on disk at `manifest_dir`/`rel` while shaders
+/// start from disk (`HELIO_SHADER_FROM_DISK`), else `embedded`.
+pub fn source_text(manifest_dir: &str, rel: &str, embedded: &'static str) -> std::borrow::Cow<'static, str> {
+    if from_disk() {
+        if let Ok(text) = std::fs::read_to_string(Path::new(manifest_dir).join(rel)) {
+            return std::borrow::Cow::Owned(text);
+        }
+    }
+    std::borrow::Cow::Borrowed(embedded)
+}
+
 /// Whether any shader has registered as hot-reloadable. One relaxed load, so
 /// the renderer can ask every frame without touching the registry lock.
 pub fn has_registered() -> bool {

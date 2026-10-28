@@ -437,7 +437,7 @@ pub static RENDERER: Group = Group {
             "Foliage",
             (0.0, 64.0, 0.5),
             0.0,
-            "Densest foliage in tufts a square metre (denser types are thinned); 0: 8",
+            "Densest foliage in tufts a square metre (denser types are thinned); 0: 16",
         ),
         number(
             "foliage_blades_per_tuft",
@@ -445,7 +445,7 @@ pub static RENDERER: Group = Group {
             "Foliage",
             (0.0, 64.0, 1.0),
             0.0,
-            "Blades a tuft averages, sizing the near band; 0: 8",
+            "Blades a tuft averages, sizing the near band; 0: 10",
         ),
         pick(
             "hdr_output_mode",
