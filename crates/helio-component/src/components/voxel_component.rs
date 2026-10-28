@@ -7,6 +7,8 @@
 
 use engine_class_derive::{component_events, engine_class};
 use super::VoxelFeatureSpawn;
+use helio_pass_voxel_planet::layers::TerrainLayers;
+use helio_pass_voxel_planet::volumes;
 use helio_voxel_data::{VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal};
 
 /// Typed payload for block lifecycle events. Coordinates are the exact
@@ -803,7 +805,8 @@ fn deserialize_terrain_layer_json(
 #[allow(dead_code)]
 type RegisteredVoxelTerrainLayer = VoxelTerrainLayer;
 
-/// Generated caves: tunnels and caverns inside cave regions.
+/// Cave networks (`volumes::Caves`): per region a hub, chambers joined to
+/// it, tunnels linking neighbouring regions' hubs, and entrances.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Caves", category_color = "#7A6A9E")]
 #[derive(pulsar_reflection::Reflectable)]
@@ -811,108 +814,90 @@ type RegisteredVoxelTerrainLayer = VoxelTerrainLayer;
 pub struct VoxelCaves {
     #[property(category = "Caves")]
     pub enabled: bool,
-    /// Deepest cave cell below the local surface.
-    #[property(
-        min = 0.0,
-        max = 170.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Depth (m)"
-    )]
-    pub depth_m: f64,
-    /// Rough share of the land inside cave regions.
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Caves",
-        label = "Regions (share)"
-    )]
+    /// Region size: one network a region at most.
+    #[property(min = 50.0, max = 5000.0, step = 10.0, category = "Caves", label = "Spacing (m)")]
+    pub spacing_m: f64,
+    /// Share of regions with a network.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Networks (share)")]
     pub share: f64,
-    #[property(
-        min = 0.1,
-        max = 500.0,
-        step = 0.1,
-        category = "Caves",
-        label = "Region size (km)"
-    )]
-    pub region_km: f64,
-    #[property(
-        min = 0.0,
-        max = 20.0,
-        step = 0.1,
-        category = "Caves",
-        label = "Tunnel radius (m)"
-    )]
-    pub tunnel_radius_m: f64,
-    #[property(
-        min = 4.0,
-        max = 2000.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Tunnel winding (m)"
-    )]
-    pub tunnel_wavelength_m: f64,
-    #[property(
-        min = 8.0,
-        max = 4000.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Cavern size (m)"
-    )]
-    pub cavern_wavelength_m: f64,
-    /// Rough share of the cave volume opened as caverns.
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Caves",
-        label = "Caverns (share)"
-    )]
-    pub cavern_share: f64,
-    /// Rock kept over every cave: tunnels and caverns close towards it
-    /// instead of breaking the surface, except at entrances.
-    #[property(
-        min = 0.0,
-        max = 100.0,
-        step = 0.5,
-        category = "Caves",
-        label = "Cover (m)"
-    )]
+    /// Depth of hubs and chambers under the ground.
+    #[property(min = 0.0, max = 1000.0, step = 1.0, category = "Caves", label = "Shallowest (m)")]
+    pub depth_min_m: f64,
+    #[property(min = 0.0, max = 1000.0, step = 1.0, category = "Caves", label = "Deepest (m)")]
+    pub depth_max_m: f64,
+    /// Cells deeper than this under the surface are never carved.
+    #[property(min = 1.0, max = 4000.0, step = 1.0, category = "Caves", label = "Depth limit (m)")]
+    pub max_depth_m: f64,
+    /// Rock kept over caves, except along entrances.
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cover (m)")]
     pub cover_m: f64,
-    /// Rough share of a cave region where tunnels open to the surface.
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Caves",
-        label = "Entrances (share)"
-    )]
-    pub entrance_share: f64,
-    #[property(
-        min = 4.0,
-        max = 2000.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Entrance spacing (m)"
-    )]
-    pub entrance_spacing_m: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Hub chambers (share)")]
+    pub hub_chambers: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Chambers (share)")]
+    pub chambers: f64,
+    #[property(min = 0.5, max = 200.0, step = 0.5, category = "Caves", label = "Chamber radius min (m)")]
+    pub chamber_min_m: f64,
+    #[property(min = 0.5, max = 200.0, step = 0.5, category = "Caves", label = "Chamber radius max (m)")]
+    pub chamber_max_m: f64,
+    #[property(min = 0.1, max = 1.0, step = 0.01, category = "Caves", label = "Chamber height (share)")]
+    pub chamber_height: f64,
+    #[property(min = 0.2, max = 50.0, step = 0.1, category = "Caves", label = "Tunnel radius min (m)")]
+    pub tunnel_min_m: f64,
+    #[property(min = 0.2, max = 50.0, step = 0.1, category = "Caves", label = "Tunnel radius max (m)")]
+    pub tunnel_max_m: f64,
+    #[property(min = 0.1, max = 1.0, step = 0.01, category = "Caves", label = "Tunnel height (share)")]
+    pub tunnel_height: f64,
+    /// Share of a vertical radius under the axis kept as floor (1: none).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Chamber floor")]
+    pub chamber_floor: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Tunnel floor")]
+    pub tunnel_floor: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Links (share)")]
+    pub links: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Entrances (share)")]
+    pub entrances: f64,
+    #[property(min = 0.0, max = 200.0, step = 1.0, category = "Caves", label = "Entrance lift (m)")]
+    pub entrance_lift_m: f64,
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Bend (m)")]
+    pub bend_m: f64,
+    #[property(min = 0.0, max = 0.5, step = 0.01, category = "Caves", label = "Roughness")]
+    pub roughness: f64,
+    #[property(min = 0.2, max = 100.0, step = 0.1, category = "Caves", label = "Roughness size (m)")]
+    pub roughness_m: f64,
 }
 
 impl Default for VoxelCaves {
     fn default() -> Self {
+        Self::from_volumes(&volumes::Caves::default())
+    }
+}
+
+impl VoxelCaves {
+    fn from_volumes(c: &volumes::Caves) -> Self {
         Self {
-            enabled: true,
-            depth_m: 120.0,
-            share: 0.45,
-            region_km: 6.0,
-            tunnel_radius_m: 2.5,
-            tunnel_wavelength_m: 160.0,
-            cavern_wavelength_m: 160.0,
-            cavern_share: 0.04,
-            cover_m: 6.0,
-            entrance_share: 0.05,
-            entrance_spacing_m: 80.0,
+            enabled: c.enabled,
+            spacing_m: c.spacing_m,
+            share: c.share,
+            depth_min_m: c.depth_min_m,
+            depth_max_m: c.depth_max_m,
+            max_depth_m: c.max_depth_m,
+            cover_m: c.cover_m,
+            hub_chambers: c.hub_chambers,
+            chambers: c.chambers,
+            chamber_min_m: c.chamber_min_m,
+            chamber_max_m: c.chamber_max_m,
+            chamber_height: c.chamber_height,
+            tunnel_min_m: c.tunnel_min_m,
+            tunnel_max_m: c.tunnel_max_m,
+            tunnel_height: c.tunnel_height,
+            chamber_floor: c.chamber_floor,
+            tunnel_floor: c.tunnel_floor,
+            links: c.links,
+            entrances: c.entrances,
+            entrance_lift_m: c.entrance_lift_m,
+            bend_m: c.bend_m,
+            roughness: c.roughness,
+            roughness_m: c.roughness_m,
         }
     }
 }
@@ -992,64 +977,85 @@ impl Default for VoxelClimate {
     }
 }
 
-/// Generated overhangs: steep ground leaning over, a continuous
-/// deformation of the heightfield (no floating rock).
+/// Cliff shapes (`volumes::Cliffs`): ledges, undercuts and overhangs on
+/// steep ground.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
-#[category("Overhangs", category_color = "#A8826F")]
+#[category("Cliffs", category_color = "#A8826F")]
 #[derive(pulsar_reflection::Reflectable)]
 #[serde(default)]
-pub struct VoxelOverhangs {
-    #[property(category = "Overhangs")]
+pub struct VoxelCliffs {
+    #[property(category = "Cliffs")]
     pub enabled: bool,
-    /// Largest horizontal lean of the ground.
-    #[property(
-        min = 0.0,
-        max = 20.0,
-        step = 0.5,
-        category = "Overhangs",
-        label = "Height (m)"
-    )]
-    pub height_m: f64,
-    /// Vertical wavelength of the lean (ledge spacing).
-    #[property(
-        min = 2.0,
-        max = 500.0,
-        step = 1.0,
-        category = "Overhangs",
-        label = "Ledge spacing (m)"
-    )]
-    pub wavelength_m: f64,
-    #[property(
-        min = 0.1,
-        max = 500.0,
-        step = 0.1,
-        category = "Overhangs",
-        label = "Region size (km)"
-    )]
+    /// Largest displacement along the surface's normal.
+    #[property(min = 0.0, max = 40.0, step = 0.5, category = "Cliffs", label = "Depth (m)")]
+    pub depth_m: f64,
+    /// Ledge spacing.
+    #[property(min = 0.2, max = 100.0, step = 0.1, category = "Cliffs", label = "Strata (m)")]
+    pub strata_m: f64,
+    /// Slope (rise over run) over which shapes fade in.
+    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Cliffs", label = "Slope from")]
+    pub slope_min: f64,
+    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Cliffs", label = "Slope to")]
+    pub slope_max: f64,
+    /// Share of the displacement from 3D noise (the rest from strata).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Cliffs", label = "Noise (share)")]
+    pub noise: f64,
+    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Cliffs", label = "Region size (km)")]
     pub region_km: f64,
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Overhangs",
-        label = "Regions (share)"
-    )]
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Cliffs", label = "Regions (share)")]
     pub share: f64,
 }
 
-impl Default for VoxelOverhangs {
+impl Default for VoxelCliffs {
     fn default() -> Self {
+        Self::from_volumes(&volumes::Cliffs::default())
+    }
+}
+
+impl VoxelCliffs {
+    fn from_volumes(c: &volumes::Cliffs) -> Self {
         Self {
-            enabled: true,
-            height_m: 6.0,
-            wavelength_m: 6.0,
-            region_km: 3.0,
-            share: 0.3,
+            enabled: c.enabled,
+            depth_m: c.depth_m,
+            strata_m: c.strata_m,
+            slope_min: c.slope_min,
+            slope_max: c.slope_max,
+            noise: c.noise,
+            region_km: c.region_km,
+            share: c.share,
         }
     }
 }
 
-/// An ordered terrain layer stack, its caves and overhangs and its
+/// The terrain's volumetric shapes (`volumes::Volumes`, docs/volumes.md):
+/// cave networks and cliff shapes.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[derive(pulsar_reflection::Reflectable)]
+#[serde(default)]
+pub struct VoxelVolumes {
+    #[property]
+    pub caves: VoxelCaves,
+    #[property]
+    pub cliffs: VoxelCliffs,
+}
+
+impl Default for VoxelVolumes {
+    fn default() -> Self {
+        Self::from_volumes(&volumes::Volumes::default())
+    }
+}
+
+impl VoxelVolumes {
+    /// The engine's settings as the component holds them.
+    pub fn from_volumes(v: &volumes::Volumes) -> Self {
+        Self {
+            caves: VoxelCaves::from_volumes(&v.caves),
+            cliffs: VoxelCliffs::from_volumes(&v.cliffs),
+        }
+    }
+}
+
+/// An ordered terrain layer stack, its caves and cliff shapes and its
 /// materials: the `helio.terrain` settings, edited as one value (the
 /// inspector's stack editor), so a preset replaces all of it at once.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
@@ -1058,10 +1064,9 @@ pub struct VoxelTerrainStack {
     /// Applied in order; at most eight enabled.
     #[property]
     pub layers: Vec<VoxelTerrainLayer>,
+    /// Caves and cliff shapes (docs/volumes.md).
     #[property]
-    pub caves: VoxelCaves,
-    #[property]
-    pub overhangs: VoxelOverhangs,
+    pub volumes: VoxelVolumes,
     #[property(label = "Material style")]
     pub materials: VoxelMaterialStyle,
     /// Temperature and moisture: the Earthlike snow and dry lands, rules'
@@ -1121,7 +1126,7 @@ type RegisteredVoxelTerrainStack = VoxelTerrainStack;
 
 /// Settings of the layered terrain generator (`helio.terrain`): an ordered
 /// stack of layers (continents, mountains, erosion, hills, craters,
-/// basins, plateaus), caves, overhangs and materials. Any world is a stack:
+/// basins, plateaus), cave networks, cliff shapes and materials. Any world is a stack:
 /// an Earth-like planet, a cratered moon, a desert, a flat block world, or
 /// one a game builds from a seed. It configures the [`VoxelTerrainComponent`]
 /// on the same entity, whose seed varies it; its serialized form (the
@@ -1180,8 +1185,8 @@ impl VoxelTerrainStack {
     }
 
     /// Continents and oceans, ridged mountains with branching erosion,
-    /// hills, river valleys and lakes, and roughness; caves, overhangs;
-    /// Earth's climate over meadows, dry lands, rock and snow.
+    /// hills, river valleys and lakes, and roughness; karst caves, ledged
+    /// cliffs; Earth's climate over meadows, dry lands, rock and snow.
     pub fn earth() -> Self {
         use VoxelLayerKind::*;
         Self {
@@ -1200,8 +1205,7 @@ impl VoxelTerrainStack {
                     ..VoxelTerrainLayer::new(Roughness)
                 },
             ],
-            caves: VoxelCaves::default(),
-            overhangs: VoxelOverhangs::default(),
+            volumes: VoxelVolumes::default(),
             materials: VoxelMaterialStyle::Earthlike,
             climate: VoxelClimate::earth(),
             soil_depth_m: 0.7,
@@ -1280,11 +1284,12 @@ impl VoxelTerrainStack {
             ],
             rock: M::Sandstone,
             climate: VoxelClimate::uniform(25.0, 0.2),
+            volumes: VoxelVolumes::from_volumes(&TerrainLayers::desert().volumes),
             ..earth
         }
     }
 
-    /// Cratered highlands and dark basalt plains over regolith, no caves.
+    /// Cratered highlands and dark basalt plains over regolith, lava tubes.
     pub fn moon() -> Self {
         use VoxelLayerKind::*;
         Self {
@@ -1312,14 +1317,7 @@ impl VoxelTerrainStack {
                     ..VoxelTerrainLayer::new(Craters)
                 },
             ],
-            caves: VoxelCaves {
-                enabled: false,
-                ..VoxelCaves::default()
-            },
-            overhangs: VoxelOverhangs {
-                enabled: false,
-                ..VoxelOverhangs::default()
-            },
+            volumes: VoxelVolumes::from_volumes(&TerrainLayers::moon().volumes),
             materials: VoxelMaterialStyle::Lunar,
             climate: VoxelClimate::uniform(0.0, 0.0),
             soil_depth_m: 4.0,
@@ -1334,14 +1332,7 @@ impl VoxelTerrainStack {
                 height_m,
                 ..VoxelTerrainLayer::new(VoxelLayerKind::Plateau)
             }],
-            caves: VoxelCaves {
-                enabled: false,
-                ..VoxelCaves::default()
-            },
-            overhangs: VoxelOverhangs {
-                enabled: false,
-                ..VoxelOverhangs::default()
-            },
+            volumes: VoxelVolumes::from_volumes(&volumes::Volumes::none()),
             materials: VoxelMaterialStyle::Layered,
             climate: VoxelClimate::uniform(45.0, 1.0),
             soil_depth_m: 1.0,

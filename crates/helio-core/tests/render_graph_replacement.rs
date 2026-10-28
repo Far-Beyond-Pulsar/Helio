@@ -76,7 +76,8 @@ impl RenderPass for BundleObserver {
     fn execute(&mut self, _: &mut PassContext) -> Result<()> {
         Ok(())
     }
-    fn on_resize(&mut self, _: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, _: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.size = Some([width, height]);
     }
     fn build_gpu_render_bundle(

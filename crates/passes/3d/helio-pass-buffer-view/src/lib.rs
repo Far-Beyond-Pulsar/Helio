@@ -139,6 +139,11 @@ impl RenderPass for BufferViewPass {
         "BufferView"
     }
 
+    /// A member while one of its debug views is selected.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.active()
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("gbuffer");
     }
@@ -247,7 +252,7 @@ impl RenderPass for BufferViewPass {
         VIEWS
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
         self.bind_group = None;
         self.bind_group_key = None;
     }

@@ -21,7 +21,8 @@ pub const MAX_VOLUMES: usize = 4096;
 pub(super) struct GenPipelines {
     pub tile_nodes: wgpu::ComputePipeline,
     pub tile_columns: wgpu::ComputePipeline,
-    pub tile_halo: wgpu::ComputePipeline,
+    pub tile_caves: wgpu::ComputePipeline,
+    pub tile_volumes: wgpu::ComputePipeline,
     pub tile_slope_nodes: wgpu::ComputePipeline,
     pub tile_slope_heights: wgpu::ComputePipeline,
     pub tile_slopes: wgpu::ComputePipeline,
@@ -65,7 +66,8 @@ impl GenPipelines {
         Self {
             tile_nodes: compute(gen_layout, "tile_nodes_main"),
             tile_columns: compute(gen_layout, "tile_columns_main"),
-            tile_halo: compute(gen_layout, "tile_halo_main"),
+            tile_caves: compute(gen_layout, "tile_caves_main"),
+            tile_volumes: compute(gen_layout, "tile_volumes_main"),
             tile_slope_nodes: compute(gen_layout, "tile_slope_nodes_main"),
             tile_slope_heights: compute(gen_layout, "tile_slope_heights_main"),
             tile_slopes: compute(gen_layout, "tile_slopes_main"),
@@ -126,12 +128,18 @@ pub(super) struct Volume {
     pub terrain_tables: wgpu::Buffer,
     pub regions: crate::engine::RegionPool,
     pub region_key_cache: FxHashMap<Footprint, std::sync::Arc<[[u32; 2]]>>,
+    /// Its planet's volume layer (whose cave networks read ground columns
+    /// beside a footprint: `region_keys`).
+    pub volume_layer: Option<crate::volumes::VolumeLayer>,
+    /// The volume layer's constants (`crate::volumes::VolumeConstants`).
+    pub volumes: wgpu::Buffer,
     pub materials: wgpu::Buffer,
     pub views: VolumeViews,
-    /// Its footprint pool: columns, halos, material slopes, feature
-    /// placements and candidate blocks.
+    /// Its footprint pool: columns, cave primitives
+    /// (`crate::volumes::CAVE_SLOT_WORDS` a footprint), material slopes,
+    /// feature placements and candidate blocks.
     pub tile_data: wgpu::Buffer,
-    pub tile_halo_data: wgpu::Buffer,
+    pub tile_cave_data: wgpu::Buffer,
     pub tile_slope_data: wgpu::Buffer,
     pub feature_set: wgpu::Buffer,
     pub tile_placements: wgpu::Buffer,
@@ -182,7 +190,8 @@ impl Volume {
     }
 
     /// The terrain regions footprint `fp`'s generation reads (near
-    /// levels' feature candidates read the ground at level 0), kept.
+    /// levels' feature candidates read the ground at level 0, cave networks
+    /// their reference ground beside it), kept.
     pub fn region_keys(&mut self, fp: Footprint) -> std::sync::Arc<[[u32; 2]]> {
         if let Some(keys) = self.region_key_cache.get(&fp) {
             return keys.clone();
@@ -199,16 +208,25 @@ impl Volume {
             fp.level
         };
         let up = fp.level - read;
-        let keys: std::sync::Arc<[[u32; 2]]> = self
-            .regions
-            .keys(
-                &self.grid,
-                fp.face,
-                read,
-                [fp.cx * CHUNK << up, ((fp.cx * CHUNK + CHUNK) << up) - 1],
-                [fp.cy * CHUNK << up, ((fp.cy * CHUNK + CHUNK) << up) - 1],
-            )
-            .into();
+        let mut keys = self.regions.keys(
+            &self.grid,
+            fp.face,
+            read,
+            [fp.cx * CHUNK << up, ((fp.cx * CHUNK + CHUNK) << up) - 1],
+            [fp.cy * CHUNK << up, ((fp.cy * CHUNK + CHUNK) << up) - 1],
+        );
+        // Its cave networks' reference ground (`tile_caves_main`).
+        let base = |c: i32| [c * CHUNK << fp.level, ((c * CHUNK + CHUNK) << fp.level) - 1];
+        let ground = self.volume_layer.as_ref().and_then(|v| {
+            let (i, j) = v.ground_columns(fp.level, base(fp.cx), base(fp.cy))?;
+            Some((v.reference_level(), i, j))
+        });
+        if let Some((reference, i, j)) = ground {
+            keys.extend(self.regions.keys(&self.grid, fp.face, reference, i, j));
+            keys.sort_unstable();
+            keys.dedup();
+        }
+        let keys: std::sync::Arc<[[u32; 2]]> = keys.into();
         self.region_key_cache.insert(fp, keys.clone());
         keys
     }
@@ -294,6 +312,8 @@ impl DrawLayouts {
                     },
                     count: None,
                 },
+                // The meshes' depth: rays end at it.
+                texture_entry(27, wgpu::TextureSampleType::Depth, c),
             ],
         });
         let seed = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -310,6 +330,12 @@ impl DrawLayouts {
                     wgpu::ShaderStages::FRAGMENT,
                 ),
                 storage(22, true, wgpu::ShaderStages::VERTEX),
+                // The meshes' depth: boxes behind it are marked hidden.
+                texture_entry(
+                    27,
+                    wgpu::TextureSampleType::Depth,
+                    wgpu::ShaderStages::FRAGMENT,
+                ),
             ],
         });
         let cull = [
@@ -515,7 +541,7 @@ impl DrawLayouts {
 }
 
 impl Volume {
-    /// Its footprint pool doubled (up to its most): columns, halos, slopes
+    /// Its footprint pool doubled (up to its most): columns, caves, slopes
     /// and placements copied into buffers twice the size (submitted at
     /// once, before the update records anything), the new slots free.
     pub fn grow_footprints(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
@@ -525,8 +551,8 @@ impl Volume {
         let e = &mut encoder;
         self.tile_data =
             regrown(device, e, &self.tile_data, "chunk footprint columns", n * TILE_COLUMNS * 16);
-        self.tile_halo_data =
-            regrown(device, e, &self.tile_halo_data, "chunk footprint halos", n * 40 * 40 * 4);
+        self.tile_cave_data =
+            regrown(device, e, &self.tile_cave_data, "chunk footprint caves", n * CAVE_SLOT_BYTES);
         self.tile_slope_data =
             regrown(device, e, &self.tile_slope_data, "chunk footprint slopes", n * SLOPE_STRIDE * 4);
         self.tile_placements = regrown(
@@ -908,12 +934,15 @@ impl ChunkWorld {
             }
         };
         // What generated packs depend on: the generation shaders, the
-        // terrain's constants and the world (`kept_chunks`).
+        // terrain's and volume layer's constants and the world
+        // (`kept_chunks`).
+        let volume_constants = crate::engine::volume_constants(planet);
         let fingerprint = {
             let mut bytes =
                 format!("chunk packs {KEPT_FORMAT} {DETAIL_LEVELS} {}", gen_source).into_bytes();
             bytes.extend_from_slice(&terrain_bytes(&program));
             bytes.extend_from_slice(bytemuck::cast_slice(&program.tables));
+            bytes.extend_from_slice(bytemuck::bytes_of(&volume_constants));
             bytes.extend_from_slice(bytemuck::bytes_of(&WorldGpu::new(planet)));
             crate::record::fnv64(&bytes)
         };
@@ -1018,6 +1047,12 @@ impl ChunkWorld {
             terrain_tables: crate::engine::tables_buffer(&device, &program),
             regions: crate::engine::RegionPool::new(&device, &program, REGION_CAPACITY),
             region_key_cache: Default::default(),
+            volume_layer: planet.volumes().cloned(),
+            volumes: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("chunk volumes"),
+                contents: bytemuck::bytes_of(&volume_constants),
+                usage: wgpu::BufferUsages::UNIFORM,
+            }),
             materials: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk materials"),
                 contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }),
@@ -1028,7 +1063,7 @@ impl ChunkWorld {
                 sun: params("chunk sun params"),
             },
             tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, g),
-            tile_halo_data: buffer("chunk footprint halos", pool_size as u64 * 40 * 40 * 4, g),
+            tile_cave_data: buffer("chunk footprint caves", pool_size as u64 * CAVE_SLOT_BYTES, g),
             tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, g),
             feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk features"),

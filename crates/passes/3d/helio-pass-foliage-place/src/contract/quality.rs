@@ -30,10 +30,10 @@ impl FoliageQuality {
     /// Metres the foliage reaches by default (the last band ends here).
     pub fn range(self) -> f32 {
         match self {
-            FoliageQuality::Low => 80.0,
-            FoliageQuality::Medium => 160.0,
-            FoliageQuality::High => 220.0,
-            FoliageQuality::Ultra => 300.0,
+            FoliageQuality::Low => 100.0,
+            FoliageQuality::Medium => 200.0,
+            FoliageQuality::High => 300.0,
+            FoliageQuality::Ultra => 400.0,
         }
     }
 

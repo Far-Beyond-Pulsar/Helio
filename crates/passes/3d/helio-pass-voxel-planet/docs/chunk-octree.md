@@ -43,7 +43,9 @@ One `ChunkWorld` holds them all (`ChunkWorld::add_volume`,
   volume's seed keeps only boxes nearer than the hits already found, and
   its trace walks no farther than them, so the nearest hit of any volume
   wins per pixel, hidden volumes cost little, and volumes may overlap (a
-  ship landed in the ground). A chunk's frame stays in its volume's
+  ship landed in the ground). Every pass reads the meshes' depth the same
+  way (Drawing 1, 2): meshes hide every volume; only the first pass keeps a
+  hidden pixel's frame chunk (its pass walks the meshes' points). A chunk's frame stays in its volume's
   coordinates: a moving or spinning volume rewrites none. A later pass's
   kernels run only over its volume's rectangle on the screen
   (`DrawParams::rect`: the projected box of its bounding ball, origin on
@@ -150,9 +152,10 @@ cells may not show:
 - **Rounding.** Coarse cells round their tops down. The field's band is
   widened by `DESCENT` (2) cells, and a Mixed node whose chunk comes back
   empty is still refined (drawn as air).
-- **Caves.** `terrain_extent` is empty where a level cannot show a cave;
-  the Buried band reaches `TerrainField::volume_bounds` under the surface
-  at every level (`EditView::volume_depth`).
+- **Caves.** A column's volume extent is empty where a level cannot show
+  a cave ([`volumes.md`](volumes.md)); the Buried band reaches
+  `Planet::volume_bounds` under the surface at every level
+  (`EditView::volume_depth`).
 - **Small edits.** A brush under half a cell is inactive at a level, and
   coarse baked bricks are built by majority (a 4 m shaft vanishes in 6.4 m
   cells). Brushes classify at any size; `BrickIndex` marks every brick's
@@ -253,12 +256,14 @@ Kernels, a timed pass each (`FrameTimings::stages`, `tile_stages`):
    relief); for levels 0 to 3 the
    level-4 heights and block slopes materials read
    (`Planet::material_slope`), kept with the columns in the pool.
-4. `tile_halo_main`: the lean lattice's heights past the footprint's
-   edges, once a footprint.
+4. `tile_caves_main`, `tile_volumes_main`: the footprint's cave
+   primitives from its regions' networks, then each column's volume
+   extent (cliff band, caves over it) and the measured volume range
+   ([`volumes.md`](volumes.md)).
 5. `tile_features_main`: the footprint's feature placements
    ([`features.md`](features.md)), its ranges raised over them.
 6. `chunk_columns_main`: each column's 64 cells in a chunk as a 64-bit mask
-   (bit z: layer `64 cz + z`): the heightfield, volume terms and lean,
+   (bit z: layer `64 cz + z`): the heightfield, cliff shapes and caves,
    features, then the edits in order (large brushes, baked cells, recent
    brushes), and the materials of its cells. A workgroup (8x8 columns)
    culls the feature placements over it and their parts together, a lane
@@ -426,7 +431,10 @@ once. A plan that changes a switch under way ends it at once.
    top); a fragment writes only the box's index. Boxes do not overlap, so
    with the depth test on box faces each pixel keeps the nearest box its
    ray enters and hidden boxes never run. Boxes holding the eye draw their
-   back faces.
+   back faces. A box past the pixel's mesh (the scene's depth before the
+   chunks publish, read by the fragment, not depth-tested: see Publish) is
+   marked hidden rather than discarded: the pixel traces nothing, and
+   keeps the box as its frame chunk for the mesh point's walks (3, 4).
 2. **Trace** (compute): each pixel's ray walks the cut from its seed box
    (`walk`). Inside a chunk, an integer DDA through the 64-tree: an empty
    child crossed in one step, a full one a hit where the ray enters. Past a
@@ -436,20 +444,29 @@ once. A plan that changes a switch under way ends it at once.
    (Buried reports itself); Empty, or outside an ancestor's content box,
    air grown to the largest slab of the coarsest ancestor whose content the
    point is outside of, so open air and dug halls cross in a few steps.
+   Under the ground (a drawn chunk over the eye's column reaches above
+   it: a cave, a dig, an overhang) the first round walks from the eye
+   itself (`DrawParams::cut.z`, `point_walk`): in a large chamber the
+   chunks around the eye are air (freed) or hold it under their occupied
+   layers, and the rock beside them (Buried nodes) has no box, so a ray
+   seeded by the boxes started past them.
    Across a cube face's edge the walk continues on the face beyond
    (`across_edge`: equal-angle faces meet cell for cell on the edge). Over
    the ceiling (`Planet::outer_radius` and 16 m) and rising, a ray meets
-   nothing more and ends: the sky.
+   nothing more and ends: the sky. A ray ends a thousandth past its
+   pixel's mesh (`MESH_MARGIN`; the shading tells which of a mesh and a hit
+   that close is in front): terrain behind meshes is neither drawn nor
+   reported, and picks there find none.
 3. **Sun shadows**: walks toward the sun from a quarter of the hits (one a
    2x2 block, the pixel moving each frame), a hundredth of a cell off their
    face, each towards a point of the sun's disk (the atmosphere's angular
    radius, else Earth's 0.27 degrees; a pixel's own R2 sequence over the
    frames), so a penumbra widens with the occluder's distance. Every hit takes the sample of its block or a neighbouring one that
    walked within four of its cells; the rest (silhouettes) are listed and
-   walk in an indirect dispatch of their own. Mesh pixels nearer than the
-   terrain hit, or with only sky behind (the scene's depth before the
-   chunks publish), walk from the mesh point (`mesh_walk`), so terrain
-   shadows fall on meshes. The denoiser (7) turns the samples into
+   walk in an indirect dispatch of their own. Mesh pixels (with no hit
+   behind them, the rays ending at the mesh) walk from the mesh point
+   (`mesh_walk`), placed in the chunk the ray ended in, so terrain shadows
+   fall on meshes. The denoiser (7) turns the samples into
    Helio's `directional_visibility`; its deferred lighting applies it.
    `set_steady_shadows` walks every hit instead, 32 rays over the disk
    (the denoiser passes the walks' own on: the reference for its error).
@@ -517,6 +534,9 @@ names the node its hit's level wants there: cells of a pixel, two levels
 of margin, the hit's own node at least. A workgroup appends the distinct
 nodes of its 32x32 pixels to one list, up to a node per 8x8 pixels in all
 (the old readback's size). Rays that met Buried nodes report them too.
+Rays end at meshes, so terrain behind them reports nothing: it is neither
+seen nor reached: residency refines it only to `unseen_pixels`, and
+Buried nodes there are not generated.
 Reports come back without waiting; the planner marks the nodes and their
 ancestors seen and generates the Buried ones.
 
@@ -535,20 +555,29 @@ where tiles held more (toward the horizon): the list has no per-tile cap.
 The publish pass writes Helio's gbuffer and depth: material colour
 (`material_albedo`: per-voxel pigment and the materials' patches, clumps
 and blades from the appearance table, sampled at the cell centre's domain
-point; where cells are a pixel or less, each face's material taken at a
+point; a voxel's pigment is as much its 0.4 m clump's as its own, since a
+hash per voxel read as a checkerboard wherever the light shapes nothing,
+in shade and under cloud; where cells are a pixel or less, each face's material taken at a
 point jittered up to a leaf across it each frame, so TSR averages the
 leaves' materials into their mixture), corner occlusion from the cells
 around the air in front of the face (across chunks by the chunk table)
 times sky visibility, crisp edges
 while a cell spans several pixels, and the shading normal. A natural step
-(air above) may be lit partly with the slope's normal (`detail.w`, step
-softness) and its sun and sky rays pass its own steps. Local lights'
-rays do not pass the steps (only cells of a pixel or less, and no farther
-than the hit's own pixel): a lamp near the ground meets the real steps,
-and a grazing step's skip (up to 12 cells) passed what stood beside the
-lamp, or the lamp itself; on rough ground (eroded slopes' single-cell
-steps) a step a cell or two along casts a shadow several pixels long. Helio's
-deferred lighting, atmosphere and TSR do the rest.
+(air above) is lit partly with the slope's normal (`detail.w`, step
+softness: 0.75 by default) and its sun and sky rays pass its own steps.
+Lit by their own faces (step softness 0, the default from 2026-10-12 to
+2026-10-26), the 10 cm steps of a gentle slope drew each riser and the
+shadow it casts as a dark line: contour lines over every meadow, under
+the grass and past it, near and from the air, and rings in lunar crater
+bowls. Natural means the leaf stores the heightfield's slope (its columns
+hold natural tops): features and edits keep their own faces (softened, a
+rock field lost its form and its shadows). Local lights' rays do not pass
+the steps (only cells of a pixel or less, and no farther than the hit's
+own pixel): a lamp near the ground meets the real steps, and a grazing
+step's skip (up to 12 cells) passed what stood beside the lamp, or the
+lamp itself; on rough ground (eroded slopes' single-cell steps) a step a
+cell or two along casts a shadow several pixels long.
+Helio's deferred lighting, atmosphere and TSR do the rest.
 
 It writes only the hits no mesh covers, as the shading pass found them
 against the meshes' depth (a covered hit's normal is zero), and writes the
@@ -569,8 +598,17 @@ shadows and sky 1.72 ms. Generation in the cruise stress flight: about
 15.5 us a chunk (footprint columns most of it, chunk builds 3.5 us, chunk
 columns 1.9 us). Settled test views take 3,000 to 10,000 detail pages.
 
+Terrain behind meshes (2026-10-27, 1080p, RTX 3060): voxel_flight's
+`ground` hold in grass, chunk draw 2.44 -> 1.76 ms and shadows 3.66 ->
+2.89 ms (VoxelChunks 8.7 -> 7.2 ms); the same view bare, unchanged (2.44
+-> 2.46 ms: the seed's depth load and the walk's runtime end). voxel_craft's
+poses with grass, VoxelChunks 0.15 to 0.7 ms less; bare, within noise. A
+wall covering the nearer half of a ground view
+(`terrain_behind_meshes_is_not_traced`): half the walk steps, reports
+5,492 -> 96.
+
 Gates (`tests/chunks.rs`): drawn hits match CPU ray casts (ground, face
-edges, caves 800 m deep, overhangs, planes, brushes, a 600 m shaft, a 3 km
+edges, cave networks 600 m deep, lava tubes, cliff shapes, planes, brushes, a 600 m shaft, a 3 km
 crater, a hollowed core, an underground hall, 18 000 block edits, sealed
 edits, features); `uniform_leaves_draw_canonical_materials`,
 `dug_walls_draw_canonical_materials` and
@@ -578,7 +616,9 @@ edits, features); `uniform_leaves_draw_canonical_materials`,
 `edited_chunks_come_back_by_copy`,
 `edited_chunks_released_by_age_come_back_by_copy` and
 `a_loaded_world_restores_its_edited_chunks` restore edited chunks with no
-generation; `terrain_shadows_fall_on_meshes_in_front_of_it`. Reports,
+generation; `terrain_shadows_fall_on_meshes_in_front_of_it`;
+`terrain_behind_meshes_is_not_traced` (hits in front of a mesh plane as
+open, none past it, half the steps and reports). Reports,
 ignored by default: `natural_cells_against_the_leaf_rule` (0 of 906k
 pixels wrong), `edit_cost_against_history`, `feature_generation_cost`.
 
@@ -603,6 +643,9 @@ the same profile: https://forums.developer.nvidia.com/t/382912.
   caves, cities): on the editor's open views, refining nothing until rays
   meet it changed nothing (`unseen_pixels` 2 covers them).
 - A footprint's first computation: progressive (parent-seeded) synthesis.
+- Seed boxes wholly behind meshes still rasterize (each fragment one depth
+  load): a HiZ cull of the boxes against the meshes' depth would save that
+  once box counts make the seed cost (0.04 to 0.09 ms at 1080p) matter.
 
 ## References
 

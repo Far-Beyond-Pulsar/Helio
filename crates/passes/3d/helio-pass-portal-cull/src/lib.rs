@@ -299,6 +299,11 @@ impl RenderPass for PortalCullPass {
         "PortalCull"
     }
 
+    /// A member while the host's portal projection has live chains.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.active_chain_count.unwrap_or(0) > 0
+    }
+
     fn set_frame_inputs(&mut self, inputs: &RenderFrameInputs<'_>) {
         self.active_chain_count = inputs.projection_counts.map(|counts| counts[1]);
     }

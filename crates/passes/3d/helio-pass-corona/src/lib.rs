@@ -170,7 +170,60 @@ pub struct CoronaPass {
     pub depth_sort_enabled: bool,
 }
 
+/// The particle pool and the per-slot buffers sized with it.
+struct ParticlePool {
+    particle_buf: wgpu::Buffer,
+    compact_buf: wgpu::Buffer,
+    prefix_buf: wgpu::Buffer,
+    block_sums_buf: wgpu::Buffer,
+    sort_key_buf: wgpu::Buffer,
+    draw_slots: wgpu::Buffer,
+}
+
+impl ParticlePool {
+    fn new(device: &wgpu::Device, capacity: u32) -> Self {
+        let per_slot = |label, bytes: u64| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: capacity as u64 * bytes,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            })
+        };
+        let particle_size = std::mem::size_of::<crate::GpuCoronaParticle>() as u64;
+        Self {
+            particle_buf: per_slot("Corona Particles", particle_size),
+            compact_buf: per_slot("Corona Compact", 4),
+            prefix_buf: per_slot("Corona Prefix", 4),
+            block_sums_buf: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Corona BlockSums"),
+                size: capacity.div_ceil(WG) as u64 * 4,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            sort_key_buf: per_slot("Corona SortKeys", 4),
+            draw_slots: helio_pass_gbuffer::DrawSlots::default()
+                .buffer(device, capacity)
+                .clone(),
+        }
+    }
+}
+
 impl CoronaPass {
+    /// Replaces the particle pool with one of `capacity` slots, empty. The
+    /// bind groups are rebuilt on the next execute (their key holds the pool).
+    fn set_pool_capacity(&mut self, device: &wgpu::Device, capacity: u32) {
+        let pool = ParticlePool::new(device, capacity);
+        self.particle_buf = pool.particle_buf;
+        self.compact_buf = pool.compact_buf;
+        self.prefix_buf = pool.prefix_buf;
+        self.block_sums_buf = pool.block_sums_buf;
+        self.sort_key_buf = pool.sort_key_buf;
+        self.draw_slots = pool.draw_slots;
+        self.max_particles = capacity;
+        self.bg_key = None;
+    }
+
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -197,13 +250,15 @@ impl CoronaPass {
             mapped_at_creation: false,
         });
 
-        let particle_size = std::mem::size_of::<crate::GpuCoronaParticle>() as u64;
-        let particle_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Corona Particles"),
-            size: DEFAULT_MAX_PARTICLES as u64 * particle_size,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
+        // A one-slot pool until the scene has emitters (see `is_member`).
+        let ParticlePool {
+            particle_buf,
+            compact_buf,
+            prefix_buf,
+            block_sums_buf,
+            sort_key_buf,
+            draw_slots,
+        } = ParticlePool::new(device, 1);
 
         let emitter_size = std::mem::size_of::<crate::GpuCoronaEmitter>() as u64;
         let emitter_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -245,16 +300,6 @@ impl CoronaPass {
             bytemuck::cast_slice(&vec![0u32; MAX_EMITTERS as usize * 8]),
         );
 
-        let compact_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Corona Compact"),
-            size: DEFAULT_MAX_PARTICLES as u64 * 4,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-        let draw_slots = helio_pass_gbuffer::DrawSlots::default()
-            .buffer(device, DEFAULT_MAX_PARTICLES as u32)
-            .clone();
-
         let emitter_alive_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Corona Emitter Alive"),
             size: MAX_EMITTERS as u64 * 4,
@@ -274,28 +319,6 @@ impl CoronaPass {
             label: Some("Corona DrawArgs"),
             size: draw_args_size,
             usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let prefix_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Corona Prefix"),
-            size: DEFAULT_MAX_PARTICLES as u64 * 4,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let max_blocks = DEFAULT_MAX_PARTICLES.div_ceil(WG);
-        let block_sums_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Corona BlockSums"),
-            size: max_blocks as u64 * 4,
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
-
-        let sort_key_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Corona SortKeys"),
-            size: DEFAULT_MAX_PARTICLES as u64 * 4,
-            usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
 
@@ -529,7 +552,7 @@ impl CoronaPass {
             render_bg,
             draw_slots,
             bg_key,
-            max_particles: DEFAULT_MAX_PARTICLES,
+            max_particles: 1,
             emitter_count: 0,
             max_sort_steps,
             particles_origin: glam::DVec3::ZERO,
@@ -863,6 +886,16 @@ impl RenderPass for CoronaPass {
         "Corona"
     }
 
+    /// A member while some `"corona_emitters"` row is live.
+    fn is_member(&mut self, scene: &mut helio_core::SceneContent<'_>) -> bool {
+        scene.holds_rows("corona_emitters")
+    }
+
+    fn on_leave(&mut self, device: &wgpu::Device) {
+        // The pool comes back, empty, when emitters do.
+        self.set_pool_capacity(device, 1);
+    }
+
     fn reads(&self) -> &'static [&'static str] {
         &["pre_aa", "full_res_depth", "corona_emitters", "depth"]
     }
@@ -892,7 +925,15 @@ impl RenderPass for CoronaPass {
             .map_or(0, |handle| {
                 (handle.buffer.size() / emitter_bytes).min(u64::from(MAX_EMITTERS)) as u32
             });
-        self.max_particles = DEFAULT_MAX_PARTICLES;
+        if self.max_particles != DEFAULT_MAX_PARTICLES {
+            self.set_pool_capacity(ctx.device, DEFAULT_MAX_PARTICLES);
+            // A fresh pool holds no particles: emission restarts.
+            ctx.write_buffer(
+                &self.spawn_cursor_buf,
+                0,
+                bytemuck::cast_slice(&vec![0u32; MAX_EMITTERS as usize * 8]),
+            );
+        }
 
         let origin = ctx.world_origin;
         self.pending_shift += origin - self.particles_origin;

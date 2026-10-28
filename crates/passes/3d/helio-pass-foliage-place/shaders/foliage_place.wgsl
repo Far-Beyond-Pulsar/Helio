@@ -636,7 +636,10 @@ fn cs_place(
                 // grid holds `grid_density` candidates a square metre for `share` of the
                 // full density, so the ground grows a tuft with probability
                 // `sum · share / grid_density`, of each type by its share of the sum.
-                let slope_cos = dot(g.normal, frame.up);
+                // Clamped: two unit vectors a hair apart dot to just over 1, and a
+                // type growing on any slope (cosines up to 1) then grew on no flat tile
+                // whose up the ground's normal matched.
+                let slope_cos = clamp(dot(g.normal, frame.up), -1.0, 1.0);
                 var sum = 0.0;
                 for (var t = 0u; t < type_limit; t++) {
                     let ty = types[t];

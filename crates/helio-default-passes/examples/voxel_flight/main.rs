@@ -5,7 +5,7 @@
 //! cargo run -p helio-default-passes --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
 //! Modes (environment):
-//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|feature|eye|altitude`
+//! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|overhang|feature|eye|altitude`
 //!   settles one view (`HELIO_VOXEL_FLIGHT_EYE=x,y,z,fx,fy,fz` for `eye`;
 //!   `feature` the nearest feature, `HELIO_VOXEL_FLIGHT_FEATURE=<material>`'s)
 //!   and holds it for `HELIO_VOXEL_FLIGHT_HOLD_SECONDS`: drawn by
@@ -28,7 +28,7 @@
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
 //! (earth|moon|desert, [`worlds`]: the planet, its features, look, sky and
-//! ground cover) or `_LAYERS=<json>` (a layer stack), `_EXPORT=<dir>` (its layers, features and look as a Pulsar level holds them), `_NO_FEATURES`, `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_OVERHANGS`,
+//! ground cover) or `_LAYERS=<json>` (a layer stack), `_EXPORT=<dir>` (its layers, features and look as a Pulsar level holds them), `_NO_FEATURES`, `_HEIGHTFIELD`, `_NO_CAVES`, `_NO_CLIFFS`,
 //! `_GRAIN=scale_m,octaves,ratio`, `_SUN=x,y,z`, `_SUN_ELEVATION=deg` (the
 //! terrain's sun that high over each view's horizon toward `_SUN`'s azimuth;
 //! the scene light keeps `_SUN`),
@@ -861,7 +861,7 @@ fn chunk_hold(flight: &Flight, view: &str, eye: DVec3, forward: Vec3) {
             let part =
                 |k: usize| t.iter().map(|f| f.tile_stages[k]).sum::<f64>() * 1e3 / tiles as f64;
             eprintln!(
-                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tiles {:.2} us/tile (nodes {:.2}, columns {:.2}, halos {:.2}, features {:.2}), chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
+                "GENBENCH {view}: {tiles} tiles {chunks} chunks in {} frames: tiles {:.2} us/tile (nodes {:.2}, columns {:.2}, volumes {:.2}, features {:.2}), chunk columns {:.2} us/chunk, chunk builds {:.2} us/chunk, all {:.2} us/tile",
                 t.len(),
                 a * 1e3 / tiles as f64,
                 part(0),
@@ -2582,62 +2582,175 @@ fn carve_tunnel(flight: &mut Flight, ground: DVec3, heading: f64) -> (DVec3, Vec
     (eye, (ahead - up * 0.25).normalize().as_vec3())
 }
 
-/// Views of generated volumetric terrain near `near`: inside a tunnel (an
-/// air pocket with walls within 8 m, below its column's heightfield top) and
-/// under an overhang (air below a solid cell above the heightfield top).
-fn volume_views(planet: &Planet, near: DVec3) -> Vec<(&'static str, DVec3, Vec3)> {
+/// Inside the cave network nearest `near` (the nearest network passage or
+/// chamber with air around its axis, looking along it).
+fn cave_view(planet: &Planet, near: DVec3) -> Option<(DVec3, Vec3)> {
     use helio_pass_voxel_planet::Cell;
     let grid = *planet.grid();
-    let field = planet.field();
     let (base, _) = grid.locate(near);
-    let mut rng = 0x2545_F491_4F6C_DD1Du64;
-    let mut next = || {
-        rng ^= rng << 13;
-        rng ^= rng >> 7;
-        rng ^= rng << 17;
-        rng
+    let volumes = planet.volumes()?;
+    let air = |c: Cell| {
+        (-1..=1).all(|a| {
+            (-1..=1).all(|b| (-1..=1).all(|d| !planet.solid(Cell::new(c.face, c.i + a, c.j + b, c.k + d))))
+        })
     };
-    let (mut tunnel, mut overhang) = (None, None);
-    for _ in 0..200_000 {
-        if tunnel.is_some() && overhang.is_some() {
-            break;
-        }
-        let i = base.i + (next() % 20_000) as i32 - 10_000;
-        let j = base.j + (next() % 20_000) as i32 - 10_000;
-        let (below, above) = field.extent(grid.domain_point(base.face, i, j, 0), 0);
-        let top = planet.column_top(base.face, i, j, 0);
-        let solid =
-            |di: i32, dj: i32, k: i32| planet.solid(Cell::new(base.face, i + di, j + dj, k));
-        if tunnel.is_none() && below > 4 {
-            let k = top - 4 - (next() % below as u64) as i32;
-            if (-1..=1).all(|a| (-1..=1).all(|b| (-1..=1).all(|c| !solid(a, b, k + c)))) {
-                let eye = grid.cell_center(Cell::new(base.face, i, j, k));
-                let up = grid.up(eye);
-                let ahead = up.any_orthonormal_vector();
-                let side = up.cross(ahead);
-                if [ahead, -ahead, side, -side, up, -up]
+    let shift = volumes.region_shift();
+    let (ri, rj) = (base.i >> shift, base.j >> shift);
+    let cave = (0..5i32).find_map(|ring| {
+        (-ring..=ring)
+            .flat_map(|a| (-ring..=ring).map(move |b| (a, b)))
+            .filter(|(a, b)| a.abs().max(b.abs()) == ring)
+            .find_map(|(a, b)| {
+                planet
+                    .cave_network(base.face, ri + a, rj + b)
                     .iter()
-                    .all(|d| planet.raycast(eye, *d, 8.0).is_some())
-                {
-                    tunnel = Some(("cave_tunnel", eye, (ahead - up * 0.1).normalize().as_vec3()));
+                    .find_map(|p| {
+                        // Over the floor on the axis, a quarter along.
+                        let at = |n: usize| (p.a[n] * 3 + p.b[n]) / 4;
+                        let k = ((at(2) + i64::from(p.rv) / 3) >> 2) as i32;
+                        let cell = Cell::new(base.face, (at(0) >> 2) as i32, (at(1) >> 2) as i32, k);
+                        if !air(cell) {
+                            return None;
+                        }
+                        let eye = grid.cell_center(cell);
+                        let up = grid.up(eye);
+                        // Along the axis, climbs and drops included (level,
+                        // a sloping passage's floor fills the view).
+                        let end_k = ((p.b[2] + i64::from(p.rv) / 3) >> 2) as i32;
+                        let end = grid.cell_center(Cell::new(base.face, (p.b[0] >> 2) as i32, (p.b[1] >> 2) as i32, end_k));
+                        let along = end - eye;
+                        let ahead = if (along - up * along.dot(up)).length() > 1.0 {
+                            along.normalize()
+                        } else {
+                            up.any_orthonormal_vector()
+                        };
+                        Some((eye, (ahead - up * 0.1).normalize().as_vec3()))
+                    })
+            })
+    });
+    cave
+}
+
+/// Under the overhang of the cliff shape nearest `near`: base columns
+/// 3.2 m apart in `rings` square rings, the first whose cliff shape leaves
+/// rock over air, seen from 8 m down the slope. Columns outside the shapes'
+/// regions are skipped on the region noise alone (no heights). `None` past
+/// `deadline`: the search is CPU work and must not hold a GPU run.
+/// `seen`: columns checked, in a region, steep enough.
+fn overhang_view(
+    planet: &Planet,
+    near: DVec3,
+    rings: i32,
+    deadline: Instant,
+    seen: &mut [u64; 3],
+) -> Option<(DVec3, Vec3)> {
+    use helio_pass_voxel_planet::Cell;
+    let grid = *planet.grid();
+    let volumes = planet.volumes().filter(|v| v.cliffs())?;
+    let (base, _) = grid.locate(near);
+    let face = base.face;
+    let step = (3.2 / grid.voxel_size()).round().max(1.0) as i32;
+    (0..rings).find_map(|ring: i32| {
+        if Instant::now() > deadline {
+            return None;
+        }
+        (-ring..=ring)
+            .flat_map(|a| (-ring..=ring).map(move |b| (a, b)))
+            .filter(|(a, b)| a.abs().max(b.abs()) == ring)
+            .find_map(|(a, b)| {
+                let (i, j) = (base.i + a * step, base.j + b * step);
+                let at = grid.domain_point(face, i, j, 0);
+                seen[0] += 1;
+                if volumes.cliff(at, i32::MAX, 0).cells < 8 {
+                    return None;
                 }
-            }
-        }
-        if overhang.is_none() && above > 2 {
-            let k = top + (next() % above as u64) as i32;
-            if solid(0, 0, k) && !solid(0, 0, k - 1) && !solid(0, 0, k - 2) {
-                let eye = grid.cell_center(Cell::new(base.face, i, j, k - 2));
-                let up = grid.up(eye);
-                let ahead = up.any_orthonormal_vector();
-                overhang = Some((
-                    "overhang",
-                    eye - ahead * 6.0,
-                    (ahead + up * 0.25).normalize().as_vec3(),
-                ));
-            }
-        }
-    }
-    tunnel.into_iter().chain(overhang).collect()
+                seen[1] += 1;
+                let cliff = volumes.cliff(at, planet.material_slope(face, i, j), 0);
+                if cliff.cells < 8 {
+                    return None;
+                }
+                seen[2] += 1;
+                // Rock over two cells of air in the band the shape changes.
+                let t = planet.column_top(face, i, j, 0);
+                let solid = |k: i32| planet.solid(Cell::new(face, i, j, k));
+                let k = (t - cliff.cells..t + cliff.cells)
+                    .find(|&k| solid(k) && !solid(k - 1) && !solid(k - 2))?;
+                let target = grid.cell_center(Cell::new(face, i, j, k - 1));
+                let up = target.normalize();
+                // Down the slope: away from the higher neighbours.
+                let top = |di: i32, dj: i32| planet.column_top(face, i + di, j + dj, 0);
+                let (si, sj) = (top(step, 0) - top(-step, 0), top(0, step) - top(0, -step));
+                let downhill = grid.cell_center(Cell::new(face, i, j, t))
+                    - grid.cell_center(Cell::new(face, i + si.signum(), j + sj.signum(), t));
+                let downhill = (downhill - up * downhill.dot(up))
+                    .try_normalize()
+                    .unwrap_or_else(|| up.any_orthonormal_vector());
+                let eye = planet.surface_point(target + downhill * 8.0, 1.7);
+                Some((eye, (target - eye).normalize().as_vec3()))
+            })
+    })
+}
+
+/// The `cave` or `overhang` view near `ground`: caves at sites 3 km apart
+/// around the spawn; overhangs at sites 2 km apart around the slope under
+/// the highest summit near the spawn (within 480 m of each). The searches
+/// are CPU work:
+/// `HELIO_VOXEL_FLIGHT_FIND` runs them alone, before any GPU work, and
+/// prints the eye for `HELIO_VOXEL_FLIGHT_EYE`.
+fn volume_view(planet: &Planet, view: &str, ground: DVec3, heading: f64) -> (DVec3, Vec3) {
+    let started = Instant::now();
+    let mut seen = [0u64; 3];
+    let found = if view == "cave" {
+        let up = ground.normalize();
+        let ahead = tangent(ground, heading).as_dvec3();
+        let side = ahead.cross(up);
+        (0..49)
+            .map(|n| (n % 7 - 3, n / 7 - 3))
+            .map(|(a, b)| {
+                planet.surface_point(
+                    ground + ahead * (3000.0 * f64::from(a)) + side * (3000.0 * f64::from(b)),
+                    0.0,
+                )
+            })
+            .find_map(|near| cave_view(planet, near))
+    } else {
+        let deadline = started + std::time::Duration::from_secs(60);
+        let slope = mountain(planet, heading)[1].1;
+        let up = slope.normalize();
+        let ahead = tangent(slope, heading).as_dvec3();
+        let side = ahead.cross(up);
+        let mut sites: Vec<(i32, i32)> = (0..49).map(|n| (n % 7 - 3, n / 7 - 3)).collect();
+        sites.sort_by_key(|(a, b)| a.abs().max(b.abs()));
+        sites
+            .into_iter()
+            .map(|(a, b)| {
+                planet.surface_point(
+                    slope + ahead * (2000.0 * f64::from(a)) + side * (2000.0 * f64::from(b)),
+                    0.0,
+                )
+            })
+            .find_map(|near| overhang_view(planet, near, 150, deadline, &mut seen))
+    };
+    let (eye, forward) = found.unwrap_or_else(|| {
+        panic!(
+            "no {view} found near the spawn in {:.1} s ({} columns, {} in cliff regions, {} steep)",
+            started.elapsed().as_secs_f64(),
+            seen[0],
+            seen[1],
+            seen[2]
+        )
+    });
+    eprintln!(
+        "VOXEL_FLIGHT {view} found in {:.1} s at HELIO_VOXEL_FLIGHT_EYE={},{},{},{},{},{}",
+        started.elapsed().as_secs_f64(),
+        eye.x,
+        eye.y,
+        eye.z,
+        forward.x,
+        forward.y,
+        forward.z
+    );
+    (eye, forward)
 }
 
 /// The feature nearest `ground` (a cell of `material` within a few layers
@@ -2745,8 +2858,8 @@ fn main() {
     let voxel: f64 = std::env::var("HELIO_VOXEL_FLIGHT_VOXEL")
         .ok()
         .map_or(0.1, |v| v.parse().unwrap());
-    // HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1: the Earth stack without caves and
-    // overhangs (A/B for volumetric columns).
+    // HELIO_VOXEL_FLIGHT_HEIGHTFIELD=1: the stack without caves and cliff
+    // shapes (A/B for volumetric columns).
     // HELIO_VOXEL_FLIGHT_SEED=<n>: the Earth stack with another seed (7).
     let seed = std::env::var("HELIO_VOXEL_FLIGHT_SEED")
         .ok()
@@ -2765,9 +2878,9 @@ fn main() {
     // HELIO_VOXEL_FLIGHT_GRAIN=scale_m,octaves,ratio: an extra roughness
     // layer (A/B for ground grain).
     let mut stack = stack;
-    // HELIO_VOXEL_FLIGHT_NO_CAVES / _NO_OVERHANGS: A/B for volumetric terms.
-    stack.caves.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CAVES").is_none();
-    stack.overhangs.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_OVERHANGS").is_none();
+    // HELIO_VOXEL_FLIGHT_NO_CAVES / _NO_CLIFFS: A/B for the volume layer.
+    stack.volumes.caves.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CAVES").is_none();
+    stack.volumes.cliffs.enabled &= std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CLIFFS").is_none();
     if let Ok(grain) = std::env::var("HELIO_VOXEL_FLIGHT_GRAIN") {
         use helio_pass_voxel_planet::layers::{Layer, LayerKind, LayerMask};
         let v: Vec<f64> = grain
@@ -2828,12 +2941,17 @@ fn main() {
         eprintln!("exported {preset:?} to {}", dir.display());
         return;
     }
-    let mut flight = Flight::new(&output, size, quality, planet, preset);
-
     // Ground spawn on the +Y face.
-    let dir = land_near(&flight.planet, 2, 0.47, 0.53, 20.0, preset.level_spawn_m());
-    let ground = flight.planet.surface_point(dir, 1.7);
+    let dir = land_near(&planet, 2, 0.47, 0.53, 20.0, preset.level_spawn_m());
+    let ground = planet.surface_point(dir, 1.7);
     let heading = 0.6;
+    // `HELIO_VOXEL_FLIGHT_FIND=cave|overhang`: only that view's search, on
+    // the CPU (no GPU work), printing its `HELIO_VOXEL_FLIGHT_EYE`.
+    if let Ok(view) = std::env::var("HELIO_VOXEL_FLIGHT_FIND") {
+        volume_view(&planet, &view, ground, heading);
+        return;
+    }
+    let mut flight = Flight::new(&output, size, quality, planet, preset);
     if std::env::var_os("HELIO_VOXEL_FLIGHT_VOLUMES").is_some() {
         volumes_tour(&mut flight, ground, heading, seed);
         return;
@@ -2865,30 +2983,9 @@ fn main() {
                     mountain(&flight.planet, heading)[usize::from(view == "mountain_slope")];
                 (e, f)
             }
-            // Inside the natural cave nearest the spawn (searched 3 km
-            // apart, cave regions are ~6 km), along it.
-            "cave" => {
-                let up = ground.normalize();
-                let ahead = tangent(ground, heading).as_dvec3();
-                let side = ahead.cross(up);
-                let (_, e, f) = (0..49)
-                    .map(|n| (n % 7 - 3, n / 7 - 3))
-                    .map(|(a, b)| {
-                        flight.planet.surface_point(
-                            ground
-                                + ahead * (3000.0 * f64::from(a))
-                                + side * (3000.0 * f64::from(b)),
-                            0.0,
-                        )
-                    })
-                    .find_map(|near| {
-                        volume_views(&flight.planet, near)
-                            .into_iter()
-                            .find(|v| v.0 == "cave_tunnel")
-                    })
-                    .expect("a cave within 9 km of the spawn");
-                (e, f)
-            }
+            // Inside the cave network nearest the spawn, along a passage;
+            // or under the nearest cliff shape's overhang.
+            "cave" | "overhang" => volume_view(&flight.planet, &view, ground, heading),
             // The nearest feature, 8 m away (`HELIO_VOXEL_FLIGHT_FEATURE`:
             // of that material, by name or id: `Wood` stands in a wood).
             "feature" => {

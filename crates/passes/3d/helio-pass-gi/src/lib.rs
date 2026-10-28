@@ -24,6 +24,9 @@ use helio_pass_sky::atmosphere::{
     ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
     ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET,
 };
+use helio_pass_sky::clouds::{
+    CLOUD_SHADOW_FRAME, CLOUD_SHADOW_FRAME_BYTES, CLOUD_SHADOW_MAP, CLOUD_SHADOW_SNIPPET,
+};
 use std::collections::VecDeque;
 
 mod mesh;
@@ -405,7 +408,9 @@ pub struct GiPass {
     fallback_atmosphere: wgpu::Buffer,
     fallback_sky_table: wgpu::Buffer,
     fallback_lights: wgpu::Buffer,
-    group: Option<(wgpu::BindGroup, [wgpu::Buffer; 3])>,
+    /// No clouds: a 1x1 map and a zeroed frame.
+    fallback_cloud_shadow: (wgpu::TextureView, wgpu::Buffer),
+    group: Option<(wgpu::BindGroup, [wgpu::Buffer; 4], wgpu::TextureView)>,
     /// This frame's probe counts: updated, reset; its probes to update,
     /// and its rays' rotation.
     counts: [u32; 2],
@@ -428,6 +433,17 @@ impl GiPass {
                 uniform(7, ATMOSPHERE_FRAME_BYTES),
                 uniform(8, ATMOSPHERE_SKY_TABLE_BYTES),
                 storage(9, true),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                uniform(11, CLOUD_SHADOW_FRAME_BYTES),
             ],
         });
         let module = helio_core::shader::module_with(
@@ -439,6 +455,7 @@ impl GiPass {
                 ATMOSPHERE_SKY_TABLE_SNIPPET,
                 GI_COMMON_SNIPPET,
                 GI_SAMPLE_SNIPPET,
+                CLOUD_SHADOW_SNIPPET,
             ],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -482,6 +499,7 @@ impl GiPass {
                 uniform,
             ),
             fallback_lights: buffer(device, "GI no lights", 128, wgpu::BufferUsages::STORAGE),
+            fallback_cloud_shadow: helio_pass_sky::clouds::cloud_shadow_fallback(device),
             group: None,
             counts: [0; 2],
             list: Vec::with_capacity(MAX_UPDATES as usize),
@@ -539,7 +557,8 @@ impl GiPass {
     /// Records the frame `begin` started: the sun, last frame's hits
     /// integrated, the probes that came in reset, this frame's rays, the
     /// hits cleared for the tracers. `atmosphere`, `sky_table` and `lights`
-    /// are the atmosphere's and the scene's (none: no atmosphere, no sun).
+    /// are the atmosphere's and the scene's (none: no atmosphere, no sun);
+    /// `clouds` the clouds' shadow map and its frame (none: no clouds).
     pub fn record(
         &mut self,
         device: &wgpu::Device,
@@ -547,12 +566,24 @@ impl GiPass {
         atmosphere: Option<&wgpu::Buffer>,
         sky_table: Option<&wgpu::Buffer>,
         lights: Option<&wgpu::Buffer>,
+        clouds: Option<(&wgpu::TextureView, &wgpu::Buffer)>,
     ) {
         let atmosphere = atmosphere.unwrap_or(&self.fallback_atmosphere);
         let sky_table = sky_table.unwrap_or(&self.fallback_sky_table);
         let lights = lights.unwrap_or(&self.fallback_lights);
-        let key = [atmosphere.clone(), sky_table.clone(), lights.clone()];
-        if self.group.as_ref().is_none_or(|(_, k)| *k != key) {
+        let (cloud_map, cloud_frame) =
+            clouds.unwrap_or((&self.fallback_cloud_shadow.0, &self.fallback_cloud_shadow.1));
+        let key = [
+            atmosphere.clone(),
+            sky_table.clone(),
+            lights.clone(),
+            cloud_frame.clone(),
+        ];
+        if self
+            .group
+            .as_ref()
+            .is_none_or(|(_, k, map)| *k != key || map != cloud_map)
+        {
             let s = &self.state;
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GI update"),
@@ -598,11 +629,19 @@ impl GiPass {
                         binding: 9,
                         resource: s.light.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: wgpu::BindingResource::TextureView(cloud_map),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: cloud_frame.as_entire_binding(),
+                    },
                 ],
             });
-            self.group = Some((group, key));
+            self.group = Some((group, key, cloud_map.clone()));
         }
-        let Some((group, _)) = &self.group else {
+        let Some((group, _, _)) = &self.group else {
             return;
         };
         let state = &mut self.state;
@@ -656,7 +695,13 @@ impl RenderPass for GiPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[ATMOSPHERE_FRAME, ATMOSPHERE_SKY_TABLE, "render_environment"]
+        &[
+            ATMOSPHERE_FRAME,
+            ATMOSPHERE_SKY_TABLE,
+            CLOUD_SHADOW_MAP,
+            CLOUD_SHADOW_FRAME,
+            "render_environment",
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -716,6 +761,11 @@ impl RenderPass for GiPass {
             .scene_buffers
             .get(helio_core::BufferKey::of("scene_lights"))
             .map(|h| h.buffer.clone());
+        let clouds = ctx
+            .registry
+            .texture_binding(CLOUD_SHADOW_MAP)
+            .cloned()
+            .zip(ctx.registry.buffer_binding(CLOUD_SHADOW_FRAME).cloned());
         let mut cmds = ctx.graphics_cmds();
         self.record(
             ctx.device,
@@ -723,6 +773,7 @@ impl RenderPass for GiPass {
             atmosphere.as_ref(),
             sky_table.as_ref(),
             lights.as_ref(),
+            clouds.as_ref().map(|(map, frame)| (map, frame)),
         );
         Ok(())
     }
@@ -1107,6 +1158,7 @@ mod shader_tests {
                 ATMOSPHERE_SKY_TABLE_SNIPPET,
                 GI_COMMON_SNIPPET,
                 GI_SAMPLE_SNIPPET,
+                CLOUD_SHADOW_SNIPPET,
             ],
         );
         validate(
@@ -1131,6 +1183,7 @@ mod shader_tests {
                 &[
                     GI_COMMON_SNIPPET,
                     helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
+                    CLOUD_SHADOW_SNIPPET,
                 ],
             );
         }

@@ -31,6 +31,10 @@ name = "indoor_room"
 path = "indoor_room.rs"
 
 [[bin]]
+name = "graph_cost"
+path = "graph_cost.rs"
+
+[[bin]]
 name = "vg_stress"
 path = "vg_stress.rs"
 required-features = ["vg-stress"]

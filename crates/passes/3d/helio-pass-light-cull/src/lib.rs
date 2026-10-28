@@ -281,7 +281,8 @@ impl RenderPass for LightCullPass {
         builder.write_buffer("tile_light_counts");
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         let num_tiles_x = width.div_ceil(TILE_SIZE);
         let num_tiles_y = height.div_ceil(TILE_SIZE);
         let num_tiles = num_tiles_x

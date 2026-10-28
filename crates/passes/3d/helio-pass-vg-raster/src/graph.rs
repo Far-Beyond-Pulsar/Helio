@@ -591,7 +591,7 @@ impl RenderPass for VgHizLatePass {
         builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
         self.levels.clear();
         self.mip_views.clear();
         self.built_for = None;

@@ -1064,7 +1064,8 @@ impl RenderPass for LensPass {
             frame.write(ResourceKey::new(APERTURE_SHAPES), view, self.name());
         }
     }
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.resize(device, width, height);
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {

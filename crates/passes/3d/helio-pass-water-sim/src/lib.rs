@@ -456,16 +456,18 @@ pub struct WaterSimPass {
     pub(crate) blit_bg_key: Option<wgpu::TextureView>,
 
     pub(crate) water_output_view: Option<wgpu::TextureView>,
-    /// Whether any `"water_volumes"` row is live, from an async readback.
-    pub(crate) volume_liveness: helio_core::SceneBufferLiveness,
+    /// Whether the simulation and tint targets are full size. The pass is a
+    /// graph member only while some `"water_volumes"` row is live; until it
+    /// joins they are 1-texel placeholders, and it frees them when it leaves.
+    pub(crate) content_allocated: bool,
     /// This frame produced `water_output` and republished it as `pre_aa`.
-    /// False when no volume is live: the screen-space passes (scene blit,
-    /// surface, underwater tint) would only copy `pre_aa` unchanged, so they
-    /// are skipped and downstream passes keep reading the original `pre_aa`.
+    /// False when the scene has no volume buffer: the screen-space passes
+    /// (scene blit, surface, underwater tint) would only copy `pre_aa`
+    /// unchanged, so they are skipped and downstream passes keep reading the
+    /// original `pre_aa`.
     pub(crate) screen_active: bool,
-    /// Whether last frame simulated (some volume row was, or may have been,
-    /// live). The simulation pauses while every row is empty and restarts
-    /// from the zeroed startup state when water appears.
+    /// Whether last frame simulated. The simulation restarts from the zeroed
+    /// startup state when water appears.
     pub(crate) sim_live: bool,
 
     pub(crate) caustics_bg_key: Option<(wgpu::Buffer, wgpu::TextureView)>,
@@ -574,23 +576,34 @@ impl WaterSimPass {
         self.hitbox_prev_shift = [0.0; 3];
     }
 
+    /// Gives the simulation and tint targets their full size (`true`) or
+    /// 1-texel placeholders (`false`), and drops what was bound to the old
+    /// ones. The simulation restarts from its startup state either way.
+    fn set_content_allocated(&mut self, device: &wgpu::Device, allocated: bool) {
+        let sim = pipeline::SimTextures::new(device, if allocated { SIM_SIZE } else { 1 });
+        self.sim_tex_a = sim.tex_a;
+        self.sim_tex_b = sim.tex_b;
+        self.sim_array_view_a = sim.array_a;
+        self.sim_array_view_b = sim.array_b;
+        self.sim_layer_views_a = sim.layers_a;
+        self.sim_layer_views_b = sim.layers_b;
+        self.front_per_layer
+            .iter_mut()
+            .for_each(|front| *front = true);
+        self.sim_live = false;
+        self.content_allocated = allocated;
+        self.resize_internal(device, self.internal_width, self.internal_height);
+    }
+
     pub fn resize_internal(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let tint_scratch_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Water Tint Scratch"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.surface_format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        self.tint_scratch_view =
-            tint_scratch_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let (tint_w, tint_h) = if self.content_allocated {
+            (width, height)
+        } else {
+            (1, 1)
+        };
+        let (tint_scratch_tex, tint_scratch_view) =
+            pipeline::tint_scratch(device, tint_w, tint_h, self.surface_format);
+        self.tint_scratch_view = tint_scratch_view;
         self._tint_scratch_tex = tint_scratch_tex;
         self.tint_blit_bg = None;
 
@@ -626,6 +639,16 @@ impl RenderPass for WaterSimPass {
         "WaterSim"
     }
 
+    /// A member while the scene has water: some `"water_volumes"` row is live.
+    fn is_member(&mut self, scene: &mut helio_core::SceneContent<'_>) -> bool {
+        scene.holds_rows("water_volumes")
+    }
+
+    fn on_leave(&mut self, device: &wgpu::Device) {
+        // Re-created at full size when water returns.
+        self.set_content_allocated(device, false);
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
@@ -635,7 +658,8 @@ impl RenderPass for WaterSimPass {
         None
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.resize_internal(device, width, height);
     }
 
@@ -720,19 +744,19 @@ impl RenderPass for WaterSimPass {
         ctx: &PrepareContext,
         demands: &mut helio_core::FrameDemands,
     ) {
-        let volumes = ctx.scene_buffers.get(BufferKey::of("water_volumes"));
-        self.volume_liveness.update(ctx.device, ctx.queue, volumes);
-        if volumes.is_some_and(|handle| self.volume_liveness.maybe_live(handle)) {
+        if ctx
+            .scene_buffers
+            .get(BufferKey::of("water_volumes"))
+            .is_some()
+        {
             demands.demand("hiz_nearest");
         }
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        self.volume_liveness.update(
-            ctx.device,
-            ctx.queue,
-            ctx.scene_buffers.get(BufferKey::of("water_volumes")),
-        );
+        if !self.content_allocated {
+            self.set_content_allocated(ctx.device, true);
+        }
         // Fixed steps on the host's frame clock: none while it is frozen.
         self.step_clock += ctx.time_delta.max(0.0);
         let steps = ((self.step_clock / SIM_STEP_SECONDS) + 1e-3)
@@ -815,14 +839,10 @@ impl RenderPass for WaterSimPass {
             .scene_buffers
             .get(BufferKey::of("water_hitboxes"))
             .map(|handle| &handle.buffer);
-        // Empty rows are inert everywhere (no surface, no caustics, no tint),
-        // so while every row is known to be empty the simulation and caustics
-        // are skipped too. Their state would only matter once water exists,
-        // and a volume that appears later starts from the startup state.
-        let sim_live = ctx
-            .scene_buffers
-            .get(BufferKey::of("water_volumes"))
-            .is_some_and(|handle| self.volume_liveness.maybe_live(handle));
+        // The pass runs only while some row is live (`is_member`); empty rows
+        // are inert everywhere (no surface, no caustics, no tint). A volume
+        // that appears starts from the startup state.
+        let sim_live = water_volumes_buf.is_some();
         if sim_live && !self.sim_live {
             self.reset_simulation(&mut ctx.graphics_cmds());
         }
@@ -1244,10 +1264,7 @@ impl RenderPass for WaterSimPass {
         // no volume is live. Skip it rather than copying the full-resolution
         // image. The simulation and caustics above are fixed-size and keep
         // running so their state is unchanged when a volume appears.
-        self.screen_active = ctx
-            .scene_buffers
-            .get(BufferKey::of("water_volumes"))
-            .is_some_and(|handle| self.volume_liveness.maybe_live(handle));
+        self.screen_active = water_volumes_buf.is_some();
         if !self.screen_active {
             return Ok(());
         }

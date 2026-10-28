@@ -237,8 +237,10 @@ one above. The CPU makes a parent cell's records once (`Streams`, cached);
 the GPU reads the same records from the program's **regions**
 (`TerrainRegions`, `terrain_regions` binding 41): the engine's
 `RegionPool` keeps every region a footprint's columns may read resident
-while it generates, making the missing ones on the CPU (in parallel) and
-evicting the longest unused. A region is a parent cell's 16 records (and
+while it generates (its cave networks' reference ground beside it too,
+`VolumeLayer::ground_columns`: a hub on a missing stream would move its
+caves), making the missing ones on the CPU (in parallel) and evicting the
+longest unused. A region is a parent cell's 16 records (and
 a texel's stem), 13 words each: node, target, beds, floodplain, channel and
 depth, reach, cut and wall slope, and its box on its face (signed bytes of
 thirty-seconds of a cell around its segment, grown by its reach and

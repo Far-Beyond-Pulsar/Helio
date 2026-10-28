@@ -36,17 +36,14 @@ pub struct BillboardPass {
     bind_group_0: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
     globals_buf: wgpu::Buffer,
-    /// Billboard instance data — the fallback buffer used only until the
-    /// SceneDB `"billboard_instances"` buffer exists (before any
-    /// `BillboardComponent` has ever been inserted).
+    /// A one-instance binding for bind group 0 until it binds SceneDB's
+    /// `"billboard_instances"` buffer; never drawn from (the pass is a graph
+    /// member only while that buffer holds a live row).
     pub instance_buf: wgpu::Buffer,
     /// Epoch of the last-bound `"billboard_instances"` `BufferHandle` — a
     /// changed epoch means the SceneDB buffer reallocated (grew) and bind
     /// group 0 must be rebuilt to point at the new one.
     scene_binding_epoch: Option<u64>,
-    /// Whether any `"billboard_instances"` row is live. Hosts register the
-    /// column up front, so its presence alone would draw every capacity row.
-    liveness: helio_core::SceneBufferLiveness,
     quad_vertex_buf: wgpu::Buffer,
     pub instance_count: u32,
     occluded_by_geometry: bool,
@@ -243,7 +240,7 @@ impl BillboardPass {
         // ── Instance buffer ───────────────────────────────────────────────────
         let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Billboard Instances"),
-            size: (MAX_BILLBOARDS as usize * std::mem::size_of::<BillboardInstance>()) as u64,
+            size: std::mem::size_of::<BillboardInstance>() as u64,
             usage: wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST,
@@ -354,7 +351,6 @@ impl BillboardPass {
             globals_buf,
             instance_buf,
             scene_binding_epoch: None,
-            liveness: Default::default(),
             quad_vertex_buf,
             instance_count: 0,
             occluded_by_geometry: true,
@@ -453,6 +449,12 @@ impl RenderPass for BillboardPass {
         "Billboard"
     }
 
+    /// A member while some `"billboard_instances"` row is live. Hosts
+    /// register the column up front, so its presence alone says nothing.
+    fn is_member(&mut self, scene: &mut helio_core::SceneContent<'_>) -> bool {
+        scene.holds_rows("billboard_instances")
+    }
+
     fn reads(&self) -> &'static [&'static str] {
         &["pre_aa", "full_res_depth", "billboards", "depth"]
     }
@@ -481,17 +483,11 @@ impl RenderPass for BillboardPass {
                 // (`scale_flags` all zero), a zero-area billboard that
                 // contributes nothing, so drawing every row needs no
                 // per-frame CPU query. Draw the rows the buffer actually has
-                // (instances past its end would read out of bounds), and none
-                // once every row is known to be empty.
-                self.liveness.update(ctx.device, ctx.queue, Some(handle));
-                let rows = match handle.row_capacity() {
+                // (instances past its end would read out of bounds); the
+                // graph runs the pass only while some row is live.
+                self.instance_count = match handle.row_capacity() {
                     0 => MAX_BILLBOARDS,
                     rows => rows.min(MAX_BILLBOARDS),
-                };
-                self.instance_count = if self.liveness.maybe_live(handle) {
-                    rows
-                } else {
-                    0
                 };
                 if self.scene_binding_epoch != Some(handle.epoch) {
                     self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
