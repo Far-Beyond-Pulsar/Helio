@@ -6285,7 +6285,7 @@ impl ChunkWorld {
                 .as_mut()
                 .unwrap()
                 .pages
-                .traced(window, near, frame, settled);
+                .traced(window, near, frame);
         }
         // The planner's and the views' recording CPU time; with
         // HELIO_SUN_PAGES_LOG, the frames that traced pages.

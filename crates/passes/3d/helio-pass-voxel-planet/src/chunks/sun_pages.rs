@@ -14,8 +14,8 @@
 //! dropped. A page's texels are kept until the terrain under them changes
 //! (`invalidate`: generated or dug chunks' boxes and moved volumes,
 //! projected along the sun: traced again at once), the cut it was traced
-//! through refines or was still settling (traced again in the background
-//! once the world settles: a still view's breathing cut never churns), or
+//! through refines (traced again in the background once the world settles:
+//! a still view's breathing cut never churns), or
 //! nothing asks for it and its physical page is needed.
 
 use glam::DVec3;
@@ -58,8 +58,8 @@ const JUMP: f64 = 0.05;
 const HANDOVER_FRAMES: u64 = 120;
 
 /// Why a resident page is traced again: the terrain under it changed (at
-/// once), or it was traced through a coarser or unsettled cut than now (in
-/// the background, once the world has settled).
+/// once), or the cut it was traced through has refined since (in the
+/// background, once the world has settled).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Stale {
     No,
@@ -656,10 +656,10 @@ impl SunPages {
     }
 
     /// The pages of `window` traced this frame through a near plane `near`
-    /// (world distance along the current epoch's sun), the world `settled`
-    /// or not (traced again in the background once it is): resident, their
-    /// table entries set.
-    pub fn traced(&mut self, window: &Window, near: f64, frame: u64, settled: bool) {
+    /// (world distance along the current epoch's sun): resident, their table
+    /// entries set. (A cut that refines under them later marks them
+    /// [`Stale::Coarse`]: `invalidate`.)
+    pub fn traced(&mut self, window: &Window, near: f64, frame: u64) {
         let (id, slot) = (self.epochs[0].id, self.epochs[0].slot);
         for &(key, p) in &window.pages {
             self.epochs[0].resident.insert(key, p);
@@ -674,7 +674,7 @@ impl SunPages {
                 owner: Some((id, key)),
                 near,
                 used,
-                stale: if settled { Stale::No } else { Stale::Coarse },
+                stale: Stale::No,
             };
             let i = sun_occlusion_table_index(slot, key.level as usize, key.page);
             self.table[i] = sun_occlusion_entry(key.page, u32::from(p));
@@ -741,7 +741,7 @@ mod tests {
         assert!(traced > 0 && traced <= TRACE_PAGES);
         assert_eq!(usize::from(views[0].level), LEVELS - 1);
         for v in &views {
-            pages.traced(v, 0.0, 0, true);
+            pages.traced(v, 0.0, 0);
         }
         // Everything asked traced within a few frames, then nothing.
         let mut frame = 1;
@@ -752,7 +752,7 @@ mod tests {
                 break;
             }
             for v in &views {
-                pages.traced(v, 0.0, frame, true);
+                pages.traced(v, 0.0, frame);
             }
             frame += 1;
             assert!(frame < 80, "the pages around the eye took {frame} frames");
@@ -785,7 +785,7 @@ mod tests {
                 break;
             }
             for v in &views {
-                pages.traced(v, 0.0, 0, true);
+                pages.traced(v, 0.0, 0);
             }
         }
         let e = pages.current().unwrap();
@@ -818,7 +818,7 @@ mod tests {
         for frame in 0..400 {
             pages.begin(frame, eye, sun);
             for v in pages.plan(frame, true) {
-                pages.traced(&v, 0.0, frame, true);
+                pages.traced(&v, 0.0, frame);
             }
             let asking = Asking {
                 epoch: pages.current().unwrap().id,
