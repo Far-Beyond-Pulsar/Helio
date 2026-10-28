@@ -551,7 +551,10 @@ shadow it casts as a dark line: contour lines over every meadow, under
 the grass and past it, near and from the air, and rings in lunar crater
 bowls. Natural means the leaf stores the heightfield's slope (its columns
 hold natural tops): features and edits keep their own faces (softened, a
-rock field lost its form and its shadows).
+rock field lost its form and its shadows). Local lights' rays do not pass
+the steps (only cells of a pixel or less): a lamp near the ground meets
+the real steps, and a grazing step's skip (up to 12 cells) passed what
+stood beside the lamp, or the lamp itself.
 Helio's deferred lighting, atmosphere and TSR do the rest.
 
 It writes only the hits no mesh covers, as the shading pass found them
