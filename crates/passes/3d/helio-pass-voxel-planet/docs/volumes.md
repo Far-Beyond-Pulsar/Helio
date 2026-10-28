@@ -356,6 +356,24 @@ holds stand at different places (the search follows the system), so
 their rows compare generation over the same kind of view, not the same
 pixels.
 
+The Moon ground (no cliffs, lava tubes only where a network runs) is the
+one place the volumes cost more, measured interleaved before/after, two
+rounds each (the clocks moved between rounds: the second "before" was
+slower in every stage, nodes and chunk builds included):
+
+| Moon ground | tiles us/tile | of which halos / volumes | chunk columns us/chunk | all us/tile |
+|---|---|---|---|---|
+| before, round 1 | 30.76 | 0.06 | 2.50 | 36.85 |
+| after, round 1 | 32.76 | 2.45 | 2.75 | 39.17 |
+| before, round 2 | 39.66 | 0.06 | 3.24 | 47.29 |
+| after, round 2 | 33.18 | 2.45 | 2.77 | 38.67 |
+
+At matched clocks the columns are unchanged (28.7-29.1 us) and the tile
+passes add their fixed 2.4 us: about 6% of the Moon's generation. The
+old halo pass did next to nothing there (the Moon had no noise caves);
+the new passes run on every tile within the volume levels. Skipping
+tiles whose regions hold no network and no cliff gate would remove it.
+
 Frame cost is unchanged in kind: the volumes only change which cells
 are solid. Under the ground the first trace round walks from the eye
 (`point_walk`), one extra walk for the pixels of an eye in a cave and
