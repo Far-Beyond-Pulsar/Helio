@@ -533,10 +533,16 @@ impl SunPages {
                 *in_block.entry(block(k)).or_insert(0) += 1;
             }
         }
-        wanted.sort_unstable_by_key(|&(class, coarse, k)| {
-            let crowd = if class >= 2 { in_block[&block(&k)] } else { 0 };
-            (class, std::cmp::Reverse(crowd), coarse, k.page[1], k.page[0])
-        });
+        // (Keys made once: a hash lookup a comparison was most of a plan.)
+        let mut keyed: Vec<_> = wanted
+            .iter()
+            .map(|&(class, coarse, k)| {
+                let crowd = if class >= 2 { in_block[&block(&k)] } else { 0 };
+                ((class, std::cmp::Reverse(crowd), coarse, k.page[1], k.page[0]), (class, coarse, k))
+            })
+            .collect();
+        keyed.sort_unstable_by_key(|e| e.0);
+        let wanted: Vec<(u8, std::cmp::Reverse<u8>, PageKey)> = keyed.into_iter().map(|e| e.1).collect();
         stats.asked = e.asked.len();
         // Views: a block of pages a view, in the order their best page
         // came.

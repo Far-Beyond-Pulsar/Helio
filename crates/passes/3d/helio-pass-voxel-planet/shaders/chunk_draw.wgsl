@@ -2714,12 +2714,17 @@ fn ask_sun_pages(p: vec3<f32>, footprint: f32) {
 }
 
 // The sun at camera-relative `p` (receiver normal `n`) by its occlusion
-// pages, for a pixel `footprint` m wide, asked for: the share, or -1 where
-// they hold it no finer than two footprints (the pixel walks).
-fn sun_by_pages(p: vec3<f32>, n: vec3<f32>, footprint: f32) -> f32 {
-    ask_sun_pages(p, footprint);
+// pages, for pixel `q` `footprint` m wide, asked for (by one pixel of each
+// 2x2 block a frame, turning: a page spans dozens of pixels): the share
+// from the first level resident from the footprint's up to `coarser`
+// levels coarser, or -1 where none is (the pixel walks).
+fn sun_by_pages(p: vec3<f32>, n: vec3<f32>, footprint: f32, q: vec2<u32>, coarser: f32) -> f32 {
+    let turn = params.table.w & 3u;
+    if all((q & vec2<u32>(1u)) == vec2<u32>(turn & 1u, turn >> 1u)) {
+        ask_sun_pages(p, footprint);
+    }
     let seen = sun_occlusion_at(p, n, footprint);
-    return select(-1.0, seen.x, seen.y > 0.0 && seen.y <= 2.0);
+    return select(-1.0, seen.x, seen.y > 0.0 && seen.y <= 1.0 + coarser);
 }
 
 fn stochastic_share(p: vec2<i32>, size: vec2<u32>, v: vec2<u32>, mesh: vec4<f32>) -> f32 {
@@ -2751,7 +2756,9 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
     let mesh = mesh_point(id.xy, size);
     if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < textureLoad(hit_distance, p, 0).r) {
         textureStore(out_normal, p, vec4<f32>(0.0));
-        let seen = sun_by_pages(to_world(mesh.xyz), vec3<f32>(0.0), pixel_width(id.xy, size, length(mesh.xyz)));
+        // Meshes take a level at most one coarser (grass near the eye walks
+        // rather than read texels four times its pixels).
+        let seen = sun_by_pages(to_world(mesh.xyz), vec3<f32>(0.0), pixel_width(id.xy, size, length(mesh.xyz)), id.xy, 1.0);
         if seen >= 0.0 && !steady_shadows() {
             store_walked(p, size, seen, 1.0, 0.0);
             return;
@@ -2819,7 +2826,9 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         // walk starts (past the steps it stands among). Not there yet: its
         // own walk.
         let lifted = to_world(at_hit + f.normal * (0.5 * f.cell) + sun * skip_along(f, sun));
-        lit = sun_by_pages(lifted, to_world(f.shading), footprint);
+        // Any level resident: while a page comes the pixel reads a coarser
+        // one (as virtual shadow maps fall back) rather than walk.
+        lit = sun_by_pages(lifted, to_world(f.shading), footprint, id.xy, 32.0);
         own = 1.0;
         walks = lit < 0.0;
     } else {

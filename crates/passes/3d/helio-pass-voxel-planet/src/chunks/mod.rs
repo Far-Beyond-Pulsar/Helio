@@ -6607,16 +6607,21 @@ impl ChunkWorld {
                 [x, y, SUN_OCCLUSION_PAGE, SUN_OCCLUSION_PAGE]
             })
             .collect();
+        // Only the pages' bounding rect is seeded and traced.
+        let rect = rects.iter().fold([u32::MAX, u32::MAX, 0, 0], |r, &[x, y, w, h]| {
+            [r[0].min(x), r[1].min(y), r[2].max(x + w), r[3].max(y + h)]
+        });
         let order = self.traced_volumes(eye, view_proj, drawn_in);
         for (pass, &index) in order.iter().enumerate() {
             let vol = self.volumes[usize::from(index)].as_ref().unwrap();
-            let params = self.draw_params(
+            let mut params = self.draw_params(
                 &input,
                 Some((vol, vol.transform)),
                 pass as u32,
                 order.len() as u32,
                 0,
             );
+            params.rect = rect;
             let offset = *at * OCCLUSION_PARAMS_STRIDE;
             *at += 1;
             self.queue
@@ -6975,6 +6980,11 @@ impl ChunkWorld {
                 });
                 pass.set_bind_group(0, &group, &[]);
                 pass.set_bind_group(1, &seed_group, &[]);
+                // An orthographic view of pages seeds their rect alone.
+                if open.is_some() {
+                    let [x0, y0, x1, y1] = params.rect;
+                    pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                }
                 // Boxes holding the eye only in the first round.
                 if round == 0 {
                     pass.set_pipeline(&pipelines.seed_inside);

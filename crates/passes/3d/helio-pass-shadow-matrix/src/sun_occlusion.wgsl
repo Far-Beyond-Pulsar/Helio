@@ -120,6 +120,7 @@ fn sun_occlusion_read_level(p: vec3<f32>, n: vec3<f32>, e: u32, level: u32) -> v
     let side = sun_occlusion_frame.atlas.x;
     let page_side = 1 << SUN_OCCLUSION_PAGE_SHIFT;
     var lit = vec4<f32>(0.0);
+    var near = bitcast<f32>(sun_occlusion_pages[sun_occlusion_frame.atlas.y + physical]);
     for (var k = 0; k < 4; k++) {
         let tap = vec2<i32>(k & 1, k >> 1);
         let t = base + tap;
@@ -128,10 +129,10 @@ fn sun_occlusion_read_level(p: vec3<f32>, n: vec3<f32>, e: u32, level: u32) -> v
             physical = sun_occlusion_physical(slot, level, page, eye);
             last = page;
             if physical == SUN_OCCLUSION_NONE { return vec2<f32>(1.0, 0.0); }
+            near = bitcast<f32>(sun_occlusion_pages[sun_occlusion_frame.atlas.y + physical]);
         }
         let corner = vec2<i32>(i32(physical % side), i32(physical / side)) * page_side;
         let stored = textureLoad(sun_occlusion_maps, corner + (t & vec2<i32>(page_side - 1)), 0).r;
-        let near = bitcast<f32>(sun_occlusion_pages[sun_occlusion_frame.atlas.y + physical]);
         // The receiver's plane at the tap's centre.
         let receiver = depth - near + dot((vec2<f32>(tap) - f) * texel, slope);
         lit[k] = select(0.0, 1.0, stored <= 0.0 || receiver <= stored + bias);

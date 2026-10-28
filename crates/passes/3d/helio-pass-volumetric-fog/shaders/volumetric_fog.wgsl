@@ -854,8 +854,9 @@ fn shaft_visibility(light_idx: u32, p0: vec3<f32>) -> vec3<f32> {
     var lit = shadow_map_visibility(light_idx, p0);
     if lights[light_idx].light_type == LIGHT_DIRECTIONAL {
         let from_camera = p0 - cameras[0].position_near.xyz;
-        // A froxel's footprint: a hundredth of its distance.
-        lit *= sun_occlusion(from_camera, vec3<f32>(0.0), 0.01 * length(from_camera)) * cloud_shadow(from_camera);
+        // A froxel's footprint: a twentieth of its distance (fog's shafts are
+        // soft; coarse levels are resident around the eye).
+        lit *= sun_occlusion(from_camera, vec3<f32>(0.0), 0.05 * length(from_camera)) * cloud_shadow(from_camera);
     }
     return lit;
 }
