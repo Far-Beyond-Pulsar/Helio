@@ -136,11 +136,11 @@ impl World {
         }
     }
 
-    /// The planet's edits now (a new world for a history it cannot follow).
-    fn sync(&mut self, gpu: &Gpu, planet: &Planet) {
-        if !self.chunks.sync_edits(VolumeId(0), planet) {
-            *self = Self::new(gpu, planet);
-        }
+    /// The planet's edits now.
+    fn sync(&mut self, _gpu: &Gpu, planet: &Planet) {
+        self.chunks
+            .sync_edits(VolumeId(0), planet)
+            .expect("the world's volume");
     }
 
     /// One frame: residency, the draw, `picks` copied; its residency.
@@ -2031,6 +2031,152 @@ fn large_sculpt_strokes_settle() {
         cpu[cpu.len() / 2],
         cpu[cpu.len() - 1]
     );
+}
+
+/// What a burst of sculpt strokes looks like while it happens, under a
+/// host's generation budget (a report: `--ignored --nocapture`). Every
+/// frame's hits (every fourth pixel each way) are kept, then judged
+/// against the burst's own settled frame (CPU ray casts of the Moon cost
+/// a third of a second each): coarse pixels (drawn three levels or more
+/// coarser than their distance wants), wrong ones after the last stroke (off by
+/// more than a metre and 2%, or a hit where there is none or none where
+/// there is one), pixels drawing material 0 (magenta), and the frames
+/// after the last stroke until the view is right again (`BURST_FRAMES=<dir>`
+/// saves some frames).
+#[test]
+#[ignore]
+fn sculpt_bursts_while_they_happen() {
+    let Some(gpu) = gpu() else { return };
+    let voxel = 0.1;
+    let mut planet = Planet::new(PlanetRecipe {
+        radius_m: 1_737_400.0,
+        voxel_size_m: voxel,
+        terrain: TerrainLayers::moon().source(75),
+        features: helio_pass_voxel_planet::feature_recipe::FeatureRecipe::moon().grow(voxel, 75),
+        ..Default::default()
+    })
+    .unwrap();
+    let dir = land(&planet, 1, 0.52, 0.48);
+    let ground = planet.surface_point(dir, 0.0);
+    let up = dir.normalize();
+    let side = up.any_orthonormal_vector();
+    let fwd = up.cross(side);
+    let view = View::new(
+        ground + up * 120.0 - fwd * 160.0,
+        (fwd - up * 0.7).normalize().as_vec3(),
+        [480, 270],
+    );
+    let mut config = ResidencyConfig::default();
+    config.plan.pixel_angle = view.pixel_angle();
+    let mut world = World::new(&gpu, &planet);
+    world.jitter = Some(0);
+    world.settle(&gpu, &planet, &view);
+    let pixels: Vec<usize> = (0..view.size[1])
+        .step_by(4)
+        .flat_map(|y| (0..view.size[0]).step_by(4).map(move |x| (y * view.size[0] + x) as usize))
+        .collect();
+    let sample = |world: &World| -> Vec<Option<PickHit>> {
+        let hits = world.chunks.read_hits();
+        pixels.iter().map(|&p| hits[p]).collect()
+    };
+    let save = |world: &World, name: String| {
+        let Some(dir) = std::env::var_os("BURST_FRAMES") else {
+            return;
+        };
+        let pixels = read_rgba8(gpu, &world.chunks.targets().unwrap().colour);
+        image::RgbaImage::from_raw(
+            view.size[0],
+            view.size[1],
+            // Brightened: the plain colour is dim.
+            pixels
+                .into_iter()
+                .flat_map(|p| [p[0], p[1], p[2]].map(|c| c.saturating_mul(3)).into_iter().chain([255]))
+                .collect(),
+        )
+        .unwrap()
+        .save(std::path::Path::new(&dir).join(format!("{name}.png")))
+        .unwrap();
+    };
+    let wrong = |a: &Option<PickHit>, b: &Option<PickHit>| match (a, b) {
+        (Some(a), Some(b)) => (a.distance - b.distance).abs() > 1.0f64.max(b.distance * 0.02),
+        (None, None) => false,
+        _ => true,
+    };
+    let bursts: [(&str, f64, BrushOp, u32, f64); 4] = [
+        ("dig_3m", 3.0, BrushOp::Remove, 0, 1.0),
+        ("dig_12m", 12.0, BrushOp::Remove, 0, 4.0),
+        ("build_60m", 60.0, BrushOp::Add, material::COBBLE, 4.0),
+        ("dig_60m", 60.0, BrushOp::Remove, 0, 4.0),
+    ];
+    let strokes = 40;
+    for (label, radius, op, material, step) in bursts {
+        let mut frames: Vec<Vec<Option<PickHit>>> = Vec::new();
+        let mut cpu = Vec::new();
+        let mut frame = 0;
+        loop {
+            if frame < strokes {
+                let along = (frame as f64 - 20.0) * step;
+                let centre = planet.surface_point((ground + side * along).normalize(), 0.0);
+                planet
+                    .apply(Brush {
+                        center: centre.to_array(),
+                        radius,
+                        shape: BrushShape::Sphere,
+                        op,
+                        material,
+                        height: 0.0,
+                    })
+                    .unwrap();
+                world.sync(&gpu, &planet);
+            }
+            let t = std::time::Instant::now();
+            world.frame_with(&gpu, &planet, &view, &config);
+            cpu.push(t.elapsed().as_secs_f64() * 1e3);
+            frames.push(sample(&world));
+            if [4, 12, 24, 39, strokes + 8].contains(&frame) {
+                save(&world, format!("{label}_{frame:03}"));
+            }
+            frame += 1;
+            if frame >= strokes && (world.chunks.settled() || frame > strokes + 900) {
+                break;
+            }
+        }
+        let settled = frames.last().unwrap().clone();
+        save(&world, format!("{label}_settled"));
+        let (mut coarse_sum, mut coarse_max, mut magenta_sum) = (0, 0, 0);
+        let (mut wrong_after, mut right_after) = (0, None);
+        for (n, hits) in frames.iter().enumerate() {
+            // Three levels or more coarser than its distance wants.
+            let coarse = hits
+                .iter()
+                .flatten()
+                .filter(|h| {
+                    let wanted = (h.distance * view.pixel_angle() / voxel).log2().floor().max(0.0);
+                    f64::from(h.level) >= wanted + 3.0
+                })
+                .count();
+            coarse_sum += coarse;
+            coarse_max = coarse_max.max(coarse);
+            magenta_sum += hits.iter().flatten().filter(|h| h.material == 0).count();
+            if n >= strokes {
+                let w = hits.iter().zip(&settled).filter(|(a, b)| wrong(a, b)).count();
+                wrong_after += w;
+                if right_after.is_none() && w * 200 <= pixels.len() {
+                    right_after = Some(n - strokes);
+                }
+            }
+        }
+        cpu.sort_by(f64::total_cmp);
+        eprintln!(
+            "BURST {label}: {frame} frames ({} after the strokes); coarse pixel-frames {coarse_sum} (most a frame {coarse_max} of {}), magenta pixel-frames {magenta_sum}; after the strokes wrong pixel-frames {wrong_after}, right {:?} frames after; frame ms p50 {:.1} p95 {:.1} max {:.1}",
+            frame - strokes,
+            pixels.len(),
+            right_after,
+            cpu[cpu.len() / 2],
+            cpu[cpu.len() * 95 / 100],
+            cpu[cpu.len() - 1]
+        );
+    }
 }
 
 /// The Moon's pole at seed 75 (Pulsar's Moon example), 300 m over the

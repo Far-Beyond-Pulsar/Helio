@@ -4,7 +4,9 @@
 //! * [`terrain`] — pluggable terrain generators, evaluated bit-for-bit
 //!   identically on CPU and GPU, built from [`noise`]; [`layers`] is the
 //!   built-in one (ordered layer stacks, interpreted by [`landform`]).
-//! * [`edits`] — ordered brushes with exact integer containment.
+//! * [`edits`] — ordered brushes with exact integer containment;
+//!   [`edit_store`] bakes them into cells, [`edit_yield`] counts what one
+//!   changes (gameplay's blocks broken and placed).
 //! * [`planet`] — canonical queries, materials and exact ray casts.
 //! * [`features`] — procedural content (trees, rocks, buildings) generated
 //!   like the terrain (docs/features.md), from [`stamp`] models; [`flora`]
@@ -20,6 +22,7 @@
 #[cfg(feature = "engine")]
 pub mod chunks;
 pub mod edit_store;
+pub mod edit_yield;
 pub mod edits;
 #[cfg(feature = "engine")]
 pub mod engine;
