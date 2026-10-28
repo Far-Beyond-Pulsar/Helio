@@ -5690,9 +5690,14 @@ impl ChunkWorld {
     /// the eye. In a cave the chunks around the eye may be air (freed) or
     /// hold the eye under their occupied layers (out of their raster boxes),
     /// and the rock beside them (Buried nodes) has no box: a ray seeded by
-    /// the boxes would start far away.
+    /// the boxes would start far away. An eye off a plane's face (beside a
+    /// placed block: `locate` clamps it onto the edge) is over no chunk.
     fn eye_chunk(&self, vol: &volumes::Volume, eye: DVec3) -> u32 {
-        let (cell, _) = vol.grid.locate(eye);
+        let (cell, c) = vol.grid.locate(eye);
+        let n = f64::from(vol.grid.cells());
+        if !(0.0..n).contains(&c[0]) || !(0.0..n).contains(&c[1]) {
+            return u32::MAX;
+        }
         self.nodes
             .iter()
             .filter(|(k, c)| {
