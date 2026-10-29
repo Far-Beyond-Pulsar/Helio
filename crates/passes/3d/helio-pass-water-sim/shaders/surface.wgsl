@@ -85,6 +85,8 @@ struct VertexOutput {
     @location(0)       world_pos: vec3f,
     @location(1) @interpolate(flat) vol_index: u32,
     @location(2) cell_size: f32,
+    @location(3) surface_xz: vec2f,
+    @location(4) unresolved_variance: f32,
 }
 
 // ── Volume geometry ──────────────────────────────────────────────────────────
@@ -125,6 +127,18 @@ fn water_cascade_height_sum(world_xz: vec2f, vol_index: u32, cell_size: f32) -> 
     return water_surface_height_offset(world_xz, vol, vol_index, cell_size, false);
 }
 
+/// Cox–Munk unresolved variance: wind's total mean-square slope minus the
+/// variance already carried by the four FFT cascades' 1x1 mip.
+fn water_unresolved_variance(vol: WaterVolume) -> f32 {
+    var resolved = 0.0;
+    for (var i = 0u; i < 4u; i++) {
+        let moments = textureSampleLevel(
+            ocean_slope_moments, water_samp, vec2f(0.5), i, 8.0);
+        resolved += moments.z + moments.w;
+    }
+    return max(0.003 + 0.00512 * vol.wind_params.z - resolved, 0.0);
+}
+
 /// World-space surface normal from all cascades, computed by summing
 /// per-cascade slopes (reconstructed from the stored normal) weighted by
 /// each cascade's amplitude fraction, then normalizing.
@@ -147,7 +161,32 @@ fn water_total_normal(world_xz: vec2f, vol: WaterVolume, vol_index: u32, cell_si
         total_slope += (interaction.ba / ny) * (water_wave_amplitude(vol) / extent);
     }
     total_slope += shore_wave(world_xz).slope;
-    return normalize(vec3f(total_slope.x, 1.0, total_slope.y));
+    return normalize(vec3f(-total_slope.x, 1.0, -total_slope.y));
+}
+
+/// Fragment-stage slope sampling follows the true screen-space footprint, as
+/// in Ultra-Water's implicit texture() lookups. The displaced mesh cell size
+/// only controls geometric displacement; using it here overfilters fine waves
+/// across large triangles.
+fn water_total_normal_fragment(world_xz: vec2f, vol: WaterVolume, vol_index: u32) -> vec3f {
+    var total_slope = vec2f(0.0);
+    let shore_damp = shore_ocean_damp(world_xz);
+    for (var i = 0u; i < 4u; i++) {
+        let patch_size = OCEAN_PATCH_SIZES[i];
+        let uv = water_tiling_xz(world_xz, i) / patch_size;
+        total_slope += textureSample(ocean_slope_moments, water_samp, uv, i).xy
+            * shore_damp[i];
+    }
+    let interaction_uv = water_world_xz_to_sim_uv(world_xz, vol);
+    if all(interaction_uv >= vec2f(0.0)) && all(interaction_uv <= vec2f(1.0)) {
+        let interaction = textureSampleLevel(
+            water_interaction, water_samp, interaction_uv, sim_layer(vol_index, 0u), 0.0);
+        let ny = sqrt(max(1.0 - dot(interaction.ba, interaction.ba), 1e-6));
+        let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
+        total_slope += (interaction.ba / ny) * (water_wave_amplitude(vol) / extent);
+    }
+    total_slope += shore_wave(world_xz).slope;
+    return normalize(vec3f(-total_slope.x, 1.0, -total_slope.y));
 }
 
 /// World XZ → grid UV in [0,1].
@@ -182,6 +221,26 @@ fn water_path_length(
     }
 
     return clamp(t_scene, 0.0, max_path);
+}
+
+/// The surface pass is composited without a hardware depth attachment, so it
+/// must preserve opaque terrain/object visibility explicitly. The depth copy
+/// contains only the opaque scene; if its linear view depth is in front of the
+/// displaced water point, that water fragment is occluded.
+fn water_surface_occluded(screen_uv: vec2f, surface_pos: vec3f) -> bool {
+    let pixel = clamp(
+        vec2i(screen_uv * viewport.xy),
+        vec2i(0),
+        vec2i(viewport.xy) - vec2i(1),
+    );
+    let scene_depth = textureLoad(depth_texture, pixel, 0);
+    if helio_is_sky(scene_depth) {
+        return false;
+    }
+    let surface_view = (cameras[0].view * vec4f(surface_pos, 1.0)).xyz;
+    let surface_view_depth = max(-surface_view.z, cameras[0].position_near.w);
+    let opaque_view_depth = helio_view_depth(cameras[0].proj, scene_depth);
+    return opaque_view_depth + 0.02 < surface_view_depth;
 }
 
 /// Displaced surface height above an arbitrary world XZ (not just the shaded
@@ -250,13 +309,12 @@ fn water_fresnel(normal: vec3f, view_dir: vec3f, alpha: f32) -> f32 {
 /// Beckmann-style slope variance encoded alongside the FFT slopes. The
 /// cascade mips already filter unresolved waves; subtracting the local mean
 /// slope leaves variance suitable for specular anti-aliasing.
-fn ocean_slope_variance(world_xz: vec2f, cell_size: f32, damp: vec4f) -> vec2f {
+fn ocean_slope_variance(world_xz: vec2f, damp: vec4f) -> vec2f {
     var variance = vec2f(0.0);
     for (var i = 0u; i < 4u; i++) {
         let patch_size = OCEAN_PATCH_SIZES[i];
-        let uv = fract(water_tiling_xz(world_xz, i) / patch_size);
-        let lod = max(log2(max(cell_size, 1e-4) * 256.0 / patch_size) + 1.0, 0.0);
-        let moments = textureSampleLevel(ocean_slope_moments, water_samp, uv, i, lod);
+        let uv = water_tiling_xz(world_xz, i) / patch_size;
+        let moments = textureSample(ocean_slope_moments, water_samp, uv, i);
         let slope = moments.xy * damp[i];
         let second = moments.zw * damp[i] * damp[i];
         variance += max(second - slope * slope, vec2f(0.0));
@@ -347,8 +405,15 @@ fn water_sun_specular(
 /// looking toward the sun and darkens it looking away, which is what makes the
 /// medium read as lit rather than as a flat tint.
 fn water_inscatter(view_dir: vec3f, sun_dir: vec3f, vol: WaterVolume) -> vec3f {
-    let phase = helio_hg_phase(dot(view_dir, sun_dir), 0.35) * 4.0 * HELIO_PI;
-    return vol.water_color.rgb * clamp(phase, 0.4, 2.0);
+    // Ultra-Water weights the medium colour by ambient sky radiance and direct
+    // sunlight. Keep its authored clear-water scatter values; the demo's
+    // directional light carries intensity 3 and a warm tint.
+    let ambient = sky_color(vec3f(0.0, 1.0, 0.0), sun_dir);
+    let sun_radiance = vec3f(3.0, 2.82, 2.46);
+    let sun_phase = clamp(helio_hg_phase(dot(view_dir, sun_dir), 0.35)
+        * 4.0 * HELIO_PI, 0.4, 2.0);
+    let direct = sun_radiance * (0.3 + 0.7 * sun_phase) * max(sun_dir.y, 0.0);
+    return vol.water_color.rgb * (ambient + direct);
 }
 
 // ── Foam ─────────────────────────────────────────────────────────────────────
@@ -369,26 +434,16 @@ fn water_shore_factor(path: f32, vol: WaterVolume) -> f32 {
 /// Foam coverage from Ultra-Water's combined damped Jacobian field plus
 /// independent shoreline contact foam.
 fn water_foam(
-    path: f32,
+    view_depth_difference: f32,
     world_xz: vec2f,
     vol: WaterVolume,
-    cell_size: f32,
 ) -> f32 {
-    let amp = max(water_wave_amplitude(vol), 1e-3);
-    let t   = cameras[0].jitter_frame.z * 0.016;
-
-    // Two layers scrolling against each other, so the band churns rather than
-    // sitting still as a uniform ring. In the waves' tiling space, so the
-    // pattern follows the world rather than a camera-relative frame's origin.
-    let tiling_xz = water_tiling_xz(world_xz, 0u);
-    let n = value_noise(tiling_xz * 0.35 + vec2f( t * 0.20, -t * 0.13)) * 0.65
-          + value_noise(tiling_xz * 1.10 + vec2f(-t * 0.31,  t * 0.17)) * 0.35;
-
-    // Contact foam. The band scales with wave size — a bigger swell washes
-    // further up the shore — and the noise makes its edge irregular.
-    let band       = max(amp * 2.5, 0.35);
-    let shore      = 1.0 - smoothstep(0.0, band, path);
-    let shore_foam = smoothstep(0.25, 0.85, shore * (0.55 + n * 0.75));
+    // Match OceanSurface's uFoam.z (.35 m) contact film. Use view-depth
+    // separation rather than slant ray length, and gate it to the bathymetric
+    // shallows so props and deep water do not acquire a white frill.
+    let depth_below = max(-shore_field(world_xz, 0).x, 0.0);
+    let shallow = 1.0 - smoothstep(2.0, 6.0, depth_below);
+    let contact = (1.0 - smoothstep(0.0, 0.35, view_depth_difference)) * shallow * 0.9;
 
     var jacobian = 0.0;
     let cascade_damp = shore_ocean_damp(world_xz);
@@ -398,20 +453,21 @@ fn water_foam(
     // but exclude it from this three-cascade foam source.
     for (var cascade = 0u; cascade < 3u; cascade++) {
         let patch_size = OCEAN_PATCH_SIZES[cascade];
-        let uv = fract(water_tiling_xz(world_xz, cascade) / patch_size);
-        let lod = max(log2(max(cell_size, 1e-4) * 256.0 / patch_size) + 1.0, 0.0);
-        let band_jacobian = textureSampleLevel(ocean_displacement, water_samp, uv, cascade, lod).w;
+        let uv = water_tiling_xz(world_xz, cascade) / patch_size;
+        let band_jacobian = textureSample(ocean_displacement, water_samp, uv, cascade).w;
         jacobian += mix(1.0, band_jacobian, cascade_damp[cascade]);
     }
     jacobian -= 2.0;
     let spectral_foam = clamp((vol.water_color.w - jacobian) * vol.extinction.w, 0.0, 1.0);
-    return max(shore_foam, spectral_foam);
+    return max(contact, spectral_foam);
 }
 
 struct FoamMaterial {
     coverage: f32,
     billow: f32,
     gradient: vec2f,
+    density: f32,
+    pattern: f32,
 }
 
 /// Erode sparse/aged foam into the tileable lace pattern and recover the
@@ -427,18 +483,12 @@ fn water_foam_material(
     let primary = textureSample(foam_material_tex, foam_material_samp, (world_xz + flow) * 0.11);
     let broad = textureSample(foam_material_tex, foam_material_samp, (world_xz - flow * 0.43) * 0.031 + vec2f(0.37));
     let pattern = primary.r * 0.65 + broad.r * 0.35;
-    // A spatially coherent, advected foam-age field gives fresh crests a
-    // filled-in appearance and progressively erodes older remnants into the
-    // baked lace filaments. The field is stable in each FFT patch's world
-    // tiling coordinate, so camera-origin rebases do not restart foam aging.
-    let age_noise = value_noise(water_tiling_xz(world_xz, 1u) * 0.045
-        + vec2f(t * 0.035, -t * 0.027));
-    let freshness = 1.0 - smoothstep(0.34, 0.91, age_noise);
-    let aged_strength = source_strength * mix(0.42, 1.0, freshness);
-    var coverage = smoothstep(1.05 - aged_strength, 1.3 - aged_strength, pattern)
-                  * sqrt(max(aged_strength, 0.0));
+    var coverage = smoothstep(1.05 - source_strength, 1.3 - source_strength, pattern)
+                  * sqrt(max(source_strength, 0.0));
     var billow = primary.g;
     var gradient = (primary.ba - vec2f(0.5)) * 64.0 * 0.11;
+    var density = source_strength;
+    var foam_pattern = pattern;
 
     // Fresh breaker foam rides shoreward with the bore. Crossfading two
     // travelling phases avoids a hard reset every 2.5 seconds.
@@ -476,6 +526,8 @@ fn water_foam_material(
         if shore_coverage >= coverage {
             billow = shore_billow;
             gradient = (mix(b0.ba, b1.ba, blend) - vec2f(0.5)) * 64.0 * 0.15;
+            density = breaker;
+            foam_pattern = shore_pattern;
         }
         coverage = max(coverage, shore_coverage);
     }
@@ -509,11 +561,13 @@ fn water_foam_material(
         if residual_coverage >= coverage {
             billow = 0.5;
             gradient = vec2f(0.0);
+            density = residual * 0.5;
+            foam_pattern = residual_pattern;
         }
         coverage = max(coverage, residual_coverage);
     }
 
-    return FoamMaterial(coverage, billow, gradient);
+    return FoamMaterial(coverage, billow, gradient, density, foam_pattern);
 }
 
 // ── Screen-space reflection ──────────────────────────────────────────────────
@@ -535,7 +589,7 @@ struct SsrResult {
     confidence: f32,
 }
 
-fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrResult {
+fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume, above_water: bool) -> SsrResult {
     var result: SsrResult;
     result.color      = vec3f(0.0);
     result.confidence = 0.0;
@@ -576,13 +630,24 @@ fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrR
     }
 
     let hit_uv = march.pos.xy;
+    let hit_depth = textureSampleLevel(depth_texture, depth_sampler, hit_uv, 0);
+    if above_water {
+        // Match the planar capture's water-plane clipping. The opaque scene
+        // contains the seabed too; reflecting it would bypass Beer-Lambert
+        // absorption and make deep water look transparent. Underwater rays
+        // intentionally retain submerged hits.
+        let hit_world = helio_world_from_depth(cameras[0].view_proj_inv, hit_uv, hit_depth);
+        if hit_world.y < vol.bounds_max.w {
+            return result;
+        }
+    }
 
     // Thickness: the pyramid says the ray reached this surface, but a hit far
     // behind it is the ray having tunnelled past a thin object.
     let thickness = max(vol.ssr_params.w, 1e-3);
     let ray_z     = helio_view_depth(cameras[0].proj, march.pos.z);
     let scene_z   = helio_view_depth(
-        cameras[0].proj, textureSampleLevel(depth_texture, depth_sampler, hit_uv, 0));
+        cameras[0].proj, hit_depth);
     if ray_z > scene_z * (1.0 + thickness) {
         return result;
     }
@@ -630,7 +695,7 @@ fn water_reflection(
         if vol.ssr_params.x <= 0.5 {
             return sky;
         }
-        let hit = trace_ssr(world_pos, ray, normal, vol);
+        let hit = trace_ssr(world_pos, ray, normal, vol, true);
         return mix(sky, hit.color, hit.confidence);
     }
 
@@ -656,7 +721,7 @@ fn water_reflection(
 
     // Blend by confidence rather than switching, so a partial hit near the
     // screen edge dissolves into sky instead of popping.
-    let hit = trace_ssr(world_pos, ray, normal, vol);
+    let hit = trace_ssr(world_pos, ray, normal, vol, true);
     return mix(planar, hit.color, hit.confidence);
 }
 
@@ -704,6 +769,8 @@ fn vs_main(
     out.position  = cameras[0].view_proj * vec4f(world, 1.0);
     out.world_pos = world;
     out.cell_size = cell_size;
+    out.surface_xz = xz;
+    out.unresolved_variance = water_unresolved_variance(vol);
     return out;
 }
 
@@ -713,15 +780,19 @@ fn fs_above(in: VertexOutput) -> vec4f {
     let vol       = volumes[in.vol_index];
     let light_dir = normalize(vol.sun_direction.xyz);
 
-    let normal    = water_total_normal(in.world_pos.xz, vol, in.vol_index, in.cell_size);
+    let normal    = water_total_normal_fragment(in.surface_xz, vol, in.vol_index);
     let view_dir  = normalize(in.world_pos - cameras[0].position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
-    let cascade_damp = shore_ocean_damp(in.world_pos.xz);
-    let slope_variance = ocean_slope_variance(in.world_pos.xz, in.cell_size, cascade_damp);
+    if water_surface_occluded(screen_uv, in.world_pos) {
+        discard;
+    }
+    let cascade_damp = shore_ocean_damp(in.surface_xz);
+    let slope_variance = ocean_slope_variance(in.surface_xz, cascade_damp);
     let normal_dx = dpdx(normal);
     let normal_dy = dpdy(normal);
     let geometric_variance = min(0.25 * (dot(normal_dx, normal_dx) + dot(normal_dy, normal_dy)), 0.18);
-    let alpha = sqrt(max(0.02 * 0.02 + slope_variance.x + slope_variance.y + geometric_variance, 1e-4));
+    let alpha = sqrt(max(0.02 * 0.02 + slope_variance.x + slope_variance.y
+        + in.unresolved_variance * cascade_damp.z * cascade_damp.z + geometric_variance, 1e-4));
 
     // Path through the medium straight down the view ray, before refraction.
     // Used to size the refraction offset; the offset then changes which pixel
@@ -796,20 +867,27 @@ fn fs_above(in: VertexOutput) -> vec4f {
     let fresnel = water_fresnel(normal, view_dir, alpha) * water_shore_factor(path, vol);
     var color   = mix(through_water, reflected, fresnel)
                 + water_sun_specular(
-                    normal, view_dir, light_dir, alpha, in.world_pos.xz,
+                    normal, view_dir, light_dir, alpha, in.surface_xz,
                     distance(in.world_pos, cameras[0].position_near.xyz));
 
     // ── Foam ─────────────────────────────────────────────────────────────────
-    let shore = shore_wave(in.world_pos.xz);
-    let foam_source = water_foam(path, in.world_pos.xz, vol, in.cell_size);
-    let foam = water_foam_material(in.world_pos.xz, foam_source, shore);
-    let foam_normal = normalize(vec3f(-foam.gradient.x, 1.0, -foam.gradient.y));
-    let foam_light = 0.78 + 0.22 * max(dot(foam_normal, light_dir), 0.0);
+    let shore = shore_wave(in.surface_xz);
+    let foam_source = water_foam(max(refr_z - view_z, 0.0), in.surface_xz, vol);
+    let foam = water_foam_material(in.surface_xz, foam_source, shore);
+    let foam_density = foam.density;
+    let foam_normal = normalize(normal - vec3f(foam.gradient.x, 0.0, foam.gradient.y)
+        * (0.03 + 0.12 * foam_density));
+    let foam_ao = mix(0.45, 1.0, smoothstep(0.15, 0.75, foam.billow));
+    let foam_solid = smoothstep(0.2, 0.9, foam_density * (0.55 + 0.7 * foam.billow));
+    let foam_tint_mix = max(foam_solid, smoothstep(0.3, 0.9, foam.pattern) * 0.6);
+    let foam_albedo = mix(vec3f(0.62, 0.78, 0.82), vec3f(0.95), foam_tint_mix);
+    let foam_light = (0.2 + 0.8 * clamp(dot(foam_normal, light_dir) * 0.8 + 0.2, 0.0, 1.0))
+        * mix(foam_ao, 1.0, 0.4);
     // Zero is the legacy value of this formerly-unused lane; interpret it as
     // Ultra-Water's default brightness so older volume rows remain visible.
     let foam_brightness = select(0.85, vol.reflection_refraction.w, vol.reflection_refraction.w > 0.0);
-    let foam_color = vec3f(0.92, 0.96, 1.00) * foam_brightness * foam_light * (0.94 + foam.billow * 0.12);
-    color = mix(color, foam_color, foam.coverage);
+    let foam_color = foam_albedo * foam_brightness * foam_light * (0.94 + foam.billow * 0.12);
+    color = mix(color, foam_color, foam.coverage * mix(0.8, 1.0, foam_solid));
 
     return vec4f(color, 1.0);
 }
@@ -824,16 +902,20 @@ fn fs_under(in: VertexOutput) -> vec4f {
     let light_dir = normalize(vol.sun_direction.xyz);
     let ior_water = max(vol.sim_params.x, 1.0);
 
-    let normal    = -water_total_normal(in.world_pos.xz, vol, in.vol_index, in.cell_size);
+    let normal    = -water_total_normal_fragment(in.surface_xz, vol, in.vol_index);
     let view_dir  = normalize(in.world_pos - cameras[0].position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
+    if water_surface_occluded(screen_uv, in.world_pos) {
+        discard;
+    }
 
-    let cascade_damp = shore_ocean_damp(in.world_pos.xz);
-    let slope_variance = ocean_slope_variance(in.world_pos.xz, in.cell_size, cascade_damp);
+    let cascade_damp = shore_ocean_damp(in.surface_xz);
+    let slope_variance = ocean_slope_variance(in.surface_xz, cascade_damp);
     let normal_dx = dpdx(normal);
     let normal_dy = dpdy(normal);
     let geometric_variance = min(0.25 * (dot(normal_dx, normal_dx) + dot(normal_dy, normal_dy)), 0.18);
-    let alpha = sqrt(max(0.02 * 0.02 + slope_variance.x + slope_variance.y + geometric_variance, 1e-4));
+    let alpha = sqrt(max(0.02 * 0.02 + slope_variance.x + slope_variance.y
+        + in.unresolved_variance * cascade_damp.z * cascade_damp.z + geometric_variance, 1e-4));
     let fresnel = water_fresnel(normal, view_dir, alpha);
 
     // Water → air. A zero-length result is total internal reflection.
@@ -850,7 +932,7 @@ fn fs_under(in: VertexOutput) -> vec4f {
 
     var confidence = 0.0;
     if vol.ssr_params.x > 0.5 {
-        let hit = trace_ssr(in.world_pos, reflected_ray, normal, vol);
+        let hit = trace_ssr(in.world_pos, reflected_ray, normal, vol, false);
         below_color = hit.color;
         confidence  = hit.confidence;
     }

@@ -37,11 +37,17 @@ fn water_wave_amplitude(vol: WaterVolume) -> f32 {
 }
 
 fn shore_field(world_xz: vec2f, layer: i32) -> vec4f {
-    if shore_params.state.x < 0.5 { return vec4f(0.0, 1e6, 0.0, 0.0); }
+    if shore_params.state.x < 0.5 {
+        if layer == 1 { return vec4f(0.0); }
+        return vec4f(-60.0, 1e6, 0.0, 0.0);
+    }
     let extent = max(shore_params.center_extent.zw, vec2f(1e-3));
     let uv = (world_xz - shore_params.center_extent.xy) / extent + vec2f(0.5);
     if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) {
-        return select(vec4f(0.0, 1e6, 0.0, 0.0), vec4f(0.0, 0.0, 0.0, 1.0), layer == 1);
+        if layer == 1 { return vec4f(0.0); }
+        // Match OceanSurface.shoreSample outside the baked map: deep offshore
+        // water keeps the full swell spectrum and has no nearby wave front.
+        return vec4f(-60.0, 1e6, 0.0, 0.0);
     }
     let size = vec2f(textureDimensions(shore_fields, 0));
     let p = uv * size - vec2f(0.5);
@@ -73,11 +79,11 @@ fn shore_wave(world_xz: vec2f) -> ShoreWave {
     if shore_params.state.x < 0.5 { return result; }
     let field = shore_field(world_xz, 0);
     let travel = shore_field(world_xz, 1);
-    let depth = max(-field.x, 0.0);
+    let depth = -field.x;
     let env = (1.0 - smoothstep(70.0, 180.0, field.y))
             * smoothstep(0.35, 0.8, length(field.zw))
-            * smoothstep(0.0, 0.5, depth);
-    if env <= 1e-4 || depth <= 0.0 { return result; }
+            * smoothstep(-0.9, 0.5, depth);
+    if env <= 1e-4 { return result; }
     let has_front = dot(travel.yz, travel.yz) > 0.25;
     let fallback_dir = -field.zw / max(length(field.zw), 1e-3);
     let dir = select(fallback_dir, normalize(travel.yz), has_front);
@@ -87,16 +93,18 @@ fn shore_wave(world_xz: vec2f) -> ShoreWave {
                     + value_noise(world_xz * 0.011 + vec2f(7.0)) * 2.5;
     let group = 0.45 + 0.55 * value_noise(world_xz * 0.004
         + vec2f(shore_params.state.y * 0.021, -shore_params.state.y * 0.017));
-    let swell_dir = vec2f(-0.9396926, -0.3420201);
+    // defaultOceanParams().swell.direction is -15 degrees. This differs from
+    // the wind vector used to orient the FFT spectrum.
+    let swell_dir = vec2f(-0.9659258, 0.2588190);
     let exposure = mix(0.25, 1.0, smoothstep(-0.3, 0.7, dot(dir, swell_dir)));
     let wave_env = env * exposure;
-    var compression = 0.82;
+    var compression = 0.85;
     for (var train = 0u; train < 2u; train++) {
         let lambda = 30.0 * select(1.0, 0.61, train == 1u);
         let omega = sqrt(9.81 * 2.0 * HELIO_PI / lambda);
         let k = omega / celerity;
         let amp_scale = select(1.0, 0.45, train == 1u);
-        let amplitude_cap = (0.42 * depth + 0.14) * select(1.0, 0.5, train == 1u);
+        let amplitude_cap = (0.42 * max(depth, 0.0) + 0.14) * select(1.0, 0.5, train == 1u);
         let amplitude = min(0.55 * amp_scale * wave_env * shoal * group, amplitude_cap);
         let phase = omega * (travel.x + shore_params.state.y) + phase_noise * select(1.0, 1.37, train == 1u) + f32(train) * 2.1;
         let c = 0.5 + 0.5 * cos(phase);
@@ -123,7 +131,8 @@ fn shore_wave(world_xz: vec2f) -> ShoreWave {
         let slope_scale = amplitude * k * 1.6 * cp * s
             / max(1.0 - qak * cos(phase) + 3.0 * pitch * k * c5 * s, 0.2);
         result.slope += dir * slope_scale;
-        let psi = atan2(sin(phase + HELIO_PI), cos(phase + HELIO_PI));
+        // JS uses mod(phase + PI, 2PI) - PI, equivalent to wrapping phase.
+        let psi = atan2(sin(phase), cos(phase));
         result.foam += breaking * smoothstep(-0.45, 0.0, psi) * exp(-max(psi, 0.0) * 0.8);
         if train == 0u {
             // floor-based wrap is stable for negative travel time and keeps

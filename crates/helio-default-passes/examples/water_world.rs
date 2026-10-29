@@ -9,9 +9,12 @@
 //! Presets: `coast` (wide island-and-ocean view), `shoreline` (low camera at
 //! the breakers), and `underwater` (looking through the
 //! surface toward the island). Keys 1/2/3 switch views, Space triggers a
-//! shoreline splash, and C saves a PNG to `target/water-world/`. The terrain,
-//! foliage, clouds and shoreline are seeded so the views stay comparable.
-//! Optional CLI: pass `--capture` to save the startup preset after 120 frames;
+//! shoreline splash, and C saves a PNG to `target/water-world/`. Click to
+//! capture the mouse, WASD flies, Q/E descend/ascend, and Escape releases the
+//! pointer (Escape again closes). The terrain, foliage, clouds and shoreline
+//! are seeded so the views stay comparable.
+//! Optional CLI: pass `--capture` to save the startup preset after the local
+//! voxel cut and foliage tiles settle (up to 900 frames);
 //! add `--capture-and-exit` to close after that capture. Without either flag,
 //! this runs as a live window and never writes a file automatically.
 
@@ -22,26 +25,33 @@ mod worlds;
 use glam::{DVec3, Vec3};
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_pass_foliage_place::components::{FoliageTypeComponent, FoliageWindComponent};
+use helio_pass_foliage_place::FoliagePlacePass;
+use helio_pass_foliage_place::{
+    pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageType, FOLIAGE_FLAG_GROUND_COLOUR,
+    FOLIAGE_FLAG_TWO_SIDED,
+};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe, VolumeTransform};
 use helio_pass_water_sim::{
-    GpuWaterVolume, OceanSpectrum, WaterSimPass, WaterVolumeComponent, WaterSpraySettings,
+    GpuWaterVolume, OceanSpectrum, WaterSimPass, WaterSpraySettings, WaterVolumeComponent,
 };
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::{collections::HashSet, time::Instant};
 use winit::{
     application::ApplicationHandler,
-    event::{ElementState, KeyEvent, WindowEvent},
+    event::{DeviceEvent, ElementState, KeyEvent, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
 const SEED: u64 = 34_120_261;
 const REST_Y: f64 = 0.0;
-const EXTENT: f32 = 2048.0;
+const EXTENT: f32 = 1536.0;
 
 struct Showcase {
     device: Arc<wgpu::Device>,
@@ -49,6 +59,9 @@ struct Showcase {
     renderer: Renderer,
     source: SharedPlanetFrame,
     planet: Arc<Planet>,
+    scene: pulsar_scenedb::SceneDb,
+    sun_entity: pulsar_scenedb::Entity,
+    sun_preset: String,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
     size: [u32; 2],
@@ -61,33 +74,53 @@ struct Showcase {
 fn terrain(seed: u64) -> Planet {
     let mut planet = Planet::new(PlanetRecipe {
         shape: helio_pass_voxel_planet::grid::Shape::Plane,
-        plane_size_m: EXTENT as f64 * 2.0,
+        // The terrain square matches the shoreline-map domain. It extends far
+        // enough beyond the authored island that the camera sees the beach and
+        // seabed rather than the plane's edge, while chunk residency only
+        // refines the camera cut.
+        plane_size_m: f64::from(EXTENT) * 2.0,
         voxel_size_m: 0.5,
         terrain: {
-            let mut seabed = helio_pass_voxel_planet::layers::TerrainLayers::flat_at(-42.0)
-                .heightfield();
+            let mut seabed =
+                helio_pass_voxel_planet::layers::TerrainLayers::flat_at(-42.0).heightfield();
             seabed.surface = "Sand".into();
             seabed.source(seed)
         },
-        features: worlds::Preset::Earth.features().grow(0.5, seed),
+        // Meadow dressing is rendered by the foliage pass below. Voxel-stamped
+        // feature trees are intentionally omitted: populating the full plane
+        // with them exhausts leaf-page residency before the nearby island cut
+        // can finish refining.
+        features: Default::default(),
         ..Default::default()
     })
     .expect("create deterministic island terrain");
 
-    // Broad island profile: a ~330 m waterline radius, gentle beach slope and
-    // a ~60 m peak, matching the scale of the Ultra-Water reference island.
-    // The bake below samples this exact edited terrain via `from_voxel_planet`.
+    // Ultra's source profile has a roughly 360 m sea-level coastline and
+    // 67 m summit. A single broad cap keeps that island scale without the
+    // multi-kilometre tangent spheres that exhausted voxel leaf residency;
+    // the surrounding authored heightfield remains a -42 m seabed. The shore
+    // map samples this same edited voxel provider.
+    let summit = island_height(0.0);
+    let cap_radius = 1_010.0_f64;
     planet
         .apply(Brush {
-            center: [0.0, -878.0, 0.0],
-            radius: 938.0,
+            center: [0.0, summit - cap_radius, 0.0],
+            radius: cap_radius,
             shape: BrushShape::Sphere,
             op: BrushOp::Add,
             material: helio_pass_voxel_planet::terrain::material::GRASS,
             height: 0.0,
         })
-        .expect("sculpt seeded island");
+        .expect("sculpt broad seeded island cap");
     planet
+}
+
+fn island_height(radius: f64) -> f64 {
+    let t = ((radius - 380.0) / 720.0).clamp(0.0, 1.0);
+    let smoothstep = t * t * (3.0 - 2.0 * t);
+    62.0 * (-((radius / 190.0).powi(2))).exp() + 15.0 * (-((radius / 430.0).powi(2))).exp()
+        - 10.0
+        - 32.0 * smoothstep
 }
 
 impl Showcase {
@@ -124,6 +157,8 @@ impl Showcase {
         helio_pass_water_sim::WaterVolumeComponent::register_gpu_columns_growable(
             &mut store, 8, &device,
         );
+        FoliageTypeComponent::register_gpu_columns_growable(&mut store, 8, &device);
+        FoliageWindComponent::register_gpu_columns_growable(&mut store, 4, &device);
         let mirror = GpuMirrorHandle::new(Arc::new(store), queue.clone());
         let mut scene = pulsar_scenedb::SceneDb::new();
         scene.world.attach_gpu_mirror(mirror.clone());
@@ -168,6 +203,15 @@ impl Showcase {
                 .around_planet([0.0, -world_radius as f32, 0.0], world_radius),
         );
 
+        // Match the reference scene's directional sun. The same light drives
+        // the terrain and Earth's atmospheric scattering; its angle changes
+        // with the selected water showcase preset below.
+        let sun_entity = scene.world.spawn();
+        scene.world.insert(
+            sun_entity,
+            helio_pass_forward_lit::LightComponent::from(directional_sun(205.0, 52.0)),
+        );
+
         let meadow = worlds::Preset::Earth
             .meadow()
             .expect("Earth meadow recipe")
@@ -177,6 +221,42 @@ impl Showcase {
             let entity = scene.world.spawn();
             scene.world.insert(entity, *row);
         }
+        // The authored voxel meadow is intentionally low and blocky. Add a
+        // small band of native blade tufts so the close shoreline preset can
+        // resolve individual wind motion at the camera's scale.
+        let mut shoreline_blades = GpuFoliageType {
+            density: 12.0,
+            height_range: [1.2, 2.2],
+            width_range: [0.035, 0.07],
+            slope_range: [-1.0, 1.0],
+            altitude_range: [f32::MIN, f32::MAX],
+            // The source Breakers camera frames the meadow from tens to a few
+            // hundred metres away. Hold the high-detail blade LOD long enough
+            // for those individual tufts to read in the shot.
+            lod_distances: [100.0, 220.0, 450.0, 900.0],
+            wind_response: [0.7, 0.4, 0.8],
+            interaction_stiffness: 1.0,
+            ground_mask: 1 << helio_pass_voxel_planet::terrain::material::GRASS,
+            density_layer: 0,
+            kind_and_flags: pack_kind_and_flags(
+                FoliageKind::Blade,
+                FOLIAGE_FLAG_TWO_SIDED | FOLIAGE_FLAG_GROUND_COLOUR,
+            ),
+            lean_range: [0.08, 0.45],
+            curve: 0.35,
+            fall_chance: 0.08,
+            ..GpuFoliageType::default()
+        };
+        shoreline_blades.set_blades_per_tuft([6, 10]);
+        shoreline_blades.set_material(Some(FoliageMaterial {
+            base_color: [0.24, 0.42, 0.12],
+            roughness: 0.86,
+            metallic: 0.0,
+        }));
+        let blade_entity = scene.world.spawn();
+        scene
+            .world
+            .insert(blade_entity, FoliageTypeComponent::from(shoreline_blades));
         let wind = scene.world.spawn();
         scene.world.insert(wind, meadow.wind);
 
@@ -187,22 +267,22 @@ impl Showcase {
         // Ultra-Water OceanSurface defaults. Helio's row maps medium scatter
         // to water_color.rgb, absorption to extinction.rgb, foam bias/scale
         // to water_color.w/extinction.w, refraction to reflection_refraction.y,
-        // foam brightness to reflection_refraction.w, and exponential depth
-        // fog to fog_params.x. wave_params carries the closest amplitude / 
-        // wavelength / speed / steepness values for uShoreWave; the current
-        // Helio shoreline train already uses the same 0.55 / 30 / 1 / 1 defaults.
+        // and foam brightness to reflection_refraction.w. wave_params carries
+        // the nearest amplitude / wavelength / speed / steepness values for
+        // uShoreWave; its contact film uses the JS .35 m band directly.
         water.water_color = [0.0, 0.05, 0.08, 0.05];
         water.extinction = [0.42, 0.075, 0.048, 1.3];
         water.reflection_refraction[1] = 0.06;
         water.reflection_refraction[3] = 0.85;
         water.fog_params[0] = 1.0 / 18_000.0;
         // No direct WaterVolume equivalents exist for uSSS, uOptics roughness
-        // or underwater-window distortion, the foam tint, or the uFoam shore
-        // band (whose default .35 is already the shoreline shader's floor).
-        // Keep Helio's independent caustics, refraction and Fresnel defaults.
+        // or underwater-window distortion, or the foam tint. Keep Helio's
+        // independent caustics, refraction and Fresnel defaults.
         water.wind_params = [0.939_692_6, 0.342_020_15, 9.0, 1.0];
         let water_entity = scene.world.spawn();
-        scene.world.insert(water_entity, WaterVolumeComponent::from(water));
+        scene
+            .world
+            .insert(water_entity, WaterVolumeComponent::from(water));
 
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
@@ -213,11 +293,7 @@ impl Showcase {
             pass.set_appearance(Some(appearance));
             Box::new(pass)
         });
-        let mut renderer_config = RendererConfig::new(
-            size[0],
-            size[1],
-            format,
-        );
+        let mut renderer_config = RendererConfig::new(size[0], size[1], format);
         renderer_config.enable_foliage = true;
         renderer_config.foliage_tufts_per_m2 = Some(meadow.tufts_per_m2 * 1.4);
         renderer_config.foliage_blades_per_tuft = Some(meadow.blades_per_tuft);
@@ -245,8 +321,6 @@ impl Showcase {
             helio_pass_postprocess::CameraPostProcessComponent::new(0, &post),
         );
         scene.world.flush_gpu_mirror(&queue);
-        std::mem::forget(scene);
-
         if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
             sim.set_shore_map_from_voxel_planet(
                 [0.0, 0.0],
@@ -332,11 +406,12 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
                 .into(),
             ),
         });
-        let present_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("water world present pipeline layout"),
-            bind_group_layouts: &[Some(&present_layout)],
-            immediate_size: 0,
-        });
+        let present_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("water world present pipeline layout"),
+                bind_group_layouts: &[Some(&present_layout)],
+                immediate_size: 0,
+            });
         let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("water world present pipeline"),
             layout: Some(&present_pipeline_layout),
@@ -368,6 +443,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             renderer,
             source,
             planet,
+            scene,
+            sun_entity,
+            sun_preset: "coast".to_owned(),
             target,
             target_view,
             size,
@@ -378,8 +456,28 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         }
     }
 
-    fn draw(&mut self, eye: DVec3, forward: Vec3) {
-        let sun = Vec3::new(-0.42, 0.78, 0.46).normalize();
+    fn draw(&mut self, eye: DVec3, forward: Vec3, preset: &str) {
+        if self.sun_preset != preset {
+            let elevation = match preset {
+                "coast" => 52.0,      // Lagoon
+                "shoreline" => 22.0,  // Breakers
+                "underwater" => 22.0, // lit shallow reef
+                _ => 22.0,
+            };
+            self.scene.world.insert(
+                self.sun_entity,
+                helio_pass_forward_lit::LightComponent::from(directional_sun(205.0, elevation)),
+            );
+            self.scene.world.flush_gpu_mirror(&self.queue);
+            self.sun_preset = preset.to_owned();
+        }
+        let sun = sun_direction(
+            205.0,
+            match preset {
+                "coast" => 52.0,
+                _ => 22.0,
+            },
+        );
         *self.source.lock().expect("planet frame lock") =
             Some(PlanetFrame::single(eye, self.planet.clone(), sun));
         let forward = forward.normalize();
@@ -466,7 +564,9 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             self.target.size(),
         );
         self.queue.submit([encoder.finish()]);
-        buffer.slice(..).map_async(wgpu::MapMode::Read, |result| result.unwrap());
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |result| result.unwrap());
         self.device
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("wait for showcase capture");
@@ -478,8 +578,10 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             .chunks(row as usize)
             .flat_map(|line| line[..self.size[0] as usize * 4].to_vec())
             .collect();
-        if matches!(self.format, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm)
-        {
+        if matches!(
+            self.format,
+            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
+        ) {
             for pixel in pixels.chunks_exact_mut(4) {
                 pixel.swap(0, 2);
             }
@@ -514,27 +616,58 @@ struct AppState {
     preset: String,
     capture_requested: bool,
     capture_countdown: Option<u32>,
+    capture_stable_frames: u32,
+    camera_eye: DVec3,
+    camera_yaw: f32,
+    camera_pitch: f32,
+    move_keys: HashSet<KeyCode>,
+    cursor_captured: bool,
+    skip_mouse_delta: bool,
+    last_frame: Instant,
 }
 
 impl AppState {
     fn set_preset(&mut self, preset: &str) {
         self.preset = preset.to_owned();
+        let (eye, forward) = preset_view(preset);
+        let forward = forward.normalize();
+        self.camera_eye = eye;
+        self.camera_yaw = forward.z.atan2(forward.x);
+        self.camera_pitch = forward.y.asin();
         self.window.set_title(&format!(
-            "Helio Water World — {}  |  1 Coast · 2 Shoreline · 3 Underwater · Space Splash · C Capture",
+            "Helio Water World — {}  |  1/2/3 Views · Click Capture · WASD Fly · Q/E Vertical · Space Splash · C Capture",
             preset
         ));
     }
 
     fn draw(&mut self, output: &Path) -> bool {
-        let (eye, forward) = preset_view(&self.preset);
-        self.showcase.draw(eye, forward);
+        self.update_camera();
+        self.showcase
+            .draw(self.camera_eye, self.camera_forward(), &self.preset);
         let mut capture_now = self.capture_requested;
-        if let Some(frames) = self.capture_countdown.as_mut() {
-            if *frames <= 1 {
+        if let Some(frames_left) = self.capture_countdown {
+            let terrain_ready =
+                self.showcase
+                    .renderer
+                    .find_pass::<ChunkPass>()
+                    .is_some_and(|pass| {
+                        pass.stats().requests == 0 && pass.stats().coarse_share <= 0.02
+                    });
+            let foliage_ready = self
+                .showcase
+                .renderer
+                .find_pass::<FoliagePlacePass>()
+                .is_some_and(|pass| pass.queued_tile_count() == 0 && pass.commands_recorded() > 0);
+            if terrain_ready && foliage_ready {
+                self.capture_stable_frames += 1;
+            } else {
+                self.capture_stable_frames = 0;
+            }
+            if self.capture_stable_frames >= 30 || frames_left <= 1 {
                 self.capture_countdown = None;
                 capture_now = true;
             } else {
-                *frames -= 1;
+                self.capture_countdown = Some(frames_left - 1);
             }
         }
         let frame = match self.surface.get_current_texture() {
@@ -555,29 +688,123 @@ impl AppState {
         self.showcase.queue.present(frame);
         if capture_now {
             std::fs::create_dir_all(output).expect("create capture output directory");
+            if let Some(foliage) = self.showcase.renderer.find_pass::<FoliagePlacePass>() {
+                eprintln!(
+                    "WATER_WORLD_FOLIAGE placed_tiles={} queued_tiles={} commands={} counters={:?}",
+                    foliage.placed_tile_count(),
+                    foliage.queued_tile_count(),
+                    foliage.commands_recorded(),
+                    foliage.debug_counters(),
+                );
+            }
+            if let Some(chunks) = self.showcase.renderer.find_pass::<ChunkPass>() {
+                eprintln!("WATER_WORLD_CHUNKS {}", chunks.diagnostics());
+            }
             self.showcase.save(output, &self.preset);
             self.capture_requested = false;
             return true;
         }
         false
     }
+
+    fn camera_forward(&self) -> Vec3 {
+        let (yaw, pitch) = (self.camera_yaw, self.camera_pitch);
+        Vec3::new(
+            yaw.cos() * pitch.cos(),
+            pitch.sin(),
+            yaw.sin() * pitch.cos(),
+        )
+    }
+
+    fn update_camera(&mut self) {
+        let now = Instant::now();
+        let dt = now
+            .duration_since(self.last_frame)
+            .as_secs_f32()
+            .clamp(0.0, 0.1);
+        self.last_frame = now;
+        let forward = self.camera_forward();
+        let right = Vec3::Y.cross(forward).normalize_or_zero();
+        let mut movement = Vec3::ZERO;
+        if self.move_keys.contains(&KeyCode::KeyW) {
+            movement += forward;
+        }
+        if self.move_keys.contains(&KeyCode::KeyS) {
+            movement -= forward;
+        }
+        if self.move_keys.contains(&KeyCode::KeyD) {
+            movement += right;
+        }
+        if self.move_keys.contains(&KeyCode::KeyA) {
+            movement -= right;
+        }
+        if self.move_keys.contains(&KeyCode::KeyE) {
+            movement.y += 1.0;
+        }
+        if self.move_keys.contains(&KeyCode::KeyQ) {
+            movement.y -= 1.0;
+        }
+        if movement.length_squared() > 0.0 {
+            let speed = if self.move_keys.contains(&KeyCode::ShiftLeft) {
+                360.0
+            } else {
+                90.0
+            };
+            self.camera_eye += (movement.normalize() * speed * dt).as_dvec3();
+        }
+    }
 }
 
 fn preset_view(preset: &str) -> (DVec3, Vec3) {
     match preset {
+        // Lagoon overview: offshore and high enough to read the broad island
+        // silhouette, with a level sightline that leaves animated sea in front.
         "coast" => (
-            DVec3::new(-980.0, 115.0, -1_240.0),
-            Vec3::new(0.62, -0.025, 0.78),
+            DVec3::new(-1_060.7, 9.0, -1_060.7),
+            Vec3::new(0.707, -0.03, 0.707),
         ),
+        // Breakers source framing: place the camera 35 m offshore and 40 m
+        // along the coast, then look 30 m back along shore. This keeps open
+        // water, the beach line and the sloped meadow in one frame instead of
+        // aiming through the island centre.
         "shoreline" => (
-            DVec3::new(-210.0, 36.0, -220.0),
-            Vec3::new(-0.68, -0.12, 0.72),
+            DVec3::new(-229.4, 3.2, -286.0),
+            Vec3::new(-0.317, -0.041, 0.948),
         ),
+        // Shallow underwater reef shot, looking up the nearby island slope.
         "underwater" => (
-            DVec3::new(-1_120.0, -28.0, -1_060.0),
-            Vec3::new(0.68, 0.035, 0.73),
+            DVec3::new(-318.2, -3.2, -318.2),
+            Vec3::new(0.68, 0.22, 0.71),
         ),
         other => panic!("unknown preset {other}; use coast, shoreline, or underwater"),
+    }
+}
+
+fn sun_direction(azimuth_degrees: f32, elevation_degrees: f32) -> Vec3 {
+    let azimuth = azimuth_degrees.to_radians();
+    let elevation = elevation_degrees.to_radians();
+    Vec3::new(
+        azimuth.sin() * elevation.cos(),
+        elevation.sin(),
+        azimuth.cos() * elevation.cos(),
+    )
+    .normalize()
+}
+
+fn directional_sun(azimuth_degrees: f32, elevation_degrees: f32) -> helio::GpuLight {
+    let direction = sun_direction(azimuth_degrees, elevation_degrees);
+    helio::GpuLight {
+        position_range: [0.0, 0.0, 0.0, f32::MAX],
+        direction_outer: [-direction.x, -direction.y, -direction.z, 0.0],
+        color_intensity: [1.0, 1.0, 1.0, 3.0],
+        shadow_index: u32::MAX,
+        light_type: helio::LightType::Directional as u32,
+        god_rays_enabled: 1,
+        god_rays_density: 1.0,
+        god_rays_weight: 1.0,
+        god_rays_exposure: 1.0,
+        god_rays_decay: 1.0,
+        ..Default::default()
     }
 }
 
@@ -619,7 +846,15 @@ impl ApplicationHandler for App {
             showcase,
             preset: "coast".to_owned(),
             capture_requested: false,
-            capture_countdown: self.capture_on_start.then_some(120),
+            capture_countdown: self.capture_on_start.then_some(900),
+            capture_stable_frames: 0,
+            camera_eye: DVec3::ZERO,
+            camera_yaw: 0.0,
+            camera_pitch: 0.0,
+            move_keys: HashSet::new(),
+            cursor_captured: false,
+            skip_mouse_delta: false,
+            last_frame: Instant::now(),
         };
         state.set_preset(&self.initial_preset);
         self.state = Some(state);
@@ -629,37 +864,72 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if !state.cursor_captured => {
+                if state
+                    .window
+                    .set_cursor_grab(CursorGrabMode::Locked)
+                    .is_err()
+                {
+                    let _ = state.window.set_cursor_grab(CursorGrabMode::Confined);
+                }
+                state.window.set_cursor_visible(false);
+                state.cursor_captured = true;
+                state.skip_mouse_delta = true;
+            }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 state.surface_config.width = size.width;
                 state.surface_config.height = size.height;
-                state.surface.configure(&state.device, &state.surface_config);
+                state
+                    .surface
+                    .configure(&state.device, &state.surface_config);
             }
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
-                        state: ElementState::Pressed,
+                        state: key_state,
                         physical_key: PhysicalKey::Code(key),
-                        repeat: false,
+                        repeat,
                         ..
                     },
                 ..
-            } => match key {
-                KeyCode::Escape => event_loop.exit(),
-                KeyCode::Digit1 => state.set_preset("coast"),
-                KeyCode::Digit2 => state.set_preset("shoreline"),
-                KeyCode::Digit3 => state.set_preset("underwater"),
-                KeyCode::KeyC => state.capture_requested = true,
-                KeyCode::Space => {
-                    if let Some(sim) = state.showcase.renderer.find_pass_mut::<WaterSimPass>() {
-                let _ = sim.add_spray_impact(
-                            DVec3::new(-350.0, REST_Y, -500.0),
-                            0.9,
-                            1.7,
-                        );
+            } => {
+                if key_state == ElementState::Pressed {
+                    state.move_keys.insert(key);
+                    if !repeat {
+                        match key {
+                            KeyCode::Escape if state.cursor_captured => {
+                                let _ = state.window.set_cursor_grab(CursorGrabMode::None);
+                                state.window.set_cursor_visible(true);
+                                state.cursor_captured = false;
+                                state.move_keys.clear();
+                            }
+                            KeyCode::Escape => event_loop.exit(),
+                            KeyCode::Digit1 => state.set_preset("coast"),
+                            KeyCode::Digit2 => state.set_preset("shoreline"),
+                            KeyCode::Digit3 => state.set_preset("underwater"),
+                            KeyCode::KeyC => state.capture_requested = true,
+                            KeyCode::Space => {
+                                if let Some(sim) =
+                                    state.showcase.renderer.find_pass_mut::<WaterSimPass>()
+                                {
+                                    let _ = sim.add_spray_impact(
+                                        DVec3::new(-350.0, REST_Y, -500.0),
+                                        0.9,
+                                        1.7,
+                                    );
+                                }
+                            }
+                            _ => {}
+                        }
                     }
+                } else {
+                    state.move_keys.remove(&key);
                 }
-                _ => {}
-            },
+            }
             WindowEvent::RedrawRequested => {
                 let captured = state.draw(&self.output);
                 if captured && self.exit_after_capture {
@@ -675,6 +945,27 @@ impl ApplicationHandler for App {
         if let Some(state) = &self.state {
             state.window.request_redraw();
         }
+    }
+
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device_id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
+        let Some(state) = &mut self.state else { return };
+        let DeviceEvent::MouseMotion { delta } = event else {
+            return;
+        };
+        if !state.cursor_captured {
+            return;
+        }
+        if state.skip_mouse_delta {
+            state.skip_mouse_delta = false;
+            return;
+        }
+        state.camera_yaw += delta.0 as f32 * 0.0025;
+        state.camera_pitch = (state.camera_pitch - delta.1 as f32 * 0.0025).clamp(-1.52, 1.52);
     }
 }
 
