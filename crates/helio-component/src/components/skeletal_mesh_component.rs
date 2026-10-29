@@ -3,6 +3,23 @@
 //! The asset files are addressed by typed stable ids. SceneDB owns the loaded
 //! mesh, skeleton and clip payloads; the component mirrors the vertex skin
 //! stream and the current joint palette into the renderer's shared GPU scene.
+//!
+//! # Animation
+//!
+//! The component is the player. It owns one [`AnimInstance`] (graph state,
+//! parameters, Montage instances, evaluated and previous pose); the compiled
+//! graph and every compiled clip are shared with other components. A component
+//! that only names a single sequence (scenes from before the graph runtime) plays
+//! it through a compiled one-node graph in that same instance, never a second
+//! player.
+//!
+//! Per frame the engine runs the **animation phase** ([`run_animation_phase`])
+//! before the ECS schedule, so the articulated-physics rig reads this frame's
+//! pose. Parameters and Montage commands written by gameplay or scripts later in
+//! the frame take effect in the next frame's animation phase. While the physics
+//! rig owns the pose ([`SkeletalMeshComponent::apply_physics_pose`]) the
+//! animation clock is held; clearing physics ownership resumes from the pose the
+//! animation had.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,14 +30,21 @@ use engine_class_derive::{
 };
 use helio::PackedVertex;
 use pulsar_reflection::{
-    AnimationSequenceAssetKind, AssetKind, AssetRef, ScenePropsProjector, SkeletalMeshAssetKind,
-    SkeletonAssetKind,
+    AnimationGraphAssetKind, AnimationMontageAssetKind, AnimationSequenceAssetKind, AssetKind,
+    AssetRef, ScenePropsProjector, SkeletalMeshAssetKind, SkeletonAssetKind,
 };
 use pulsar_scenedb::{AssetId, AssetPayload, AssetView};
-use skeletal_assets::diagnostics::Diagnostic;
 use serde_json::Value;
+use skeletal_assets::diagnostics::Diagnostic;
+use skeletal_assets::runtime::anim_instance::{single_sequence_graph, AnimInstance};
+use skeletal_assets::runtime::clip::CompiledClip;
+use skeletal_assets::runtime::graph::compile::{compile_graph, compile_montage};
+use skeletal_assets::runtime::graph::{CompiledGraph, ParamError, Value as AnimValue};
+use skeletal_assets::runtime::montage::{CompiledMontage, MontageEvent, MontageHandle, PlayRefused};
+use skeletal_assets::runtime::pose::RuntimeSkeleton;
 use std::collections::HashMap;
 
+use crate::anim_source::ProjectAnimSource;
 use crate::components::{MeshGeometryKey, MeshSectionDraw, StaticMeshDraw};
 use crate::mesh_cache::MeshSection;
 
@@ -30,12 +54,13 @@ pub use notifies::{
     AnimationNotifyCatalog, AnimationNotifyDiagnostic, AnimationNotifyEvent,
     SkeletalAnimationEvents, SkeletalAnimationEventsEventWriterExt, animation_notify_descriptor,
     animation_source_for_file, flush_animation_notifies, project_animation_notify_events,
-    register_animation_notifies, register_loaded_animation_notifies,
+    component_animation_notify_events, register_animation_notifies, register_loaded_animation_notifies, run_animation_phase,
 };
 
 pub const SKELETAL_MESH_ASSET_KIND: &str = "skmesh";
 pub const SKELETON_ASSET_KIND: &str = "skeleton";
 pub const ANIMATION_SEQUENCE_ASSET_KIND: &str = "animseq";
+pub const ANIMATION_GRAPH_ASSET_KIND: &str = "anim_graph";
 pub const SKELETAL_SKIN_VERTICES_BUFFER: &str = "skeletal_skin_vertices";
 pub const SKELETAL_BONE_PALETTE_BUFFER: &str = "skeletal_bone_palette";
 pub const SKELETAL_PREVIOUS_BONE_PALETTE_BUFFER: &str = "skeletal_previous_bone_palette";
@@ -58,6 +83,45 @@ pub struct LoadedSkeletalMesh(pub Arc<skeletal_assets::skmesh::SkeletalMeshAsset
 pub struct LoadedSkeleton(pub Arc<skeletal_assets::assets::SkeletonAsset>);
 #[derive(Clone)]
 pub struct LoadedAnimationSequence(pub Arc<skeletal_assets::assets::AnimSeqAsset>);
+/// A compiled animation graph, or the reasons it could not be compiled.
+#[derive(Clone)]
+pub struct LoadedAnimationGraph {
+    pub graph: Option<Arc<CompiledGraph>>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Which loaded assets the current animation instance was built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RuntimeKey {
+    skeleton: usize,
+    graph: usize,
+    animation: usize,
+    looping: bool,
+}
+
+fn ptr_of<T>(value: &Option<Arc<T>>) -> usize {
+    value.as_ref().map_or(0, |a| Arc::as_ptr(a) as usize)
+}
+
+/// Mutable animation state of one component. Never serialized or cloned: a
+/// duplicated component starts its own playback.
+#[derive(Debug, Default)]
+pub(crate) struct AnimRuntime {
+    instance: Option<AnimInstance>,
+    skeleton: Option<Arc<RuntimeSkeleton>>,
+    skeleton_source: usize,
+    key: Option<RuntimeKey>,
+    /// The first animation phase of this live period has run.
+    started: bool,
+    montages: HashMap<String, Arc<CompiledMontage>>,
+    montage_events: Vec<MontageEvent>,
+}
+
+impl Clone for AnimRuntime {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
 
 /// A skinned mesh placed in the scene. The authored links are typed UUIDs;
 /// loaded data and GPU-ready geometry are derived and never serialized.
@@ -73,11 +137,21 @@ pub struct LoadedAnimationSequence(pub Arc<skeletal_assets::assets::AnimSeqAsset
 #[scene_store(collect_handles = crate::components::collect_skeletal_assets)]
 pub struct SkeletalMeshComponent {
     pub mesh: Option<AssetRef<SkeletalMeshAssetKind>>,
-    pub animation: Option<AssetRef<AnimationSequenceAssetKind>>,
+    /// The Animation Graph this component runs. The one authored animation source.
+    #[serde(default)]
+    pub animation_graph: Option<AssetRef<AnimationGraphAssetKind>>,
+    /// Compatibility, one release: scenes saved before the graph runtime named a
+    /// single sequence here. It decodes into the component's internal
+    /// single-sequence player (runtime state, not a second authored system) and is
+    /// still written back under the same key so no scene loses its animation. It
+    /// is removed when the one-release window closes.
+    #[serde(default, rename = "animation", skip_serializing_if = "Option::is_none")]
+    legacy_animation: Option<AssetRef<AnimationSequenceAssetKind>>,
+    #[serde(default, rename = "looping", skip_serializing_if = "is_false")]
+    legacy_looping: bool,
+    /// Play or pause the whole animation instance (graph, Montages, internal player).
     #[serde(default)]
     pub playing: bool,
-    #[serde(default)]
-    pub looping: bool,
     #[serde(default = "default_playback_rate")]
     pub playback_rate: f32,
 
@@ -100,15 +174,29 @@ pub struct SkeletalMeshComponent {
     #[serde(skip)]
     pub animation_asset_id: AssetId,
     #[serde(skip)]
+    pub animation_graph_id: AssetId,
+    #[serde(skip)]
     pub loaded_mesh: Option<Arc<skeletal_assets::skmesh::SkeletalMeshAsset>>,
     #[serde(skip)]
     pub loaded_skeleton: Option<Arc<skeletal_assets::assets::SkeletonAsset>>,
+    /// The sequence of the internal single-sequence player.
     #[serde(skip)]
     pub loaded_animation: Option<Arc<skeletal_assets::assets::AnimSeqAsset>>,
+    /// The compiled graph for `animation_graph`, shared with every component running it.
+    #[serde(skip)]
+    pub loaded_graph: Option<Arc<CompiledGraph>>,
+    /// Compile problems of the graph, recomputed whenever it is (re)bound.
+    #[serde(skip)]
+    pub graph_diagnostics: Vec<Diagnostic>,
+    /// Phase of the internal single-sequence player within its clip, for
+    /// inspection and the physics handoff. Read-only: seek with `seek_animation`.
     #[serde(skip)]
     pub elapsed_seconds: f32,
     #[serde(skip)]
     notify_playback: notifies::NotifyPlayback,
+    /// Per-component animation state: the instance, parameters and Montages.
+    #[serde(skip)]
+    anim: AnimRuntime,
     /// Evaluated parent-composed transforms in skeleton-local space, ordered
     /// exactly like `loaded_skeleton.bones`. These are pre-inverse-bind and
     /// intended for runtime consumers such as articulated physics bodies.
@@ -144,6 +232,10 @@ pub struct SkeletalMeshComponent {
     pub gpu_bone_palettes: Vec<[[f32; 4]; 4]>,
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 fn default_playback_rate() -> f32 {
     1.0
 }
@@ -155,6 +247,7 @@ impl ScenePropsProjector for SkeletalMeshComponent {
         props.remove("mesh");
         props.remove("skeleton");
         props.remove("animation");
+        props.remove("looping");
     }
 }
 
@@ -171,21 +264,74 @@ impl SkeletalMeshComponent {
         self.mesh_asset_id = asset_id_for_ref(self.mesh.as_ref());
         self.mesh_skeleton = mesh_skeleton_ref(self.mesh.as_ref());
         self.skeleton_asset_id = asset_id_for_ref(self.mesh_skeleton.as_ref());
-        self.animation_asset_id = asset_id_for_ref(self.animation.as_ref());
+        self.animation_asset_id = asset_id_for_ref(self.legacy_animation.as_ref());
+        self.animation_graph_id = asset_id_for_ref(self.animation_graph.as_ref());
         if self.mesh_asset_id.is_zero() {
             self.clear_mesh();
+        }
+        if self.animation_graph_id.is_zero() {
+            self.loaded_graph = None;
+            self.graph_diagnostics.clear();
+        }
+        if self.animation_asset_id.is_zero() {
+            self.loaded_animation = None;
         }
         self.refresh_pose();
         self.refresh_diagnostics();
     }
 
-    /// Advance playback and refresh the GPU joint palette. Called by the
-    /// runtime component tick once the scene lifecycle wires this component.
+    /// Advance the animation by `delta_seconds` and refresh the pose and palette.
+    /// The engine calls this from [`run_animation_phase`] once per frame.
     pub fn advance(&mut self, delta_seconds: f32) {
         if let Err(error) = self.advance_notifies(delta_seconds) {
             self.playing = false;
             tracing::warn!(%error, "could not advance skeletal animation");
         }
+    }
+
+    /// One animation-phase step: begin playback on the first live frame, hold while
+    /// notify events wait for delivery, otherwise advance.
+    pub(crate) fn animation_phase_step(&mut self, delta_seconds: f32) {
+        if !self.anim.started {
+            self.begin_notify_playback();
+            self.anim.started = true;
+        }
+        if self.notify_playback.has_pending() {
+            return;
+        }
+        self.advance(delta_seconds);
+    }
+
+    /// The component left the live set (disabled or its owner is gone).
+    pub(crate) fn animation_phase_stopped(&mut self) {
+        self.anim.started = false;
+        self.notify_playback.clear_pending();
+        self.anim.montage_events.extend(
+            self.anim
+                .instance
+                .as_mut()
+                .map(|i| {
+                    i.shutdown();
+                    std::mem::take(&mut i.report.montage_events)
+                })
+                .unwrap_or_default(),
+        );
+        // a re-enabled component rebuilds its instance
+        self.anim.instance = None;
+        self.anim.key = None;
+    }
+
+    fn internal_looping(&self) -> bool {
+        self.legacy_looping
+    }
+
+    /// Start (or replace) the internal single-sequence player. The reference is
+    /// kept under the compatibility key so it survives a save.
+    pub fn play_sequence(&mut self, sequence: Option<AssetRef<AnimationSequenceAssetKind>>, looping: bool) {
+        self.legacy_animation = sequence;
+        self.legacy_looping = looping;
+        self.attach_assets();
+        self.playing = self.legacy_animation.is_some();
     }
 
     fn clear_mesh(&mut self) {
@@ -251,7 +397,82 @@ impl SkeletalMeshComponent {
         self.geometry_key = MeshGeometryKey(key);
     }
 
+    /// Bring the animation instance in line with the loaded assets. Returns
+    /// whether a new playback started (the assets changed): unaccepted notify
+    /// events of the old playback are discarded then.
+    pub(super) fn ensure_runtime(&mut self) -> bool {
+        let key = RuntimeKey {
+            skeleton: ptr_of(&self.loaded_skeleton),
+            graph: ptr_of(&self.loaded_graph),
+            animation: ptr_of(&self.loaded_animation),
+            looping: self.legacy_looping,
+        };
+        if self.anim.key == Some(key) && self.anim.instance.is_some() {
+            return false;
+        }
+        let previous = self.anim.key;
+        // the runtime skeleton: the mesh's, or an empty one so an animation can
+        // still run its clock (and notifies) before a mesh has loaded
+        if self.anim.skeleton.is_none() || self.anim.skeleton_source != key.skeleton {
+            let built = self.loaded_skeleton.as_ref().and_then(|asset| {
+                RuntimeSkeleton::new(asset.id.as_str(), &asset.skeleton())
+                    .map_err(|error| tracing::warn!(%error, "the skeleton cannot be used for animation"))
+                    .ok()
+            });
+            let empty = || RuntimeSkeleton::new("", &skeletal_assets::skeleton::Skeleton::default()).expect("empty skeleton");
+            self.anim.skeleton = Some(Arc::new(built.unwrap_or_else(empty)));
+            self.anim.skeleton_source = key.skeleton;
+            self.anim.montages.clear();
+        }
+        let skeleton = self.anim.skeleton.clone().expect("set above");
+
+        let mut chosen: Option<Arc<CompiledGraph>> = None;
+        let mut single = false;
+        if let Some(graph) = &self.loaded_graph {
+            if graph.skeleton.id == skeleton.id {
+                chosen = Some(graph.clone());
+            }
+        }
+        if chosen.is_none() {
+            if let Some(sequence) = &self.loaded_animation {
+                let fits = skeleton.is_empty() || sequence.skeleton.as_ref().is_none_or(|id| id.as_str() == skeleton.id);
+                if fits {
+                    let clip = Arc::new(CompiledClip::compile_shared(sequence, &skeleton));
+                    chosen = Some(single_sequence_graph(skeleton.clone(), clip, self.legacy_looping));
+                    single = true;
+                }
+            }
+        }
+        let same_skeleton = previous.is_some_and(|p| p.skeleton == key.skeleton);
+        let sequence_replaced = single && previous.is_none_or(|p| p.animation != key.animation);
+        let mut instance = match self.anim.instance.take() {
+            Some(existing) if same_skeleton && !sequence_replaced => existing,
+            _ => AnimInstance::new(skeleton.clone()),
+        };
+        match chosen {
+            Some(graph) => {
+                if let Err(error) = instance.set_graph(graph) {
+                    tracing::warn!(%error, "animation graph refused");
+                    instance = AnimInstance::new(skeleton);
+                }
+            }
+            None => instance.clear_graph(),
+        }
+        instance.refresh();
+        if single {
+            self.elapsed_seconds = 0.0;
+        }
+        self.anim.instance = Some(instance);
+        self.anim.key = Some(key);
+        self.notify_playback.clear_pending();
+        self.notify_playback.next_generation();
+        true
+    }
+
+    /// Publish the animation instance's current pose: the physics-facing
+    /// mesh-space transforms and the current/previous GPU skin palettes.
     fn refresh_pose(&mut self) {
+        self.ensure_runtime();
         let (Some(mesh), Some(skeleton)) = (&self.loaded_mesh, &self.loaded_skeleton) else {
             self.bone_palette.clear();
             self.gpu_bone_palettes.clear();
@@ -269,33 +490,21 @@ impl SkeletalMeshComponent {
             self.bone_world_pose.clear();
             return;
         }
-        let skeleton = skeleton.skeleton();
-        let clip = self
-            .loaded_animation
-            .as_ref()
-            .filter(|animation| {
-                animation.skeleton.as_ref().is_none_or(|id| {
-                    id.as_str() == skeleton_id(self.mesh_skeleton.as_ref()).as_deref().unwrap_or("")
-                })
-            })
-            .map(|animation| &animation.clip);
-        let bind_pose = skeletal_assets::animation::AnimationClip::bind_pose();
-        let clip = clip.unwrap_or(&bind_pose);
-        let world = skeletal_assets::animation::evaluate_world_transforms(
-            &skeleton,
-            clip,
-            self.elapsed_seconds,
-        );
-        self.bone_world_pose = skeleton
-            .bones
+        let (Some(instance), Some(runtime)) = (&self.anim.instance, &self.anim.skeleton) else { return };
+        let pose = instance.pose().clone();
+        if pose.bones.len() != runtime.len() {
+            self.bone_palette.clear();
+            self.gpu_bone_palettes.clear();
+            self.bone_world_pose.clear();
+            return;
+        }
+        let mesh_space = runtime.to_mesh_space(&pose.bones);
+        self.bone_world_pose = mesh_space.iter().map(|m| m.to_cols_array_2d()).collect();
+        let world: HashMap<_, _> = runtime
+            .ids
             .iter()
-            .map(|bone| {
-                let matrix = world
-                    .get(&bone.id)
-                    .copied()
-                    .unwrap_or(skeletal_assets::math::Mat4::IDENTITY);
-                glam::Mat4::from_cols_array(&matrix.0).to_cols_array_2d()
-            })
+            .zip(&mesh_space)
+            .map(|(id, m)| (id.clone(), skeletal_assets::math::Mat4(m.to_cols_array())))
             .collect();
         let palette = skeletal_assets::skinning::joint_matrices(mesh, &world);
         self.set_palette(
@@ -314,8 +523,30 @@ impl SkeletalMeshComponent {
             self.mesh_skeleton.as_ref(),
             self.legacy_skeleton.as_ref(),
             self.loaded_animation.as_deref().and_then(|a| a.skeleton.as_ref()).map(|id| id.as_str().to_string()),
-            self.animation.is_some(),
+            self.legacy_animation.is_some(),
         );
+        self.diagnostics.extend(self.graph_diagnostics.iter().cloned());
+        if self.animation_graph.is_some() && self.loaded_graph.is_some() {
+            if self.legacy_animation.is_some() {
+                self.diagnostics.push(
+                    Diagnostic::warning(
+                        "component.sequence_shadowed_by_graph",
+                        "The component names an animation graph and an old single sequence; the graph plays and the sequence is ignored",
+                    )
+                    .at("animation")
+                    .repair("Remove the single sequence or use it inside the graph"),
+                );
+            }
+            if let (Some(graph), Some(skeleton)) = (&self.loaded_graph, &self.mesh_skeleton) {
+                if graph.skeleton.id != skeleton.as_str() {
+                    self.diagnostics.push(
+                        Diagnostic::error("component.graph_skeleton_mismatch", "The animation graph is for a different skeleton than the mesh, so it is not run")
+                            .at("animation_graph")
+                            .repair("Pick a graph made for the mesh's skeleton"),
+                    );
+                }
+            }
+        }
         for d in &self.diagnostics {
             tracing::warn!(code = d.code, "{}", d.message);
         }
@@ -378,6 +609,112 @@ impl SkeletalMeshComponent {
     pub fn clear_physics_pose(&mut self) {
         self.physics_pose_active = false;
         self.refresh_pose();
+    }
+
+    // ---- gameplay API: parameters and Montages ---------------------------------------
+
+    /// The component's animation instance (graph state, parameters, Montages, pose).
+    pub fn animation(&self) -> Option<&AnimInstance> {
+        self.anim.instance.as_ref()
+    }
+
+    /// Write a graph parameter. Names and types are validated against the running
+    /// graph; the value is read by the next animation phase.
+    pub fn set_animation_parameter(&mut self, name: &str, value: AnimValue) -> Result<(), ParamError> {
+        self.ensure_runtime();
+        match self.anim.instance.as_mut() {
+            Some(instance) => instance.set_parameter(name, value),
+            None => Err(ParamError::Unknown(name.to_string())),
+        }
+    }
+
+    pub fn set_animation_float(&mut self, name: &str, value: f32) -> Result<(), ParamError> {
+        self.set_animation_parameter(name, AnimValue::Float(value))
+    }
+    pub fn set_animation_bool(&mut self, name: &str, value: bool) -> Result<(), ParamError> {
+        self.set_animation_parameter(name, AnimValue::Bool(value))
+    }
+    pub fn set_animation_int(&mut self, name: &str, value: i32) -> Result<(), ParamError> {
+        self.set_animation_parameter(name, AnimValue::Int(value))
+    }
+    pub fn set_animation_vector(&mut self, name: &str, value: [f32; 3]) -> Result<(), ParamError> {
+        self.set_animation_parameter(name, AnimValue::Vector(glam::Vec3::from_array(value)))
+    }
+
+    /// Play a Montage asset on this component. The montage is compiled for the
+    /// mesh's skeleton on first use and cached. Reads project files on a cache miss.
+    pub fn play_montage(
+        &mut self,
+        montage: &AssetRef<AnimationMontageAssetKind>,
+        rate: f32,
+        section: Option<&str>,
+    ) -> Result<MontageHandle, String> {
+        self.ensure_runtime();
+        let skeleton = self.anim.skeleton.clone().ok_or("the component has no skeleton to pose")?;
+        let compiled = match self.anim.montages.get(montage.as_str()) {
+            Some(m) => m.clone(),
+            None => {
+                let source = ProjectAnimSource::open().ok_or("no project is open")?;
+                let m = compile_montage(montage.as_str(), &skeleton, &source)
+                    .map_err(|d| d.into_iter().map(|d| d.message).collect::<Vec<_>>().join("; "))?;
+                self.anim.montages.insert(montage.as_str().to_string(), m.clone());
+                m
+            }
+        };
+        self.play_compiled_montage(compiled, rate, section).map_err(|e| format!("{e:?}"))
+    }
+
+    /// Play an already compiled Montage (hosts that load assets themselves).
+    pub fn play_compiled_montage(
+        &mut self,
+        montage: Arc<CompiledMontage>,
+        rate: f32,
+        section: Option<&str>,
+    ) -> Result<MontageHandle, PlayRefused> {
+        self.ensure_runtime();
+        let instance = self.anim.instance.as_mut().ok_or(PlayRefused::InvalidRate)?;
+        instance.montages.play(montage, rate, section)
+    }
+
+    pub fn stop_montage(&mut self, handle: MontageHandle, blend_out: Option<f32>) -> bool {
+        self.anim.instance.as_mut().is_some_and(|i| i.montages.stop(handle, blend_out))
+    }
+
+    pub fn stop_montage_group(&mut self, group: &str, blend_out: Option<f32>) -> usize {
+        self.anim.instance.as_mut().map_or(0, |i| i.montages.stop_group(group, blend_out))
+    }
+
+    pub fn pause_montage(&mut self, handle: MontageHandle, paused: bool) -> bool {
+        self.anim.instance.as_mut().is_some_and(|i| i.montages.pause(handle, paused))
+    }
+
+    pub fn set_montage_rate(&mut self, handle: MontageHandle, rate: f32) -> Result<(), PlayRefused> {
+        self.anim.instance.as_mut().ok_or(PlayRefused::InvalidRate)?.montages.set_rate(handle, rate)
+    }
+
+    pub fn jump_to_montage_section(&mut self, handle: MontageHandle, section: &str) -> Result<(), PlayRefused> {
+        self.anim.instance.as_mut().ok_or_else(|| PlayRefused::UnknownSection(section.to_string()))?.montages.jump_to_section(handle, section)
+    }
+
+    pub fn set_montage_next_section(&mut self, handle: MontageHandle, section: &str, next: &str) -> Result<(), PlayRefused> {
+        self.anim.instance.as_mut().ok_or_else(|| PlayRefused::UnknownSection(section.to_string()))?.montages.set_next_section(handle, section, next)
+    }
+
+    /// Montage lifecycle events (started, section changes, blend out, result) since
+    /// the last call, in order. Delivery as component-scoped Blueprint events is Phase 3.
+    pub fn take_montage_events(&mut self) -> Vec<MontageEvent> {
+        std::mem::take(&mut self.anim.montage_events)
+    }
+
+    /// State machine and IK debug lines of the latest animation update.
+    pub fn animation_trace(&self) -> &[String] {
+        self.anim.instance.as_ref().map_or(&[], |i| i.report.trace.as_slice())
+    }
+
+    /// Root motion produced by the latest animation update, in the owner's space.
+    /// The engine applies it to the owner's transform (Phase 3 defines authority).
+    pub fn animation_root_motion(&self) -> skeletal_assets::runtime::pose::RootMotion {
+        self.anim.instance.as_ref().map_or(skeletal_assets::runtime::pose::RootMotion::IDENTITY, |i| i.report.root_motion)
     }
 }
 
@@ -502,6 +839,7 @@ pub fn register_skeletal_mesh_assets() {
         pulsar_scenedb::register_loader(SKELETAL_MESH_ASSET_KIND, load_skeletal_mesh);
         pulsar_scenedb::register_loader(SKELETON_ASSET_KIND, load_skeleton);
         pulsar_scenedb::register_loader(ANIMATION_SEQUENCE_ASSET_KIND, load_animation_sequence);
+        pulsar_scenedb::register_loader(ANIMATION_GRAPH_ASSET_KIND, load_animation_graph);
         pulsar_scenedb::register_binding::<SkeletalMeshComponent>(
             SKELETAL_MESH_ASSET_KIND,
             bind_skeletal_mesh,
@@ -513,6 +851,10 @@ pub fn register_skeletal_mesh_assets() {
         pulsar_scenedb::register_binding::<SkeletalMeshComponent>(
             ANIMATION_SEQUENCE_ASSET_KIND,
             bind_animation_sequence,
+        );
+        pulsar_scenedb::register_binding::<SkeletalMeshComponent>(
+            ANIMATION_GRAPH_ASSET_KIND,
+            bind_animation_graph,
         );
     });
 }
@@ -534,6 +876,16 @@ fn load_skeleton(source: &str) -> Result<AssetPayload, String> {
 fn load_animation_sequence(source: &str) -> Result<AssetPayload, String> {
     let animation = notifies::load_sequence_for_events(Path::new(source))?;
     Ok(Arc::new(LoadedAnimationSequence(Arc::new(animation))))
+}
+
+/// Compile the graph with everything it names, in the project the engine has open.
+/// A graph that does not compile still loads: the payload carries the diagnostics.
+fn load_animation_graph(source: &str) -> Result<AssetPayload, String> {
+    let text = skeletal_assets::assets::read_text(Path::new(source)).map_err(|e| format!("could not read animation graph '{source}': {e}"))?;
+    let asset = skeletal_assets::anim_graph::AnimationGraphAsset::parse(&text).map_err(|e| format!("could not decode animation graph '{source}': {e}"))?;
+    let project = ProjectAnimSource::open().ok_or("no project is open to resolve the graph's assets")?;
+    let out = compile_graph(&asset, &project);
+    Ok(Arc::new(LoadedAnimationGraph { graph: out.graph, diagnostics: out.diagnostics }))
 }
 
 fn bind_skeletal_mesh(component: &mut SkeletalMeshComponent, view: &AssetView) {
@@ -570,7 +922,25 @@ fn bind_animation_sequence(component: &mut SkeletalMeshComponent, view: &AssetVi
     let _ = component.seek_animation(0.0);
 }
 
-/// Handle-ledger collection for the three stable references.
+fn bind_animation_graph(component: &mut SkeletalMeshComponent, view: &AssetView) {
+    if view.id != component.animation_graph_id {
+        return;
+    }
+    match view.payload::<LoadedAnimationGraph>() {
+        Some(loaded) => {
+            component.loaded_graph = loaded.graph.clone();
+            component.graph_diagnostics = loaded.diagnostics.clone();
+        }
+        None => {
+            component.loaded_graph = None;
+            component.graph_diagnostics.clear();
+        }
+    }
+    component.refresh_pose();
+    component.refresh_diagnostics();
+}
+
+/// Handle-ledger collection for the stable references.
 pub(crate) fn collect_skeletal_assets(
     component: &SkeletalMeshComponent,
     out: &mut Vec<pulsar_scenedb::handle_ledger::HandleId>,
@@ -579,7 +949,8 @@ pub(crate) fn collect_skeletal_assets(
     for id in [
         asset_id_for_ref(component.mesh.as_ref()),
         asset_id_for_ref(mesh_skeleton_ref(component.mesh.as_ref()).as_ref()),
-        asset_id_for_ref(component.animation.as_ref()),
+        asset_id_for_ref(component.legacy_animation.as_ref()),
+        asset_id_for_ref(component.animation_graph.as_ref()),
     ] {
         out.push(id.handle());
     }
@@ -601,7 +972,7 @@ fn decode_skeletal_mesh_component(data: &Value) -> Result<SkeletalMeshComponent,
 fn skeletal_mesh_property_written(component: &mut SkeletalMeshComponent, property: Option<&str>) {
     if matches!(
         property,
-        None | Some("mesh") | Some("animation")
+        None | Some("mesh") | Some("animation") | Some("animation_graph")
     ) {
         component.attach_assets();
     }
@@ -611,20 +982,17 @@ fn skeletal_mesh_property_written(component: &mut SkeletalMeshComponent, propert
 #[register_component_runtime]
 impl SkeletalMeshComponent {
     fn begin_play(&mut self, _context: &mut pulsar_world_registry::ComponentContext) {
-        self.begin_notify_playback();
+        // playback itself begins in the animation phase, which has already run this frame
+        self.reconcile_notify_playback();
     }
 
-    fn tick(&mut self, context: &mut pulsar_world_registry::ComponentContext, delta_seconds: f32) {
+    /// Lifecycle only: the animation advances in the engine's animation phase
+    /// ([`run_animation_phase`]), before physics, not here.
+    fn tick(&mut self, context: &mut pulsar_world_registry::ComponentContext, _delta_seconds: f32) {
         self.reconcile_notify_playback();
         if let Err(error) = self.register_notify_events(context.events.hub()) {
             tracing::warn!(%error, "could not register animation notifies");
-            return;
         }
-        // a failed suffix is retried in the next AfterScripts publication phase.
-        if self.notify_playback.has_pending() {
-            return;
-        }
-        self.advance(delta_seconds);
     }
 }
 
@@ -736,5 +1104,251 @@ mod authority_tests {
         assert!(right.is_empty());
         // no mesh at all is not an error: the component is simply empty
         assert!(link_diagnostics(None, true, None, None, None, false).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod animation_runtime_tests {
+    use super::*;
+    use pulsar_events::{gamma::{Channel, DynValue, SubscribeOptions}, EventHub, FlushPoint};
+    use pulsar_scenedb::World;
+    use pulsar_world_registry::ComponentRuntimeState;
+    use serde_json::json;
+    use skeletal_assets::anim_graph::builder::GraphBuilder;
+    use skeletal_assets::anim_graph::catalogue::ParamType;
+    use skeletal_assets::anim_graph::{AnimationGraphAsset, GraphParameter};
+    use skeletal_assets::assets::{AnimSeqAsset, SkeletonAsset};
+    use skeletal_assets::runtime::graph::compile::compile_graph;
+    use skeletal_assets::runtime::memory::MemorySource;
+    use std::sync::Mutex;
+
+    struct Rig {
+        skeleton: Arc<SkeletonAsset>,
+        source: MemorySource,
+    }
+
+    /// Three-bone skeleton, one sequence "Walk" (1 s, notify "Step" at 0.5) that
+    /// slides bone b1 along x, and a graph playing it at a `speed`-controlled rate.
+    fn rig() -> (Rig, Arc<CompiledGraph>, String) {
+        let bones: Vec<_> = (0..3)
+            .map(|i| skeletal_assets::skeleton::Bone {
+                id: format!("b{i}"),
+                name: format!("b{i}"),
+                parent: (i > 0).then(|| format!("b{}", i - 1)),
+                bind_transform: skeletal_assets::math::Transform::IDENTITY,
+            })
+            .collect();
+        let skeleton = Arc::new(SkeletonAsset::new(skeletal_assets::skeleton::Skeleton { bones }));
+        let skeleton_id = skeleton.id.as_str().to_string();
+        let walk: AnimSeqAsset = serde_json::from_value(json!({
+            "version": 2, "skeleton": skeleton_id, "name": "Walk", "duration": 1.0, "fps": 30.0,
+            "tracks": [{"bone_id": "b1", "keyframes": [
+                {"time": 0.0, "transform": {"translation": {"x": 0.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "scale": {"x": 1.0, "y": 1.0, "z": 1.0}}},
+                {"time": 1.0, "transform": {"translation": {"x": 4.0, "y": 0.0, "z": 0.0}, "rotation": {"x": 0.0, "y": 0.0, "z": 0.0}, "scale": {"x": 1.0, "y": 1.0, "z": 1.0}}}
+            ]}],
+            "notifies": [{"id": "step", "name": "Step", "time": 0.5}]
+        }))
+        .unwrap();
+        let walk_id = walk.id.as_str().to_string();
+        let mut source = MemorySource::default();
+        source.skeletons.insert(skeleton_id.clone(), skeleton.clone());
+        source.sequences.insert(walk_id.clone(), Arc::new(walk));
+        let mut asset = AnimationGraphAsset::default();
+        asset.skeleton = Some(skeletal_assets::ids::SkeletonId::parse(&skeleton_id).unwrap().to_ref());
+        asset.parameters.push(GraphParameter::new("speed", ParamType::Float));
+        let mut b = GraphBuilder::new("main", &[("speed", ParamType::Float)]);
+        b.node("out", "anim.output_pose", &[]);
+        b.node("p", "anim.sequence_player", &[("sequence", json!(walk_id))]);
+        b.node("s", "anim.get_parameter", &[("parameter", json!("speed"))]);
+        b.wire("s", "p", "play_rate").wire("p", "out", "pose");
+        asset.main = b.into_graph();
+        let out = compile_graph(&asset, &source);
+        let graph = out.graph.unwrap_or_else(|| panic!("{:#?}", out.diagnostics));
+        (Rig { skeleton, source }, graph, walk_id)
+    }
+
+    fn graph_component(rig: &Rig, graph: &Arc<CompiledGraph>) -> SkeletalMeshComponent {
+        let mut c = SkeletalMeshComponent::default();
+        c.loaded_skeleton = Some(rig.skeleton.clone());
+        c.loaded_graph = Some(graph.clone());
+        c.playing = true;
+        c.playback_rate = 1.0;
+        c
+    }
+
+    fn registered_hub() -> EventHub {
+        let hub = EventHub::new();
+        pulsar_world_registry::register_component_events(&hub).unwrap();
+        hub
+    }
+
+    fn frame(world: &mut World, hub: &EventHub, dt: f32, state: &mut ComponentRuntimeState) {
+        run_animation_phase(world, dt);
+        pulsar_world_registry::tick_live_components(world, hub, dt, 1, state);
+        flush_animation_notifies(world, hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+    }
+
+    fn x1(world: &World, e: pulsar_scenedb::Entity) -> f32 {
+        world.get::<SkeletalMeshComponent>(e).unwrap().animation().unwrap().pose().bones[1].translation.x
+    }
+
+    #[test]
+    fn an_old_scene_decodes_into_the_internal_player_and_still_round_trips() {
+        let id = "22222222-2222-4222-8222-222222222222";
+        let old = json!({"mesh": null, "animation": id, "playing": true, "looping": true, "playback_rate": 2.0});
+        let c = decode_skeletal_mesh_component(&old).unwrap();
+        assert_eq!(c.legacy_animation.as_ref().map(|r| r.as_str()), Some(id));
+        assert!(c.internal_looping() && c.animation_graph.is_none());
+        let saved = serde_json::to_value(&c).unwrap();
+        assert_eq!(saved["animation"], id, "no scene loses its animation on the way through");
+        assert_eq!(saved["looping"], true);
+        assert_eq!(saved["playback_rate"], 2.0);
+        let fresh = serde_json::to_value(SkeletalMeshComponent::default()).unwrap();
+        assert!(fresh.get("animation").is_none() && fresh.get("looping").is_none());
+        // the reflected property panel never shows the compatibility keys
+        let mut props: HashMap<String, Value> = saved.as_object().unwrap().clone().into_iter().collect();
+        <SkeletalMeshComponent as ScenePropsProjector>::apply_scene_props(&mut props, None);
+        assert!(!props.contains_key("animation") && !props.contains_key("looping") && props.contains_key("animation_graph"));
+        // one runtime: a graph wins over the old sequence, and says so
+        let (rig, graph, _) = rig();
+        let mut both = graph_component(&rig, &graph);
+        both.legacy_animation = AssetRef::parse(id);
+        both.animation_graph = AssetRef::parse("33333333-3333-4333-8333-333333333333");
+        both.refresh_diagnostics();
+        assert!(both.diagnostics.iter().any(|d| d.code == "component.sequence_shadowed_by_graph"));
+        both.ensure_runtime();
+        assert_eq!(both.animation().unwrap().graph().unwrap().id, graph.id);
+    }
+
+    #[test]
+    fn a_graph_component_runs_in_the_animation_phase_with_typed_parameters_and_raises_graph_player_notifies() {
+        let (rig, graph, walk_id) = rig();
+        let hub = registered_hub();
+        let mut world = World::new();
+        let owner = world.spawn();
+        let instance = pulsar_world_registry::attach_value(&mut world, owner, graph_component(&rig, &graph)).unwrap();
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let sink = got.clone();
+        let id = hub.descriptor_by_name("SkeletalMeshComponent.animation_notify").unwrap().id;
+        let _sub = hub.bus().subscribe_dyn(id, SubscribeOptions::channel(Channel::Entity(instance.bits())), move |event| {
+            let DynValue::Bytes(bytes) = &event.fields[0] else { panic!("codec payload") };
+            let value = pulsar_world_registry::pulsar_script_vm::TypeRegistry::global().decode_event_value("AnimationNotifyEvent", bytes).unwrap();
+            sink.lock().unwrap().push(value.downcast_ref::<AnimationNotifyEvent>().unwrap().clone());
+        });
+        let mut state = ComponentRuntimeState::default();
+        {
+            let mut c = world.get_mut::<SkeletalMeshComponent>(instance).unwrap();
+            assert!(c.set_animation_float("speed", 2.0).is_ok());
+            assert!(matches!(c.set_animation_bool("speed", true), Err(ParamError::WrongType { .. })));
+            assert!(matches!(c.set_animation_float("nope", 1.0), Err(ParamError::Unknown(_))));
+        }
+        frame(&mut world, &hub, 0.2, &mut state);
+        assert!((x1(&world, instance) - 1.6).abs() < 1e-3, "0.2 s at rate 2 is 0.4 of the 4 m slide: {}", x1(&world, instance));
+        assert!(got.lock().unwrap().is_empty(), "the 0.5 s notify is not crossed yet");
+        frame(&mut world, &hub, 0.1, &mut state);
+        let events = got.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!((events[0].notify_id.as_str(), events[0].sequence_id.as_str()), ("step", walk_id.as_str()));
+        // pause holds the pose; the physics rig owning the pose holds the clock
+        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().playing = false;
+        let held = x1(&world, instance);
+        frame(&mut world, &hub, 1.0, &mut state);
+        assert_eq!(x1(&world, instance), held);
+        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().playing = true;
+        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().physics_pose_active = true;
+        frame(&mut world, &hub, 1.0, &mut state);
+        assert_eq!(x1(&world, instance), held, "physics owns the pose: animation does not advance");
+        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().physics_pose_active = false;
+        frame(&mut world, &hub, 0.125, &mut state);
+        assert!(x1(&world, instance) != held, "ownership returned and the clock moves again");
+    }
+
+    #[test]
+    fn two_components_share_the_compiled_graph_and_keep_independent_state_through_teardown() {
+        let (rig, graph, _) = rig();
+        let hub = registered_hub();
+        let mut world = World::new();
+        let (oa, ob) = (world.spawn(), world.spawn());
+        let a = pulsar_world_registry::attach_value(&mut world, oa, graph_component(&rig, &graph)).unwrap();
+        let b = pulsar_world_registry::attach_value(&mut world, ob, graph_component(&rig, &graph)).unwrap();
+        world.get_mut::<SkeletalMeshComponent>(a).unwrap().set_animation_float("speed", 1.0).unwrap();
+        world.get_mut::<SkeletalMeshComponent>(b).unwrap().set_animation_float("speed", 3.0).unwrap();
+        let mut state = ComponentRuntimeState::default();
+        frame(&mut world, &hub, 0.25, &mut state);
+        assert!((x1(&world, a) - 1.0).abs() < 1e-3 && (x1(&world, b) - 3.0).abs() < 1e-3);
+        let ga = world.get::<SkeletalMeshComponent>(a).unwrap().animation().unwrap().graph().unwrap().clone();
+        let gb = world.get::<SkeletalMeshComponent>(b).unwrap().animation().unwrap().graph().unwrap().clone();
+        assert!(Arc::ptr_eq(&ga, &gb), "one compiled graph for both components");
+        // removing one never disturbs the other
+        world.despawn(b);
+        pulsar_world_registry::process_component_removals(&world, &hub, &mut state);
+        frame(&mut world, &hub, 0.25, &mut state);
+        assert!((x1(&world, a) - 2.0).abs() < 1e-3);
+        // disabling the owner stops the animation without panicking
+        let mut link = world.get_mut::<pulsar_world_registry::pulsar_scene_model::ComponentOwner>(a).unwrap();
+        let was = link.is_enabled();
+        link.enabled = 0;
+        drop(link);
+        frame(&mut world, &hub, 0.25, &mut state);
+        assert!(world.get::<SkeletalMeshComponent>(a).unwrap().animation().is_none(), "the instance was torn down");
+        let mut link = world.get_mut::<pulsar_world_registry::pulsar_scene_model::ComponentOwner>(a).unwrap();
+        link.enabled = u32::from(was);
+        drop(link);
+        frame(&mut world, &hub, 0.25, &mut state);
+        assert!(world.get::<SkeletalMeshComponent>(a).unwrap().animation().is_some(), "re-enabling starts a fresh playback");
+    }
+
+    #[test]
+    fn montages_overlay_the_graph_pose_and_report_through_the_component() {
+        use skeletal_assets::montage::{AnimationMontageAsset, MontageSegment, SlotTrack};
+        use skeletal_assets::runtime::montage::{MontageEventKind, MontageResult};
+        let (rig, _graph0, walk_id) = rig();
+        // graph: walk -> Slot("UpperBody")
+        let mut asset = AnimationGraphAsset::default();
+        asset.skeleton = Some(skeletal_assets::ids::SkeletonId::parse(rig.skeleton.id.as_str()).unwrap().to_ref());
+        let mut b = GraphBuilder::new("main", &[]);
+        b.node("out", "anim.output_pose", &[]);
+        b.node("p", "anim.sequence_player", &[("sequence", json!(walk_id))]);
+        b.node("slot", "anim.slot", &[("slot", json!("UpperBody"))]);
+        b.wire("p", "slot", "source").wire("slot", "out", "pose");
+        asset.main = b.into_graph();
+        let graph = compile_graph(&asset, &rig.source).graph.expect("compiles");
+        // montage: the same clip on UpperBody, only below b2, one second long
+        let mut montage = AnimationMontageAsset::default();
+        let mut track = SlotTrack::new("UpperBody", "DefaultGroup");
+        track.segments.push(MontageSegment::new(AssetRef::parse(&walk_id), 0.0));
+        track.mask = Some(skeletal_assets::bone_mask::BoneMaskSpec {
+            branches: vec![skeletal_assets::bone_mask::MaskBranch { bone: "b2".into(), depth: None, weight: 1.0 }],
+            default_weight: 0.0,
+        });
+        montage.tracks.push(track);
+        montage.blend_in.duration = 0.0;
+        montage.blend_out.duration = 0.0;
+        let runtime_skeleton = Arc::new(RuntimeSkeleton::new(rig.skeleton.id.as_str(), &rig.skeleton.skeleton()).unwrap());
+        let sequences = &rig.source.sequences;
+        let compiled = CompiledMontage::compile(&montage, &runtime_skeleton, &mut |id| {
+            let asset = sequences.get(id)?;
+            Some(Arc::new(CompiledClip::compile_shared(asset, &runtime_skeleton)))
+        })
+        .unwrap();
+        let hub = registered_hub();
+        let mut world = World::new();
+        let owner = world.spawn();
+        let c = pulsar_world_registry::attach_value(&mut world, owner, graph_component(&rig, &graph)).unwrap();
+        let mut state = ComponentRuntimeState::default();
+        frame(&mut world, &hub, 0.25, &mut state);
+        let handle = world.get_mut::<SkeletalMeshComponent>(c).unwrap().play_compiled_montage(Arc::new(compiled), 1.0, None).unwrap();
+        frame(&mut world, &hub, 0.5, &mut state);
+        {
+            let comp = world.get::<SkeletalMeshComponent>(c).unwrap();
+            let pose = comp.animation().unwrap().pose();
+            assert!((pose.bones[1].translation.x - 3.0).abs() < 1e-3, "locomotion is untouched outside the mask: {}", pose.bones[1].translation.x);
+        }
+        frame(&mut world, &hub, 2.0, &mut state);
+        let events = world.get_mut::<SkeletalMeshComponent>(c).unwrap().take_montage_events();
+        assert!(events.iter().any(|e| e.handle == handle && matches!(e.kind, MontageEventKind::Started)));
+        assert!(events.iter().any(|e| e.handle == handle && matches!(e.kind, MontageEventKind::Ended(MontageResult::Completed))), "{events:?}");
+        assert!(world.get_mut::<SkeletalMeshComponent>(c).unwrap().take_montage_events().is_empty(), "drained");
     }
 }

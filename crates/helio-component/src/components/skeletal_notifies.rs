@@ -1,11 +1,12 @@
 //! runtime crossings belong to the live player, not its sampled pose.
 
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::{HashMap, VecDeque}, sync::Arc};
 
 use engine_class_derive::{component_events, engine_class};
 use skeletal_assets::{
     assets::AnimSeqAsset,
     notifies::{NotifyIndex, NotifyTarget, PlaybackInterval},
+    runtime::anim_instance::{TimeStep, UpdateMode},
 };
 
 use super::SkeletalMeshComponent;
@@ -141,13 +142,30 @@ pub fn project_animation_notify_events(root: &std::path::Path) -> AnimationNotif
         }
     }
     paths.sort();
+    let items = paths
+        .into_iter()
+        .map(|path| {
+            let loaded = load_sequence_for_events(&path);
+            (path, loaded)
+        })
+        .collect();
+    catalog_from(items, catalog)
+}
+
+/// Canonical event descriptors of the given parsed sequences. Conflicting
+/// identities are quarantined as a set, independent of input order.
+fn catalog_from(
+    items: Vec<(std::path::PathBuf, Result<AnimSeqAsset, String>)>,
+    mut catalog: AnimationNotifyCatalog,
+) -> AnimationNotifyCatalog {
+    use std::collections::{BTreeMap, BTreeSet};
     let hub = EventHub::new();
     let mut events = BTreeMap::new();
     let mut origins: BTreeMap<_, Vec<_>> = BTreeMap::new();
     let mut conflicts: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
     let key = |d: &EventDescriptor| (d.namespace.clone(), d.name.clone());
-    for path in paths {
-        let sequence = match load_sequence_for_events(&path) {
+    for (path, loaded) in items {
+        let sequence = match loaded {
             Ok(sequence) => sequence,
             Err(error) => {
                 catalog
@@ -221,20 +239,133 @@ pub fn project_animation_notify_events(root: &std::path::Path) -> AnimationNotif
     catalog
 }
 
+
+/// Notify descriptors for the animation assets a skeletal mesh component names,
+/// found through the project's asset index and the assets' own references: no
+/// directory walk and nothing published on a bus. `assets` holds the ids of the
+/// component's Animation Graph and/or its single sequence. For a graph the
+/// closure is every sequence the graph can play: its Sequence Players, the samples
+/// of its Blend Spaces, the sources of its Pose Databases, linked graphs, and the
+/// sequences of Montages that have a track on one of the graph's Slots (their
+/// sequence notifies fire while the Montage plays).
+pub fn component_animation_notify_events(
+    root: &std::path::Path,
+    assets: &std::collections::HashSet<String>,
+) -> AnimationNotifyCatalog {
+    use crate::anim_source::ProjectAnimSource;
+    use pulsar_reflection::{AnimationGraphAssetKind, AnimationMontageAssetKind, AssetKind};
+    use skeletal_assets::runtime::graph::compile::AssetSource;
+    use std::collections::BTreeSet;
+
+    let source = ProjectAnimSource::at(root.to_path_buf());
+    let mut catalog = AnimationNotifyCatalog::default();
+    let mut sequences: BTreeSet<String> = BTreeSet::new();
+    let mut slots: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut graphs_seen: BTreeSet<String> = BTreeSet::new();
+    let mut graph_stack: Vec<String> = Vec::new();
+    let index = engine_fs::open_project_file_index(root).ok().flatten();
+    let kind_of = |id: &str| -> Option<&'static str> {
+        let index = index.as_ref()?;
+        [AnimationGraphAssetKind::KIND, pulsar_reflection::AnimationSequenceAssetKind::KIND]
+            .into_iter()
+            .find(|kind| index.path_for_asset_id_kind(kind, id).ok().flatten().is_some())
+    };
+    for id in assets {
+        match kind_of(id) {
+            Some(k) if k == AnimationGraphAssetKind::KIND => graph_stack.push(id.clone()),
+            Some(_) => {
+                sequences.insert(id.clone());
+            }
+            None => catalog.diagnostics.push(AnimationNotifyDiagnostic { path: std::path::PathBuf::from(id), error: "the animation asset is not in this project's asset index".into() }),
+        }
+    }
+    while let Some(id) = graph_stack.pop() {
+        if !graphs_seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(graph) = source.graph(&id) else {
+            catalog.diagnostics.push(AnimationNotifyDiagnostic { path: std::path::PathBuf::from(&id), error: "the animation graph could not be loaded".into() });
+            continue;
+        };
+        for (_, _, g) in graph.graphs() {
+            for node in g.nodes.values().filter(|n| n.node_type == "anim.slot") {
+                let text = |k: &str| node.properties.get(k).and_then(|v| v.as_str()).map(str::to_string);
+                if let Some(slot) = text("slot") {
+                    slots.insert((slot, text("group").unwrap_or_else(|| "DefaultGroup".into())));
+                }
+            }
+        }
+        for r in skeletal_assets::anim_graph::validate::asset_references(&graph) {
+            match r.kind {
+                k if k == pulsar_reflection::AnimationSequenceAssetKind::KIND => {
+                    sequences.insert(r.id);
+                }
+                k if k == pulsar_reflection::BlendSpaceAssetKind::KIND => {
+                    if let Some(space) = source.blend_space(&r.id) {
+                        sequences.extend(space.samples.iter().filter_map(|s| s.sequence.as_ref().map(|s| s.as_str().to_string())));
+                    }
+                }
+                k if k == pulsar_reflection::PoseDatabaseAssetKind::KIND => {
+                    if let Some(db) = source.pose_db(&r.id) {
+                        for s in db.sources.iter().filter(|s| s.enabled) {
+                            match &s.source {
+                                skeletal_assets::pose_db::PoseSource::Sequence { sequence } => {
+                                    sequences.insert(sequence.as_str().to_string());
+                                }
+                                skeletal_assets::pose_db::PoseSource::BlendSpace { blend_space } => {
+                                    if let Some(space) = source.blend_space(blend_space.as_str()) {
+                                        sequences.extend(space.samples.iter().filter_map(|s| s.sequence.as_ref().map(|s| s.as_str().to_string())));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                k if k == AnimationGraphAssetKind::KIND => graph_stack.push(r.id),
+                _ => {}
+            }
+        }
+    }
+    if !slots.is_empty() {
+        if let Some(index) = &index {
+            for (id, _) in index.assets_of_kind(AnimationMontageAssetKind::KIND).unwrap_or_default() {
+                let Some(montage) = source.montage(&id) else { continue };
+                if montage.tracks.iter().any(|t| slots.contains(&(t.slot.clone(), t.group.clone()))) {
+                    sequences.extend(montage.segments().filter_map(|s| s.sequence.as_ref().map(|s| s.as_str().to_string())));
+                }
+            }
+        }
+    }
+    let items = sequences
+        .into_iter()
+        .map(|id| {
+            let origin = index
+                .as_ref()
+                .and_then(|i| i.path_for_asset_id_kind(pulsar_reflection::AnimationSequenceAssetKind::KIND, &id).ok().flatten())
+                .map(|p| root.join(p))
+                .unwrap_or_else(|| std::path::PathBuf::from(&id));
+            let loaded = match source.sequence(&id) {
+                Some(seq) => Ok((*seq).clone()),
+                None => Err("the sequence could not be loaded".to_string()),
+            };
+            (origin, loaded)
+        })
+        .collect();
+    catalog_from(items, catalog)
+}
 #[derive(Debug)]
 struct PendingNotify {
     event: AnimationNotifyEvent,
     authored: DynEvent,
     target: NotifyTarget,
     generic_accepted: bool,
+    /// The sequence that owns the notify, so its descriptor can be registered
+    /// on whichever bus finally delivers the occurrence.
+    sequence: Arc<AnimSeqAsset>,
 }
 
 impl PendingNotify {
-    fn new(
-        sequence: &AnimSeqAsset,
-        hit: skeletal_assets::notifies::CrossedNotify<'_>,
-        generation: i64,
-    ) -> Self {
+    fn new(sequence: &Arc<AnimSeqAsset>, hit: skeletal_assets::notifies::CrossedNotify<'_>, generation: i64) -> Self {
         let descriptor = animation_notify_descriptor(sequence, hit.notify);
         let mut fields = vec![
             DynValue::U64(0),
@@ -257,6 +388,7 @@ impl PendingNotify {
             authored: DynEvent::new(descriptor.id, fields),
             target: hit.notify.target.clone(),
             generic_accepted: false,
+            sequence: sequence.clone(),
             event: AnimationNotifyEvent {
                 sequence_id: sequence.id.to_string(),
                 notify_id: hit.notify.id.clone(),
@@ -266,6 +398,26 @@ impl PendingNotify {
                 cycle: hit.cycle,
                 generation,
             },
+        }
+    }
+}
+
+/// Animation phase: advance every live skeletal mesh component's animation by
+/// `delta_seconds` and publish its pose. The engine tick runs this **before**
+/// the ECS schedule, so physics reads this frame's evaluated pose; gameplay and
+/// script writes to graph parameters made later in the frame apply next frame.
+pub fn run_animation_phase(world: &mut World, delta_seconds: f32) {
+    let players: Vec<Entity> = world.query::<&SkeletalMeshComponent>().map(|(entity, _)| entity).collect();
+    for instance in players {
+        let live = world
+            .get::<pulsar_world_registry::pulsar_scene_model::ComponentOwner>(instance)
+            .is_some_and(|link| link.is_enabled() && world.is_alive(link.entity()));
+        let Some(mut player) = world.get_mut::<SkeletalMeshComponent>(instance) else { continue };
+        if live {
+            // a failed suffix is retried in the next AfterScripts publication phase.
+            player.animation_phase_step(delta_seconds);
+        } else if player.anim.started {
+            player.animation_phase_stopped();
         }
     }
 }
@@ -321,6 +473,9 @@ pub fn flush_animation_notifies(
             .collect();
         let context = pulsar_world_registry::ComponentContext::for_instance(instance, owner, hub);
         let mut player = world.get_mut::<SkeletalMeshComponent>(instance).unwrap();
+        if let Err(error) = player.register_pending_events(hub) {
+            tracing::warn!(%error, "animation notify schema conflicts with the running session");
+        }
         if let Err(error) = player.publish_directed_notifies(&context.events, hub, owner, &targets)
         {
             tracing::warn!(%error, "could not queue animation notify; retaining it");
@@ -354,15 +509,15 @@ pub trait SkeletalAnimationEvents {
     fn animation_notify() -> AnimationNotifyEvent {}
 }
 
+/// Notify bookkeeping of one component. It owns no clock: the component's
+/// animation instance is the only thing that advances time, and every span of
+/// sequence playback it reports is turned into crossings here.
 #[derive(Debug, Default)]
 pub(super) struct NotifyPlayback {
-    sequence: Option<Arc<AnimSeqAsset>>,
-    seconds: f64,
-    phase: f32,
     generation: i64,
-    looping: bool,
     pending: VecDeque<PendingNotify>,
-    index: Option<NotifyIndex>,
+    /// Crossing indexes by clip id, rebuilt when the sequence asset changes.
+    indexes: HashMap<String, (Arc<AnimSeqAsset>, NotifyIndex)>,
     registered_descriptor: Option<Arc<EventDescriptor>>,
     registered_sequence: Option<Arc<AnimSeqAsset>>,
 }
@@ -370,6 +525,34 @@ pub(super) struct NotifyPlayback {
 impl NotifyPlayback {
     pub(super) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
+    }
+
+    pub(super) fn clear_pending(&mut self) {
+        self.pending.clear();
+    }
+
+    pub(super) fn next_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Crossings of one span, appended to the outbox in the span's order.
+    fn collect(&mut self, span: &skeletal_assets::runtime::graph::PlaybackSpan) -> Result<(), String> {
+        let Some(sequence) = &span.clip.source else { return Ok(()) };
+        if sequence.features.notifies.is_empty() {
+            return Ok(());
+        }
+        let key = span.clip.id.clone();
+        let stale = self.indexes.get(&key).is_none_or(|(known, _)| !Arc::ptr_eq(known, sequence));
+        if stale {
+            sequence.features.validate(sequence.clip.duration)?;
+            let index = NotifyIndex::new(&sequence.features.notifies, sequence.clip.duration)?;
+            self.indexes.insert(key.clone(), (sequence.clone(), index));
+        }
+        let (_, index) = &self.indexes[&key];
+        let crossed = index.collect(PlaybackInterval::Advance { from: span.from, to: span.to, looping: span.looping })?;
+        let generation = self.generation;
+        self.pending.extend(crossed.into_iter().map(|hit| PendingNotify::new(sequence, hit, generation)));
+        Ok(())
     }
 }
 
@@ -387,65 +570,48 @@ impl SkeletalMeshComponent {
         self.notify_playback.generation = self.notify_playback.generation.wrapping_add(1);
     }
 
+    /// Bring the animation runtime in line with the loaded assets. Replacing the
+    /// sequence or graph starts a fresh playback and discards unaccepted events.
     pub(super) fn reconcile_notify_playback(&mut self) {
-        let same_sequence = match (&self.notify_playback.sequence, &self.loaded_animation) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_sequence
-            || self.elapsed_seconds != self.notify_playback.phase
-            || self.looping != self.notify_playback.looping
-        {
-            if !same_sequence && self.notify_playback.sequence.is_some() {
-                self.elapsed_seconds = 0.0;
-            }
-            // direct phase edits are seeks; replacement starts a fresh playback.
-            let _ = self.seek_animation(self.elapsed_seconds as f64);
+        if self.ensure_runtime() {
+            self.notify_playback.pending.clear();
+            self.notify_playback.generation = self.notify_playback.generation.wrapping_add(1);
         }
     }
 
-    /// seek without crossings, discarding occurrences not yet accepted by Gamma.
-    /// already queued engine events keep their original sequence and generation.
+    /// Seek the single-sequence player without crossings, discarding occurrences
+    /// not yet accepted by Gamma. Already queued engine events keep their
+    /// original sequence and generation.
     pub fn seek_animation(&mut self, seconds: f64) -> Result<(), String> {
         if !seconds.is_finite() || seconds < 0.0 || seconds > f32::MAX as f64 {
             return Err("Animation seek time must be finite and nonnegative".into());
         }
-        let duration = self
-            .loaded_animation
-            .as_ref()
-            .map(|a| a.clip.duration as f64);
+        self.reconcile_notify_playback();
+        let looping = self.internal_looping();
+        let duration = self.loaded_animation.as_ref().map(|a| a.clip.duration as f64);
         let phase = match duration {
             Some(duration) if !duration.is_finite() || duration < 0.0 => {
                 return Err("Clip duration must be finite and nonnegative".into());
             }
-            Some(duration) if self.looping && duration > 0.0 => seconds % duration,
+            Some(duration) if looping && duration > 0.0 => seconds % duration,
             Some(duration) => seconds.min(duration),
             None => seconds,
         } as f32;
         if let Some(sequence) = &self.loaded_animation {
             sequence.features.validate(sequence.clip.duration)?;
-            if self
-                .notify_playback
-                .sequence
-                .as_ref()
-                .is_none_or(|old| !Arc::ptr_eq(old, sequence))
-            {
-                self.notify_playback.index = Some(NotifyIndex::new(
-                    &sequence.features.notifies,
-                    sequence.clip.duration,
-                )?);
-            }
-        } else {
-            self.notify_playback.index = None;
         }
-        self.notify_playback.sequence = self.loaded_animation.clone();
-        self.notify_playback.seconds = if self.looping { seconds } else { phase as f64 };
-        self.notify_playback.phase = phase;
-        self.notify_playback.looping = self.looping;
+        let clock = if looping { seconds } else { phase as f64 };
+        if let Some(instance) = self.anim.instance.as_mut() {
+            if !instance.seek_single_sequence(clock) && self.loaded_graph.is_none() && self.loaded_animation.is_some() {
+                return Err("The animation runtime has no sequence player to seek".into());
+            }
+        }
         self.notify_playback.generation = self.notify_playback.generation.wrapping_add(1);
         self.notify_playback.pending.clear();
         self.elapsed_seconds = phase;
+        if let Some(instance) = self.anim.instance.as_mut() {
+            instance.refresh();
+        }
         if !self.physics_pose_active {
             self.refresh_pose();
         }
@@ -471,50 +637,29 @@ impl SkeletalMeshComponent {
         if !delta_seconds.is_finite() || !self.playback_rate.is_finite() {
             return Err("Animation delta and playback rate must be finite".into());
         }
-        // the existing player supports forward playback only.
-        let from = self.notify_playback.seconds;
-        let mut to = from + delta_seconds as f64 * self.playback_rate.max(0.0) as f64;
-        if !to.is_finite() || to > f32::MAX as f64 {
+        // forward playback only: a negative rate holds the pose.
+        let scaled = delta_seconds * self.playback_rate.max(0.0);
+        let looping = self.internal_looping();
+        let Some(instance) = self.anim.instance.as_mut() else { return Ok(()) };
+        instance.advance(scaled, TimeStep::Variable, UpdateMode::Play);
+        let position = instance.single_sequence_position();
+        if position.is_some_and(|p| !p.is_finite() || p > f32::MAX as f64) {
             return Err("Animation playback time overflowed".into());
         }
-        let mut phase = to;
-        if let Some(sequence) = &self.loaded_animation {
+        let spans = std::mem::take(&mut instance.report.spans);
+        let events = std::mem::take(&mut instance.report.montage_events);
+        self.anim.montage_events.extend(events);
+        for span in &spans {
+            self.notify_playback.collect(span)?;
+        }
+        if let (Some(position), Some(sequence)) = (position, self.loaded_animation.as_ref()) {
             let duration = sequence.clip.duration as f64;
-            if !duration.is_finite() || duration < 0.0 {
-                return Err("Clip duration must be finite and nonnegative".into());
-            }
-            if !self.looping || duration == 0.0 {
-                to = to.min(duration);
-            }
-            let crossed = self
-                .notify_playback
-                .index
-                .as_ref()
-                .ok_or("Notify index is missing")?
-                .collect(PlaybackInterval::Advance {
-                    from,
-                    to,
-                    looping: self.looping,
-                })?;
-            let generation = self.notify_playback.generation;
-            self.notify_playback.pending.extend(
-                crossed
-                    .into_iter()
-                    .map(|hit| PendingNotify::new(sequence, hit, generation)),
-            );
-            phase = if self.looping && duration > 0.0 {
-                to % duration
-            } else {
-                to
-            };
-            if (!self.looping || duration == 0.0) && to >= duration {
+            self.elapsed_seconds = if looping && duration > 0.0 { (position % duration) as f32 } else { position.min(duration) as f32 };
+            // a one-shot (or zero-length) sequence stops at its end
+            if (!looping || duration == 0.0) && position >= duration {
                 self.playing = false;
             }
         }
-        // sampling never advances this cursor, including repeated pose refreshes.
-        self.notify_playback.seconds = to;
-        self.notify_playback.phase = phase as f32;
-        self.elapsed_seconds = phase as f32;
         self.refresh_pose();
         Ok(())
     }
@@ -546,6 +691,21 @@ impl SkeletalMeshComponent {
                 hub.descriptor(animation_notify_descriptor(sequence, notify).id)
             });
         self.notify_playback.registered_sequence = Some(sequence.clone());
+        Ok(())
+    }
+
+    /// Register the descriptors of every sequence with queued occurrences (graph
+    /// players and blend space samples, not just the single-sequence player).
+    fn register_pending_events(&mut self, hub: &EventHub) -> Result<(), String> {
+        let mut seen: Vec<Arc<AnimSeqAsset>> = Vec::new();
+        for pending in &self.notify_playback.pending {
+            if !seen.iter().any(|s| Arc::ptr_eq(s, &pending.sequence)) {
+                seen.push(pending.sequence.clone());
+            }
+        }
+        for sequence in seen {
+            register_animation_notifies(&sequence, hub)?;
+        }
         Ok(())
     }
 
@@ -603,7 +763,7 @@ mod tests {
         .unwrap();
         let mut player = SkeletalMeshComponent::default();
         player.loaded_animation = Some(Arc::new(sequence));
-        player.looping = true;
+        player.legacy_looping = true;
         player.playing = true;
         player.playback_rate = 1.0;
         player
@@ -647,9 +807,16 @@ mod tests {
         hub: &EventHub,
         owner: Entity,
     ) {
+        p.animation_phase_step(dt);
         p.tick(context, dt);
         let targets = vec![Some(owner); p.notify_playback.pending.len()];
         let _ = p.publish_directed_notifies(&context.events, hub, owner, &targets);
+    }
+
+    /// One engine frame's animation and component phases.
+    fn frame(world: &mut World, hub: &EventHub, dt: f32, state: &mut ComponentRuntimeState) {
+        run_animation_phase(world, dt);
+        pulsar_world_registry::tick_live_components(world, hub, dt, 1, state);
     }
 
     fn registered_hub() -> EventHub {
@@ -667,7 +834,7 @@ mod tests {
         let (got, _subscription) = listen(&hub, instance);
         let (owner_got, _owner_subscription) = listen(&hub, owner);
         let mut state = ComponentRuntimeState::default();
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 2.25, 1, &mut state);
+        frame(&mut world, &hub, 2.25, &mut state);
         assert!(got.lock().unwrap().is_empty());
         assert_eq!(
             world
@@ -702,12 +869,12 @@ mod tests {
                 .get_mut::<SkeletalMeshComponent>(instance)
                 .unwrap()
                 .refresh_pose();
-            pulsar_world_registry::tick_live_components(&mut world, &hub, 0.0, 1, &mut state);
+            frame(&mut world, &hub, 0.0, &mut state);
             flush_animation_notifies(&mut world, &hub, |_, _| None);
             hub.flush(FlushPoint::AfterScripts);
         }
         assert_eq!(got.lock().unwrap().len(), 8);
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        frame(&mut world, &hub, 0.25, &mut state);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         hub.flush(FlushPoint::AfterScripts);
         assert_eq!(got.lock().unwrap()[8].cycle, 2);
@@ -827,7 +994,7 @@ mod tests {
         let (got_a, sub_a) = listen(&hub, a);
         let (got_b, _sub_b) = listen(&hub, b);
         let mut state = ComponentRuntimeState::default();
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        frame(&mut world, &hub, 0.25, &mut state);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         world.despawn(b);
         pulsar_world_registry::process_component_removals(&world, &hub, &mut state);
@@ -839,7 +1006,7 @@ mod tests {
             2,
             "Gamma owns accepted payloads until delivery"
         );
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        frame(&mut world, &hub, 0.25, &mut state);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         hub.flush(FlushPoint::AfterScripts);
         assert_eq!(got_a.lock().unwrap().len(), 2);
@@ -861,7 +1028,7 @@ mod tests {
         p.loaded_animation = player().loaded_animation;
         p.reconcile_notify_playback();
         assert!(p.notify_playback.pending.is_empty());
-        p.looping = false;
+        p.legacy_looping = false;
         p.restart_animation().unwrap();
         p.advance(3.0);
         assert!(!p.playing);
@@ -1017,7 +1184,7 @@ mod tests {
         let descriptor = animation_notify_descriptor(sequence, &sequence.features.notifies[1]);
         let instance = pulsar_world_registry::attach_value(&mut world, owner, p).unwrap();
         let mut state = ComponentRuntimeState::default();
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.5, 1, &mut state);
+        frame(&mut world, &hub, 0.5, &mut state);
         let foreign = unsafe { ForeignBus::from_raw(hub.export_raw()) }.unwrap();
         foreign.register_descriptor(&descriptor).unwrap();
         let received = Arc::new(Mutex::new(Vec::new()));
@@ -1070,7 +1237,7 @@ mod tests {
             SubscribeOptions::channel(entity_channel(recycled.bits())),
             move |_| *stale.lock().unwrap() += 1,
         );
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 1.0, 1, &mut state);
+        frame(&mut world, &hub, 1.0, &mut state);
         flush_animation_notifies(&mut world, &hub, |_, _| Some(target));
         hub.flush(FlushPoint::AfterScripts);
         assert_eq!(received.lock().unwrap().len(), 1);
@@ -1079,7 +1246,7 @@ mod tests {
         drop(sub);
         let no_listener = world.spawn();
         for resolved in [Some(no_listener), None] {
-            pulsar_world_registry::tick_live_components(&mut world, &hub, 1.0, 1, &mut state);
+            frame(&mut world, &hub, 1.0, &mut state);
             flush_animation_notifies(&mut world, &hub, |_, _| resolved);
             hub.flush(FlushPoint::AfterScripts);
         }
@@ -1266,11 +1433,11 @@ mod tests {
         pulsar_world_registry::attach_value(&mut world, owner_a, a).unwrap();
         pulsar_world_registry::attach_value(&mut world, owner_b, b).unwrap();
         let mut state = ComponentRuntimeState::default();
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        frame(&mut world, &hub, 0.25, &mut state);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         hub.flush(FlushPoint::AfterScripts);
         assert_eq!((*a_count.lock().unwrap(), *b_count.lock().unwrap()), (0, 1));
-        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        frame(&mut world, &hub, 0.25, &mut state);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         hub.flush(FlushPoint::AfterScripts);
         assert_eq!((*a_count.lock().unwrap(), *b_count.lock().unwrap()), (1, 1));
