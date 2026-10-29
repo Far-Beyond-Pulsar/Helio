@@ -271,6 +271,16 @@ pub struct VoxelFeatureSpawn {
     pub height_wander_m: f64,
     #[property(min = 0.0, max = 100000.0, step = 10.0, label = "Wander scale (m)")]
     pub height_wander_scale_m: f64,
+    /// The climate it grows in: annual mean temperature and moisture (0
+    /// dry to 1 wet) at its ground (the terrain's climate).
+    #[property(min = -1000.0, max = 1000.0, step = 0.5, label = "Min temperature (C)")]
+    pub min_temperature_c: f64,
+    #[property(min = -1000.0, max = 1000.0, step = 0.5, label = "Max temperature (C)")]
+    pub max_temperature_c: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01)]
+    pub min_moisture: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01)]
+    pub max_moisture: f64,
     /// Most rise between the ground at its anchor and its footprint's
     /// corners (0: any).
     #[property(min = 0.0, max = 1000.0, step = 0.1, label = "Max relief (m)")]
@@ -301,6 +311,10 @@ impl Default for VoxelFeatureSpawn {
             max_height_m: 1e9,
             height_wander_m: 0.0,
             height_wander_scale_m: 0.0,
+            min_temperature_c: -1e3,
+            max_temperature_c: 1e3,
+            min_moisture: 0.0,
+            max_moisture: 1.0,
             max_relief_m: 0.0,
             sink_m: 0.0,
             far_material: 0,

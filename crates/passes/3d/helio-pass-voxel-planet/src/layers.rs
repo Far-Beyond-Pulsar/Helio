@@ -481,7 +481,9 @@ impl Climate {
     pub fn earth() -> Self {
         Self {
             maps: true,
-            pole: [0.0, std::f64::consts::FRAC_1_SQRT_2, std::f64::consts::FRAC_1_SQRT_2],
+            // Normalized where it is used; whole numbers, so the
+            // component's `[f32; 3]` holds it exactly.
+            pole: [0.0, 1.0, 1.0],
             latitude_deg: 45.0,
             equator_c: 28.0,
             pole_c: -22.0,

@@ -952,11 +952,24 @@ pub struct VoxelClimate {
 }
 
 impl VoxelClimate {
-    /// The generator's climate as the component holds it.
-    fn from_generator(climate: helio_pass_voxel_planet::layers::Climate) -> Self {
-        serde_json::to_value(climate)
-            .and_then(serde_json::from_value)
-            .expect("climate settings mirror the generator's")
+    /// The generator's climate as the component holds it. Field by field:
+    /// a serde round trip would build `Self::default()` (`#[serde(default)]`),
+    /// which is this.
+    fn from_generator(c: helio_pass_voxel_planet::layers::Climate) -> Self {
+        Self {
+            maps: c.maps,
+            pole: c.pole.map(|v| v as f32),
+            latitude_deg: c.latitude_deg,
+            equator_c: c.equator_c,
+            pole_c: c.pole_c,
+            lapse_c_per_km: c.lapse_c_per_km,
+            snow_c: c.snow_c,
+            wetness: c.wetness,
+            continentality_km: c.continentality_km,
+            rain_shadow_m: c.rain_shadow_m,
+            ocean: c.ocean,
+            texel_km: c.texel_km,
+        }
     }
     /// Earth's: warm tropics, frozen poles, oceans, rain belts.
     pub fn earth() -> Self {
@@ -1436,6 +1449,44 @@ fn validate_paint_slot(material_slot: u8) -> Result<(), String> {
 mod tests {
     use super::*;
     use pulsar_reflection::EngineClass;
+
+    #[test]
+    fn climates_and_stacks_construct() {
+        // `VoxelClimate`'s default is Earth's, built from the generator's:
+        // not through serde, whose `#[serde(default)]` asks for the default.
+        assert_eq!(VoxelClimate::default().snow_c, VoxelClimate::earth().snow_c);
+        assert_eq!(VoxelTerrainStack::earth().climate.equator_c, 28.0);
+        let _ = VoxelTerrainLayersComponent::default();
+        for name in VoxelTerrainStack::PRESETS {
+            assert!(VoxelTerrainStack::preset(name).is_some(), "{name}");
+        }
+        use helio_pass_voxel_planet::layers::Climate;
+        for generator in [Climate::earth(), Climate::uniform(25.0, 0.2)] {
+            let c = VoxelClimate::from_generator(generator.clone());
+            assert_eq!(
+                serde_json::to_value(&c).unwrap(),
+                serde_json::to_value(Climate {
+                    pole: c.pole.map(f64::from),
+                    ..generator
+                })
+                .unwrap(),
+                "every field carried over"
+            );
+            assert_eq!(c.pole, generator.pole.map(|v| v as f32));
+        }
+        // The component's presets are the generator's, exactly.
+        use helio_pass_voxel_planet::layers::TerrainLayers;
+        for (component, generator) in [
+            (VoxelTerrainStack::earth(), TerrainLayers::earth()),
+            (VoxelTerrainStack::moon(), TerrainLayers::moon()),
+            (VoxelTerrainStack::desert(), TerrainLayers::desert()),
+            (VoxelTerrainStack::flat(2.0), TerrainLayers::flat_at(2.0)),
+        ] {
+            let parsed: TerrainLayers =
+                serde_json::from_value(serde_json::to_value(&component).unwrap()).unwrap();
+            assert_eq!(parsed, generator);
+        }
+    }
 
     #[test]
     fn older_terrains_load_and_drop_their_chunk_fields() {
