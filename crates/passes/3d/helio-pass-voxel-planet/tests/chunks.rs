@@ -4896,11 +4896,14 @@ fn ground_probes_meet_the_drawn_surface() {
 /// between the face's middle columns. Pixels seeded by any of the many
 /// boxes the cull counts as holding the eye once walked from that box,
 /// past the ground in front: chunk-sized walls and slabs. Rays nearly
-/// parallel to that plane, seeded in a box they never enter in its frame,
-/// once crossed it untraced and ended on the Solid node under the ground.
-/// Once residency settles, no primary ray ends on a Solid or Buried node,
-/// and every drawn hit is a solid cell entered from air as the cut draws
-/// it (at the level of the chunk the ray came from).
+/// parallel to that plane, seeded in a box they never enter in its frame
+/// or fallen between two boxes' tops to the Moon's far side, once crossed
+/// the ground untraced and ended on Solid nodes; rays nearly parallel to
+/// any side two chunks share went on under the ground between their
+/// frames. Once residency settles, no primary ray ends on a Solid or
+/// Buried node, and every drawn hit is a solid cell entered from air as
+/// the cut draws it (at the level of the chunk the ray came from), but
+/// along an edge with air, where frames meet to a 64th of a cell.
 #[test]
 fn moon_pole_rays_end_on_chunks() {
     use rayon::prelude::*;
@@ -4970,30 +4973,49 @@ fn moon_pole_rays_end_on_chunks() {
             (!right).then_some((x, y, hit))
         })
         .collect();
-    // Of those, the ones entered from a cell the cut draws as solid: at the
-    // level of the drawn chunk it lies in (none: air, an Empty node's).
+    // Of those, the ones entered from a cell the cut draws as solid (at the
+    // level of the drawn chunk it lies in; none: air, an Empty node's),
+    // with the hit on its face past its edges with air cells by more than
+    // a 64th of a cell: a ray along such an edge meets either cell (each
+    // chunk's frame places its sides to about that, as the raster's
+    // `SEED_REACH`).
+    let view_proj = view.view_proj(&planet);
     let wrong: Vec<_> = wrong
         .into_iter()
-        .filter(|(_, _, hit)| {
+        .filter(|&(x, y, hit)| {
             let c = hit.cell;
-            let mut before = [c.i, c.j, c.k];
-            if let Some(code) = hit.entered {
-                before[(code >> 1) as usize] += if code & 1 == 1 { -1 } else { 1 };
-            }
-            if planet.sample_kind(hit.level, c.face, c.i, c.j, c.k).0 != 1 {
+            let solid = |level: u32, cell: [i32; 3]| planet.sample_kind(level, c.face, cell[0], cell[1], cell[2]).0 == 1;
+            if !solid(hit.level, [c.i, c.j, c.k]) {
                 return true;
             }
+            let Some(code) = hit.entered else { return true };
+            let axis = (code >> 1) as usize;
+            let mut before = [c.i, c.j, c.k];
+            before[axis] += if code & 1 == 1 { -1 } else { 1 };
             // The base cell at the middle of the one entered from.
             let base = before.map(|v| (v << hit.level) + ((1 << hit.level) >> 1));
-            world
+            let drawn_solid = world
                 .chunks
                 .chunks_over(VolumeId(0), c.face, base[0], base[1])
                 .into_iter()
                 .find(|(key, _, drawn)| *drawn && (base[2] >> key.level).div_euclid(64) == key.cz)
-                .is_some_and(|(key, _, _)| planet.sample_kind(key.level, c.face, base[0] >> key.level, base[1] >> key.level, base[2] >> key.level).0 == 1)
+                .is_some_and(|(key, _, _)| solid(key.level, base.map(|v| v >> key.level)));
+            if !drawn_solid {
+                return false;
+            }
+            let at = view.eye + view.pixel_dir(view_proj, x, y) * hit.distance;
+            let Some(q) = planet.grid().face_coords(c.face, at) else { return true };
+            let q = q.map(|v| v / f64::from(1u32 << hit.level));
+            let edge = (0..3).filter(|&a| a != axis).any(|a| {
+                let f = q[a] - f64::from(before[a]);
+                let (mut lo, mut hi) = (before, before);
+                lo[a] -= 1;
+                hi[a] += 1;
+                (f < 1.0 / 64.0 && !solid(hit.level, lo)) || (f > 1.0 - 1.0 / 64.0 && !solid(hit.level, hi))
+            });
+            !edge
         })
         .collect();
-    let view_proj = view.view_proj(&planet);
     for &(x, y, hit) in wrong.iter().take(8) {
         let cpu = planet.raycast(view.eye, view.pixel_dir(view_proj, x, y), 600.0);
         eprintln!("pixel {x},{y}: drawn {hit:?}; cpu {:?}", cpu.map(|c| (c.distance, c.cell, c.previous)));

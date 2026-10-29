@@ -470,8 +470,18 @@ once. A plan that changes a switch under way ends it at once.
    cell it runs past in once it has entered every slab it crosses, where
    the box's frame is exact (`passes_beside`); it was walked as crossing it
    to its far sides, past the ground in the box beside (rays along the
-   plane through the Moon pole's eye ended on the Solid node under it). The
-   walk looks the next box up where the ray is, never back along it. Over
+   plane through the Moon pole's eye ended on the Solid node under it). A
+   box a step crosses into takes the ray from where the box before let it
+   go (`from_side`): its near side on that axis gives way to the step's
+   time, and its trace starts in the border cells. Without it a ray nearly
+   parallel to the side was in neither box between the two frames' sides,
+   and went on under the ground to the next cell's side. Raster boxes reach
+   a 64th of a cell past their cells (`SEED_REACH`; the walk is not
+   widened): boxes share no vertices and a side between two tops of
+   different heights is edge-on to an eye in its plane, so a ray along it
+   fell between them, seeded by a box behind (the Moon's far side). The
+   walk looks the next box up where the ray is, never back along it. A ray
+   along an edge between frames meets either cell, to about that 64th. Over
    the ceiling (`Planet::outer_radius` and 16 m) and rising, a ray meets
    nothing more and ends: the sky. A ray ends a thousandth past its
    pixel's mesh (`MESH_MARGIN`; the shading tells which of a mesh and a hit

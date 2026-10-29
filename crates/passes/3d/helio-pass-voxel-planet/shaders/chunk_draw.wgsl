@@ -320,9 +320,10 @@ fn cull_bin(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let c = chunk_frame(slot);
     let top = chunk_meta[slot].top;
-    let grow = statics[slot].m0.w;
+    let reach = statics[slot].m0.w;
+    let grow = reach + SEED_REACH;
     let z0 = c.box.x - grow;
-    let z1 = select(clamp(top.z + max(top.x, 0.0) * 64.0 + max(top.y, 0.0) * 64.0, c.box.y, 64.0), c.box.y + grow, grow > 0.0);
+    let z1 = select(clamp(top.z + max(top.x, 0.0) * 64.0 + max(top.y, 0.0) * 64.0, c.box.y, 64.0) + SEED_REACH, c.box.y + grow, reach > 0.0);
     let m = mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz);
     let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + m * vec3<f32>(32.0, 32.0, (z0 + z1) * 0.5);
     let half_z = (z1 - z0) * 0.5;
@@ -418,9 +419,11 @@ fn seed_vertex_inside(@builtin(vertex_index) v: u32, @builtin(instance_index) n:
 fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     let c = chunk_frame(slot);
     let corner = CORNERS[v];
-    // An exact chunk's cells reach past its frame's box by `grow` cells:
-    // its box holds them, flat over them.
-    let grow = statics[slot].m0.w;
+    // An exact chunk's cells reach past its frame's box by `reach` cells:
+    // its box holds them, flat over them. Every box reaches `SEED_REACH`
+    // further.
+    let reach = statics[slot].m0.w;
+    let grow = reach + SEED_REACH;
     var x = f32(corner & 1u) * (64.0 + 2.0 * grow) - grow;
     // Mirroring x maps the box onto itself and reverses its winding: a
     // left-handed frame, or a box drawn from inside (its back faces).
@@ -430,7 +433,7 @@ fn seed_box(slot: u32, v: u32, inside: bool) -> VOut {
     // below its bottom): raising a corner keeps the faces over the cells.
     let y = f32((corner >> 1u) & 1u) * (64.0 + 2.0 * grow) - grow;
     let top = chunk_meta[slot].top;
-    let plane = select(max(c.box.x, top.z + top.x * x + top.y * y), c.box.y + grow, grow > 0.0);
+    let plane = select(max(c.box.x, top.z + top.x * x + top.y * y) + SEED_REACH, c.box.y + grow, reach > 0.0);
     let local = vec3<f32>(x, y, select(c.box.x - grow, plane, (corner & 4u) != 0u));
     let world = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + c.m0.xyz * local.x + c.m1.xyz * local.y + c.m2.xyz * local.z;
     var out: VOut;
@@ -495,7 +498,20 @@ fn seed_fragment_inside(in: VOut) -> SeedInside {
 // and slabs.
 const INSIDE_SEED: u32 = 0x40000000u;
 
+// How far past its cells a chunk's raster box reaches (cells), on every
+// side. The raster's seed is the nearest box face a pixel's centre falls
+// on, and boxes share no vertices (each in its own frame, its top on its
+// own plane): a pixel whose ray runs along a side between two tops of
+// different heights, edge-on to an eye in its plane, fell between them
+// and was seeded by a box behind (the Moon's far side, under its pole:
+// the ray went through the ground). Overlapping boxes leave no such gap;
+// the walk is not widened (its hits stay exact), and a box seeding a ray
+// it does not cross passes it on (`passes_beside`). A 64th of a cell is
+// past the raster's sub-pixel snapping wherever cells are a pixel or more.
+const SEED_REACH: f32 = 1.0 / 64.0;
+
 // ---- 2. Trace ----
+
 
 @group(1) @binding(0) var seed: texture_2d<u32>;
 @group(1) @binding(1) var out_visibility: texture_storage_2d<rg32uint, write>;
@@ -1360,6 +1376,16 @@ struct WalkEnd {
     material: u32,
 }
 
+// A box's slab entry times `near` with the one on `axis` (a side the ray
+// stepped into it by; 3: none) no later than `t`, where the box before
+// let the ray go: the two frames place their shared side apart by rounding,
+// and a ray nearly parallel to it was in neither box between the two
+// (it went on under the ground, a hit on the next cell's side). The box
+// takes it at once, in the border cells it is beside.
+fn from_side(near: vec3<f32>, axis: u32, t: f32) -> vec3<f32> {
+    return select(near, min(near, vec3<f32>(t)), vec3<u32>(axis) == vec3<u32>(0u, 1u, 2u));
+}
+
 // Where a ray goes on from a box of an affine frame it does not cross in
 // that frame (o, d: the ray in its cells; `near`: the times it enters the
 // box's slabs, the latest past `leave`, the earliest it leaves one): the
@@ -1415,6 +1441,10 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
     // there.
     var slot = start.slot;
     var last = (2u << 18u) | (1u << 20u);
+    // The axis of the side a frame step crossed into this box by (3:
+    // none). Two chunks' frames place their shared side apart by rounding:
+    // the box takes the ray from where the one before left it.
+    var stepped = 3u;
     // A box of an exact level: its face and level in key.x, its cells (the
     // face's) in cube_lo and cube_hi. Such a walk starts where the ray
     // enters its seed box (an exact chunk's raster box reaches past its
@@ -1451,6 +1481,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             let hi = vec3<i32>(min(cube_hi.xy, vec2<i32>(i32(params.table.y >> u32(level)))), cube_hi.z);
             if place {
                 place = false;
+                stepped = 3u;
                 let q = exact_cell(ray, face, level, t_prev);
                 cell = vec3<i32>(floor(q));
                 frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
@@ -1483,6 +1514,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 t_prev = t_leave;
                 if t_prev >= t_end { break; }
                 // The cell just past the side it leaves by.
+                stepped = 3u;
                 let axis = span.leave >> 1u;
                 let positive = (span.leave & 1u) == 1u;
                 let q = exact_cell(ray, face, level, t_leave);
@@ -1515,7 +1547,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
             if real { cube_hi = clip_to_face(vec3<i32>(64), key); }
             let ca = (vec3<f32>(cube_lo) - o) * inv;
             let cb = (vec3<f32>(cube_hi) - o) * inv;
-            let cube_near = min(ca, cb);
+            let cube_near = from_side(min(ca, cb), stepped, t_prev);
             let cube_far = max(ca, cb);
             let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
             // Whether the ray crosses the box in its frame (else it was put
@@ -1525,7 +1557,10 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 // The walk over the chunk's occupied layers.
                 let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
                 let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
-                let lo = min(ta, tb);
+                // Its occupied layers reach the side crossed into it by only
+                // where they reach the chunk's top or bottom.
+                let layers = stepped < 2u || (stepped == 2u && select(frame.box.x <= 0.0, frame.box.y >= 64.0, d.z < 0.0));
+                let lo = from_side(min(ta, tb), select(3u, stepped, layers), t_prev);
                 let hi = max(ta, tb);
                 var t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
                 var t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
@@ -1557,6 +1592,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
                 if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
                 cell = key.yzw * 64 + local;
+                stepped = axis;
                 // Where in the next cell the ray enters: the side it
                 // crossed on the exit axis.
                 frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
@@ -1564,6 +1600,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
                 if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
             } else {
                 let beside = passes_beside(o, d, cube_near, t_leave, t_prev);
+                stepped = 3u;
                 t_prev = beside.t;
                 if t_prev >= t_end { break; }
                 cell = key.yzw * 64 + beside.cell;
@@ -1574,6 +1611,7 @@ fn walk(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f32, r
         let n = i32(params.table.y >> u32(level));
         let crossed = any(cell.xy < vec2<i32>(0)) || any(cell.xy >= vec2<i32>(n));
         if crossed {
+            stepped = 3u;
             if PLANE_WORLD { break; }
             let across = across_edge(face, cell, frac, n);
             if !across.ok { break; }
@@ -2443,6 +2481,8 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
     var cube_hi = start.hi;
     var real = start.real;
     var t_prev = t_start;
+    // The axis of the side a step crossed into this box by (as `walk`).
+    var stepped = 3u;
     var chunk = 0u;
     for (; chunk < boxes; chunk++) {
         let over = select(b + t_prev > 0.0 && q0 + t_prev * (2.0 * b + t_prev) > 0.0, b > 0.0 && q0 + b * t_prev > 0.0, PLANE_WORLD);
@@ -2457,7 +2497,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
         if real { cube_hi = clip_to_face(vec3<i32>(64), key); }
         let ca = (vec3<f32>(cube_lo) - o) * inv;
         let cb = (vec3<f32>(cube_hi) - o) * inv;
-        let cube_near = min(ca, cb);
+        let cube_near = from_side(min(ca, cb), stepped, t_prev);
         let cube_far = max(ca, cb);
         let t_leave = min(cube_far.x, min(cube_far.y, cube_far.z));
         // Whether the ray crosses the box in its frame (as `walk`).
@@ -2466,7 +2506,8 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
             // The walk over the chunk's occupied layers.
             let ta = (vec3<f32>(0.0, 0.0, frame.box.x) - o) * inv;
             let tb = (vec3<f32>(f32(cube_hi.x), f32(cube_hi.y), frame.box.y) - o) * inv;
-            let lo = min(ta, tb);
+            let layers = stepped < 2u || (stepped == 2u && select(frame.box.x <= 0.0, frame.box.y >= 64.0, d.z < 0.0));
+            let lo = from_side(min(ta, tb), select(3u, stepped, layers), t_prev);
             let hi = max(ta, tb);
             var t0 = max(max(lo.x, max(lo.y, lo.z)), t_prev);
             var t1 = min(min(hi.x, min(hi.y, hi.z)), t_end);
@@ -2500,6 +2541,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
             let step = select(cube_lo - 1, cube_hi, d > vec3<f32>(0.0));
             if axis == 0u { local.x = step.x; } else if axis == 1u { local.y = step.y; } else { local.z = step.z; }
             cell = key.yzw * 64 + local;
+            stepped = axis;
             // Where in the next cell the ray enters: the side it crossed
             // on the exit axis.
             frac = clamp(fract(q), vec3<f32>(0.0), vec3<f32>(0.999));
@@ -2507,6 +2549,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
             if axis == 0u { frac.x = entry; } else if axis == 1u { frac.y = entry; } else { frac.z = entry; }
         } else {
             let beside = passes_beside(o, d, cube_near, t_leave, t_prev);
+            stepped = 3u;
             t_prev = beside.t;
             if t_prev >= t_end { break; }
             local = beside.cell;
@@ -2518,6 +2561,7 @@ fn walk_fine(start: Walk, org: vec3<f32>, dir: vec3<f32>, t_start: f32, t_end: f
         let n = i32(params.table.y >> u32(level));
         let crossed = any(cell.xy < vec2<i32>(0)) || any(cell.xy >= vec2<i32>(n));
         if crossed {
+            stepped = 3u;
             if PLANE_WORLD { break; }
             let across = across_edge(face, cell, frac, n);
             if !across.ok { break; }
