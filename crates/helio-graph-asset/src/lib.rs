@@ -24,7 +24,8 @@ pub mod sections;
 mod validate;
 
 pub use asset::{
-    Connection, GraphAsset, GraphComment, GraphSection, NodeInstance, Params, PinRef, SectionPort,
+    Connection, GraphAsset, GraphComment, GraphSection, GraphZipTie, GraphZipTieEdge, NodeInstance,
+    Params, PinRef, SectionPort,
     EXTENSION, FORMAT_VERSION, SECTION_ENTRY, SECTION_EXIT, SECTION_PREFIX,
 };
 pub use compile::{compile, Fallback, GraphAssetPipeline};
