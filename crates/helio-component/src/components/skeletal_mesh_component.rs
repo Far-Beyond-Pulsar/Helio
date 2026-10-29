@@ -1086,7 +1086,7 @@ fn reload_dependants(world: &mut World, changed: &Path, mut recompile: impl FnMu
     let mut recompiled = 0;
     for (_, player) in world.query::<&mut SkeletalMeshComponent>() {
         player.anim.montages.clear();
-        if player.graph_dependency_paths.iter().any(|path| *path == changed) && recompile(player) {
+        if player.graph_dependency_paths.contains(&changed) && recompile(player) {
             recompiled += 1;
         }
     }

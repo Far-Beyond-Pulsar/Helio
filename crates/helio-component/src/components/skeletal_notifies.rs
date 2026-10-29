@@ -861,6 +861,7 @@ impl NotifyPlayback {
     }
 
     /// Notify states currently active across all playbacks.
+    #[cfg(test)]
     pub(super) fn active_states(&self) -> usize {
         self.tracker.active_states()
     }
