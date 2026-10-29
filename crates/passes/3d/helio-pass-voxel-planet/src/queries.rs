@@ -20,17 +20,26 @@
 //! * **Asks** ([`WorldQueries::ask`], [`WorldQueries::watch`]) answer what
 //!   bricks do not hold (a ray past them, the ground under an aircraft)
 //!   against the latest snapshot on the workers, a frame or so later.
-//! * **Edits** show at once: [`WorldQueries::edit`] applies brushes to the
-//!   resident bricks immediately, and a published snapshot that includes
-//!   them ([`WorldQueries::publish`]) re-samples the bricks they touched.
+//! * **Changes** never block a read: [`WorldQueries::edit`] (brushes) and
+//!   [`WorldQueries::publish`] (a snapshot) only queue. A worker rebuilds
+//!   the resident bricks a change touches aside (copies with the brushes
+//!   applied, or an undo's bricks sampled again), on every core, then swaps
+//!   them all in at once: a read sees the world before the change or after
+//!   it, never part of it, and waits at most for the swap of the bricks'
+//!   pointers. Bricks are immutable and shared (`Arc`), so a read holding
+//!   one finishes on it. Changes show in order, a few milliseconds after
+//!   they are made ([`WorldQueries::editing`] counts those not shown).
 //!   Publishing any snapshot works out what changed from the edit
-//!   histories, so hosts only hand over their planets.
+//!   histories, so hosts only hand over their planets; a snapshot holding
+//!   brushes reads do not show yet shows them first, so it never shows
+//!   part of an edit either.
 
-use crate::edits::{center_half, Brush, FaceBrush};
-use crate::grid::Cell;
+use crate::edits::{center_half, meets, Brush, Cube, FaceBrush, Meets};
+use crate::grid::{Cell, Grid, VolumeMap, VolumePoints};
 use crate::planet::{Matter, Planet, RayHit, Walked};
 use crate::terrain::material;
 use glam::DVec3;
+use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -135,35 +144,128 @@ impl Brick {
         Self { all: self.all, ground: self.ground, materials: self.materials.clone(), used: AtomicU64::new(self.used.load(Ordering::Relaxed)) }
     }
 
-    /// `brushes` (all of one face) applied to its cells, as the planet
-    /// applies its recent brushes: over everything else, in order.
-    fn apply(&mut self, planet: &Planet, key: BrickKey, brushes: &[FaceBrush]) {
-        let [i0, j0, k0] = key.origin();
-        for b in brushes {
-            let extent = b.extent_cells() as i32;
-            let (ci, cj) = (b.center[0] >> 1, b.center[1] >> 1);
-            let (k_lo, k_hi) = (b.k_lo >> 1, (b.k_hi >> 1) + 1);
-            for j in (cj - extent).max(j0)..(cj + extent + 1).min(j0 + QUERY_BRICK) {
-                for i in (ci - extent).max(i0)..(ci + extent + 1).min(i0 + QUERY_BRICK) {
-                    for k in k_lo.max(k0)..k_hi.min(k0 + QUERY_BRICK) {
-                        let center = [center_half(i, 0), center_half(j, 0), center_half(k, 0)];
-                        if !b.contains(center, || planet.grid().volume_point(key.face, i, j, k, 0)) {
-                            continue;
-                        }
-                        let index = BrickKey::index(Cell::new(key.face, i, j, k));
-                        match b.op() {
-                            0 => self.set(index, false, false, 0),
-                            1 => self.set(index, true, true, b.material()),
-                            _ if self.solid(index, Matter::All) => {
-                                let ground = self.solid(index, Matter::Ground);
-                                self.set(index, true, ground, b.material());
-                            }
-                            _ => {}
+    /// `stamps` applied to its cells, as the planet applies its recent
+    /// brushes: over everything else, in order. A brush is tested against
+    /// the whole brick, then its eight 8^3 octants (`edits::meets`, exact
+    /// where it is certain), and cell by cell only where its surface
+    /// crosses: a brush costs its surface, not its volume.
+    fn apply(&mut self, grid: &Grid, key: BrickKey, stamps: &Stamps) {
+        let lo = key.origin();
+        for fb in stamps.faces.iter().filter(|fb| fb.face() == key.face) {
+            match meets(fb, Cube::brick([key.i, key.j, key.k].map(i64::from), 1), grid, &stamps.map) {
+                Meets::Outside => {}
+                Meets::Contains => self.fill(fb),
+                Meets::Crosses => {
+                    for octant in 0..8 {
+                        let at = [0, 1, 2].map(|a| lo[a] + 8 * ((octant >> a) & 1));
+                        match meets(fb, Cube::brick(at.map(|v| i64::from(v / 8)), 0), grid, &stamps.map) {
+                            Meets::Outside => {}
+                            how => self.stamp_octant(fb, key.face, at, how == Meets::Contains, &stamps.points),
                         }
                     }
                 }
             }
         }
+    }
+
+    /// Brush `fb` over every cell.
+    fn fill(&mut self, fb: &FaceBrush) {
+        match fb.op() {
+            0 => {
+                self.all = [0; WORDS];
+                self.ground = [0; WORDS];
+                self.materials = None;
+            }
+            1 => {
+                self.all = [!0; WORDS];
+                self.ground = [!0; WORDS];
+                self.materials = (fb.material() != 0).then(|| vec![fb.material(); CELLS].into_boxed_slice());
+            }
+            _ => (0..CELLS).for_each(|index| self.stamp(index, fb)),
+        }
+    }
+
+    /// Brush `fb` over the 8^3 cells from `at`: all of them (`whole`), or
+    /// those whose centres it holds.
+    fn stamp_octant(&mut self, fb: &FaceBrush, face: u8, at: [i32; 3], whole: bool, points: &VolumePoints) {
+        for j in at[1]..at[1] + 8 {
+            for i in at[0]..at[0] + 8 {
+                let mut column = None;
+                for k in at[2]..at[2] + 8 {
+                    let center = [center_half(i, 0), center_half(j, 0), center_half(k, 0)];
+                    let held = whole
+                        || fb.contains(center, || points.at(*column.get_or_insert_with(|| points.column(face, i, j, 0)), k, 0));
+                    if held {
+                        self.stamp(BrickKey::index(Cell::new(face, i, j, k)), fb);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Brush `fb` over cell `index`: removed, added, or painted if solid.
+    fn stamp(&mut self, index: usize, fb: &FaceBrush) {
+        match fb.op() {
+            0 => self.set(index, false, false, 0),
+            1 => self.set(index, true, true, fb.material()),
+            _ if self.solid(index, Matter::All) => {
+                let ground = self.solid(index, Matter::Ground);
+                self.set(index, true, ground, fb.material());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Brushes resolved for applying to many bricks: every brush's face
+/// brushes in order, and the grid's volume maps.
+struct Stamps {
+    faces: Vec<FaceBrush>,
+    map: VolumeMap,
+    points: VolumePoints,
+}
+
+impl Stamps {
+    fn new(grid: &Grid, brushes: &[Brush]) -> Self {
+        Self {
+            faces: brushes.iter().flat_map(|b| b.resolve(grid).unwrap_or_default()).collect(),
+            map: grid.volume_map(),
+            points: grid.volume_points(),
+        }
+    }
+}
+
+/// Where brushes may reach: the bricks they can touch.
+struct Reach {
+    /// Each brush's centre and the farthest a touched brick's middle can be
+    /// from it, and a ball holding them all.
+    brushes: Vec<(DVec3, f64)>,
+    all: (DVec3, f64),
+}
+
+impl Reach {
+    fn new(grid: &Grid, brushes: &[Brush]) -> Self {
+        let brick_m = f64::from(QUERY_BRICK) * grid.voxel_size();
+        let brushes: Vec<(DVec3, f64)> = brushes
+            .iter()
+            .map(|brush| {
+                // A cube brush reaches sqrt(3) radii (and its height) from its
+                // centre; a brick sqrt(3) halves from its middle.
+                let reach = brush.radius.max(brush.height) * 1.7321 + brick_m * 0.8661 + grid.voxel_size();
+                (DVec3::from_array(brush.center), reach)
+            })
+            .collect();
+        let middle = brushes.iter().map(|(c, _)| *c).sum::<DVec3>() / brushes.len().max(1) as f64;
+        let radius = brushes.iter().map(|(c, r)| c.distance(middle) + r).fold(-1.0, f64::max);
+        Self { brushes, all: (middle, radius) }
+    }
+
+    fn touches(&self, planet: &Planet, key: &BrickKey) -> bool {
+        if self.brushes.is_empty() {
+            return false;
+        }
+        let c = key.center(planet);
+        c.distance(self.all.0) <= self.all.1 && self.brushes.iter().any(|(p, r)| c.distance(*p) <= *r)
     }
 }
 
@@ -230,9 +332,30 @@ struct Focus {
     listed_at: Option<DVec3>,
 }
 
+/// A change of the world reads see, queued.
+enum Change {
+    /// Brushes made (`edit`), applied over it.
+    Edit(Vec<Brush>),
+    /// A snapshot (`publish`): its history continued, undone, or another
+    /// world.
+    Publish(Arc<Planet>),
+}
+
 /// Work and results shared with the workers.
 struct State {
+    /// The world reads see: a snapshot, and brushes shown ahead of it
+    /// (`edit`), its history continued from its end. Bricks sampled from an
+    /// older snapshot have these applied.
     planet: Arc<Planet>,
+    pending: Vec<Brush>,
+    /// Bumped when that world is replaced rather than continued (an undo,
+    /// another world): bricks sampled before are dropped.
+    epoch: u64,
+    /// Changes not shown yet, in order; whether a worker is making one, and
+    /// the bricks inserted meanwhile (it rebuilds those it touches too).
+    changes: VecDeque<Change>,
+    changing: bool,
+    inserted: Vec<BrickKey>,
     foci: FxHashMap<u64, Focus>,
     /// Bricks the foci (or reads) want and are not resident, nearest first
     /// when taken; and those taken by a worker.
@@ -241,10 +364,6 @@ struct State {
     /// Bricks a newer snapshot must re-sample (they hold edits it now
     /// includes, or changed under them).
     stale: FxHashSet<BrickKey>,
-    /// Brushes applied to bricks (`edit`) ahead of their snapshot, with
-    /// their place in the edit history: re-applied over a brick sampled from
-    /// a snapshot whose history is shorter.
-    pending: Vec<(usize, Brush)>,
     asks: VecDeque<(Ticket, Query)>,
     answers: FxHashMap<Ticket, Answer>,
     /// Each watch's query and generation (bumped as it or the snapshot
@@ -256,10 +375,28 @@ struct State {
     stop: bool,
 }
 
+impl State {
+    /// The length of the edit history reads see.
+    fn visible(&self) -> usize {
+        self.planet.edits().len() + self.pending.len()
+    }
+
+    /// Brush `index` of the history reads see (`None`: sealed).
+    fn brush(&self, index: usize) -> Option<Brush> {
+        match index.checked_sub(self.planet.edits().len()) {
+            Some(ahead) => self.pending.get(ahead).copied(),
+            None => self.planet.edits().brush(index),
+        }
+    }
+}
+
 struct Shared {
     state: Mutex<State>,
     work: Condvar,
     bricks: RwLock<FxHashMap<BrickKey, Arc<Brick>>>,
+    /// `State::planet`, for reads: they never wait for the workers'
+    /// bookkeeping.
+    planet: RwLock<Arc<Planet>>,
     tick: AtomicU64,
 }
 
@@ -278,13 +415,18 @@ impl WorldQueries {
     /// Queries over `planet` on `threads` workers (at least one).
     pub fn new(planet: Arc<Planet>, threads: usize) -> Self {
         let shared = Arc::new(Shared {
+            planet: RwLock::new(planet.clone()),
             state: Mutex::new(State {
                 planet,
+                pending: Vec::new(),
+                epoch: 0,
+                changes: VecDeque::new(),
+                changing: false,
+                inserted: Vec::new(),
                 foci: Default::default(),
                 wanted: Default::default(),
                 sampling: Default::default(),
                 stale: Default::default(),
-                pending: Vec::new(),
                 asks: VecDeque::new(),
                 answers: Default::default(),
                 watches: Default::default(),
@@ -311,79 +453,49 @@ impl WorldQueries {
 
     /// The snapshot queries are answered against.
     pub fn planet(&self) -> Arc<Planet> {
-        self.shared.state.lock().expect("queries").planet.clone()
+        self.shared.planet.read().expect("planet").clone()
     }
 
-    /// Answer against `planet` from now on. Bricks its edits changed (from
-    /// the previous snapshot's: brushes appended or undone) are sampled
-    /// again; another world (a new recipe, a rebuilt history) drops them
-    /// all.
+    /// Answer against `planet` from now on (queued after the changes made
+    /// before, shown in a few milliseconds): bricks its edits changed from
+    /// the previous snapshot's (brushes appended or undone) are rebuilt
+    /// aside and swapped in at once, and sampled again from it later;
+    /// another world (a new recipe, a rebuilt history) drops them all.
     pub fn publish(&self, planet: Arc<Planet>) {
         let mut state = self.shared.state.lock().expect("queries");
-        if Arc::ptr_eq(&state.planet, &planet) {
+        let latest = state.changes.iter().rev().find_map(|change| match change {
+            Change::Publish(planet) => Some(planet),
+            Change::Edit(_) => None,
+        });
+        if Arc::ptr_eq(latest.unwrap_or(&state.planet), &planet) {
             return;
         }
-        let changed = changed_brushes(&state.planet, &planet);
-        let tick = self.shared.tick.load(Ordering::Relaxed);
-        // Edits applied ahead of their snapshot that it now holds; a history
-        // that went back (an undo) or another world voids them all.
-        let held = planet.edits().len();
-        if changed.is_none() || held < state.planet.edits().len() {
-            state.pending.clear();
+        // A snapshot still waiting last in line is replaced: the newer one
+        // holds what it does.
+        match state.changes.back_mut() {
+            Some(Change::Publish(waiting)) => *waiting = planet,
+            _ => state.changes.push_back(Change::Publish(planet)),
         }
-        state.pending.retain(|(index, _)| *index >= held);
-        state.planet = planet;
-        for (_, generation) in state.watches.values_mut() {
-            *generation += 1;
-        }
-        let mut bricks = self.shared.bricks.write().expect("bricks");
-        match changed {
-            Some(brushes) => {
-                let keys = touched(&state.planet, &bricks, &brushes);
-                state.stale.extend(keys);
-            }
-            None => {
-                bricks.clear();
-                state.stale.clear();
-                state.wanted.clear();
-                for focus in state.foci.values_mut() {
-                    focus.listed_at = None;
-                }
-            }
-        }
-        drop(bricks);
-        let foci: Vec<u64> = state.foci.keys().copied().collect();
-        for id in foci {
-            list_focus(&mut state, id, tick);
-        }
-        self.shared.work.notify_all();
+        self.shared.work.notify_one();
     }
 
-    /// Apply `brushes` to the resident bricks now: reads see them at once,
-    /// before a snapshot that includes them is published (which then
-    /// samples those bricks again).
+    /// Show `brushes` (ahead of a snapshot that includes them, which then
+    /// samples the bricks they touched again): queued after the changes made
+    /// before, and shown together, in a few milliseconds.
     pub fn edit(&self, brushes: &[Brush]) {
         if brushes.is_empty() {
             return;
         }
         let mut state = self.shared.state.lock().expect("queries");
-        let planet = state.planet.clone();
-        let mut bricks = self.shared.bricks.write().expect("bricks");
-        let keys = touched(&planet, &bricks, brushes);
-        let resolved: Vec<Vec<FaceBrush>> = brushes.iter().map(|b| b.resolve(planet.grid()).unwrap_or_default()).collect();
-        for key in &keys {
-            if let Some(brick) = bricks.get(key) {
-                let mut edited = brick.copy();
-                for faces in &resolved {
-                    let of_face: Vec<FaceBrush> = faces.iter().copied().filter(|f| f.face() == key.face).collect();
-                    edited.apply(&planet, *key, &of_face);
-                }
-                bricks.insert(*key, Arc::new(edited));
-            }
-        }
-        let next = planet.edits().len() + state.pending.len();
-        state.pending.extend(brushes.iter().enumerate().map(|(n, b)| (next + n, *b)));
-        state.stale.extend(keys);
+        state.changes.push_back(Change::Edit(brushes.to_vec()));
+        self.shared.work.notify_one();
+    }
+
+    /// Changes ([`Self::edit`], [`Self::publish`]) reads do not show yet (0:
+    /// they show every one made).
+    pub fn editing(&self) -> usize {
+        let state = self.shared.state.lock().expect("queries");
+        state.changes.len() + usize::from(state.changing)
     }
 
     /// Keep the bricks within `radius` of `center` resident (focus `id`,
@@ -808,38 +920,177 @@ fn changed_brushes(old: &Planet, new: &Planet) -> Option<Vec<Brush>> {
     (shorter.len()..longer.len()).map(|i| longer.brush(i)).collect()
 }
 
-/// The resident bricks `brushes` may touch.
-fn touched(planet: &Planet, bricks: &FxHashMap<BrickKey, Arc<Brick>>, brushes: &[Brush]) -> Vec<BrickKey> {
-    let grid = planet.grid();
-    let brick_m = f64::from(QUERY_BRICK) * grid.voxel_size();
-    bricks
-        .keys()
-        .filter(|key| {
-            let c = key.center(planet);
-            brushes.iter().any(|brush| {
-                // A cube brush reaches sqrt(3) radii (and its height) from its
-                // centre; a brick sqrt(3) halves from its middle.
-                let reach = brush.radius.max(brush.height) * 1.7321 + brick_m * 0.8661 + grid.voxel_size();
-                c.distance(DVec3::from_array(brush.center)) <= reach
-            })
-        })
-        .copied()
-        .collect()
-}
-
 enum Job {
+    /// The next change, against the world reads see (its snapshot and the
+    /// brushes shown ahead of it).
+    Change(Change, Arc<Planet>, Vec<Brush>),
     Watch(u64, Query, u64, Arc<Planet>),
     Ask(Ticket, Query, Arc<Planet>),
-    Brick(BrickKey, Arc<Planet>, Vec<(usize, Brush)>),
+    /// A brick sampled from a snapshot, the brushes shown ahead of it
+    /// applied, for a world of an epoch.
+    Brick(BrickKey, Arc<Planet>, Vec<Brush>, u64),
 }
 
-/// `brushes` (of any faces) applied to `brick` at `key`.
-fn apply_brushes<'a>(planet: &Planet, key: BrickKey, brick: &mut Brick, brushes: impl Iterator<Item = &'a Brush>) {
-    for brush in brushes {
-        if let Ok(faces) = brush.resolve(planet.grid()) {
-            let of_face: Vec<FaceBrush> = faces.into_iter().filter(|f| f.face() == key.face).collect();
-            brick.apply(planet, key, &of_face);
+/// How a change rebuilds the bricks it touches.
+enum Rebuild {
+    /// Brushes applied over them.
+    Apply(Stamps),
+    /// Sampled again from a snapshot (an undo).
+    Sample(Arc<Planet>),
+}
+
+impl Rebuild {
+    fn build(&self, grid: &Grid, key: BrickKey, old: &Brick, tick: u64) -> Brick {
+        match self {
+            Rebuild::Apply(stamps) => {
+                let mut brick = old.copy();
+                brick.apply(grid, key, stamps);
+                brick
+            }
+            Rebuild::Sample(planet) => Brick::sample(planet, key, tick),
         }
+    }
+}
+
+/// Makes `change` of the world `base` and `pending` (shown ahead of it):
+/// works out the bricks it rebuilds and how the world reads see changes,
+/// then [`rebuild`]s them.
+fn make_change(shared: &Shared, change: Change, base: Arc<Planet>, pending: Vec<Brush>) {
+    let grid = *base.grid();
+    match change {
+        Change::Edit(brushes) => {
+            let how = Rebuild::Apply(Stamps::new(&grid, &brushes));
+            rebuild(shared, &base, &Reach::new(&grid, &brushes), &Reach::new(&grid, &[]), &how, |state| {
+                state.pending.extend(brushes);
+            });
+        }
+        Change::Publish(planet) => {
+            let (base_len, held) = (base.edits().len(), planet.edits().len());
+            let visible = base_len + pending.len();
+            let changed = changed_brushes(&base, &planet);
+            // Whether it holds the brushes shown ahead of `base` as far as
+            // its history goes (a host may have dropped one), and the
+            // brushes it holds past them.
+            let continued = held >= base_len
+                && (base_len..held.min(visible)).all(|i| planet.edits().brush(i) == Some(pending[i - base_len]));
+            let extras = changed
+                .as_ref()
+                .filter(|_| continued)
+                .and_then(|_| (visible..held).map(|i| planet.edits().brush(i)).collect::<Option<Vec<Brush>>>());
+            match (changed, extras) {
+                (Some(changed), None) if !continued => {
+                    // An undo (or a history that went another way from the
+                    // brushes shown ahead): the bricks it and those brushes
+                    // (void now) touched are sampled from it.
+                    let touched: Vec<Brush> = changed.iter().chain(&pending).copied().collect();
+                    let how = Rebuild::Sample(planet.clone());
+                    rebuild(shared, &base, &Reach::new(&grid, &touched), &Reach::new(&grid, &[]), &how, |state| {
+                        state.planet = planet;
+                        state.pending.clear();
+                        state.epoch += 1;
+                        adopted(shared, state);
+                    });
+                }
+                (Some(changed), Some(extras)) => {
+                    // Its history continued: what it holds past what reads
+                    // show is applied first; the bricks its new brushes
+                    // touched are sampled from it later.
+                    let how = Rebuild::Apply(Stamps::new(&grid, &extras));
+                    rebuild(shared, &base, &Reach::new(&grid, &extras), &Reach::new(&grid, &changed), &how, |state| {
+                        let shown = (held - base_len).min(state.pending.len());
+                        state.pending.drain(..shown);
+                        state.planet = planet;
+                        adopted(shared, state);
+                    });
+                }
+                _ => {
+                    // Another world: every brick goes.
+                    let mut state = shared.state.lock().expect("queries");
+                    shared.bricks.write().expect("bricks").clear();
+                    state.stale.clear();
+                    state.wanted.clear();
+                    state.planet = planet;
+                    state.pending.clear();
+                    state.epoch += 1;
+                    adopted(shared, &mut state);
+                    let foci: Vec<u64> = state.foci.keys().copied().collect();
+                    for id in foci {
+                        list_focus(&mut state, id, 0);
+                    }
+                    state.changing = false;
+                    shared.work.notify_all();
+                }
+            }
+        }
+    }
+}
+
+/// A snapshot became the world reads see: watches are answered again.
+fn adopted(shared: &Shared, state: &mut State) {
+    *shared.planet.write().expect("planet") = state.planet.clone();
+    for (_, generation) in state.watches.values_mut() {
+        *generation += 1;
+    }
+}
+
+/// Rebuilds the resident bricks `rebuilt` reaches aside (`how`, in parallel,
+/// no lock held), then swaps them all in under the locks with `commit`'s
+/// change of the world reads see: a read sees the world before or after,
+/// never a part. Bricks samplers inserted meanwhile (from the world before)
+/// are rebuilt too, before the swap. Bricks `stale` reaches are sampled
+/// again later.
+fn rebuild(shared: &Shared, base: &Planet, rebuilt: &Reach, stale: &Reach, how: &Rebuild, commit: impl FnOnce(&mut State)) {
+    let tick = shared.tick.load(Ordering::Relaxed);
+    // The resident keys are copied under the lock and tested without it
+    // (a brick inserted meanwhile is in `State::inserted`).
+    let resident: Vec<BrickKey> = shared.bricks.read().expect("bricks").keys().copied().collect();
+    let touched: Vec<BrickKey> = resident.iter().filter(|key| rebuilt.touches(base, key)).copied().collect();
+    let mut resampled: Vec<BrickKey> = resident.into_iter().filter(|key| stale.touches(base, key)).collect();
+    let mut todo: Vec<(BrickKey, Arc<Brick>)> = {
+        let bricks = shared.bricks.read().expect("bricks");
+        touched.into_iter().filter_map(|key| Some((key, bricks.get(&key)?.clone()))).collect()
+    };
+    let mut built: FxHashMap<BrickKey, (Arc<Brick>, Arc<Brick>)> = FxHashMap::default();
+    for attempt in 0.. {
+        built.extend(
+            todo.par_iter()
+                .map(|(key, old)| (*key, (old.clone(), Arc::new(how.build(base.grid(), *key, old, tick)))))
+                .collect::<Vec<_>>(),
+        );
+        let mut state = shared.state.lock().expect("queries");
+        let mut bricks = shared.bricks.write().expect("bricks");
+        let mut inserted = std::mem::take(&mut state.inserted);
+        inserted.sort_unstable_by_key(|k| (k.face, k.i, k.j, k.k));
+        inserted.dedup();
+        resampled.extend(inserted.iter().filter(|key| stale.touches(base, key)));
+        todo = inserted
+            .into_iter()
+            .filter(|key| rebuilt.touches(base, key))
+            .filter_map(|key| {
+                let now = bricks.get(&key)?;
+                built.get(&key).is_none_or(|(old, _)| !Arc::ptr_eq(old, now)).then(|| (key, now.clone()))
+            })
+            .collect();
+        if !todo.is_empty() && attempt < 3 {
+            continue;
+        }
+        // Still racing samplers: those bricks go, and are sampled again
+        // with the change shown.
+        for (key, _) in todo.drain(..) {
+            bricks.remove(&key);
+            state.wanted.insert(key);
+        }
+        for (key, (old, new)) in built.drain() {
+            if bricks.get(&key).is_some_and(|now| Arc::ptr_eq(now, &old)) {
+                bricks.insert(key, new);
+            }
+        }
+        drop(bricks);
+        state.stale.extend(resampled.drain(..));
+        commit(&mut state);
+        state.changing = false;
+        shared.work.notify_all();
+        return;
     }
 }
 
@@ -858,6 +1109,7 @@ fn work(shared: &Shared) {
             }
         };
         match job {
+            Job::Change(change, base, pending) => make_change(shared, change, base, pending),
             Job::Watch(id, query, generation, planet) => {
                 let answer = query.answer(&planet);
                 let mut state = shared.state.lock().expect("queries");
@@ -869,34 +1121,75 @@ fn work(shared: &Shared) {
                 let answer = query.answer(&planet);
                 shared.state.lock().expect("queries").answers.insert(ticket, answer);
             }
-            Job::Brick(key, planet, pending) => {
-                let tick = shared.tick.load(Ordering::Relaxed);
-                let mut brick = Brick::sample(&planet, key, tick);
-                // Edits applied ahead of this snapshot.
-                apply_brushes(&planet, key, &mut brick, pending.iter().map(|(_, b)| b));
-                let mut state = shared.state.lock().expect("queries");
-                state.sampling.remove(&key);
-                // Edits made while it was sampled, at once; a newer snapshot
-                // since: sample it again.
-                let newer: Vec<Brush> = state
-                    .pending
-                    .iter()
-                    .filter(|(i, _)| pending.last().is_none_or(|(last, _)| i > last))
-                    .map(|(_, b)| *b)
-                    .collect();
-                apply_brushes(&planet, key, &mut brick, newer.iter());
-                if !Arc::ptr_eq(&state.planet, &planet) {
-                    state.stale.insert(key);
-                }
-                shared.bricks.write().expect("bricks").insert(key, Arc::new(brick));
-            }
+            Job::Brick(key, planet, pending, epoch) => sample(shared, key, &planet, &pending, epoch),
         }
     }
 }
 
-/// The next job: watches, then asks, then the wanted brick nearest a focus,
-/// then stale bricks.
+/// Samples brick `key` from `planet` with `pending` (shown ahead of it)
+/// applied, and inserts it once it holds exactly what reads show: edits
+/// shown while it was sampled are applied first (no lock held); a world
+/// replaced meanwhile (`epoch`) drops it.
+fn sample(shared: &Shared, key: BrickKey, planet: &Planet, pending: &[Brush], epoch: u64) {
+    let grid = planet.grid();
+    let mut brick = Brick::sample(planet, key, shared.tick.load(Ordering::Relaxed));
+    if !pending.is_empty() {
+        brick.apply(grid, key, &Stamps::new(grid, pending));
+    }
+    let mut have = planet.edits().len() + pending.len();
+    loop {
+        let mut state = shared.state.lock().expect("queries");
+        if state.epoch != epoch {
+            // Sampled from a world since replaced: wanted from the new one.
+            state.sampling.remove(&key);
+            state.wanted.insert(key);
+            return;
+        }
+        let shown = state.visible();
+        if shown == have {
+            state.sampling.remove(&key);
+            if !std::ptr::eq(&*state.planet, planet) {
+                state.stale.insert(key);
+            }
+            if state.changing {
+                state.inserted.push(key);
+            }
+            shared.bricks.write().expect("bricks").insert(key, Arc::new(brick));
+            return;
+        }
+        let Some(newer) = (have..shown).map(|i| state.brush(i)).collect::<Option<Vec<Brush>>>() else {
+            // Shown brushes since sealed: sampled again.
+            state.sampling.remove(&key);
+            state.wanted.insert(key);
+            return;
+        };
+        drop(state);
+        brick.apply(grid, key, &Stamps::new(grid, &newer));
+        have = shown;
+    }
+}
+
+/// The next job: the next change, watches, then asks, then the wanted
+/// brick nearest a focus, then stale bricks.
 fn take(state: &mut State, shared: &Shared) -> Option<Job> {
+    if !state.changing {
+        if let Some(change) = state.changes.pop_front() {
+            // Edits made one after another show together.
+            let change = match change {
+                Change::Edit(mut brushes) => {
+                    while let Some(Change::Edit(more)) = state.changes.front_mut() {
+                        brushes.append(more);
+                        state.changes.pop_front();
+                    }
+                    Change::Edit(brushes)
+                }
+                publish => publish,
+            };
+            state.changing = true;
+            state.inserted.clear();
+            return Some(Job::Change(change, state.planet.clone(), state.pending.clone()));
+        }
+    }
     let planet = state.planet.clone();
     let due = state
         .watches
@@ -934,9 +1227,8 @@ fn take(state: &mut State, shared: &Shared) -> Option<Job> {
         Some(k)
     })?;
     state.sampling.insert(key);
-    Some(Job::Brick(key, planet, state.pending.clone()))
+    Some(Job::Brick(key, planet, state.pending.clone(), state.epoch))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -971,9 +1263,10 @@ mod tests {
             .1
     }
 
+    /// Until every change shows and every brick is resident.
     fn settle(queries: &WorldQueries) {
         let started = Instant::now();
-        while queries.loading() > 0 {
+        while queries.editing() > 0 || queries.loading() > 0 {
             assert!(started.elapsed() < Duration::from_secs(120), "bricks still loading: {}", queries.loading());
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -1101,10 +1394,11 @@ mod tests {
         assert_eq!(ready(|| queries.solid(c, Matter::All)), planet.solid_of(c, Matter::All));
     }
 
-    /// An edit shows at once, before its snapshot; the snapshot that holds
-    /// it re-samples its bricks to the planet's own cells.
+    /// An edit shows once made (before its snapshot), as a whole; the
+    /// snapshot that holds it re-samples its bricks to the planet's own
+    /// cells.
     #[test]
-    fn edits_show_at_once_and_settle_on_their_snapshot() {
+    fn edits_show_before_and_settle_on_their_snapshot() {
         let mut planet = earth();
         let eye = forest(&planet);
         let queries = WorldQueries::new(Arc::new(planet.clone()), 2);
@@ -1116,20 +1410,95 @@ mod tests {
         let block = Brush { center: (eye + up.any_orthonormal_vector() * 1.0).to_array(), radius: 0.3, shape: BrushShape::Cube, op: BrushOp::Add, material: 9, height: 0.0 };
         let (dug, built) = (planet.grid().locate(ground).0, planet.grid().locate(DVec3::from_array(block.center)).0);
         assert!(planet.solid(dug) && !planet.solid(built));
-        queries.edit(&[dig, block]);
+        queries.edit(&[dig]);
+        queries.edit(&[block]);
+        settle(&queries);
         assert_eq!(queries.solid(dug, Matter::All), Resident::Ready(false));
         assert_eq!(queries.solid(built, Matter::All), Resident::Ready(true));
         assert_eq!(queries.material(built), Resident::Ready(9));
         planet.apply(dig).unwrap();
         planet.apply(block).unwrap();
+        let exact = |queries: &WorldQueries, planet: &Planet| {
+            let (cell, _) = planet.grid().locate(eye);
+            for di in -12..12 {
+                for dk in -20..12 {
+                    let c = Cell::new(cell.face, cell.i + di, cell.j, cell.k + dk);
+                    assert_eq!(queries.solid(c, Matter::All).ready(), Some(planet.solid(c)), "{c:?}");
+                    assert_eq!(queries.material(c).ready(), Some(planet.material(c)), "{c:?}");
+                }
+            }
+        };
+        // Bricks edited ahead of the snapshot are already its cells.
+        exact(&queries, &planet);
         queries.publish(Arc::new(planet.clone()));
         settle(&queries);
-        let (cell, _) = planet.grid().locate(eye);
-        for di in -12..12 {
-            for dk in -20..12 {
-                let c = Cell::new(cell.face, cell.i + di, cell.j, cell.k + dk);
-                assert_eq!(queries.solid(c, Matter::All).ready(), Some(planet.solid(c)), "{c:?}");
-            }
+        exact(&queries, &planet);
+        // A snapshot with a brush never shown (another editor's) shows it.
+        let pit = Brush { center: (ground - up.any_orthonormal_vector() * 1.5).to_array(), radius: 0.6, shape: BrushShape::Cube, op: BrushOp::Remove, material: 0, height: 0.0 };
+        planet.apply(pit).unwrap();
+        queries.publish(Arc::new(planet.clone()));
+        settle(&queries);
+        exact(&queries, &planet);
+    }
+
+    /// While edits and an undo are made, every read sees the world before or
+    /// after each one, never part of one: a ray through a block across
+    /// several bricks hits its front or nothing new, never a brick behind.
+    #[test]
+    fn a_change_shows_whole_or_not_at_all() {
+        use std::sync::atomic::AtomicBool;
+        let planet = Arc::new(earth());
+        let eye = forest(&planet);
+        let up = planet.grid().up(eye);
+        let ahead = up.any_orthonormal_vector();
+        let side = up.cross(ahead);
+        // A 2.4 m block 3.5 m ahead, through the eye's height: two bricks
+        // and more deep.
+        let block = Brush { center: (eye + ahead * 3.5).to_array(), radius: 1.2, shape: BrushShape::Cube, op: BrushOp::Add, material: 9, height: 0.0 };
+        let mut built = (*planet).clone();
+        built.apply(block).unwrap();
+        let built = Arc::new(built);
+        let rays: Vec<DVec3> = (0..24)
+            .map(|n| {
+                let a = f64::from(n) / 24.0 - 0.5;
+                (ahead + side * (a * 0.5) - up * (0.05 + 0.1 * (f64::from(n) * 0.7).sin().abs())).normalize()
+            })
+            .collect();
+        let answers: Vec<_> = rays.iter().map(|d| (planet.raycast_of(eye, *d, 6.0, Matter::All), built.raycast_of(eye, *d, 6.0, Matter::All))).collect();
+        assert!(answers.iter().filter(|(a, b)| a != b).count() > 8, "the block changes most rays");
+        let queries = Arc::new(WorldQueries::new(planet.clone(), 3));
+        queries.focus(1, eye, 7.0);
+        settle(&queries);
+        let stop = Arc::new(AtomicBool::new(false));
+        let probe = {
+            let (queries, stop, rays, answers) = (queries.clone(), stop.clone(), rays.clone(), answers.clone());
+            std::thread::spawn(move || {
+                let (mut reads, mut seen_after) = (0, false);
+                while !stop.load(Ordering::Relaxed) {
+                    for (d, (before, after)) in rays.iter().zip(&answers) {
+                        let read = queries.raycast(eye, *d, 6.0, Matter::All).ready().expect("resident");
+                        assert!(read == *before || read == *after, "a ray saw part of a change: {read:?}, before {before:?}, after {after:?}");
+                        seen_after |= before != after && read == *after;
+                        reads += 1;
+                    }
+                }
+                (reads, seen_after)
+            })
+        };
+        for _ in 0..3 {
+            queries.edit(&[block]);
+            settle(&queries);
+            queries.publish(built.clone());
+            settle(&queries);
+            // An undo.
+            queries.publish(planet.clone());
+            settle(&queries);
+        }
+        stop.store(true, Ordering::Relaxed);
+        let (reads, seen_after) = probe.join().unwrap();
+        assert!(reads > 100 && seen_after, "{reads} reads, the block seen {seen_after}");
+        for (d, (before, _)) in rays.iter().zip(&answers) {
+            assert_eq!(queries.raycast(eye, *d, 6.0, Matter::All), Resident::Ready(*before));
         }
     }
 
