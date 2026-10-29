@@ -13,6 +13,27 @@ pub const FORMAT_VERSION: u32 = 1;
 /// Node parameters by key.
 pub type Params = BTreeMap<String, Value>;
 
+/// Editor-only wire grouping, persisted with the graph so canvas layout survives reloads.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphZipTie {
+    pub position: [f32; 2],
+    #[serde(default = "default_zip_tie_straight_length")]
+    pub straight_length: f32,
+    pub wires: Vec<GraphZipTieEdge>,
+}
+
+fn default_zip_tie_straight_length() -> f32 {
+    80.0
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphZipTieEdge {
+    pub source_node: String,
+    pub source_pin: String,
+    pub target_node: String,
+    pub target_pin: String,
+}
+
 /// One end of a wire.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PinRef {
@@ -106,6 +127,8 @@ pub struct GraphSection {
     pub nodes: Vec<NodeInstance>,
     #[serde(default)]
     pub connections: Vec<Connection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zip_ties: Vec<GraphZipTie>,
 }
 
 /// Prefix of the kind of a node standing for a section: `section:<id>`.
@@ -126,6 +149,8 @@ pub struct GraphAsset {
     pub connections: Vec<Connection>,
     #[serde(default)]
     pub comments: Vec<GraphComment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zip_ties: Vec<GraphZipTie>,
     /// Groups of nodes shown as single nodes; each is placed by a `section:<id>` node.
     #[serde(default)]
     pub sections: Vec<GraphSection>,
@@ -140,6 +165,7 @@ impl Default for GraphAsset {
             nodes: Vec::new(),
             connections: Vec::new(),
             comments: Vec::new(),
+            zip_ties: Vec::new(),
             sections: Vec::new(),
         }
     }
