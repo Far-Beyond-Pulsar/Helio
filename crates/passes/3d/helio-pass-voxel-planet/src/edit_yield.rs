@@ -47,13 +47,20 @@ impl EditYield {
     }
     /// Base cells of each material broken (solid before, air after).
     pub fn broken(&self) -> [u64; crate::terrain::MATERIALS] {
-        self.by_material(|c| (c.before != material::AIR && c.after == material::AIR).then_some(c.before))
+        self.by_material(|c| {
+            (c.before != material::AIR && c.after == material::AIR).then_some(c.before)
+        })
     }
     /// Base cells of each material placed (air before, solid after).
     pub fn placed(&self) -> [u64; crate::terrain::MATERIALS] {
-        self.by_material(|c| (c.before == material::AIR && c.after != material::AIR).then_some(c.after))
+        self.by_material(|c| {
+            (c.before == material::AIR && c.after != material::AIR).then_some(c.after)
+        })
     }
-    fn by_material(&self, of: impl Fn(&CellChange) -> Option<u32>) -> [u64; crate::terrain::MATERIALS] {
+    fn by_material(
+        &self,
+        of: impl Fn(&CellChange) -> Option<u32>,
+    ) -> [u64; crate::terrain::MATERIALS] {
         let mut out = [0; crate::terrain::MATERIALS];
         for c in &self.changes {
             if let Some(m) = of(c) {
@@ -125,12 +132,8 @@ impl Planet {
                             bits &= bits - 1;
                             let (x, y) = (bit % BRICK, bit / BRICK);
                             let at = |b: i32, c: i32| ((b * BRICK + c) << level) + half;
-                            let cell = Cell::new(
-                                face,
-                                at(key.bi, x),
-                                at(key.bj, y),
-                                at(key.bk, z as i32),
-                            );
+                            let cell =
+                                Cell::new(face, at(key.bi, x), at(key.bj, y), at(key.bk, z as i32));
                             let was = self.material(cell);
                             let now = after(brush.op, fb.material(), was);
                             if was == now {
@@ -214,9 +217,14 @@ mod tests {
         .enumerate()
         {
             let brush = Brush {
-                center: (ground + DVec3::new(0.13 * n as f64, 0.2 - 0.1 * n as f64, 0.05)).to_array(),
+                center: (ground + DVec3::new(0.13 * n as f64, 0.2 - 0.1 * n as f64, 0.05))
+                    .to_array(),
                 radius,
-                shape: if n % 2 == 0 { BrushShape::Sphere } else { BrushShape::Cube },
+                shape: if n % 2 == 0 {
+                    BrushShape::Sphere
+                } else {
+                    BrushShape::Cube
+                },
                 op,
                 material: 5 + n as u32,
                 height: 0.0,
@@ -272,7 +280,12 @@ mod tests {
         };
         let counted = planet.edit_yield(&brush).unwrap();
         assert!(counted.level > 0);
-        let exact: u64 = planet.edit_yield_at(&brush, 0).unwrap().broken().iter().sum();
+        let exact: u64 = planet
+            .edit_yield_at(&brush, 0)
+            .unwrap()
+            .broken()
+            .iter()
+            .sum();
         let broken: u64 = counted.broken().iter().sum();
         assert!(
             (broken as f64 - exact as f64).abs() < exact as f64 * 0.05,

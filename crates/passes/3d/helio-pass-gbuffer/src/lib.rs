@@ -90,6 +90,9 @@ pub struct GBufferPass {
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     /// Device supports `POLYGON_MODE_LINE`, so the wireframe debug view is offered.
     wireframe_supported: bool,
+    /// The reflected camera reverses handedness; flip front-face winding while
+    /// preserving ordinary back-face culling for the capture.
+    mirrored_view: bool,
     shader_cache: RadiantShaderCache,
     /// Shared with the renderer and GPU scene — never deep-cloned (see
     /// `SharedTemplateRegistry`). `None` until the first `execute()`.
@@ -173,6 +176,12 @@ fn coordinate_space_words(spaces: &[glam::Mat4]) -> Vec<f32> {
 }
 
 impl GBufferPass {
+    /// Configure front-face winding for a reflected camera before the first
+    /// frame builds material pipelines.
+    pub fn set_mirrored_view(&mut self, mirrored: bool) {
+        self.mirrored_view = mirrored;
+    }
+
     /// Create the GBuffer pass.
     pub fn new(device: &wgpu::Device) -> Self {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
@@ -363,6 +372,7 @@ impl GBufferPass {
             wireframe_supported: device
                 .features()
                 .contains(wgpu::Features::POLYGON_MODE_LINE),
+            mirrored_view: false,
             shader_cache: RadiantShaderCache::new(),
             template_registry: None,
             last_template_keys: Vec::new(),
@@ -1278,6 +1288,11 @@ impl GBufferPass {
                     }),
                     primitive: wgpu::PrimitiveState {
                         topology: wgpu::PrimitiveTopology::TriangleList,
+                        front_face: if self.mirrored_view {
+                            wgpu::FrontFace::Cw
+                        } else {
+                            wgpu::FrontFace::Ccw
+                        },
                         cull_mode: if wireframe
                             || key.feature_flags & helio_mats::FLAG_DOUBLE_SIDED != 0
                         {

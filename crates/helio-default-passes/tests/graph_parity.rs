@@ -75,7 +75,9 @@ fn uniform_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::UNIFORM
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
 }

@@ -1,4 +1,5 @@
 //!use helio_prelude
+//!use water_shore_surface
 //
 // Underwater participating medium.
 //
@@ -21,7 +22,7 @@
 //   3  scene_samp    sampler  linear clamp
 //   4  depth_texture texture_depth_2d
 //   5  depth_samp    sampler  nearest clamp
-//   6  water_sim     texture  RGBA16F heightfield
+//   6  water_interaction texture array  (legacy volume-local height)
 //   7  water_samp    sampler  linear
 
 struct WaterVolume {
@@ -49,9 +50,12 @@ struct WaterVolume {
 @group(0) @binding(3) var scene_samp:    sampler;
 @group(0) @binding(4) var depth_texture: texture_depth_2d;
 @group(0) @binding(5) var depth_samp:    sampler;
-@group(0) @binding(6) var water_sim:     texture_2d_array<f32>;
+@group(0) @binding(6) var water_interaction: texture_2d_array<f32>;
 @group(0) @binding(7) var water_samp:    sampler;
-@group(0) @binding(8) var caustics_tex:  texture_2d<f32>;
+@group(0) @binding(9) var ocean_displacement: texture_2d_array<f32>;
+struct OceanPhase { patches: array<vec4f, 4> }
+@group(0) @binding(10) var<uniform> ocean_phase: OceanPhase;
+@group(0) @binding(11) var shafts_tex: texture_2d<f32>;
 
 /// Vertical distance over which entering the water ramps in, in metres. Without
 /// this the effect switches on the instant the camera crosses the plane, which
@@ -59,7 +63,6 @@ struct WaterVolume {
 /// over it.
 const SUBMERGE_BLEND: f32 = 0.35;
 
-const GOD_RAY_SAMPLES: i32 = 24;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -77,30 +80,35 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 }
 
 // ── Volume geometry ──────────────────────────────────────────────────────────
-// Mirrors the helpers in surface.wgsl. WGSL has no include mechanism, and the
-// prelude is engine-wide rather than water-specific, so these are duplicated
-// rather than shared. They must stay in step with surface.wgsl.
 
-fn water_wave_amplitude(vol: WaterVolume) -> f32 {
-    let rest     = vol.bounds_max.w;
-    let headroom = min(rest - vol.bounds_min.y, vol.bounds_max.y - rest);
-    return clamp(vol.wave_params.x, 0.0, max(headroom, 0.0));
-}
-
-/// Return the sim texture array layer for a volume index and cascade.
-fn sim_layer(vol_index: u32, cascade: u32) -> i32 {
-    return i32(vol_index * 3u + cascade);
-}
-
-/// Displaced surface height above a world XZ position.
+/// The water height is sampled at LOD 0 for fullscreen depth tests. This keeps
+/// the interface temporally stable as half/full-resolution pixel footprints
+/// change and includes the finest geometric FFT band available to the surface.
 fn water_surface_at(world_xz: vec2f, vol: WaterVolume, vol_idx: u32) -> f32 {
-    let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
-    let uv     = (world_xz - vol.bounds_min.xz) / extent;
-    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) {
-        return vol.bounds_max.w;
-    }
-    let h = textureSampleLevel(water_sim, water_samp, uv, vol_idx * 3u, 0.0).r;
-    return vol.bounds_max.w + h * water_wave_amplitude(vol);
+    return water_surface_height_at(world_xz, vol, vol_idx, 0.0, true, 4u);
+}
+
+/// Reconstruct the global FFT interface for underwater sky rays. Central
+/// differences use a footprint close to the finest authored band, so the
+/// Snell window follows the actual displaced surface instead of a flat plane.
+fn global_surface_height(world_xz: vec2f, vol: WaterVolume, vol_idx: u32) -> f32 {
+    return water_surface_at(world_xz, vol, vol_idx);
+}
+
+fn global_surface_normal(world_xz: vec2f, vol: WaterVolume, vol_idx: u32) -> vec3f {
+    let e = 0.12;
+    let dx = global_surface_height(world_xz + vec2f(e, 0.0), vol, vol_idx)
+           - global_surface_height(world_xz - vec2f(e, 0.0), vol, vol_idx);
+    let dz = global_surface_height(world_xz + vec2f(0.0, e), vol, vol_idx)
+           - global_surface_height(world_xz - vec2f(0.0, e), vol, vol_idx);
+    return normalize(vec3f(-dx / (2.0 * e), 1.0, -dz / (2.0 * e)));
+}
+
+fn underwater_sky(ray: vec3f, light_dir: vec3f) -> vec3f {
+    let up = clamp(ray.y, 0.0, 1.0);
+    let sky = mix(vec3f(0.80, 0.90, 1.0), vec3f(0.10, 0.30, 0.80), up * up);
+    let sun = pow(max(dot(normalize(light_dir), ray), 0.0), 5000.0);
+    return sky + vec3f(sun) * vec3f(10.0, 8.0, 6.0);
 }
 
 // ── Noise (lens wobble) ──────────────────────────────────────────────────────
@@ -129,46 +137,27 @@ fn water_distortion(uv: vec2f, t: f32) -> vec2f {
     return vec2f(nx, ny);
 }
 
-// ── God rays ─────────────────────────────────────────────────────────────────
-
-/// Screen-space light shafts toward the sun.
-///
-/// Marches from the pixel toward the sun's projected position, accumulating
-/// where the depth buffer says nothing is occluding — i.e. where light has a
-/// clear path down through the water. Cheap compared to marching the shadow
-/// map, and underwater shafts are diffuse enough that the difference does not
-/// read.
-fn god_rays(uv: vec2f, vol: WaterVolume) -> f32 {
-    let intensity = vol.fog_params.y;
-    if intensity <= 1e-3 {
-        return 0.0;
+/// Four-tap depth-guided reconstruction of the half-resolution shaft buffer.
+fn upsample_shafts(uv: vec2f, full_depth: f32, linear_depth: f32) -> f32 {
+    let dims = vec2i(textureDimensions(shafts_tex));
+    let half_pos = uv * vec2f(dims) - vec2f(0.5);
+    let base = vec2i(floor(half_pos));
+    let f = fract(half_pos);
+    let tolerance = max(0.35, linear_depth * 0.025);
+    var sum = 0.0;
+    var total = 0.0;
+    for (var y = 0; y < 2; y++) {
+        for (var x = 0; x < 2; x++) {
+            let coord = clamp(base + vec2i(x, y), vec2i(0), dims - vec2i(1));
+            let sample = textureLoad(shafts_tex, coord, 0);
+            let bilinear = select(1.0 - f.x, f.x, x == 1) * select(1.0 - f.y, f.y, y == 1);
+            let depth_weight = exp(-abs(sample.g - linear_depth) / tolerance);
+            let weight = bilinear * depth_weight;
+            sum += sample.r * weight;
+            total += weight;
+        }
     }
-
-    // Project a point far along the sun direction. Behind the camera: no shafts.
-    let sun_world = cameras[0].position_near.xyz + normalize(vol.sun_direction.xyz) * 10000.0;
-    let sun_clip  = cameras[0].view_proj * vec4f(sun_world, 1.0);
-    if sun_clip.w <= 0.0 {
-        return 0.0;
-    }
-    let sun_uv = helio_ndc_to_uv(sun_clip.xy / sun_clip.w);
-
-    let delta = (sun_uv - uv) / f32(GOD_RAY_SAMPLES);
-    var pos   = uv;
-    var accum = 0.0;
-    var decay = 1.0;
-
-    for (var i = 0; i < GOD_RAY_SAMPLES; i++) {
-        pos += delta;
-        if any(pos < vec2f(0.0)) || any(pos > vec2f(1.0)) { break; }
-        // Unoccluded (sky) samples carry light; geometry blocks it.
-        let d = textureSampleLevel(depth_texture, depth_samp, pos, 0);
-        accum += select(0.0, 1.0, helio_is_sky(d)) * decay;
-        decay *= 0.96;
-    }
-
-    // Fade with angular distance so the effect concentrates around the sun.
-    let falloff = 1.0 - smoothstep(0.0, 0.9, length(sun_uv - uv));
-    return accum / f32(GOD_RAY_SAMPLES) * intensity * falloff;
+    return select(0.0, sum / max(total, 1e-5), total > 1e-5) * select(1.0, 0.0, helio_is_sky(full_depth));
 }
 
 // ── Fragment ─────────────────────────────────────────────────────────────────
@@ -182,12 +171,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var submersion = 0.0;
     for (var i = 0u; i < arrayLength(&volumes); i++) {
         let v = volumes[i];
-        if cam_pos.x < v.bounds_min.x || cam_pos.x > v.bounds_max.x { continue; }
-        if cam_pos.z < v.bounds_min.z || cam_pos.z > v.bounds_max.z { continue; }
-        if cam_pos.y < v.bounds_min.y { continue; }
-
         // Against the DISPLACED surface, not the flat plane — otherwise the
-        // test is wrong precisely when the camera is at the waterline.
+        // test is wrong precisely when the camera is at the waterline. The
+        // old volume floor is not a boundary for the continuous global ocean.
         let surf = water_surface_at(cam_pos.xz, v, i);
         let depth_under = surf - cam_pos.y;
         if depth_under <= -SUBMERGE_BLEND { continue; }
@@ -244,25 +230,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         ray_dir = normalize(world_pos - cam_pos);
         dist    = distance(world_pos, cam_pos);
 
-        // Caustics on submerged geometry, seen directly rather than through
-        // the surface. Same projection the surface shader uses.
-        if vol.caustics_params.x > 0.5 {
-            let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
-            let cuv    = (world_pos.xz - vol.bounds_min.xz) / extent;
-            let below  = water_surface_at(world_pos.xz, vol, u32(vol_idx)) - world_pos.y;
-            if below > 0.0 && all(cuv >= vec2f(0.0)) && all(cuv <= vec2f(1.0)) {
-                let caustic = textureSampleLevel(caustics_tex, water_samp, cuv, 0.0).r;
-                lit += vec3f(caustic) * exp(-below * 0.12);
-            }
-        }
+        // The old caustics map was projected into a legacy volume footprint.
+        // The surface path now evaluates a continuous FFT area ratio; a
+        // matching submerged-camera shaft/receiver caustics path still needs
+        // a graph-owned global field and remains a separate follow-up.
     }
 
     // A ray heading upward leaves the water at the surface; it should only
     // accumulate medium up to that crossing.
     if ray_dir.y > 1e-4 {
-        let t_surface = (surface_h - cam_pos.y) / ray_dir.y;
+        var t_surface = (surface_h - cam_pos.y) / ray_dir.y;
+        // Resolve the ray/interface intersection against the displaced FFT
+        // field. Two fixed-point steps are stable for the bounded wave slope
+        // and avoid the visible flat-waterline cut at grazing angles.
+        for (var step = 0u; step < 2u; step++) {
+            if t_surface > 0.0 {
+                let point = cam_pos + ray_dir * t_surface;
+                t_surface = (global_surface_height(point.xz, vol, u32(vol_idx)) - cam_pos.y) / ray_dir.y;
+            }
+        }
         if t_surface > 0.0 {
             dist = min(dist, t_surface);
+            // The opaque scene's sky ray is the only environment available to
+            // this pass. Refract it through the local water interface, then
+            // apply Schlick transmission inside Snell's window. Rays outside
+            // the critical cone stay in the submerged medium (TIR).
+            if helio_is_sky(depth) {
+                let hit_pos = cam_pos + ray_dir * t_surface;
+            let normal_up = global_surface_normal(hit_pos.xz, vol, u32(vol_idx));
+                let transmitted = refract(ray_dir, -normal_up, 1.0 / max(vol.sim_params.x, 1.0));
+                if dot(transmitted, transmitted) > 0.25 {
+                    let cos_theta = clamp(dot(-ray_dir, -normal_up), 0.0, 1.0);
+                    let f0_base = (max(vol.sim_params.x, 1.0) - 1.0)
+                                / (max(vol.sim_params.x, 1.0) + 1.0);
+                    let f0 = f0_base * f0_base;
+                    let fresnel = f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+                    let window = underwater_sky(normalize(transmitted), normalize(vol.sun_direction.xyz));
+                    lit = mix(lit, window, 1.0 - fresnel);
+                }
+            }
         }
     }
 
@@ -278,7 +284,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var color = lit * transmit + inscatter * (1.0 - transmit);
 
     // ── God rays ─────────────────────────────────────────────────────────────
-    color += inscatter * god_rays(uv_g, vol);
+    color += inscatter * upsample_shafts(uv_g, depth, dist);
 
     // ── Vignette ─────────────────────────────────────────────────────────────
     let d        = in.uv - 0.5;

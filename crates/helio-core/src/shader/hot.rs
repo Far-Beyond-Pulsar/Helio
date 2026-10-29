@@ -862,13 +862,19 @@ pub fn enabled() -> bool {
 /// set, not `0`); read once.
 fn from_disk() -> bool {
     static FROM_DISK: OnceLock<bool> = OnceLock::new();
-    *FROM_DISK.get_or_init(|| std::env::var("HELIO_SHADER_FROM_DISK").is_ok_and(|value| value.trim() != "0"))
+    *FROM_DISK.get_or_init(|| {
+        std::env::var("HELIO_SHADER_FROM_DISK").is_ok_and(|value| value.trim() != "0")
+    })
 }
 
 /// A WGSL file a crate assembles itself (`include_str!`, not
 /// `include_wgsl!`): its text on disk at `manifest_dir`/`rel` while shaders
 /// start from disk (`HELIO_SHADER_FROM_DISK`), else `embedded`.
-pub fn source_text(manifest_dir: &str, rel: &str, embedded: &'static str) -> std::borrow::Cow<'static, str> {
+pub fn source_text(
+    manifest_dir: &str,
+    rel: &str,
+    embedded: &'static str,
+) -> std::borrow::Cow<'static, str> {
     if from_disk() {
         if let Ok(text) = std::fs::read_to_string(Path::new(manifest_dir).join(rel)) {
             return std::borrow::Cow::Owned(text);

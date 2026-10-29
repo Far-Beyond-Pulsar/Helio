@@ -172,7 +172,11 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // A host's first eye can be anywhere (an editor camera starts at the
         // planet's centre): nothing to stream there.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        *source.lock().unwrap() = Some(PlanetFrame::single(glam::DVec3::new(8.0, 6.0, 12.0), planet.clone(), up));
+        *source.lock().unwrap() = Some(PlanetFrame::single(
+            glam::DVec3::new(8.0, 6.0, 12.0),
+            planet.clone(),
+            up,
+        ));
         for _ in 0..600 {
             renderer.render(&camera, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -540,7 +544,8 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     let ground = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
     let up = ground.normalize();
     let forward = up.any_orthonormal_vector().as_vec3();
-    *editor.source.lock().unwrap() = Some(PlanetFrame::single(ground, planet.clone(), up.as_vec3()));
+    *editor.source.lock().unwrap() =
+        Some(PlanetFrame::single(ground, planet.clone(), up.as_vec3()));
     let validation = editor
         .device
         .push_error_scope(wgpu::ErrorFilter::Validation);
@@ -1218,7 +1223,11 @@ fn saved_edited_chunks_come_back_through_the_frame() {
         Some(PlanetFrame {
             eye,
             volumes: vec![helio_pass_voxel_planet::engine::VolumeFrame {
-                volume: helio_pass_voxel_planet::VoxelVolume::new(0, planet.clone(), helio_pass_voxel_planet::VolumeTransform::IDENTITY),
+                volume: helio_pass_voxel_planet::VoxelVolume::new(
+                    0,
+                    planet.clone(),
+                    helio_pass_voxel_planet::VolumeTransform::IDENTITY,
+                ),
                 kept,
                 export,
             }],

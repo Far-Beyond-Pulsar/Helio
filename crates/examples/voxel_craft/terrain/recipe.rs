@@ -9,8 +9,8 @@ use crate::config::{PLANET_RADIUS_M, VOXEL_M, WORLD_SEED};
 use helio_pass_voxel_planet::layers::{
     self, Climate, Layer, LayerKind, LayerMask, MaterialRule, MaterialStyle, TerrainLayers,
 };
-use helio_pass_voxel_planet::volumes::{Caves, Volumes};
 use helio_pass_voxel_planet::terrain::TerrainSource;
+use helio_pass_voxel_planet::volumes::{Caves, Volumes};
 use helio_pass_voxel_planet::PlanetRecipe;
 
 fn rule(material: &str, f: impl FnOnce(&mut MaterialRule)) -> MaterialRule {

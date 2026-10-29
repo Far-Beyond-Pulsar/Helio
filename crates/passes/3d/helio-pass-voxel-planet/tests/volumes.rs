@@ -59,11 +59,8 @@ impl Camera {
             self.up
         };
         let view = glam::camera::rh::view::look_to_mat4(Vec3::ZERO, self.forward, up);
-        let proj = helio_core::depth::perspective(
-            FOV_Y,
-            self.size[0] as f32 / self.size[1] as f32,
-            0.05,
-        );
+        let proj =
+            helio_core::depth::perspective(FOV_Y, self.size[0] as f32 / self.size[1] as f32, 0.05);
         proj * view
     }
 
@@ -202,7 +199,10 @@ impl Scene {
                     self.world.volume_stats()
                 );
             }
-            assert!(self.frame - started < 4000, "residency did not settle: {stats:?}");
+            assert!(
+                self.frame - started < 4000,
+                "residency did not settle: {stats:?}"
+            );
         }
         eprintln!(
             "settled in {} frames: {} chunks drawn",
@@ -253,19 +253,23 @@ fn compare(hits: &[Option<PickHit>], volumes: &Volumes, camera: &Camera) -> Agre
                 out.coarse += 1;
                 let plausible = drawn.is_none_or(|h| {
                     h.distance >= reach * 0.99
-                        && volumes.volumes.iter().filter(|v| v.id == h.volume).any(|v| {
-                            let r = helio_pass_voxel_planet::volume::bounding_radius(&v.planet)
-                                .unwrap_or(f64::INFINITY);
-                            helio_pass_voxel_planet::volume::ray_ball(
-                                camera.eye,
-                                dir,
-                                v.transform.position,
-                                r,
-                            )
-                            .is_some_and(|(enter, leave)| {
-                                h.distance >= enter - 1.0 && h.distance <= leave + 1.0
+                        && volumes
+                            .volumes
+                            .iter()
+                            .filter(|v| v.id == h.volume)
+                            .any(|v| {
+                                let r = helio_pass_voxel_planet::volume::bounding_radius(&v.planet)
+                                    .unwrap_or(f64::INFINITY);
+                                helio_pass_voxel_planet::volume::ray_ball(
+                                    camera.eye,
+                                    dir,
+                                    v.transform.position,
+                                    r,
+                                )
+                                .is_some_and(|(enter, leave)| {
+                                    h.distance >= enter - 1.0 && h.distance <= leave + 1.0
+                                })
                             })
-                        })
                 });
                 if !plausible && out.other_volume < 4 {
                     eprintln!("pixel {x},{y}: drawn {drawn:?} past the casts' reach");
@@ -281,7 +285,8 @@ fn compare(hits: &[Option<PickHit>], volumes: &Volumes, camera: &Camera) -> Agre
                 let same = drawn.is_some_and(|h| {
                     let cell = voxel * f64::from(1u32 << h.level);
                     h.volume == cpu.id
-                        && (h.distance - cpu.hit.distance).abs() <= 4.0 * cell + 1e-4 * cpu.hit.distance
+                        && (h.distance - cpu.hit.distance).abs()
+                            <= 4.0 * cell + 1e-4 * cpu.hit.distance
                 });
                 if !same && out.other_volume < 4 {
                     eprintln!(
@@ -432,7 +437,10 @@ fn a_planet_a_moon_and_a_block_draw_as_one_scene() {
     let moon = VoxelVolume::new(
         2,
         Arc::new(moon()),
-        VolumeTransform::new(moon_at, DQuat::from_rotation_z(0.4) * DQuat::from_rotation_x(1.1)),
+        VolumeTransform::new(
+            moon_at,
+            DQuat::from_rotation_z(0.4) * DQuat::from_rotation_x(1.1),
+        ),
     );
     // The block set into the ground 9 m ahead and 5 m to the right, turned
     // and leaning a little: its slab's top, sides and cabin show, and the
@@ -516,7 +524,10 @@ fn a_moving_spinning_volume_renders_where_it_is_each_frame() {
         let camera = Camera::placed(&at(frame), eye, forward, DVec3::Y, [256, 160]);
         scene.frame(gpu, &camera, None);
         let a = compare(&scene.world.read_hits(), &volumes, &camera);
-        assert!(a.compared > 2000 && a.mismatched == 0, "frame {frame}: {a:?}");
+        assert!(
+            a.compared > 2000 && a.mismatched == 0,
+            "frame {frame}: {a:?}"
+        );
     }
     // A standing camera: the block moved and turned under it.
     let standing = Camera::placed(&at(11), eye, forward, DVec3::Y, [256, 160]);
@@ -529,7 +540,10 @@ fn a_moving_spinning_volume_renders_where_it_is_each_frame() {
         scene.place(&volumes);
         let hits = scene.settle(gpu, &standing);
         let a = compare(&hits, &volumes, &standing);
-        assert!(a.compared > 500 && a.mismatched * 200 <= a.compared, "frame {frame}: {a:?}");
+        assert!(
+            a.compared > 500 && a.mismatched * 200 <= a.compared,
+            "frame {frame}: {a:?}"
+        );
     }
 }
 
@@ -569,15 +583,25 @@ fn picks_name_the_volume_they_hit() {
             let shown: Vec<usize> = (0..hits.len())
                 .filter(|&n| hits[n].is_some_and(|h| h.volume == id))
                 .collect();
-            assert!(shown.len() > 100, "volume {id} shows {} pixels", shown.len());
+            assert!(
+                shown.len() > 100,
+                "volume {id} shows {} pixels",
+                shown.len()
+            );
             let n = shown[shown.len() / 2];
-            [((n % 256) as f32 + 0.5) / 256.0, ((n / 256) as f32 + 0.5) / 160.0]
+            [
+                ((n % 256) as f32 + 0.5) / 256.0,
+                ((n / 256) as f32 + 0.5) / 160.0,
+            ]
         })
         .collect();
     picks.lock().unwrap().requests = at
         .iter()
         .enumerate()
-        .map(|(n, uv)| PickRequest { id: n as u64, uv: *uv })
+        .map(|(n, uv)| PickRequest {
+            id: n as u64,
+            uv: *uv,
+        })
         .collect();
     for _ in 0..6 {
         scene.frame(gpu, &camera, Some(&picks));
@@ -587,12 +611,13 @@ fn picks_name_the_volume_they_hit() {
     let mut volumes_hit = std::collections::BTreeSet::new();
     for r in results {
         let [u, v] = at[r.id as usize];
-        let (x, y) = (
-            ((u * 256.0) as u32).min(255),
-            ((v * 160.0) as u32).min(159),
-        );
+        let (x, y) = (((u * 256.0) as u32).min(255), ((v * 160.0) as u32).min(159));
         let drawn = hits[(y * 256 + x) as usize];
-        assert_eq!(r.hit.map(|h| (h.volume, h.cell)), drawn.map(|h| (h.volume, h.cell)), "pick {r:?}");
+        assert_eq!(
+            r.hit.map(|h| (h.volume, h.cell)),
+            drawn.map(|h| (h.volume, h.cell)),
+            "pick {r:?}"
+        );
         if let Some(h) = r.hit {
             volumes_hit.insert(h.volume);
         }
@@ -713,7 +738,13 @@ trait ChainNormals {
 impl ChainNormals for Vec<Vec<f32>> {
     fn chain_normals(self) -> Vec<DVec3> {
         (0..self[0].len())
-            .map(|i| DVec3::new(f64::from(self[0][i]), f64::from(self[1][i]), f64::from(self[2][i])))
+            .map(|i| {
+                DVec3::new(
+                    f64::from(self[0][i]),
+                    f64::from(self[1][i]),
+                    f64::from(self[2][i]),
+                )
+            })
             .collect()
     }
 }

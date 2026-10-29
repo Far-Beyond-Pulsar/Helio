@@ -42,7 +42,11 @@ fn sculpted() -> (Planet, DVec3, DVec3) {
                 center: (ground + side * a + fwd * b).to_array(),
                 radius: 1.0 + f64::from(n % 4),
                 shape: BrushShape::Sphere,
-                op: if n % 3 == 0 { BrushOp::Add } else { BrushOp::Remove },
+                op: if n % 3 == 0 {
+                    BrushOp::Add
+                } else {
+                    BrushOp::Remove
+                },
                 material: 3,
                 height: 0.0,
             })
@@ -119,9 +123,6 @@ fn edit_cost_through_the_game_paths() {
         }
         let t = Instant::now();
         let events = planet.edit_yield(&brush).unwrap();
-        eprintln!(
-            "EDITCOST r {radius} m: events {:.1} ms ({events})",
-            ms(t)
-        );
+        eprintln!("EDITCOST r {radius} m: events {:.1} ms ({events})", ms(t));
     }
 }

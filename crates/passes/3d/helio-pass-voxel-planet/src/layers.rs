@@ -16,16 +16,16 @@
 //! the terrain, temperature and moisture the materials and features read.
 use crate::grid::{Grid, DOMAIN_UNIT};
 use crate::landform::{
-    noise_quantile, LandformConstants, LandformField, Octave, PackedRule,
-    StackLayer, BASIN, CONTINENT, CRATER, CRATER_RADIUS_Q19, EROSION, GRAD_SHIFT, HILLS, LAYERS,
-    OCTAVES, REGION, RIDGE, ROUGHNESS, RULES, STYLE_EARTHLIKE, STYLE_LAYERED, STYLE_LUNAR,
-    STYLE_RULES, WARP, WARP_OCTAVES,
+    noise_quantile, LandformConstants, LandformField, Octave, PackedRule, StackLayer, BASIN,
+    CONTINENT, CRATER, CRATER_RADIUS_Q19, EROSION, GRAD_SHIFT, HILLS, LAYERS, OCTAVES, REGION,
+    RIDGE, ROUGHNESS, RULES, STYLE_EARTHLIKE, STYLE_LAYERED, STYLE_LUNAR, STYLE_RULES, WARP,
+    WARP_OCTAVES,
 };
 use crate::noise::{FINE_ONE, ONE};
-use crate::volumes::{self, Caves, VolumeLayer, Volumes};
 use crate::terrain::{
     material, GeneratorInfo, TerrainField, TerrainGenerator, TerrainSource, HEIGHT_ONE,
 };
+use crate::volumes::{self, Caves, VolumeLayer, Volumes};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -365,7 +365,9 @@ impl MaterialRule {
         let q16 = |v: f64| (v.clamp(0.0, 1.0) * 65_536.0).round() as i32;
         let byte = |v: f64| (v.clamp(-1.0, 1.0) * 126.0).round() as i32;
         let degrees = |c: f64| {
-            (c * f64::from(crate::planet_maps::DEGREE)).clamp(-2.0e9, 2.0e9).round() as i32
+            (c * f64::from(crate::planet_maps::DEGREE))
+                .clamp(-2.0e9, 2.0e9)
+                .round() as i32
         };
         let patch = if self.patch_km > 0.0 {
             let shift = ((self.patch_km * 1_000.0 / DOMAIN_UNIT)
@@ -817,7 +819,9 @@ impl TerrainLayers {
             .iter()
             .any(|l| l.kind == LayerKind::Rivers && l.mask != LayerMask::Everywhere)
         {
-            return Err("a Rivers layer is not masked: rivers carve land and end at the sea".into());
+            return Err(
+                "a Rivers layer is not masked: rivers carve land and end at the sea".into(),
+            );
         }
         for kind in [LayerKind::Warp, LayerKind::Continents, LayerKind::Rivers] {
             if enabled.iter().filter(|l| l.kind == kind).count() > 1 {
@@ -1125,7 +1129,10 @@ impl TerrainLayers {
             rules,
         };
         let volumes = VolumeLayer::new(&self.volumes, grid, constants.header[3] as u32);
-        Ok((constants, (volumes.caves() || volumes.cliffs()).then_some(volumes)))
+        Ok((
+            constants,
+            (volumes.caves() || volumes.cliffs()).then_some(volumes),
+        ))
     }
 }
 
@@ -1509,7 +1516,16 @@ mod tests {
                 material::SAND
             );
             // Deeper: stone patches, clay bands or the sandstone fallback.
-            let deep = id(ground_material(&k, maps, p, 0, 500_000, 40, 2, 4_960 + n % 40));
+            let deep = id(ground_material(
+                &k,
+                maps,
+                p,
+                0,
+                500_000,
+                40,
+                2,
+                4_960 + n % 40,
+            ));
             assert!(
                 [material::STONE, material::CLAY, material::SANDSTONE].contains(&deep),
                 "{deep}"

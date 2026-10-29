@@ -400,20 +400,22 @@ fn register_scene_prep(registry: &mut NodeRegistry) {
         },
     ));
 
-    registry.register(pass_node(
-        "portal_cull",
-        "Portals: Cull",
-        CATEGORY,
-        "Culls portals and compacts the ones to draw. Portal Instance reads its buffers.",
-        |build| {
-            let c = ctx(build.env);
-            build
-                .graph
-                .add_pass(Box::new(PortalCullPass::new(c.device)));
-            Ok(())
-        },
-    )
-    .with_marker_after());
+    registry.register(
+        pass_node(
+            "portal_cull",
+            "Portals: Cull",
+            CATEGORY,
+            "Culls portals and compacts the ones to draw. Portal Instance reads its buffers.",
+            |build| {
+                let c = ctx(build.env);
+                build
+                    .graph
+                    .add_pass(Box::new(PortalCullPass::new(c.device)));
+                Ok(())
+            },
+        )
+        .with_marker_after(),
+    );
 
     registry.register(pass_node(
         "light_cull",

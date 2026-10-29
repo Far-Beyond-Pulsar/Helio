@@ -199,8 +199,7 @@ impl Volumes {
             .iter()
             .enumerate()
             .filter(|(_, v)| {
-                bounding_radius(&v.planet)
-                    .is_none_or(|r| p.distance(v.transform.position) <= r)
+                bounding_radius(&v.planet).is_none_or(|r| p.distance(v.transform.position) <= r)
             })
             .map(|(i, v)| (p.distance(v.transform.position), i, v.transform.to_local(p)))
             .collect();
@@ -264,11 +263,18 @@ mod tests {
         let far = VoxelVolume::new(
             9,
             small_planet(2_000.0),
-            VolumeTransform::from_position(t.to_world(local_eye) + t.dir_to_world(local_dir) * 20_000.0),
+            VolumeTransform::from_position(
+                t.to_world(local_eye) + t.dir_to_world(local_dir) * 20_000.0,
+            ),
         );
         let volumes = Volumes::new(vec![far, near]);
         let hit = volumes
-            .raycast(t.to_world(local_eye), t.dir_to_world(local_dir), 1e6, Matter::All)
+            .raycast(
+                t.to_world(local_eye),
+                t.dir_to_world(local_dir),
+                1e6,
+                Matter::All,
+            )
             .unwrap();
         assert_eq!(hit.id, 7);
         assert_eq!(hit.hit.cell, expected.cell);
@@ -278,6 +284,9 @@ mod tests {
         // between them is in neither.
         let under = t.to_world(planet.grid().cell_center(expected.cell));
         assert!(volumes.solid(under, Matter::All));
-        assert!(!volumes.solid(t.to_world(local_eye) + t.dir_to_world(local_dir) * 9_000.0, Matter::All));
+        assert!(!volumes.solid(
+            t.to_world(local_eye) + t.dir_to_world(local_dir) * 9_000.0,
+            Matter::All
+        ));
     }
 }

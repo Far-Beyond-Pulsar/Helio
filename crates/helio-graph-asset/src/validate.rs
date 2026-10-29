@@ -513,15 +513,13 @@ mod tests {
         );
         let mut asset = graph();
         asset.nodes.push(node("caps", "t.caps", None));
-        asset
-            .connections
-            .push(wire("start", "out", "caps", "in"));
-        asset
-            .connections
-            .push(wire("caps", "out", "out", "in"));
+        asset.connections.push(wire("start", "out", "caps", "in"));
+        asset.connections.push(wire("caps", "out", "out", "in"));
         let validation = validate(&asset, &registry);
         let warned = validation.diagnostics.iter().any(|d| {
-            d.severity == Severity::Warning && d.message.contains("builds nothing") && d.node.as_deref() == Some("caps")
+            d.severity == Severity::Warning
+                && d.message.contains("builds nothing")
+                && d.node.as_deref() == Some("caps")
         });
         assert!(warned, "{:?}", validation.diagnostics);
         assert!(!validation.has_errors());
@@ -529,7 +527,10 @@ mod tests {
 
         asset.nodes[2].params.insert("enabled".into(), json!(false));
         let validation = validate(&asset, &registry);
-        assert!(validation.diagnostics.iter().all(|d| d.node.as_deref() != Some("caps")));
+        assert!(validation
+            .diagnostics
+            .iter()
+            .all(|d| d.node.as_deref() != Some("caps")));
     }
 
     #[test]

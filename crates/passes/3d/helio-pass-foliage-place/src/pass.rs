@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use crate::{
-    FOLIAGE_BAND_TILES, FOLIAGE_MAX_INTERACTORS, FOLIAGE_TILE_SIZE_METERS, FoliageQuality,
-    FoliageRange, GROUND_ARGS, GROUND_HITS, GROUND_QUERIES, GpuBladeInstance, GpuFoliageBands,
-    GpuFoliageLayer, GpuFoliageTile, GpuFoliageType, GpuGroundArgs, GpuGroundHit, GpuGroundQuery,
-    GpuTileFrame, GroundLink, PlaneGround, TileState, plan_bands,
+    plan_bands, FoliageQuality, FoliageRange, GpuBladeInstance, GpuFoliageBands, GpuFoliageLayer,
+    GpuFoliageTile, GpuFoliageType, GpuGroundArgs, GpuGroundHit, GpuGroundQuery, GpuTileFrame,
+    GroundLink, PlaneGround, TileState, FOLIAGE_BAND_TILES, FOLIAGE_MAX_INTERACTORS,
+    FOLIAGE_TILE_SIZE_METERS, GROUND_ARGS, GROUND_HITS, GROUND_QUERIES,
 };
 use glam::DVec3;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};

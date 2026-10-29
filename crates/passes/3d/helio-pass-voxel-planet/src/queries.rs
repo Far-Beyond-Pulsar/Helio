@@ -62,12 +62,20 @@ impl BrickKey {
 
     /// Its first cell.
     pub fn origin(&self) -> [i32; 3] {
-        [self.i * QUERY_BRICK, self.j * QUERY_BRICK, self.k * QUERY_BRICK]
+        [
+            self.i * QUERY_BRICK,
+            self.j * QUERY_BRICK,
+            self.k * QUERY_BRICK,
+        ]
     }
 
     /// `cell`'s index in it (`Planet::sample_brick`'s order).
     fn index(cell: Cell) -> usize {
-        let (i, j, k) = (cell.i.rem_euclid(QUERY_BRICK), cell.j.rem_euclid(QUERY_BRICK), cell.k.rem_euclid(QUERY_BRICK));
+        let (i, j, k) = (
+            cell.i.rem_euclid(QUERY_BRICK),
+            cell.j.rem_euclid(QUERY_BRICK),
+            cell.k.rem_euclid(QUERY_BRICK),
+        );
         ((j * QUERY_BRICK + i) * QUERY_BRICK + k) as usize
     }
 
@@ -75,7 +83,9 @@ impl BrickKey {
     fn center(&self, planet: &Planet) -> DVec3 {
         let half = QUERY_BRICK / 2;
         let [i, j, k] = self.origin();
-        planet.grid().cell_center(Cell::new(self.face, i + half, j + half, k + half))
+        planet
+            .grid()
+            .cell_center(Cell::new(self.face, i + half, j + half, k + half))
     }
 }
 
@@ -93,7 +103,12 @@ pub struct Brick {
 
 impl Brick {
     fn air(tick: u64) -> Self {
-        Self { all: [0; WORDS], ground: [0; WORDS], materials: None, used: AtomicU64::new(tick) }
+        Self {
+            all: [0; WORDS],
+            ground: [0; WORDS],
+            materials: None,
+            used: AtomicU64::new(tick),
+        }
     }
 
     fn sample(planet: &Planet, key: BrickKey, tick: u64) -> Self {
@@ -112,10 +127,19 @@ impl Brick {
 
     fn set(&mut self, index: usize, solid: bool, ground: bool, material: u32) {
         let (word, bit) = (index / 64, 1u64 << (index % 64));
-        self.all[word] = if solid { self.all[word] | bit } else { self.all[word] & !bit };
-        self.ground[word] = if ground { self.ground[word] | bit } else { self.ground[word] & !bit };
+        self.all[word] = if solid {
+            self.all[word] | bit
+        } else {
+            self.all[word] & !bit
+        };
+        self.ground[word] = if ground {
+            self.ground[word] | bit
+        } else {
+            self.ground[word] & !bit
+        };
         if material != 0 || self.materials.is_some() {
-            self.materials.get_or_insert_with(|| vec![0; CELLS].into_boxed_slice())[index] = material;
+            self.materials
+                .get_or_insert_with(|| vec![0; CELLS].into_boxed_slice())[index] = material;
         }
     }
 
@@ -132,7 +156,12 @@ impl Brick {
     }
 
     fn copy(&self) -> Self {
-        Self { all: self.all, ground: self.ground, materials: self.materials.clone(), used: AtomicU64::new(self.used.load(Ordering::Relaxed)) }
+        Self {
+            all: self.all,
+            ground: self.ground,
+            materials: self.materials.clone(),
+            used: AtomicU64::new(self.used.load(Ordering::Relaxed)),
+        }
     }
 
     /// `brushes` (all of one face) applied to its cells, as the planet
@@ -147,7 +176,8 @@ impl Brick {
                 for i in (ci - extent).max(i0)..(ci + extent + 1).min(i0 + QUERY_BRICK) {
                     for k in k_lo.max(k0)..k_hi.min(k0 + QUERY_BRICK) {
                         let center = [center_half(i, 0), center_half(j, 0), center_half(k, 0)];
-                        if !b.contains(center, || planet.grid().volume_point(key.face, i, j, k, 0)) {
+                        if !b.contains(center, || planet.grid().volume_point(key.face, i, j, k, 0))
+                        {
                             continue;
                         }
                         let index = BrickKey::index(Cell::new(key.face, i, j, k));
@@ -188,12 +218,21 @@ impl<T> Resident<T> {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Query {
     /// The first solid cell along a ray (`Planet::raycast_of`).
-    Ray { origin: DVec3, direction: DVec3, max: f64, matter: Matter },
+    Ray {
+        origin: DVec3,
+        direction: DVec3,
+        max: f64,
+        matter: Matter,
+    },
     /// Height above the ground directly below (`Planet::ground_height_of`).
     Height { at: DVec3, matter: Matter },
     /// The point `clearance` over the ground under `at`
     /// (`Planet::surface_point_of`).
-    Surface { at: DVec3, clearance: f64, matter: Matter },
+    Surface {
+        at: DVec3,
+        clearance: f64,
+        matter: Matter,
+    },
     /// Distance to the nearest possible solid cell (`Planet::air_clearance`).
     Clearance { at: DVec3 },
 }
@@ -209,9 +248,18 @@ pub enum Answer {
 impl Query {
     fn answer(&self, planet: &Planet) -> Answer {
         match *self {
-            Query::Ray { origin, direction, max, matter } => Answer::Ray(planet.raycast_of(origin, direction, max, matter)),
+            Query::Ray {
+                origin,
+                direction,
+                max,
+                matter,
+            } => Answer::Ray(planet.raycast_of(origin, direction, max, matter)),
             Query::Height { at, matter } => Answer::Height(planet.ground_height_of(at, matter)),
-            Query::Surface { at, clearance, matter } => Answer::Surface(planet.surface_point_of(at, clearance, matter)),
+            Query::Surface {
+                at,
+                clearance,
+                matter,
+            } => Answer::Surface(planet.surface_point_of(at, clearance, matter)),
             Query::Clearance { at } => Answer::Clearance(planet.air_clearance(at)),
         }
     }
@@ -306,7 +354,11 @@ impl WorldQueries {
                     .expect("spawn a voxel query worker")
             })
             .collect();
-        Self { shared, workers, budget: 16_384 }
+        Self {
+            shared,
+            workers,
+            budget: 16_384,
+        }
     }
 
     /// The snapshot queries are answered against.
@@ -370,19 +422,28 @@ impl WorldQueries {
         let planet = state.planet.clone();
         let mut bricks = self.shared.bricks.write().expect("bricks");
         let keys = touched(&planet, &bricks, brushes);
-        let resolved: Vec<Vec<FaceBrush>> = brushes.iter().map(|b| b.resolve(planet.grid()).unwrap_or_default()).collect();
+        let resolved: Vec<Vec<FaceBrush>> = brushes
+            .iter()
+            .map(|b| b.resolve(planet.grid()).unwrap_or_default())
+            .collect();
         for key in &keys {
             if let Some(brick) = bricks.get(key) {
                 let mut edited = brick.copy();
                 for faces in &resolved {
-                    let of_face: Vec<FaceBrush> = faces.iter().copied().filter(|f| f.face() == key.face).collect();
+                    let of_face: Vec<FaceBrush> = faces
+                        .iter()
+                        .copied()
+                        .filter(|f| f.face() == key.face)
+                        .collect();
                     edited.apply(&planet, *key, &of_face);
                 }
                 bricks.insert(*key, Arc::new(edited));
             }
         }
         let next = planet.edits().len() + state.pending.len();
-        state.pending.extend(brushes.iter().enumerate().map(|(n, b)| (next + n, *b)));
+        state
+            .pending
+            .extend(brushes.iter().enumerate().map(|(n, b)| (next + n, *b)));
         state.stale.extend(keys);
     }
 
@@ -393,10 +454,16 @@ impl WorldQueries {
         let tick = self.shared.tick.fetch_add(1, Ordering::Relaxed) + 1;
         let mut state = self.shared.state.lock().expect("queries");
         let brick_m = f64::from(QUERY_BRICK) * state.planet.grid().voxel_size();
-        let focus = state.foci.entry(id).or_insert(Focus { center, radius, listed_at: None });
+        let focus = state.foci.entry(id).or_insert(Focus {
+            center,
+            radius,
+            listed_at: None,
+        });
         focus.center = center;
         focus.radius = radius;
-        let moved = focus.listed_at.is_none_or(|at| at.distance(center) > brick_m * 0.5);
+        let moved = focus
+            .listed_at
+            .is_none_or(|at| at.distance(center) > brick_m * 0.5);
         if moved {
             list_focus(&mut state, id, tick);
             self.evict(&state, tick);
@@ -423,7 +490,9 @@ impl WorldQueries {
         let keys = region(&planet, center, radius);
         let missing: Vec<BrickKey> = {
             let bricks = self.shared.bricks.read().expect("bricks");
-            keys.into_iter().filter(|key| !bricks.contains_key(key)).collect()
+            keys.into_iter()
+                .filter(|key| !bricks.contains_key(key))
+                .collect()
         };
         if missing.is_empty() {
             return true;
@@ -445,7 +514,9 @@ impl WorldQueries {
     /// Base cell `cell`'s material (`Planet::material`: `material::AIR` for
     /// air, the terrain's own where no edit or feature set one).
     pub fn material(&self, cell: Cell) -> Resident<u32> {
-        match self.read(cell, |brick, index| (brick.solid(index, Matter::All), brick.raw_material(index))) {
+        match self.read(cell, |brick, index| {
+            (brick.solid(index, Matter::All), brick.raw_material(index))
+        }) {
             Resident::Ready((false, _)) => Resident::Ready(material::AIR),
             Resident::Ready((true, m)) if m != 0 => Resident::Ready(m),
             Resident::Ready((true, _)) => Resident::Ready(self.planet().terrain_material(cell)),
@@ -456,7 +527,9 @@ impl WorldQueries {
     fn read<T>(&self, cell: Cell, f: impl FnOnce(&Brick, usize) -> T) -> Resident<T> {
         let key = BrickKey::of(cell);
         if let Some(brick) = self.shared.bricks.read().expect("bricks").get(&key) {
-            brick.used.store(self.shared.tick.load(Ordering::Relaxed), Ordering::Relaxed);
+            brick
+                .used
+                .store(self.shared.tick.load(Ordering::Relaxed), Ordering::Relaxed);
             return Resident::Ready(f(brick, BrickKey::index(cell)));
         }
         self.want(&[key]);
@@ -467,7 +540,13 @@ impl WorldQueries {
     /// `Planet::raycast_of`, over the resident bricks: `Pending` when the
     /// ray reaches one that is not resident before a hit (and it is asked
     /// for).
-    pub fn raycast(&self, origin: DVec3, direction: DVec3, max: f64, matter: Matter) -> Resident<Option<RayHit>> {
+    pub fn raycast(
+        &self,
+        origin: DVec3,
+        direction: DVec3,
+        max: f64,
+        matter: Matter,
+    ) -> Resident<Option<RayHit>> {
         let planet = self.planet();
         let bricks = self.shared.bricks.read().expect("bricks");
         let tick = self.shared.tick.load(Ordering::Relaxed);
@@ -522,7 +601,12 @@ impl WorldQueries {
 
     /// The answer to `ticket`, once (`None` while it is worked on).
     pub fn answer(&self, ticket: Ticket) -> Option<Answer> {
-        self.shared.state.lock().expect("queries").answers.remove(&ticket)
+        self.shared
+            .state
+            .lock()
+            .expect("queries")
+            .answers
+            .remove(&ticket)
     }
 
     /// Keep `query` answered as watch `id` (replacing its last query): the
@@ -541,7 +625,13 @@ impl WorldQueries {
     /// Watch `id`'s latest answer and the query it answers (`None` until
     /// the first is in).
     pub fn watched(&self, id: u64) -> Option<(Query, Answer)> {
-        self.shared.state.lock().expect("queries").watched.get(&id).copied()
+        self.shared
+            .state
+            .lock()
+            .expect("queries")
+            .watched
+            .get(&id)
+            .copied()
     }
 
     /// Stop answering watch `id`.
@@ -566,7 +656,10 @@ impl WorldQueries {
             .iter()
             .filter(|(key, _)| {
                 let c = key.center(planet);
-                !state.foci.values().any(|f| c.distance(f.center) <= f.radius * KEEP_MARGIN + brick_m)
+                !state
+                    .foci
+                    .values()
+                    .any(|f| c.distance(f.center) <= f.radius * KEEP_MARGIN + brick_m)
             })
             .map(|(key, brick)| (brick.used.load(Ordering::Relaxed), *key))
             .collect();
@@ -609,7 +702,12 @@ impl VolumeQueries {
 
     /// Volume `id` is `planet` placed by `transform` (published to its
     /// queries when it changed; added when new).
-    pub fn set_volume(&mut self, id: u64, planet: Arc<Planet>, transform: crate::volume::VolumeTransform) {
+    pub fn set_volume(
+        &mut self,
+        id: u64,
+        planet: Arc<Planet>,
+        transform: crate::volume::VolumeTransform,
+    ) {
         let bounds = crate::volume::bounding_radius(&planet);
         match self.volumes.iter_mut().find(|v| v.id == id) {
             Some(v) => {
@@ -756,7 +854,9 @@ impl Drop for WorldQueries {
 /// List focus `id`'s bricks as wanted ([`region`]; resident ones are
 /// dropped when taken).
 fn list_focus(state: &mut State, id: u64, _tick: u64) {
-    let Some(focus) = state.foci.get_mut(&id) else { return };
+    let Some(focus) = state.foci.get_mut(&id) else {
+        return;
+    };
     focus.listed_at = Some(focus.center);
     let (center, radius) = (focus.center, focus.radius);
     let planet = state.planet.clone();
@@ -805,11 +905,17 @@ fn changed_brushes(old: &Planet, new: &Planet) -> Option<Vec<Brush>> {
     if longer.prefix_hash(shorter.len()) != Some(shorter.hash()) {
         return None;
     }
-    (shorter.len()..longer.len()).map(|i| longer.brush(i)).collect()
+    (shorter.len()..longer.len())
+        .map(|i| longer.brush(i))
+        .collect()
 }
 
 /// The resident bricks `brushes` may touch.
-fn touched(planet: &Planet, bricks: &FxHashMap<BrickKey, Arc<Brick>>, brushes: &[Brush]) -> Vec<BrickKey> {
+fn touched(
+    planet: &Planet,
+    bricks: &FxHashMap<BrickKey, Arc<Brick>>,
+    brushes: &[Brush],
+) -> Vec<BrickKey> {
     let grid = planet.grid();
     let brick_m = f64::from(QUERY_BRICK) * grid.voxel_size();
     bricks
@@ -819,7 +925,8 @@ fn touched(planet: &Planet, bricks: &FxHashMap<BrickKey, Arc<Brick>>, brushes: &
             brushes.iter().any(|brush| {
                 // A cube brush reaches sqrt(3) radii (and its height) from its
                 // centre; a brick sqrt(3) halves from its middle.
-                let reach = brush.radius.max(brush.height) * 1.7321 + brick_m * 0.8661 + grid.voxel_size();
+                let reach =
+                    brush.radius.max(brush.height) * 1.7321 + brick_m * 0.8661 + grid.voxel_size();
                 c.distance(DVec3::from_array(brush.center)) <= reach
             })
         })
@@ -834,10 +941,16 @@ enum Job {
 }
 
 /// `brushes` (of any faces) applied to `brick` at `key`.
-fn apply_brushes<'a>(planet: &Planet, key: BrickKey, brick: &mut Brick, brushes: impl Iterator<Item = &'a Brush>) {
+fn apply_brushes<'a>(
+    planet: &Planet,
+    key: BrickKey,
+    brick: &mut Brick,
+    brushes: impl Iterator<Item = &'a Brush>,
+) {
     for brush in brushes {
         if let Ok(faces) = brush.resolve(planet.grid()) {
-            let of_face: Vec<FaceBrush> = faces.into_iter().filter(|f| f.face() == key.face).collect();
+            let of_face: Vec<FaceBrush> =
+                faces.into_iter().filter(|f| f.face() == key.face).collect();
             brick.apply(planet, key, &of_face);
         }
     }
@@ -861,13 +974,22 @@ fn work(shared: &Shared) {
             Job::Watch(id, query, generation, planet) => {
                 let answer = query.answer(&planet);
                 let mut state = shared.state.lock().expect("queries");
-                if state.watches.get(&id).is_some_and(|(_, g)| *g == generation) {
+                if state
+                    .watches
+                    .get(&id)
+                    .is_some_and(|(_, g)| *g == generation)
+                {
                     state.watched.insert(id, (query, answer));
                 }
             }
             Job::Ask(ticket, query, planet) => {
                 let answer = query.answer(&planet);
-                shared.state.lock().expect("queries").answers.insert(ticket, answer);
+                shared
+                    .state
+                    .lock()
+                    .expect("queries")
+                    .answers
+                    .insert(ticket, answer);
             }
             Job::Brick(key, planet, pending) => {
                 let tick = shared.tick.load(Ordering::Relaxed);
@@ -888,7 +1010,11 @@ fn work(shared: &Shared) {
                 if !Arc::ptr_eq(&state.planet, &planet) {
                     state.stale.insert(key);
                 }
-                shared.bricks.write().expect("bricks").insert(key, Arc::new(brick));
+                shared
+                    .bricks
+                    .write()
+                    .expect("bricks")
+                    .insert(key, Arc::new(brick));
             }
         }
     }
@@ -918,7 +1044,11 @@ fn take(state: &mut State, shared: &Shared) -> Option<Job> {
         keys.iter()
             .map(|key| {
                 let c = key.center(&planet);
-                let d = state.foci.values().map(|f| c.distance(f.center)).fold(f64::INFINITY, f64::min);
+                let d = state
+                    .foci
+                    .values()
+                    .map(|f| c.distance(f.center))
+                    .fold(f64::INFINITY, f64::min);
                 (d, *key)
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
@@ -936,7 +1066,6 @@ fn take(state: &mut State, shared: &Shared) -> Option<Job> {
     state.sampling.insert(key);
     Some(Job::Brick(key, planet, state.pending.clone()))
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -964,7 +1093,11 @@ mod tests {
                 let a = t as f64 * 0.37;
                 let dir = DVec3::new(a.cos(), 0.8 + 0.1 * (a * 1.3).sin(), a.sin()).normalize();
                 let eye = planet.surface_point_of(dir * planet.outer_radius(), 1.7, Matter::Ground);
-                (planet.ground_height_of(eye, Matter::Ground) - planet.ground_height_of(eye, Matter::All), eye)
+                (
+                    planet.ground_height_of(eye, Matter::Ground)
+                        - planet.ground_height_of(eye, Matter::All),
+                    eye,
+                )
             })
             .max_by(|a, b| a.0.total_cmp(&b.0))
             .unwrap()
@@ -974,7 +1107,11 @@ mod tests {
     fn settle(queries: &WorldQueries) {
         let started = Instant::now();
         while queries.loading() > 0 {
-            assert!(started.elapsed() < Duration::from_secs(120), "bricks still loading: {}", queries.loading());
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "bricks still loading: {}",
+                queries.loading()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -985,7 +1122,10 @@ mod tests {
             if let Resident::Ready(v) = read() {
                 return v;
             }
-            assert!(started.elapsed() < Duration::from_secs(60), "never resident");
+            assert!(
+                started.elapsed() < Duration::from_secs(60),
+                "never resident"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }
@@ -1037,7 +1177,10 @@ mod tests {
         queries.focus(1, eye, 24.0);
         let started = Instant::now();
         while queries.loading() > 0 {
-            assert!(started.elapsed() < Duration::from_secs(120), "bricks still loading");
+            assert!(
+                started.elapsed() < Duration::from_secs(120),
+                "bricks still loading"
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         let target = place.to_world(ground + up * 2.0);
@@ -1050,12 +1193,19 @@ mod tests {
             let dir = (aim - eye).normalize();
             let exact = volumes.raycast(eye, dir, 22.0, Matter::All);
             let read = ready(|| queries.raycast(eye, dir, 22.0, Matter::All));
-            assert_eq!(read.map(|h| (h.id, h.hit.cell)), exact.map(|h| (h.id, h.hit.cell)), "ray {n}");
+            assert_eq!(
+                read.map(|h| (h.id, h.hit.cell)),
+                exact.map(|h| (h.id, h.hit.cell)),
+                "ray {n}"
+            );
             by_volume[exact.map_or(0, |h| h.id as usize)] += 1;
             if let Some(h) = exact {
                 // Just inside the hit cell: solid there.
                 let inside = eye + dir * (h.hit.distance + 0.02);
-                assert_eq!(ready(|| queries.solid_at(inside, Matter::All)), volumes.solid(inside, Matter::All));
+                assert_eq!(
+                    ready(|| queries.solid_at(inside, Matter::All)),
+                    volumes.solid(inside, Matter::All)
+                );
             }
         }
         assert!(by_volume[1] > 4 && by_volume[2] > 4, "{by_volume:?}");
@@ -1078,8 +1228,16 @@ mod tests {
                 let c = Cell::new(cell.face, cell.i + di, cell.j + di / 2, cell.k + dk);
                 let all = queries.solid(c, Matter::All).ready().expect("resident");
                 assert_eq!(all, planet.solid_of(c, Matter::All), "{c:?}");
-                assert_eq!(queries.solid(c, Matter::Ground).ready(), Some(planet.solid_of(c, Matter::Ground)), "{c:?}");
-                assert_eq!(queries.material(c).ready(), Some(planet.material(c)), "{c:?}");
+                assert_eq!(
+                    queries.solid(c, Matter::Ground).ready(),
+                    Some(planet.solid_of(c, Matter::Ground)),
+                    "{c:?}"
+                );
+                assert_eq!(
+                    queries.material(c).ready(),
+                    Some(planet.material(c)),
+                    "{c:?}"
+                );
                 features += u32::from(all != planet.solid_of(c, Matter::Ground));
             }
         }
@@ -1090,15 +1248,28 @@ mod tests {
             let a = f64::from(n) * 0.4;
             let d = (side * a.cos() + up.cross(side) * a.sin() - up * 0.3).normalize();
             for matter in [Matter::All, Matter::Ground] {
-                let read = queries.raycast(eye, d, 5.0, matter).ready().expect("within the focus");
-                assert_eq!(read, planet.raycast_of(eye, d, 5.0, matter), "ray {n} {matter:?}");
+                let read = queries
+                    .raycast(eye, d, 5.0, matter)
+                    .ready()
+                    .expect("within the focus");
+                assert_eq!(
+                    read,
+                    planet.raycast_of(eye, d, 5.0, matter),
+                    "ray {n} {matter:?}"
+                );
             }
         }
         // Past the focus a ray is pending, and asked: answered later.
         let far = eye + side * 40.0;
-        assert_eq!(queries.solid(planet.grid().locate(far).0, Matter::All), Resident::Pending);
+        assert_eq!(
+            queries.solid(planet.grid().locate(far).0, Matter::All),
+            Resident::Pending
+        );
         let c = planet.grid().locate(far).0;
-        assert_eq!(ready(|| queries.solid(c, Matter::All)), planet.solid_of(c, Matter::All));
+        assert_eq!(
+            ready(|| queries.solid(c, Matter::All)),
+            planet.solid_of(c, Matter::All)
+        );
     }
 
     /// An edit shows at once, before its snapshot; the snapshot that holds
@@ -1112,9 +1283,26 @@ mod tests {
         settle(&queries);
         let up = planet.grid().up(eye);
         let ground = planet.surface_point_of(eye, 0.0, Matter::Ground) - up * 0.3;
-        let dig = Brush { center: ground.to_array(), radius: 0.8, shape: BrushShape::Sphere, op: BrushOp::Remove, material: 0, height: 0.0 };
-        let block = Brush { center: (eye + up.any_orthonormal_vector() * 1.0).to_array(), radius: 0.3, shape: BrushShape::Cube, op: BrushOp::Add, material: 9, height: 0.0 };
-        let (dug, built) = (planet.grid().locate(ground).0, planet.grid().locate(DVec3::from_array(block.center)).0);
+        let dig = Brush {
+            center: ground.to_array(),
+            radius: 0.8,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        };
+        let block = Brush {
+            center: (eye + up.any_orthonormal_vector() * 1.0).to_array(),
+            radius: 0.3,
+            shape: BrushShape::Cube,
+            op: BrushOp::Add,
+            material: 9,
+            height: 0.0,
+        };
+        let (dug, built) = (
+            planet.grid().locate(ground).0,
+            planet.grid().locate(DVec3::from_array(block.center)).0,
+        );
         assert!(planet.solid(dug) && !planet.solid(built));
         queries.edit(&[dig, block]);
         assert_eq!(queries.solid(dug, Matter::All), Resident::Ready(false));
@@ -1128,7 +1316,11 @@ mod tests {
         for di in -12..12 {
             for dk in -20..12 {
                 let c = Cell::new(cell.face, cell.i + di, cell.j, cell.k + dk);
-                assert_eq!(queries.solid(c, Matter::All).ready(), Some(planet.solid(c)), "{c:?}");
+                assert_eq!(
+                    queries.solid(c, Matter::All).ready(),
+                    Some(planet.solid(c)),
+                    "{c:?}"
+                );
             }
         }
     }
@@ -1141,20 +1333,57 @@ mod tests {
         let eye = forest(&planet);
         let queries = WorldQueries::new(planet.clone(), 2);
         let up = planet.grid().up(eye);
-        let ray = Query::Ray { origin: eye, direction: up.any_orthonormal_vector(), max: 100.0, matter: Matter::All };
+        let ray = Query::Ray {
+            origin: eye,
+            direction: up.any_orthonormal_vector(),
+            max: 100.0,
+            matter: Matter::All,
+        };
         let ticket = queries.ask(ray);
-        let answer = ready(|| queries.answer(ticket).map_or(Resident::Pending, Resident::Ready));
+        let answer = ready(|| {
+            queries
+                .answer(ticket)
+                .map_or(Resident::Pending, Resident::Ready)
+        });
         assert_eq!(answer, ray.answer(&planet));
-        queries.watch(7, Query::Height { at: eye, matter: Matter::Ground });
-        let (query, height) = ready(|| queries.watched(7).map_or(Resident::Pending, Resident::Ready));
-        assert_eq!(height, Answer::Height(planet.ground_height_of(eye, Matter::Ground)));
-        assert_eq!(query, Query::Height { at: eye, matter: Matter::Ground });
+        queries.watch(
+            7,
+            Query::Height {
+                at: eye,
+                matter: Matter::Ground,
+            },
+        );
+        let (query, height) = ready(|| {
+            queries
+                .watched(7)
+                .map_or(Resident::Pending, Resident::Ready)
+        });
+        assert_eq!(
+            height,
+            Answer::Height(planet.ground_height_of(eye, Matter::Ground))
+        );
+        assert_eq!(
+            query,
+            Query::Height {
+                at: eye,
+                matter: Matter::Ground
+            }
+        );
         let higher = eye + up * 10.0;
-        queries.watch(7, Query::Height { at: higher, matter: Matter::Ground });
+        queries.watch(
+            7,
+            Query::Height {
+                at: higher,
+                matter: Matter::Ground,
+            },
+        );
         let height = ready(|| match queries.watched(7) {
             Some((Query::Height { at, .. }, answer)) if at == higher => Resident::Ready(answer),
             _ => Resident::Pending,
         });
-        assert_eq!(height, Answer::Height(planet.ground_height_of(higher, Matter::Ground)));
+        assert_eq!(
+            height,
+            Answer::Height(planet.ground_height_of(higher, Matter::Ground))
+        );
     }
 }

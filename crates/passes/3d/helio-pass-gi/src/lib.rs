@@ -910,40 +910,43 @@ impl GiResolvePass {
         }
         let Some((out, _)) = &self.out else { return };
         self.cache.end_frame();
-        let group = self.cache.bind_group(device, &wgpu::BindGroupDescriptor {
-            label: Some("GI resolve"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: frame.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: probes.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: camera.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(normal),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: out.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: self.view.as_entire_binding(),
-                },
-            ],
-        });
+        let group = self.cache.bind_group(
+            device,
+            &wgpu::BindGroupDescriptor {
+                label: Some("GI resolve"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: frame.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: probes.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(normal),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: out.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.view.as_entire_binding(),
+                    },
+                ],
+            },
+        );
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("GI resolve"),
             timestamp_writes: None,

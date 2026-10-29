@@ -555,12 +555,27 @@ impl Volume {
         let n = size as u64;
         let mut encoder = device.create_command_encoder(&Default::default());
         let e = &mut encoder;
-        self.tile_data =
-            regrown(device, e, &self.tile_data, "chunk footprint columns", n * TILE_COLUMNS * 16);
-        self.tile_cave_data =
-            regrown(device, e, &self.tile_cave_data, "chunk footprint caves", n * CAVE_SLOT_BYTES);
-        self.tile_slope_data =
-            regrown(device, e, &self.tile_slope_data, "chunk footprint slopes", n * SLOPE_STRIDE * 4);
+        self.tile_data = regrown(
+            device,
+            e,
+            &self.tile_data,
+            "chunk footprint columns",
+            n * TILE_COLUMNS * 16,
+        );
+        self.tile_cave_data = regrown(
+            device,
+            e,
+            &self.tile_cave_data,
+            "chunk footprint caves",
+            n * CAVE_SLOT_BYTES,
+        );
+        self.tile_slope_data = regrown(
+            device,
+            e,
+            &self.tile_slope_data,
+            "chunk footprint slopes",
+            n * SLOPE_STRIDE * 4,
+        );
         self.tile_placements = regrown(
             device,
             e,
@@ -629,7 +644,7 @@ impl DrawPipelines {
         device: &wgpu::Device,
         layouts: &DrawLayouts,
         source: &str,
-        scene: Option<(&wgpu::BindGroupLayout, u32)>,
+        scene: Option<(&wgpu::BindGroupLayout, u32, &wgpu::BindGroupLayout)>,
     ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("chunk draw"),
@@ -764,11 +779,13 @@ impl DrawPipelines {
             device,
             wgpu::RenderPipelineDescriptor {
                 label: Some("chunk exits open"),
-                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: None,
-                    bind_group_layouts: &[],
-                    immediate_size: 0,
-                })),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[],
+                        immediate_size: 0,
+                    }),
+                ),
                 vertex: wgpu::VertexState {
                     module: &module,
                     entry_point: Some("resolve_vertex"),
@@ -794,14 +811,19 @@ impl DrawPipelines {
         );
         // The publish again, textured by the host's scene materials, where
         // the device has texture binding arrays.
-        let publish_scene = scene.map(|(textures, capacity)| {
+        let publish_scene = scene.map(|(textures, capacity, shore_params)| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("chunk draw (scene materials)"),
                 source: wgpu::ShaderSource::Wgsl(scene::scene_source(source, capacity).into()),
             });
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: None,
-                bind_group_layouts: &[Some(&layouts.draw), Some(&layouts.resolve), Some(textures)],
+                bind_group_layouts: &[
+                    Some(&layouts.draw),
+                    Some(&layouts.resolve),
+                    Some(textures),
+                    Some(shore_params),
+                ],
                 immediate_size: 0,
             });
             helio_core::shader::create_render_pipeline(
@@ -846,7 +868,12 @@ impl DrawPipelines {
                 false,
             ),
             sky_sample: compute("chunk sky samples", &sky_layout, "sky_sample", false),
-            sky_sample_far: compute("chunk far sky samples", &sky_layout, "sky_sample_far", false),
+            sky_sample_far: compute(
+                "chunk far sky samples",
+                &sky_layout,
+                "sky_sample_far",
+                false,
+            ),
             shadow: compute("chunk shadow", &layout(&layouts.shadow), "shadow", false),
             shadow_fallback: compute(
                 "chunk shadow fallbacks",
@@ -854,7 +881,12 @@ impl DrawPipelines {
                 "shadow_fallback",
                 false,
             ),
-            local_sample: compute("chunk local light samples", &local_layout, "local_sample", false),
+            local_sample: compute(
+                "chunk local light samples",
+                &local_layout,
+                "local_sample",
+                false,
+            ),
             local_sample_far: compute(
                 "chunk far local light samples",
                 &local_layout,
@@ -931,13 +963,21 @@ impl ChunkWorld {
     /// (shared with volumes of the same program and form), its footprint
     /// pool (no larger than the footprints it has), its edits, and its
     /// planner. Its chunks share the world's pool.
-    pub fn add_volume(&mut self, tag: u64, planet: &Planet, transform: VolumeTransform) -> VolumeId {
+    pub fn add_volume(
+        &mut self,
+        tag: u64,
+        planet: &Planet,
+        transform: VolumeTransform,
+    ) -> VolumeId {
         let index = self
             .volumes
             .iter()
             .position(Option::is_none)
             .unwrap_or(self.volumes.len());
-        assert!(index < MAX_VOLUMES, "a world holds {MAX_VOLUMES} volumes at most");
+        assert!(
+            index < MAX_VOLUMES,
+            "a world holds {MAX_VOLUMES} volumes at most"
+        );
         if index == self.volumes.len() {
             self.volumes.push(None);
         }
@@ -955,12 +995,18 @@ impl ChunkWorld {
                 &device,
                 &self.layouts,
                 &source,
-                self.scene.as_ref().map(|s| (&s.layout, s.capacity)),
+                self.scene
+                    .as_ref()
+                    .map(|s| (&s.layout, s.capacity, &s.shore_params_layout)),
             ));
         }
         let gen_source = generation_source(plane, &program, self.wide64);
         let source_key = crate::record::fnv64(gen_source.as_bytes());
-        let gen = match self.gen_cache.get(&source_key).and_then(std::sync::Weak::upgrade) {
+        let gen = match self
+            .gen_cache
+            .get(&source_key)
+            .and_then(std::sync::Weak::upgrade)
+        {
             Some(gen) => gen,
             None => {
                 let gen = std::sync::Arc::new(GenPipelines::new(
@@ -1054,7 +1100,8 @@ impl ChunkWorld {
             * u64::from(crate::engine::node_words(&program))
             * 4;
         if node_bytes > self.tile_node_data.size() {
-            self.tile_node_data = buffer("chunk tile nodes", node_bytes, wgpu::BufferUsages::STORAGE);
+            self.tile_node_data =
+                buffer("chunk tile nodes", node_bytes, wgpu::BufferUsages::STORAGE);
         }
         // Its planner from the next update (with that update's settings).
         self.unplanned.push(index16);
@@ -1104,9 +1151,21 @@ impl ChunkWorld {
                 camera: params("chunk draw params"),
                 sun: params("chunk sun params"),
             },
-            tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, g),
-            tile_cave_data: buffer("chunk footprint caves", pool_size as u64 * CAVE_SLOT_BYTES, g),
-            tile_slope_data: buffer("chunk footprint slopes", pool_size as u64 * SLOPE_STRIDE * 4, g),
+            tile_data: buffer(
+                "chunk footprint columns",
+                pool_size as u64 * TILE_COLUMNS * 16,
+                g,
+            ),
+            tile_cave_data: buffer(
+                "chunk footprint caves",
+                pool_size as u64 * CAVE_SLOT_BYTES,
+                g,
+            ),
+            tile_slope_data: buffer(
+                "chunk footprint slopes",
+                pool_size as u64 * SLOPE_STRIDE * 4,
+                g,
+            ),
             feature_set: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk features"),
                 contents: bytemuck::cast_slice(&features.gpu_words()),
@@ -1242,13 +1301,17 @@ impl ChunkWorld {
     }
 
     pub(super) fn volume_mut(&mut self, id: VolumeId) -> Option<&mut Volume> {
-        self.volumes.get_mut(usize::from(id.0)).and_then(Option::as_mut)
+        self.volumes
+            .get_mut(usize::from(id.0))
+            .and_then(Option::as_mut)
     }
 
     /// Volume `index` taken out to work on it beside the world's shared
     /// state ([`Self::put_volume`] puts it back).
     pub(super) fn take_volume(&mut self, index: u16) -> Option<Volume> {
-        self.volumes.get_mut(usize::from(index)).and_then(Option::take)
+        self.volumes
+            .get_mut(usize::from(index))
+            .and_then(Option::take)
     }
 
     pub(super) fn put_volume(&mut self, vol: Volume) {

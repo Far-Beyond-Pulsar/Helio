@@ -43,15 +43,46 @@ fn a_layer_is_clamped_to_what_the_shader_can_draw() {
 #[test]
 fn the_weather_and_the_representation_round_trip_through_the_row() {
     let layer = CloudLayer {
-        representation: CloudRepresentation::Voxels { cell_m: 48.0, fill: 0.35 },
-        weather: PlanetWeather { pole: [0.0, 0.0, 1.0], circulation_cells: 5.0, storminess: 0.9, evolution: 600.0, seed: 7, ..PlanetWeather::earth() },
+        representation: CloudRepresentation::Voxels {
+            cell_m: 48.0,
+            fill: 0.35,
+        },
+        weather: PlanetWeather {
+            pole: [0.0, 0.0, 1.0],
+            circulation_cells: 5.0,
+            storminess: 0.9,
+            evolution: 600.0,
+            seed: 7,
+            ..PlanetWeather::earth()
+        },
         ..CloudLayer::cumulus()
     };
-    let clouds = AtmosphereComponent::earth().with_clouds(layer).clouds().unwrap();
+    let clouds = AtmosphereComponent::earth()
+        .with_clouds(layer)
+        .clouds()
+        .unwrap();
     assert_eq!(clouds.weather, layer.weather);
-    let CloudRepresentation::Voxels { cell_m, fill } = clouds.representation else { panic!("voxels") };
+    let CloudRepresentation::Voxels { cell_m, fill } = clouds.representation else {
+        panic!("voxels")
+    };
     assert!((cell_m - 48.0).abs() < 1e-3 && (fill - 0.35).abs() < 1e-6);
-    assert_eq!(CloudLayer::cumulus().representation, CloudRepresentation::Volumetric);
-    let calm = AtmosphereComponent::earth().with_clouds(CloudLayer { weather: PlanetWeather::calm(), ..layer }).clouds().unwrap();
-    assert_eq!((calm.weather.circulation, calm.weather.storminess, calm.weather.cirrus), (0.0, 0.0, 0.0));
+    assert_eq!(
+        CloudLayer::cumulus().representation,
+        CloudRepresentation::Volumetric
+    );
+    let calm = AtmosphereComponent::earth()
+        .with_clouds(CloudLayer {
+            weather: PlanetWeather::calm(),
+            ..layer
+        })
+        .clouds()
+        .unwrap();
+    assert_eq!(
+        (
+            calm.weather.circulation,
+            calm.weather.storminess,
+            calm.weather.cirrus
+        ),
+        (0.0, 0.0, 0.0)
+    );
 }

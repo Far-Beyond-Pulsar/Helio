@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use helio_default_passes::environment_join::{
     BufferHandle, BufferKey, EnvironmentJoin, EnvironmentJoinKeys, SceneBufferProjection,
-    SceneDerivation, SceneDerivationContext, DECALS_KEY, DECAL_SOURCE_ROW_BYTES, FOLIAGE_LAYERS_KEY,
-    FOLIAGE_SOURCE_ROW_BYTES, WATER_VOLUMES_KEY, WATER_VOLUME_SOURCE_ROW_BYTES,
+    SceneDerivation, SceneDerivationContext, DECALS_KEY, DECAL_SOURCE_ROW_BYTES,
+    FOLIAGE_LAYERS_KEY, FOLIAGE_SOURCE_ROW_BYTES, WATER_VOLUMES_KEY, WATER_VOLUME_SOURCE_ROW_BYTES,
 };
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
@@ -105,7 +105,10 @@ fn scene(device: &wgpu::Device, queue: &wgpu::Queue, far: Transform) -> SceneBuf
     let mut foliage = vec![0u32; FOLIAGE_WORDS * 3];
     // A density (the join's gate), then the layer.
     foliage[FOLIAGE_WORDS] = 4.0f32.to_bits();
-    for (word, value) in [8.0f32, 0.0, 6_371_000.0, 6_371_010.0].into_iter().enumerate() {
+    for (word, value) in [8.0f32, 0.0, 6_371_000.0, 6_371_010.0]
+        .into_iter()
+        .enumerate()
+    {
         foliage[FOLIAGE_WORDS + FOLIAGE_LAYER_WORD + word] = value.to_bits();
     }
     for (word, value) in [4.0f32, 2.0, 6.0, 0.5].into_iter().enumerate() {
@@ -209,8 +212,16 @@ fn derive(
         &projection.get(WATER_VOLUMES_KEY).unwrap().buffer,
     );
     let decal = read(device, queue, &projection.get(DECALS_KEY).unwrap().buffer);
-    let layers = read(device, queue, &projection.get(FOLIAGE_LAYERS_KEY).unwrap().buffer);
-    (water[..64].to_vec(), decal[..32].to_vec(), layers[..8].to_vec())
+    let layers = read(
+        device,
+        queue,
+        &projection.get(FOLIAGE_LAYERS_KEY).unwrap().buffer,
+    );
+    (
+        water[..64].to_vec(),
+        decal[..32].to_vec(),
+        layers[..8].to_vec(),
+    )
 }
 
 #[test]
@@ -230,7 +241,16 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, glam::DVec3::ZERO);
     assert_eq!(
         &layer,
-        &[992.0, 6_371_000.0, -308.0, 0.0, 1008.0, 6_371_010.0, -292.0, 0.0],
+        &[
+            992.0,
+            6_371_000.0,
+            -308.0,
+            0.0,
+            1008.0,
+            6_371_010.0,
+            -292.0,
+            0.0
+        ],
         "the layer around its owner, at its world altitudes"
     );
     assert_eq!(&water[0..3], &[998.0, 6_371_001.5, -303.0], "water min");
@@ -279,9 +299,28 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     // The layer where placement tests its points: the frame's space, its
     // square around the owner exactly; its authored f32 altitudes keep
     // their own 0.5 m step up there.
-    assert!(near(&[layer[0], 0.0, layer[2]], glam::Vec3::new(offset.x - 8.0, 0.0, offset.z - 8.0)), "{:?}", &layer[0..3]);
-    assert!(near(&[layer[4], 0.0, layer[6]], glam::Vec3::new(offset.x + 8.0, 0.0, offset.z + 8.0)), "{:?}", &layer[4..7]);
-    assert!((layer[1] + 0.125).abs() <= 0.5 && (layer[5] - 9.875).abs() <= 0.5, "altitudes {} {}", layer[1], layer[5]);
+    assert!(
+        near(
+            &[layer[0], 0.0, layer[2]],
+            glam::Vec3::new(offset.x - 8.0, 0.0, offset.z - 8.0)
+        ),
+        "{:?}",
+        &layer[0..3]
+    );
+    assert!(
+        near(
+            &[layer[4], 0.0, layer[6]],
+            glam::Vec3::new(offset.x + 8.0, 0.0, offset.z + 8.0)
+        ),
+        "{:?}",
+        &layer[4..7]
+    );
+    assert!(
+        (layer[1] + 0.125).abs() <= 0.5 && (layer[5] - 9.875).abs() <= 0.5,
+        "altitudes {} {}",
+        layer[1],
+        layer[5]
+    );
 
     // A moved origin re-derives them, though no input row changed.
     let moved = origin + glam::DVec3::new(1024.0, 0.0, 0.0);

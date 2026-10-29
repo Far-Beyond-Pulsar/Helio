@@ -224,7 +224,10 @@ impl VgRayProxies {
         };
         let live_vertices: u32 = self.proxies.values().map(|p| p.range.vertex_count).sum();
         let live_indices: u32 = self.proxies.values().map(|p| p.range.index_count).sum();
-        let target_vertices = live_vertices.max(1024).next_power_of_two().saturating_mul(2);
+        let target_vertices = live_vertices
+            .max(1024)
+            .next_power_of_two()
+            .saturating_mul(2);
         let target_indices = live_indices.max(4096).next_power_of_two().saturating_mul(2);
         pool.vertex_capacity > target_vertices.saturating_mul(4)
             || pool.index_capacity > target_indices.saturating_mul(4)
