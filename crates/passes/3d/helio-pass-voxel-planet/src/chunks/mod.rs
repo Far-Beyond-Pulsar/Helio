@@ -1826,8 +1826,12 @@ pub struct UpdateStats {
     pub fading_nodes: usize,
     pub drawn_chunks: usize,
     pub resident_chunks: usize,
-    /// Nodes rays met (ray reports this frame), and Buried nodes rays met
+    /// Ray reports since the last update (each a node a 32x32 tile's rays
+    /// met: the planner decodes them); the distinct nodes among them, in a
+    /// counting build (`Capacity::counters`, else 0: counting them costs a
+    /// hash a report on the render thread); Buried nodes rays met
     /// (generated next).
+    pub reports: usize,
     pub seen: usize,
     pub reached: usize,
     /// Drawn Mixed nodes in view coarser than wanted, as a share of them.
@@ -4655,7 +4659,11 @@ impl ChunkWorld {
         drop(results_scope);
         // Ray reports: nodes met, and Buried nodes met (generate them).
         let events_scope = helio_core::CpuScope::new("VoxelChunks: report events");
-        stats.seen = self.seen.iter().map(|r| r.len()).sum();
+        stats.reports = self.seen.iter().map(|r| r.len()).sum();
+        if self.counting {
+            let distinct: FxHashSet<[i32; 4]> = self.seen.iter().flat_map(|r| r.iter().copied()).collect();
+            stats.seen = distinct.len();
+        }
         stats.reached = self.reached.len();
         for reports in std::mem::take(&mut self.seen) {
             for vol in self.volumes.iter_mut().flatten() {
@@ -4905,6 +4913,7 @@ impl ChunkWorld {
         let grid = vol.grid;
         let local_eye = Eye::new(&grid, vol.local_eye(eye));
         let mut batch = GenBatch::default();
+        let queue_scope = helio_core::CpuScope::new("VoxelChunks: generate: queue");
         let mut readback = Readback {
             buffer: self.readback_pool.get(&self.device, 16),
             ready: Default::default(),
@@ -5090,6 +5099,8 @@ impl ChunkWorld {
             job[2] = results_at + n as u32;
         }
         readback.chunks.extend(restores.nodes.iter().copied());
+        drop(queue_scope);
+        let record_scope = helio_core::CpuScope::new("VoxelChunks: generate: record");
         // The batch's footprints: those it computes first (the kernels run
         // over them), then those it reads from the pool.
         let computed_count = computed.len();
@@ -5397,6 +5408,7 @@ impl ChunkWorld {
         }
         // Slots evicted now are reused from the next frame.
         self.free_slots.extend(evictions);
+        drop(record_scope);
         lap(&mut stats, 3);
         self.finish_update(encoder, stats, added, removed, frame, unseen)
     }

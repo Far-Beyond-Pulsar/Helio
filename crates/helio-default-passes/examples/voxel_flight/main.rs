@@ -78,6 +78,8 @@ struct Flight {
     output: PathBuf,
     /// Pipelined frames not yet known complete.
     in_flight: std::collections::VecDeque<Arc<std::sync::atomic::AtomicBool>>,
+    /// The render thread's cycles in the last `draw`'s recording.
+    render_cycles: u64,
     /// Pick requests drawn frames answer (`pick_probe`).
     picks: Option<SharedPicks>,
     /// Volumes drawn beside the planet (`volumes_tour`), placed each frame.
@@ -325,6 +327,7 @@ impl Flight {
                 .and_then(|v| v.parse().ok()),
             output: output.to_path_buf(),
             in_flight: Default::default(),
+            render_cycles: 0,
             picks: None,
             extra: Vec::new(),
         }
@@ -361,9 +364,11 @@ impl Flight {
             near,
             40_000_000.0,
         );
+        let cycles = thread_cycles();
         self.renderer
             .render(&camera, &self.target.create_view(&Default::default()))
             .unwrap();
+        self.render_cycles = thread_cycles() - cycles;
         let recorded = Instant::now();
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = done.clone();
@@ -538,6 +543,26 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
         "VOLUMES tour: {frames} frames in {:.1} s",
         started.elapsed().as_secs_f64()
     );
+}
+
+/// The calling thread's CPU cycles so far (Windows `QueryThreadCycleTime`:
+/// the cycles it ran, not the time it waited or was descheduled by other
+/// processes); 0 elsewhere.
+fn thread_cycles() -> u64 {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
+        }
+        let mut cycles = 0u64;
+        // SAFETY: the pseudo-handle of the calling thread, and a u64 out.
+        unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+        cycles
+    }
+    #[cfg(not(windows))]
+    0
 }
 
 fn percentile(values: &[f64], p: f64) -> f64 {
@@ -1767,8 +1792,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut pages_cpu_ms = Vec::new();
     let mut pages_cpu_parts = [0.0f64; 5];
     let mut planner_ms = 0.0;
-    // The render thread's CPU a frame (recording: `Renderer::render`).
+    // The render thread's CPU a frame (recording: `Renderer::render`), wall
+    // time and its own cycles (M).
     let mut record_all = Vec::new();
+    let mut cycles_all = Vec::new();
     let mut worst_wanted = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
@@ -2016,6 +2043,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         if !captured {
             intervals.push(interval);
             record_all.push(record_ms);
+            cycles_all.push(flight.render_cycles as f64 * 1e-6);
             slow.push((interval, t, altitude));
         }
         // Counting builds: each frame's rays that left the cut or the box
@@ -2200,6 +2228,14 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             percentile(&record_all, 0.95),
             percentile(&record_all, 0.99),
             max(&record_all)
+        );
+        eprintln!(
+            "CHUNKSTRESS {mode}: render thread cycles (M, its own: not descheduled time) mean {:.2} p50 {:.2} p95 {:.2} p99 {:.2} max {:.2}",
+            cycles_all.iter().sum::<f64>() / cycles_all.len().max(1) as f64,
+            percentile(&cycles_all, 0.5),
+            percentile(&cycles_all, 0.95),
+            percentile(&cycles_all, 0.99),
+            max(&cycles_all)
         );
     }
     eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {emptied_chunks} held nothing, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
@@ -2571,7 +2607,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
         resident = stats.resident_chunks;
         if n % 60 == 0 {
             eprintln!(
-                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} seen {} slots {} leaves {}",
+                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} reports {} slots {} leaves {}",
                 flight.planet.air_clearance(eye),
                 stats.coarse_share,
                 stats.requests,
@@ -2579,7 +2615,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
                 stats.drawn_chunks,
                 stats.resident_chunks,
                 stats.evicted_chunks,
-                stats.seen,
+                stats.reports,
                 stats.out_of_slots,
                 stats.out_of_leaves
             );
