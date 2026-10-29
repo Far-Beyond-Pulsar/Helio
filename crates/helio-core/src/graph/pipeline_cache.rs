@@ -49,6 +49,9 @@ fn shared_driver_cache(
     let mut caches = caches
         .lock()
         .expect("driver pipeline cache registry poisoned");
+    // The registry is process-wide and its key is a raw Device address. Drop
+    // dead records so sequential device lifetimes do not accumulate entries.
+    caches.retain(|_, record| record.cache.strong_count() > 0);
 
     if let Some(record) = caches.get(&device_key) {
         if let Some(cache) = record.cache.upgrade() {
@@ -388,6 +391,19 @@ fn pass_epoch(epochs: &Mutex<HashMap<&'static str, u64>>, pass: &'static str) ->
 }
 
 const MAX_PIPELINE_VARIANTS: usize = 512;
+const MAX_PENDING_PIPELINES: usize = 512;
+
+fn trim_pipeline_entries(
+    entries: &mut HashMap<PipelineFormatKey, Arc<wgpu::RenderPipeline>>,
+    preserve: &PipelineFormatKey,
+) {
+    while entries.len() > MAX_PIPELINE_VARIANTS {
+        let Some(old_key) = entries.keys().find(|key| *key != preserve).cloned() else {
+            break;
+        };
+        entries.remove(&old_key);
+    }
+}
 
 impl PipelineFormatCache {
     pub fn new() -> Self {
@@ -462,10 +478,12 @@ impl PipelineFormatCache {
         }
         let pipeline = Arc::new(build());
         let mut entries = self.entries.write().expect("pipeline cache poisoned");
-        entries
-            .entry(key)
+        let result = entries
+            .entry(key.clone())
             .or_insert_with(|| pipeline.clone())
-            .clone()
+            .clone();
+        trim_pipeline_entries(&mut entries, &key);
+        result
     }
 
     /// Recipe-aware variant that supplies the optional driver cache to the
@@ -498,10 +516,12 @@ impl PipelineFormatCache {
         }
         let pipeline = Arc::new(build(self.driver_cache.as_deref()));
         let mut entries = self.entries.write().expect("pipeline cache poisoned");
-        entries
-            .entry(key)
+        let result = entries
+            .entry(key.clone())
             .or_insert_with(|| pipeline.clone())
-            .clone()
+            .clone();
+        trim_pipeline_entries(&mut entries, &key);
+        result
     }
 
     /// Returns a ready pipeline immediately, or schedules construction on a
@@ -528,13 +548,12 @@ impl PipelineFormatCache {
         {
             return Some(existing.clone());
         }
-        if !self
-            .pending
-            .lock()
-            .expect("pipeline pending lock poisoned")
-            .insert(key.clone())
         {
-            return None;
+            let mut pending = self.pending.lock().expect("pipeline pending lock poisoned");
+            if pending.contains(&key) || pending.len() >= MAX_PENDING_PIPELINES {
+                return None;
+            }
+            pending.insert(key.clone());
         }
         let entries = Arc::clone(&self.entries);
         let build_lock = Arc::clone(&self.build_lock);
@@ -559,13 +578,7 @@ impl PipelineFormatCache {
                 // sees the new epoch here or is purged right after inserting.
                 if !is_stale() {
                     entries.insert(key.clone(), pipeline);
-                    while entries.len() > MAX_PIPELINE_VARIANTS {
-                        if let Some(old_key) = entries.keys().next().cloned() {
-                            entries.remove(&old_key);
-                        } else {
-                            break;
-                        }
-                    }
+                    trim_pipeline_entries(&mut entries, &key);
                 }
             }
             // After an invalidation the pending marker was already cleared

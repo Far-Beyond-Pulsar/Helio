@@ -2633,7 +2633,28 @@ pub fn camera_lens_view_overscan(world: &pulsar_scenedb::World, view_id: u32, as
 
 fn camera_lens_clear(mirror: &GpuMirrorHandle, row: u32) {
     pulsar_scenedb::gpu::clear_derived_row::<CameraLensSourceRow>(mirror, row);
-    if let Some(block) = with_blocks(mirror, |blocks| blocks.release(row)) {
+    // A clear can arrive after its store entry was already removed (for
+    // example during world teardown). Do not create an empty permanent entry
+    // just to release a row, and drop the per-store bookkeeping once the last
+    // lens has gone away.
+    let key = mirror.store() as *const SceneGpuStore as usize;
+    let block = {
+        let mut stores = BLOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(by_store) = stores.as_mut() else {
+            return;
+        };
+        let block = by_store.get_mut(&key).and_then(|blocks| blocks.release(row));
+        if by_store
+            .get(&key)
+            .is_some_and(|blocks| blocks.by_lens_row.is_empty())
+        {
+            by_store.remove(&key);
+        }
+        block
+    };
+    if let Some(block) = block {
         let first = block * LENS_ELEMENT_SLOTS as u32;
         for slot in 0..LENS_ELEMENT_SLOTS as u32 {
             pulsar_scenedb::gpu::clear_derived_row::<LensElementComponent>(mirror, first + slot);

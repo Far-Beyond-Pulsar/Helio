@@ -122,8 +122,12 @@ impl Renderer {
     }
 
     pub fn set_render_scale(&mut self, scale: f32) {
-        self.render_scale = scale.clamp(0.25, 1.0);
-        self.set_render_size(self.output_width, self.output_height);
+        let scale = scale.clamp(0.25, 1.0);
+        if (self.render_scale - scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.render_scale = scale;
+        self.pending_resize = Some((self.output_width, self.output_height));
     }
 
     /// Change temporal resolve when scene content becomes available after the

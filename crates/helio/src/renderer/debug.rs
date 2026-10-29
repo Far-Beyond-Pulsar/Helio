@@ -126,6 +126,9 @@ pub struct DebugBatch<'a> {
 
 impl<'a> DebugBatch<'a> {
     pub fn line(&mut self, from: impl WorldPoint, to: impl WorldPoint, color: [f32; 4]) {
+        if self.state.user_lines.len() + 2 > MAX_DEBUG_VERTS as usize {
+            return;
+        }
         self.state.user_lines.push(WorldVertex::new(from, color));
         self.state.user_lines.push(WorldVertex::new(to, color));
         self.lines_changed = true;
@@ -138,6 +141,9 @@ impl<'a> DebugBatch<'a> {
         v2: impl WorldPoint,
         color: [f32; 4],
     ) {
+        if self.state.user_tris.len() + 3 > MAX_DEBUG_TRIS as usize {
+            return;
+        }
         self.state.user_tris.push(WorldVertex::new(v0, color));
         self.state.user_tris.push(WorldVertex::new(v1, color));
         self.state.user_tris.push(WorldVertex::new(v2, color));
@@ -440,6 +446,9 @@ fn grow_debug_buffer(
         *buffer = debug_vertex_buffer(device, label, vertices.next_power_of_two());
     }
 }
+
+const MAX_EDITOR_LINE_LAYERS: usize = 32;
+const MAX_EDITOR_LAYER_VERTS: usize = 65536;
 
 pub struct DebugPass {
     pipeline_depth: wgpu::RenderPipeline,
@@ -1383,6 +1392,22 @@ impl Renderer {
         let Ok(mut state) = self.debug_state.lock() else {
             return;
         };
+        let mut lines = lines;
+        if !lines.is_empty() {
+            if !state.editor_line_layers.contains_key(layer)
+                && state.editor_line_layers.len() >= MAX_EDITOR_LINE_LAYERS
+            {
+                return;
+            }
+            let other_vertices: usize = state
+                .editor_line_layers
+                .iter()
+                .filter(|(name, _)| name.as_str() != layer)
+                .map(|(_, vertices)| vertices.len())
+                .sum();
+            let available = MAX_EDITOR_LAYER_VERTS.saturating_sub(other_vertices);
+            lines.truncate(available - available % 2);
+        }
         let changed = if lines.is_empty() {
             state.editor_line_layers.remove(layer).is_some()
         } else if state.editor_line_layers.get(layer) != Some(&lines) {

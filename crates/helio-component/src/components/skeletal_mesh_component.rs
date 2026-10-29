@@ -23,6 +23,15 @@ use std::collections::HashMap;
 use crate::components::{MeshGeometryKey, MeshSectionDraw, StaticMeshDraw};
 use crate::mesh_cache::MeshSection;
 
+#[path = "skeletal_notifies.rs"]
+mod notifies;
+pub use notifies::{
+    AnimationNotifyCatalog, AnimationNotifyDiagnostic, AnimationNotifyEvent,
+    SkeletalAnimationEvents, SkeletalAnimationEventsEventWriterExt, animation_notify_descriptor,
+    animation_source_for_file, flush_animation_notifies, project_animation_notify_events,
+    register_animation_notifies, register_loaded_animation_notifies,
+};
+
 pub const SKELETAL_MESH_ASSET_KIND: &str = "skmesh";
 pub const SKELETON_ASSET_KIND: &str = "skeleton";
 pub const ANIMATION_SEQUENCE_ASSET_KIND: &str = "animseq";
@@ -86,6 +95,8 @@ pub struct SkeletalMeshComponent {
     pub loaded_animation: Option<Arc<skeletal_assets::assets::AnimSeqAsset>>,
     #[serde(skip)]
     pub elapsed_seconds: f32,
+    #[serde(skip)]
+    notify_playback: notifies::NotifyPlayback,
     /// Evaluated parent-composed transforms in skeleton-local space, ordered
     /// exactly like `loaded_skeleton.bones`. These are pre-inverse-bind and
     /// intended for runtime consumers such as articulated physics bodies.
@@ -157,23 +168,10 @@ impl SkeletalMeshComponent {
     /// Advance playback and refresh the GPU joint palette. Called by the
     /// runtime component tick once the scene lifecycle wires this component.
     pub fn advance(&mut self, delta_seconds: f32) {
-        if self.physics_pose_active {
-            return;
+        if let Err(error) = self.advance_notifies(delta_seconds) {
+            self.playing = false;
+            tracing::warn!(%error, "could not advance skeletal animation");
         }
-        if !self.playing || !delta_seconds.is_finite() || delta_seconds <= 0.0 {
-            return;
-        }
-        self.elapsed_seconds += delta_seconds * self.playback_rate.max(0.0);
-        if let Some(animation) = &self.loaded_animation {
-            let duration = animation.clip.duration.max(0.0);
-            if duration > 0.0 && self.looping {
-                self.elapsed_seconds %= duration;
-            } else if self.elapsed_seconds >= duration {
-                self.elapsed_seconds = duration;
-                self.playing = false;
-            }
-        }
-        self.refresh_pose();
     }
 
     fn clear_mesh(&mut self) {
@@ -450,8 +448,7 @@ fn load_skeleton(source: &str) -> Result<AssetPayload, String> {
 }
 
 fn load_animation_sequence(source: &str) -> Result<AssetPayload, String> {
-    let animation = skeletal_assets::assets::load_animseq_asset(Path::new(source))
-        .map_err(|e| e.to_string())?;
+    let animation = notifies::load_sequence_for_events(Path::new(source))?;
     Ok(Arc::new(LoadedAnimationSequence(Arc::new(animation))))
 }
 
@@ -486,8 +483,7 @@ fn bind_animation_sequence(component: &mut SkeletalMeshComponent, view: &AssetVi
     component.loaded_animation = view
         .payload::<LoadedAnimationSequence>()
         .map(|loaded| loaded.0.clone());
-    component.elapsed_seconds = 0.0;
-    component.refresh_pose();
+    let _ = component.seek_animation(0.0);
 }
 
 /// Handle-ledger collection for the three stable references.
@@ -522,7 +518,20 @@ fn skeletal_mesh_property_written(component: &mut SkeletalMeshComponent, propert
 
 #[register_component_runtime]
 impl SkeletalMeshComponent {
-    fn tick(&mut self, _context: &mut pulsar_world_registry::ComponentContext, delta_seconds: f32) {
+    fn begin_play(&mut self, _context: &mut pulsar_world_registry::ComponentContext) {
+        self.begin_notify_playback();
+    }
+
+    fn tick(&mut self, context: &mut pulsar_world_registry::ComponentContext, delta_seconds: f32) {
+        self.reconcile_notify_playback();
+        if let Err(error) = self.register_notify_events(context.events.hub()) {
+            tracing::warn!(%error, "could not register animation notifies");
+            return;
+        }
+        // a failed suffix is retried in the next AfterScripts publication phase.
+        if self.notify_playback.has_pending() {
+            return;
+        }
         self.advance(delta_seconds);
     }
 }

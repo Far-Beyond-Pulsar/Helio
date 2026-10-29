@@ -12,6 +12,17 @@ use super::resource_lifetime::ResourceLifetime;
 use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction};
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
 
+/// Per-frame vectors reused across successful frames. They are drained before
+/// they go back to the graph, so they keep capacity, never command buffers or
+/// resources; a frame that fails drops its own.
+#[derive(Default)]
+struct FrameScratch {
+    compute: Vec<wgpu::CommandBuffer>,
+    graphics: Vec<Option<wgpu::CommandBuffer>>,
+    segment_passes: Vec<&'static str>,
+    reflected_groups: Vec<Vec<wgpu::BindGroup>>,
+}
+
 /// How long `CommandEncoder::finish` took for one run of passes, recorded
 /// when [`RenderGraph::set_finish_breakdown`] is on.
 ///
@@ -246,6 +257,7 @@ pub struct RenderGraph {
     finish_breakdown_enabled: bool,
     /// The last frame's segments while `finish_breakdown_enabled`.
     finish_breakdown: Vec<FinishSegment>,
+    frame_scratch: FrameScratch,
     chain_membership: Vec<bool>,
     /// Previous frame's chain membership, used to detect which passes changed
     /// so only their bundles (and everything after) need rebuilding.
@@ -328,19 +340,21 @@ impl RenderGraph {
         &mut self,
         pass_index: usize,
         registry: &crate::ResourceRegistry<'_>,
-    ) -> Result<Vec<wgpu::BindGroup>> {
+        groups: &mut Vec<wgpu::BindGroup>,
+    ) -> Result<()> {
         let Some(pipeline) = self
             .reflected_pipelines
             .get(pass_index)
             .and_then(Option::as_ref)
         else {
-            return Ok(Vec::new());
+            groups.clear();
+            return Ok(());
         };
         if self.reflected_group_cache.len() < self.passes.len() {
             self.reflected_group_cache
                 .resize_with(self.passes.len(), Vec::new);
         }
-        crate::shader::reuse_or_create_reflected_bind_groups(
+        crate::shader::reflection::reuse_or_create_reflected_bind_groups_into(
             self.passes[pass_index].name(),
             &pipeline.bindings,
             &pipeline.layouts,
@@ -348,8 +362,8 @@ impl RenderGraph {
             registry,
             &self.device,
             &mut self.reflected_group_cache[pass_index],
+            groups,
         )
-        .map(|groups| groups)
         .map_err(|error| {
             crate::Error::ResourceNotFound(format!("{}: {error}", self.passes[pass_index].name()))
         })
@@ -394,6 +408,7 @@ impl RenderGraph {
             finish_breakdown_enabled: std::env::var_os(FINISH_BREAKDOWN_ENV)
                 .is_some_and(|value| value != "0"),
             finish_breakdown: Vec::new(),
+            frame_scratch: FrameScratch::default(),
             chain_membership: Vec::new(),
             prev_chain_membership: Vec::new(),
             chain_generation: 0,
@@ -564,6 +579,7 @@ impl RenderGraph {
         if self.render_size() == size && self.resources_allocated {
             return;
         }
+        let started = std::time::Instant::now();
         self.set_size(size);
         self.resize_pending = true;
         if self.locked {
@@ -571,12 +587,26 @@ impl RenderGraph {
         } else {
             self.allocate_transients();
         }
+        let textures = started.elapsed();
         let device = self.device.clone();
         for pass in self.all_passes_mut() {
             pass.on_resize(&device, size);
         }
+        let passes = started.elapsed() - textures;
         self.gpu_render_bundles.clear();
         self.rebuild_gpu_render_bundles();
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(100) {
+            eprintln!(
+                "[RenderGraph] slow resize to {:?} (output {:?}) took {:.1} ms (textures {:.1} ms,                  pass callbacks {:.1} ms, bundles {:.1} ms)",
+                size.internal,
+                size.output,
+                elapsed.as_secs_f64() * 1000.0,
+                textures.as_secs_f64() * 1000.0,
+                passes.as_secs_f64() * 1000.0,
+                (elapsed - textures - passes).as_secs_f64() * 1000.0,
+            );
+        }
     }
 
     fn set_size(&mut self, size: crate::graph::RenderSize) {
@@ -1435,13 +1465,15 @@ impl RenderGraph {
         registry.reset_tracking("RenderGraph");
         // Resolves every pass's reflected bind groups, reusing last frame's
         // where they bind the same resources.
-        let reflected_groups: Vec<Vec<wgpu::BindGroup>> = {
+        let mut reflected_groups = std::mem::take(&mut self.frame_scratch.reflected_groups);
+        reflected_groups.resize_with(self.passes.len(), Vec::new);
+        {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: create_reflected_groups");
-            (0..self.passes.len())
-                .map(|pass_index| self.create_reflected_groups(pass_index, registry))
-                .collect::<Result<Vec<_>>>()?
-        };
+            for (pass_index, groups) in reflected_groups.iter_mut().enumerate() {
+                self.create_reflected_groups(pass_index, registry, groups)?;
+            }
+        }
         let resized_this_frame = self.resize_pending;
 
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
@@ -1463,7 +1495,9 @@ impl RenderGraph {
                 }
             };
         }
-        let mut chain_patch: Vec<Option<wgpu::RenderPassColorAttachment<'static>>> = Vec::new();
+        let mut chain_patch: smallvec::SmallVec<
+            [Option<wgpu::RenderPassColorAttachment<'static>>; 8],
+        > = smallvec::SmallVec::new();
 
         // Encoder segments. The graphics encoder is cut at pass boundaries
         // (never inside an open chain) and each cut segment goes straight to
@@ -1485,10 +1519,14 @@ impl RenderGraph {
         let (finish_reply_tx, finish_reply_rx) = mpsc::channel::<FinishReply>();
         #[cfg(not(target_arch = "wasm32"))]
         let mut finishes_in_flight = 0usize;
-        let mut compute_segments: Vec<wgpu::CommandBuffer> = Vec::new();
-        // Indexed by segment; `None` while its finish is still in flight.
-        let mut graphics_segments: Vec<Option<wgpu::CommandBuffer>> = Vec::new();
-        let mut segment_passes: Vec<&'static str> = Vec::new();
+        // `graphics_segments` is indexed by segment; `None` while its finish
+        // is still in flight.
+        let FrameScratch {
+            compute: mut compute_segments,
+            graphics: mut graphics_segments,
+            mut segment_passes,
+            reflected_groups: _,
+        } = std::mem::take(&mut self.frame_scratch);
         let mut segment_recording = std::time::Duration::ZERO;
         let new_encoder = |label: &'static str| {
             scene
@@ -1502,7 +1540,12 @@ impl RenderGraph {
                 if !segment_passes.is_empty() {
                     let done_graphics =
                         std::mem::replace(&mut encoder, new_encoder("Render Graph"));
-                    let passes = std::mem::take(&mut segment_passes);
+                    let passes = if finish_breakdown {
+                        std::mem::take(&mut segment_passes)
+                    } else {
+                        segment_passes.clear();
+                        Vec::new()
+                    };
                     segment_recording = std::time::Duration::ZERO;
                     let index = graphics_segments.len();
                     graphics_segments.push(None);
@@ -2061,17 +2104,28 @@ impl RenderGraph {
             let mut command_buffers = compute_segments;
             command_buffers.extend(compute_last);
             command_buffers.extend(
-                graphics_segments.into_iter().map(|segment| {
+                graphics_segments.drain(..).map(|segment| {
                     segment.expect("every graphics segment is finished before submit")
                 }),
             );
             command_buffers.push(graphics_last);
             command_buffers
         };
+        let mut command_buffers = command_buffers;
         let submission_index = {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: queue.submit (graph)");
-            scene.queue().submit(command_buffers)
+            scene.queue().submit(command_buffers.drain(..))
+        };
+        segment_passes.clear();
+        for groups in &mut reflected_groups {
+            groups.clear();
+        }
+        self.frame_scratch = FrameScratch {
+            compute: command_buffers,
+            graphics: graphics_segments,
+            segment_passes,
+            reflected_groups,
         };
         {
             #[cfg(not(target_arch = "wasm32"))]

@@ -290,19 +290,22 @@ fn load_graph(source: &str, bytes: &[u8]) -> Result<GraphMaterial, String> {
     let graph: psgc::GraphDescription = serde_json::from_value(graph_value.clone())
         .map_err(|error| format!("invalid main_graph: {error}"))?;
     let root = engine_state::get_project_path().map(PathBuf::from);
+    let graph_textures = crate::material_graph::texture_assets(&graph)?;
     let mut textures = Vec::new();
-    for asset in crate::material_graph::texture_assets(&graph)? {
+    let mut texture_sources = Vec::with_capacity(graph_textures.len());
+    for asset in graph_textures {
         let path = match &root {
             Some(root) if Path::new(&asset).is_relative() => root.join(&asset),
             _ => PathBuf::from(&asset),
         };
         let texture_source = crate::texture_assets::texture_source_for_file(&path);
-        remember_texture_user(&texture_source, source);
         let image = crate::texture_assets::decode_image_file(&path)
             .map_err(|error| format!("texture '{asset}': {error}"))?;
         let id = AssetId::of(crate::texture_assets::TEXTURE_ASSET_KIND, &texture_source);
+        texture_sources.push(texture_source);
         textures.push((asset, id, Arc::new(image)));
     }
+    remember_texture_users(source, &texture_sources);
     // Compile against placeholder slots while the SceneDB asset loader is on
     // a worker. Graph-local ordinals produce the same slot-independent source
     // later used by the renderer, so mirror attachment never runs PSGC.
@@ -327,12 +330,39 @@ fn texture_users() -> &'static Mutex<HashMap<String, HashSet<String>>> {
     USERS.get_or_init(Default::default)
 }
 
-fn remember_texture_user(texture_source: &str, material_source: &str) {
+const MAX_TEXTURE_USER_SOURCES: usize = 8192;
+const MAX_MATERIALS_PER_TEXTURE_SOURCE: usize = 1024;
+
+fn remember_texture_users(material_source: &str, texture_sources: &[String]) {
     if let Ok(mut users) = texture_users().lock() {
-        users
-            .entry(texture_source.to_string())
-            .or_default()
-            .insert(material_source.to_string());
+        users.retain(|_, materials| {
+            materials.remove(material_source);
+            !materials.is_empty()
+        });
+        for texture_source in texture_sources {
+            let materials = users
+                .entry(texture_source.clone())
+                .or_default();
+            materials.insert(material_source.to_string());
+            while materials.len() > MAX_MATERIALS_PER_TEXTURE_SOURCE {
+                if let Some(victim) = materials.iter().next().cloned() {
+                    materials.remove(&victim);
+                } else {
+                    break;
+                }
+            }
+        }
+        while users.len() > MAX_TEXTURE_USER_SOURCES {
+            let victim = users
+                .keys()
+                .find(|source| !texture_sources.iter().any(|current| current == *source))
+                .cloned();
+            if let Some(victim) = victim {
+                users.remove(&victim);
+            } else {
+                break;
+            }
+        }
     }
 }
 
@@ -421,6 +451,7 @@ pub fn resolve_material(
 /// Compiled graph sources (hash and WGSL), by material and content version.
 /// Texture residency belongs to each material row, not the shader identity.
 type CompiledGraphs = HashMap<(AssetId, u64), Result<CompiledGraph, String>>;
+const MAX_COMPILED_GRAPHS: usize = 1024;
 
 fn compiled_graphs() -> &'static Mutex<CompiledGraphs> {
     static COMPILED: OnceLock<Mutex<CompiledGraphs>> = OnceLock::new();
@@ -483,6 +514,14 @@ fn compiled_graph(
     let mut compiled = compiled_graphs()
         .lock()
         .map_err(|_| "compiled graph cache poisoned".to_string())?;
+    compiled.retain(|(cached_id, cached_version), _| {
+        *cached_id != id || *cached_version == version
+    });
+    if compiled.len() >= MAX_COMPILED_GRAPHS && !compiled.contains_key(&(id, version)) {
+        if let Some(victim) = compiled.keys().next().copied() {
+            compiled.remove(&victim);
+        }
+    }
     let result = compiled.entry((id, version)).or_insert_with(|| {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();

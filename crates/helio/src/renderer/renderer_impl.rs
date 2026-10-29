@@ -37,6 +37,9 @@ use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 
 use super::debug::DebugDrawState;
 
+/// Mono, stereo, and a few application-owned auxiliary views.
+const MAX_VIEW_HISTORY: usize = 16;
+
 /// Backend-only fallback bindings for the material sampling contract.
 ///
 /// Material parameters and texture references are authored in SceneDB. The
@@ -77,7 +80,7 @@ pub struct Renderer {
     /// it is expressed in. Stereo callers submit eyes sequentially, so a
     /// single matrix would make each eye reproject from the other eye's
     /// camera.
-    pub(crate) prev_view_proj_by_view: HashMap<u32, (glam::Mat4, glam::DVec3)>,
+    pub(crate) prev_view_proj_by_view: HashMap<u32, (glam::Mat4, glam::DVec3, u64)>,
     /// GPU work deriving drawable scene buffers from the frontend's authored
     /// ones, run each frame between the SceneDB snapshot and the graph. See
     /// `helio_core::scene_derivation`.
@@ -269,7 +272,7 @@ impl Renderer {
         // This view's last projection, rebased from the origin it was in; a
         // view's first frame has none (no motion).
         let previous_projection = match self.prev_view_proj_by_view.get(&camera.view_id) {
-            Some(&(previous, origin)) => helio_core::temporal::rebase_previous_projection(
+            Some(&(previous, origin, _)) => helio_core::temporal::rebase_previous_projection(
                 previous,
                 self.world_origin - origin,
             ),
@@ -293,8 +296,10 @@ impl Renderer {
             (
                 glam::Mat4::from_cols_array(&uniforms.view_proj),
                 self.world_origin,
+                self.frame_count,
             ),
         );
+        self.trim_view_history();
         self.camera_data = uniforms;
     }
 
@@ -350,7 +355,7 @@ impl Renderer {
             let previous =
                 self.prev_view_proj_by_view
                     .get(&view_id)
-                    .map_or(current, |&(previous, origin)| {
+                    .map_or(current, |&(previous, origin, _)| {
                         helio_core::temporal::rebase_previous_projection(
                             previous,
                             self.world_origin - origin,
@@ -358,8 +363,9 @@ impl Renderer {
                     });
             camera.prev_view_proj = previous.to_cols_array();
             self.prev_view_proj_by_view
-                .insert(view_id, (current, self.world_origin));
+                .insert(view_id, (current, self.world_origin, self.frame_count));
         }
+        self.trim_view_history();
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::cast_slice(&[left, right]));
         self.camera_data = left;
@@ -367,6 +373,21 @@ impl Renderer {
         // new view, and make the next mono frame compare afresh.
         self.camera_identity = None;
         self.camera_generation = self.camera_generation.wrapping_add(1);
+    }
+
+    fn trim_view_history(&mut self) {
+        while self.prev_view_proj_by_view.len() > MAX_VIEW_HISTORY {
+            let oldest = self
+                .prev_view_proj_by_view
+                .iter()
+                .min_by_key(|(_, (_, _, used))| used)
+                .map(|(view_id, _)| *view_id);
+            if let Some(oldest) = oldest {
+                self.prev_view_proj_by_view.remove(&oldest);
+            } else {
+                break;
+            }
+        }
     }
 
     /// Change the shadow quality. The passes that use it are configured at
