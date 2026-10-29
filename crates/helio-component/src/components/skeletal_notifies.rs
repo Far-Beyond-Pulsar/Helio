@@ -1,12 +1,16 @@
 //! runtime crossings belong to the live player, not its sampled pose.
 
-use std::{collections::{HashMap, VecDeque}, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 
 use engine_class_derive::{component_events, engine_class};
 use skeletal_assets::{
     assets::AnimSeqAsset,
-    notifies::{NotifyIndex, NotifyTarget, PlaybackInterval},
-    runtime::anim_instance::{TimeStep, UpdateMode},
+    notify_schema::AnimationNotifyState,
+    runtime::{
+        anim_instance::{TimeStep, UpdateMode},
+        montage::{CompiledMontage, MontageEvent, MontageEventKind, MontageResult},
+        playback::{EndReason, NotifyItem, NotifyOccurrence, NotifyOwner, NotifyTracker},
+    },
 };
 
 use super::SkeletalMeshComponent;
@@ -15,7 +19,7 @@ use pulsar_events::{
     gamma::{DynEvent, DynValue, EventDescriptor, FieldType},
 };
 use pulsar_scenedb::{Entity, World};
-use skeletal_assets::notifies::{AnimationNotify, NotifyValue};
+use skeletal_assets::notifies::{AnimationNotify, NotifyField, NotifyTarget, NotifyValue};
 
 pub(super) fn load_sequence_for_events(path: &std::path::Path) -> Result<AnimSeqAsset, String> {
     let text = skeletal_assets::assets::read_text(path).map_err(|e| e.to_string())?;
@@ -46,11 +50,10 @@ pub fn register_loaded_animation_notifies(world: &mut World, hub: &EventHub) {
     }
 }
 
-/// canonical binding keys use asset identities; labels are free to change.
-pub fn animation_notify_descriptor(
-    sequence: &AnimSeqAsset,
-    notify: &AnimationNotify,
-) -> EventDescriptor {
+/// Fields every notify/state/Montage-notify event carries before its authored
+/// payload. `sequence_id` names the source asset whatever its kind (kept under
+/// that name for compatibility); `source_kind` says which kind it is.
+fn item_descriptor(namespace: &str, source_id: &str, item_id: &str, payload: &[NotifyField]) -> EventDescriptor {
     let mut fields = vec![
         ("entity".to_owned(), FieldType::U64),
         ("source".into(), FieldType::U64),
@@ -61,8 +64,13 @@ pub fn animation_notify_descriptor(
         ("playback_time".into(), FieldType::F64),
         ("cycle".into(), FieldType::I64),
         ("generation".into(), FieldType::I64),
+        ("playback_instance".into(), FieldType::I64),
+        ("notify_phase".into(), FieldType::Str),
+        ("tick_delta".into(), FieldType::F64),
+        ("end_reason".into(), FieldType::Str),
+        ("source_kind".into(), FieldType::Str),
     ];
-    fields.extend(notify.fields.iter().map(|f| {
+    fields.extend(payload.iter().map(|f| {
         (
             f.name.clone(),
             match f.value {
@@ -73,21 +81,93 @@ pub fn animation_notify_descriptor(
             },
         )
     }));
-    EventDescriptor::dynamic_in("animseq", format!("{}.{}", sequence.id, notify.id), fields)
-        .expect("animseq is a valid namespace")
+    EventDescriptor::dynamic_in(namespace, format!("{source_id}.{item_id}"), fields)
+        .expect("animation namespaces are valid")
+}
+
+/// canonical binding keys use asset identities; labels are free to change.
+pub fn animation_notify_descriptor(
+    sequence: &AnimSeqAsset,
+    notify: &AnimationNotify,
+) -> EventDescriptor {
+    item_descriptor("animseq", &sequence.id.to_string(), &notify.id, &notify.fields)
+}
+
+/// A Sequence-owned notify state raises Begin, Tick and End under one canonical
+/// descriptor, told apart by its `notify_phase` field.
+pub fn animation_notify_state_descriptor(
+    sequence: &AnimSeqAsset,
+    state: &AnimationNotifyState,
+) -> EventDescriptor {
+    item_descriptor("animseq", &sequence.id.to_string(), &state.id, &state.fields)
+}
+
+/// Notifies a Montage itself owns live in the `montage` namespace.
+pub fn montage_notify_descriptor(montage_id: &str, notify: &AnimationNotify) -> EventDescriptor {
+    item_descriptor("montage", montage_id, &notify.id, &notify.fields)
+}
+
+pub fn montage_notify_state_descriptor(montage_id: &str, state: &AnimationNotifyState) -> EventDescriptor {
+    item_descriptor("montage", montage_id, &state.id, &state.fields)
+}
+
+/// The Montage lifecycle kinds, in the order they can happen to one instance.
+pub const MONTAGE_LIFECYCLE_KINDS: [&str; 6] =
+    ["started", "blended_in", "section_changed", "blending_out", "ended", "interrupted"];
+
+/// Canonical descriptor of one lifecycle event of one Montage asset
+/// (`montage::<montage id>.lifecycle_<kind>`). Blueprint nodes filter by the
+/// Montage by naming it here; the same occurrence is also raised as the
+/// generic component event `SkeletalMeshComponent.montage_<kind>`.
+pub fn montage_lifecycle_descriptor(montage_id: &str, kind: &str) -> EventDescriptor {
+    let fields = vec![
+        ("entity".to_owned(), FieldType::U64),
+        ("source".into(), FieldType::U64),
+        ("montage_id".into(), FieldType::Str),
+        ("instance".into(), FieldType::I64),
+        ("section_from".into(), FieldType::Str),
+        ("section_to".into(), FieldType::Str),
+        ("result".into(), FieldType::Str),
+        ("interrupted_by".into(), FieldType::I64),
+        ("generation".into(), FieldType::I64),
+    ];
+    EventDescriptor::dynamic_in("montage", format!("{montage_id}.lifecycle_{kind}"), fields)
+        .expect("montage is a valid namespace")
 }
 
 pub fn register_animation_notifies(sequence: &AnimSeqAsset, hub: &EventHub) -> Result<(), String> {
     sequence.features.validate(sequence.clip.duration)?;
+    let category = || EventCategory::Custom("Animation".into());
     for notify in &sequence.features.notifies {
-        hub.register(
-            animation_notify_descriptor(sequence, notify),
-            EventCategory::Custom("Animation".into()),
-        )
-        .map_err(|e| e.to_string())?;
+        hub.register(animation_notify_descriptor(sequence, notify), category())
+            .map_err(|e| e.to_string())?;
+    }
+    for state in &sequence.features.notify_states {
+        hub.register(animation_notify_state_descriptor(sequence, state), category())
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
+
+/// Register everything a Montage can raise: its own notifies and states and its
+/// lifecycle events.
+pub fn register_montage_events(montage: &CompiledMontage, hub: &EventHub) -> Result<(), String> {
+    let category = || EventCategory::Custom("Animation".into());
+    for notify in &montage.notifies {
+        hub.register(montage_notify_descriptor(&montage.id, notify), category())
+            .map_err(|e| e.to_string())?;
+    }
+    for state in &montage.notify_states {
+        hub.register(montage_notify_state_descriptor(&montage.id, state), category())
+            .map_err(|e| e.to_string())?;
+    }
+    for kind in MONTAGE_LIFECYCLE_KINDS {
+        hub.register(montage_lifecycle_descriptor(&montage.id, kind), category())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 
 /// Saved events that can be offered independently of broken project assets.
 #[derive(Debug, Default)]
@@ -174,8 +254,13 @@ fn catalog_from(
                 continue;
             }
         };
-        for notify in &sequence.features.notifies {
-            let descriptor = animation_notify_descriptor(&sequence, notify);
+        let items = sequence
+            .features
+            .notifies
+            .iter()
+            .map(|n| (n.name.as_str(), n.id.as_str(), animation_notify_descriptor(&sequence, n)))
+            .chain(sequence.features.notify_states.iter().map(|s| (s.name.as_str(), s.id.as_str(), animation_notify_state_descriptor(&sequence, s))));
+        for (item_name, item_id, descriptor) in items {
             let identity = key(&descriptor);
             origins
                 .entry(identity.clone())
@@ -201,8 +286,8 @@ fn catalog_from(
                 format!(
                     "{}.{} [{}]",
                     sequence.clip.name,
-                    notify.name,
-                    notify.id.chars().take(8).collect::<String>()
+                    item_name,
+                    item_id.chars().take(8).collect::<String>()
                 ),
                 descriptor,
             ));
@@ -353,77 +438,198 @@ pub fn component_animation_notify_events(
         .collect();
     catalog_from(items, catalog)
 }
+
+/// How a pending occurrence is also shown to the generic component event bridge.
+#[derive(Debug)]
+enum Bridge {
+    /// `SkeletalMeshComponent.animation_notify`: notifies and notify-state phases.
+    Notify,
+    /// `SkeletalMeshComponent.montage_<kind>`.
+    Montage { kind: &'static str, event: MontageLifecycleEvent },
+}
+
+/// One occurrence waiting for delivery through the component's event channel.
 #[derive(Debug)]
 struct PendingNotify {
     event: AnimationNotifyEvent,
+    bridge: Bridge,
+    /// The canonical per-asset event, published on the target entity's channel.
     authored: DynEvent,
+    /// Registered on whichever bus finally delivers the occurrence.
+    descriptor: EventDescriptor,
     target: NotifyTarget,
     generic_accepted: bool,
-    /// The sequence that owns the notify, so its descriptor can be registered
-    /// on whichever bus finally delivers the occurrence.
-    sequence: Arc<AnimSeqAsset>,
+}
+
+fn payload_values(fields: &[NotifyField]) -> impl Iterator<Item = DynValue> + '_ {
+    fields.iter().map(|field| match &field.value {
+        NotifyValue::Bool(v) => DynValue::Bool(*v),
+        NotifyValue::Int(v) => DynValue::I64(*v),
+        NotifyValue::Float(v) => DynValue::F64(*v),
+        NotifyValue::String(v) => DynValue::Str(v.clone()),
+    })
 }
 
 impl PendingNotify {
-    fn new(sequence: &Arc<AnimSeqAsset>, hit: skeletal_assets::notifies::CrossedNotify<'_>, generation: i64) -> Self {
-        let descriptor = animation_notify_descriptor(sequence, hit.notify);
+    /// A notify, or a phase of a notify state, from a playback instance.
+    fn from_occurrence(occurrence: &NotifyOccurrence, generation: i64) -> Self {
+        let descriptor = match (&occurrence.owner, occurrence.item) {
+            (NotifyOwner::Sequence(s), NotifyItem::Notify(i)) => animation_notify_descriptor(s, &s.features.notifies[i]),
+            (NotifyOwner::Sequence(s), NotifyItem::State(i)) => animation_notify_state_descriptor(s, &s.features.notify_states[i]),
+            (NotifyOwner::Montage(m), NotifyItem::Notify(i)) => montage_notify_descriptor(&m.id, &m.notifies[i]),
+            (NotifyOwner::Montage(m), NotifyItem::State(i)) => montage_notify_state_descriptor(&m.id, &m.notify_states[i]),
+        };
+        let event = AnimationNotifyEvent {
+            sequence_id: occurrence.owner.id(),
+            notify_id: occurrence.id().to_owned(),
+            notify_name: occurrence.name().to_owned(),
+            clip_time: occurrence.asset_time() as f64,
+            playback_time: occurrence.position,
+            cycle: occurrence.cycle,
+            generation,
+            playback_instance: occurrence.instance as i64,
+            notify_phase: occurrence.phase.name().to_owned(),
+            tick_delta: occurrence.delta as f64,
+            end_reason: occurrence.end_reason.map_or("", EndReason::name).to_owned(),
+            source_kind: occurrence.owner.kind().to_owned(),
+        };
         let mut fields = vec![
             DynValue::U64(0),
             DynValue::U64(0),
-            DynValue::Str(sequence.id.to_string()),
-            DynValue::Str(hit.notify.id.clone()),
-            DynValue::Str(hit.notify.name.clone()),
-            DynValue::F64(hit.notify.time as f64),
-            DynValue::F64(hit.playback_time),
-            DynValue::I64(hit.cycle),
+            DynValue::Str(event.sequence_id.clone()),
+            DynValue::Str(event.notify_id.clone()),
+            DynValue::Str(event.notify_name.clone()),
+            DynValue::F64(event.clip_time),
+            DynValue::F64(event.playback_time),
+            DynValue::I64(event.cycle),
             DynValue::I64(generation),
+            DynValue::I64(event.playback_instance),
+            DynValue::Str(event.notify_phase.clone()),
+            DynValue::F64(event.tick_delta),
+            DynValue::Str(event.end_reason.clone()),
+            DynValue::Str(event.source_kind.clone()),
         ];
-        fields.extend(hit.notify.fields.iter().map(|field| match &field.value {
-            NotifyValue::Bool(v) => DynValue::Bool(*v),
-            NotifyValue::Int(v) => DynValue::I64(*v),
-            NotifyValue::Float(v) => DynValue::F64(*v),
-            NotifyValue::String(v) => DynValue::Str(v.clone()),
-        }));
+        fields.extend(payload_values(occurrence.fields()));
         Self {
             authored: DynEvent::new(descriptor.id, fields),
-            target: hit.notify.target.clone(),
+            descriptor,
+            target: occurrence.target().clone(),
             generic_accepted: false,
-            sequence: sequence.clone(),
-            event: AnimationNotifyEvent {
-                sequence_id: sequence.id.to_string(),
-                notify_id: hit.notify.id.clone(),
-                notify_name: hit.notify.name.clone(),
-                clip_time: hit.notify.time as f64,
-                playback_time: hit.playback_time,
-                cycle: hit.cycle,
-                generation,
-            },
+            bridge: Bridge::Notify,
+            event,
+        }
+    }
+
+    /// A Montage lifecycle event of one instance. `interrupted` is the extra
+    /// event raised after `ended` when the result is an interruption.
+    fn lifecycle(event: &MontageEvent, kind: &'static str, generation: i64) -> Self {
+        let mut data = MontageLifecycleEvent {
+            montage_id: event.montage.clone(),
+            instance: event.handle.0 as i64,
+            generation,
+            ..Default::default()
+        };
+        match &event.kind {
+            MontageEventKind::SectionChanged { from, to } => {
+                data.section_from = from.clone().unwrap_or_default();
+                data.section_to = to.clone();
+            }
+            MontageEventKind::Ended(result) => {
+                data.result = montage_result_name(*result).to_owned();
+                if let MontageResult::Interrupted { by } = result {
+                    data.interrupted_by = by.0 as i64;
+                }
+            }
+            _ => {}
+        }
+        if kind == "interrupted" {
+            data.result = "interrupted".to_owned();
+        }
+        let descriptor = montage_lifecycle_descriptor(&event.montage, kind);
+        let authored = DynEvent::new(
+            descriptor.id,
+            vec![
+                DynValue::U64(0),
+                DynValue::U64(0),
+                DynValue::Str(data.montage_id.clone()),
+                DynValue::I64(data.instance),
+                DynValue::Str(data.section_from.clone()),
+                DynValue::Str(data.section_to.clone()),
+                DynValue::Str(data.result.clone()),
+                DynValue::I64(data.interrupted_by),
+                DynValue::I64(generation),
+            ],
+        );
+        Self {
+            event: AnimationNotifyEvent::default(),
+            bridge: Bridge::Montage { kind, event: data },
+            authored,
+            descriptor,
+            target: NotifyTarget::Self_,
+            generic_accepted: false,
         }
     }
 }
 
+fn montage_result_name(result: MontageResult) -> &'static str {
+    match result {
+        MontageResult::Completed => "completed",
+        MontageResult::Interrupted { .. } => "interrupted",
+        MontageResult::Stopped => "stopped",
+        MontageResult::Cancelled => "cancelled",
+    }
+}
+
 /// Animation phase: advance every live skeletal mesh component's animation by
-/// `delta_seconds` and publish its pose. The engine tick runs this **before**
-/// the ECS schedule, so physics reads this frame's evaluated pose; gameplay and
-/// script writes to graph parameters made later in the frame apply next frame.
+/// `delta_seconds`, publish its pose and move its owner by the root motion the
+/// component's mode selects. The engine tick runs this **before** the ECS
+/// schedule, so physics reads this frame's evaluated pose and owner transform;
+/// gameplay and script writes to graph parameters made later in the frame apply
+/// next frame.
 pub fn run_animation_phase(world: &mut World, delta_seconds: f32) {
     let players: Vec<Entity> = world.query::<&SkeletalMeshComponent>().map(|(entity, _)| entity).collect();
     for instance in players {
-        let live = world
+        let link = world
             .get::<pulsar_world_registry::pulsar_scene_model::ComponentOwner>(instance)
-            .is_some_and(|link| link.is_enabled() && world.is_alive(link.entity()));
+            .map(|link| (link.is_enabled(), link.entity()));
+        let live = link.is_some_and(|(enabled, owner)| enabled && world.is_alive(owner));
         let Some(mut player) = world.get_mut::<SkeletalMeshComponent>(instance) else { continue };
+        let mut moved = None;
         if live {
             // a failed suffix is retried in the next AfterScripts publication phase.
             player.animation_phase_step(delta_seconds);
+            moved = player.take_root_motion();
         } else if player.anim.started {
             player.animation_phase_stopped();
         }
+        drop(player);
+        if let (Some(delta), Some((_, owner))) = (moved, link) {
+            apply_root_motion(world, owner, &delta);
+        }
+    }
+}
+
+/// Move `owner` by a root-motion delta in its own local frame. Moving is
+/// subject to the same gates as script moves (`Static` objects stay put); a
+/// refused move drops the delta.
+fn apply_root_motion(world: &mut World, owner: Entity, delta: &skeletal_assets::runtime::pose::RootMotion) {
+    use pulsar_world_registry::pulsar_scene_model::components::Transform;
+    if let Err(reason) = pulsar_world_registry::pulsar_scene_model::motion::ensure_can_move(world, owner) {
+        tracing::debug!(%reason, "root motion not applied");
+        return;
+    }
+    let Some(mut transform) = world.get_mut::<Transform>(owner) else { return };
+    let (position, rotation) = skeletal_assets::runtime::rootmotion::advance_transform(transform.position, transform.rotation, transform.scale, delta);
+    if position != transform.position || rotation != transform.rotation {
+        transform.position = position;
+        transform.rotation = rotation;
     }
 }
 
 /// called after scripts release World, immediately before the AfterScripts flush.
 /// object references are resolved from the source owner's current script instance.
+/// A component that was disabled keeps the events its teardown produced (state
+/// ends, cancelled Montages) as long as its owner lives.
 pub fn flush_animation_notifies(
     world: &mut World,
     hub: &EventHub,
@@ -440,7 +646,8 @@ pub fn flush_animation_notifies(
             continue;
         };
         let owner = link.entity();
-        if !link.is_enabled() || !world.is_alive(owner) {
+        let enabled = link.is_enabled();
+        if !world.is_alive(owner) {
             world
                 .get_mut::<SkeletalMeshComponent>(instance)
                 .unwrap()
@@ -449,10 +656,12 @@ pub fn flush_animation_notifies(
                 .clear();
             continue;
         }
-        world
-            .get_mut::<SkeletalMeshComponent>(instance)
-            .unwrap()
-            .reconcile_notify_playback();
+        if enabled {
+            world
+                .get_mut::<SkeletalMeshComponent>(instance)
+                .unwrap()
+                .reconcile_notify_playback();
+        }
         let target_names: Vec<_> = world
             .get::<SkeletalMeshComponent>(instance)
             .unwrap()
@@ -484,6 +693,13 @@ pub fn flush_animation_notifies(
 }
 
 /// an owned occurrence, transported with the existing versioned event codec.
+///
+/// One type for instant notifies and for the phases of a notify state; `sequence_id`
+/// names the owning asset whatever its kind (`source_kind` is `animseq` or
+/// `montage`). `notify_phase` is `notify`, `begin`, `tick` or `end`; `end_reason` is
+/// set on ends; `playback_instance` identifies the playback (a Sequence Player,
+/// a Blend Space sample, a Montage segment, a Montage timeline) so a state's
+/// begin/tick/end can be matched up.
 #[engine_class(no_register)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AnimationNotifyEvent {
@@ -501,23 +717,69 @@ pub struct AnimationNotifyEvent {
     pub cycle: i64,
     #[property]
     pub generation: i64,
+    #[property]
+    pub playback_instance: i64,
+    #[property]
+    pub notify_phase: String,
+    #[property]
+    pub tick_delta: f64,
+    #[property]
+    pub end_reason: String,
+    #[property]
+    pub source_kind: String,
+}
+
+/// A lifecycle event of one Montage instance on this component.
+#[engine_class(no_register)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MontageLifecycleEvent {
+    #[property]
+    pub montage_id: String,
+    /// The Montage instance (a handle, unique per component).
+    #[property]
+    pub instance: i64,
+    #[property]
+    pub section_from: String,
+    #[property]
+    pub section_to: String,
+    /// On `ended`/`interrupted`: `completed`, `interrupted`, `stopped` or `cancelled`.
+    #[property]
+    pub result: String,
+    /// The instance that interrupted this one, or -1.
+    #[property]
+    pub interrupted_by: i64,
+    #[property]
+    pub generation: i64,
 }
 
 #[component_events(class = "SkeletalMeshComponent")]
 pub trait SkeletalAnimationEvents {
     #[bp_event]
     fn animation_notify() -> AnimationNotifyEvent {}
+    #[bp_event]
+    fn montage_started() -> MontageLifecycleEvent {}
+    #[bp_event]
+    fn montage_blended_in() -> MontageLifecycleEvent {}
+    #[bp_event]
+    fn montage_section_changed() -> MontageLifecycleEvent {}
+    #[bp_event]
+    fn montage_blending_out() -> MontageLifecycleEvent {}
+    #[bp_event]
+    fn montage_ended() -> MontageLifecycleEvent {}
+    #[bp_event]
+    fn montage_interrupted() -> MontageLifecycleEvent {}
 }
 
 /// Notify bookkeeping of one component. It owns no clock: the component's
 /// animation instance is the only thing that advances time, and every span of
-/// sequence playback it reports is turned into crossings here.
+/// playback it reports goes through the tracker, which knows each playback
+/// (Sequence Player, Blend Space sample, Montage segment, Montage timeline) and
+/// the notify states active in it.
 #[derive(Debug, Default)]
 pub(super) struct NotifyPlayback {
     generation: i64,
     pending: VecDeque<PendingNotify>,
-    /// Crossing indexes by clip id, rebuilt when the sequence asset changes.
-    indexes: HashMap<String, (Arc<AnimSeqAsset>, NotifyIndex)>,
+    tracker: NotifyTracker,
     registered_descriptor: Option<Arc<EventDescriptor>>,
     registered_sequence: Option<Arc<AnimSeqAsset>>,
 }
@@ -535,25 +797,58 @@ impl NotifyPlayback {
         self.generation = self.generation.wrapping_add(1);
     }
 
-    /// Crossings of one span, appended to the outbox in the span's order.
-    fn collect(&mut self, span: &skeletal_assets::runtime::graph::PlaybackSpan) -> Result<(), String> {
-        let Some(sequence) = &span.clip.source else { return Ok(()) };
-        if sequence.features.notifies.is_empty() {
-            return Ok(());
-        }
-        let key = span.clip.id.clone();
-        let stale = self.indexes.get(&key).is_none_or(|(known, _)| !Arc::ptr_eq(known, sequence));
-        if stale {
-            sequence.features.validate(sequence.clip.duration)?;
-            let index = NotifyIndex::new(&sequence.features.notifies, sequence.clip.duration)?;
-            self.indexes.insert(key.clone(), (sequence.clone(), index));
-        }
-        let (_, index) = &self.indexes[&key];
-        let crossed = index.collect(PlaybackInterval::Advance { from: span.from, to: span.to, looping: span.looping })?;
+    /// Everything one advance reported, in delivery order: the lifecycle events
+    /// that precede the playback (started, blended in, section changed), the
+    /// notifies and notify-state phases in playback order per playback, then the
+    /// ones that follow it (blending out, ended).
+    fn collect_report(&mut self, report: &skeletal_assets::runtime::anim_instance::UpdateReport, montage_events: &[MontageEvent]) -> Result<(), String> {
         let generation = self.generation;
-        self.pending.extend(crossed.into_iter().map(|hit| PendingNotify::new(sequence, hit, generation)));
-        Ok(())
+        let mut occurrences = Vec::new();
+        let result = self.tracker.observe_report(report, &mut occurrences);
+        self.push_lifecycle(montage_events.iter().filter(|e| is_early(&e.kind)), generation);
+        self.pending.extend(occurrences.iter().map(|o| PendingNotify::from_occurrence(o, generation)));
+        self.push_lifecycle(montage_events.iter().filter(|e| !is_early(&e.kind)), generation);
+        result
     }
+
+    pub(super) fn push_lifecycle_events(&mut self, events: &[MontageEvent]) {
+        let generation = self.generation;
+        self.push_lifecycle(events.iter(), generation);
+    }
+
+    fn push_lifecycle<'a>(&mut self, events: impl Iterator<Item = &'a MontageEvent>, generation: i64) {
+        for event in events {
+            let kind = match &event.kind {
+                MontageEventKind::Started => "started",
+                MontageEventKind::BlendedIn => "blended_in",
+                MontageEventKind::SectionChanged { .. } => "section_changed",
+                MontageEventKind::BlendingOut => "blending_out",
+                MontageEventKind::Ended(_) => "ended",
+            };
+            self.pending.push_back(PendingNotify::lifecycle(event, kind, generation));
+            if matches!(event.kind, MontageEventKind::Ended(MontageResult::Interrupted { .. })) {
+                self.pending.push_back(PendingNotify::lifecycle(event, "interrupted", generation));
+            }
+        }
+    }
+
+    /// End every active notify state now (the component seeked, reloaded or is
+    /// going away) and queue the ends.
+    pub(super) fn end_all(&mut self, reason: EndReason) {
+        let mut occurrences = Vec::new();
+        self.tracker.end_all(reason, &mut occurrences);
+        let generation = self.generation;
+        self.pending.extend(occurrences.iter().map(|o| PendingNotify::from_occurrence(o, generation)));
+    }
+
+    /// Notify states currently active across all playbacks.
+    pub(super) fn active_states(&self) -> usize {
+        self.tracker.active_states()
+    }
+}
+
+fn is_early(kind: &MontageEventKind) -> bool {
+    matches!(kind, MontageEventKind::Started | MontageEventKind::BlendedIn | MontageEventKind::SectionChanged { .. })
 }
 
 impl Clone for NotifyPlayback {
@@ -571,17 +866,19 @@ impl SkeletalMeshComponent {
     }
 
     /// Bring the animation runtime in line with the loaded assets. Replacing the
-    /// sequence or graph starts a fresh playback and discards unaccepted events.
+    /// sequence or graph starts a fresh playback and discards unaccepted events;
+    /// notify states that were active end with the reason `reload`.
     pub(super) fn reconcile_notify_playback(&mut self) {
         if self.ensure_runtime() {
-            self.notify_playback.pending.clear();
-            self.notify_playback.generation = self.notify_playback.generation.wrapping_add(1);
+            // `ensure_runtime` already discarded the old playback's unaccepted events
+            self.notify_playback.end_all(EndReason::Reload);
         }
     }
 
     /// Seek the single-sequence player without crossings, discarding occurrences
-    /// not yet accepted by Gamma. Already queued engine events keep their
-    /// original sequence and generation.
+    /// not yet accepted by Gamma. Active notify states end with the reason `seek`
+    /// (a seek is gameplay-visible only through those ends). Already queued
+    /// engine events keep their original sequence and generation.
     pub fn seek_animation(&mut self, seconds: f64) -> Result<(), String> {
         if !seconds.is_finite() || seconds < 0.0 || seconds > f32::MAX as f64 {
             return Err("Animation seek time must be finite and nonnegative".into());
@@ -608,6 +905,7 @@ impl SkeletalMeshComponent {
         }
         self.notify_playback.generation = self.notify_playback.generation.wrapping_add(1);
         self.notify_playback.pending.clear();
+        self.notify_playback.end_all(EndReason::Seek);
         self.elapsed_seconds = phase;
         if let Some(instance) = self.anim.instance.as_mut() {
             instance.refresh();
@@ -629,6 +927,9 @@ impl SkeletalMeshComponent {
         let _ = self.seek_animation(0.0);
     }
 
+    /// Advance the instance and queue what it raised. Time scales by the size of
+    /// `playback_rate`; its sign only selects the direction of the internal
+    /// single-sequence player (graph nodes and Montages carry their own rates).
     pub(super) fn advance_notifies(&mut self, delta_seconds: f32) -> Result<(), String> {
         self.reconcile_notify_playback();
         if self.physics_pose_active || !self.playing || delta_seconds <= 0.0 {
@@ -637,34 +938,48 @@ impl SkeletalMeshComponent {
         if !delta_seconds.is_finite() || !self.playback_rate.is_finite() {
             return Err("Animation delta and playback rate must be finite".into());
         }
-        // forward playback only: a negative rate holds the pose.
-        let scaled = delta_seconds * self.playback_rate.max(0.0);
+        let scaled = delta_seconds * self.playback_rate.abs();
+        if scaled <= 0.0 {
+            return Ok(());
+        }
         let looping = self.internal_looping();
+        let reverse = self.playback_rate < 0.0;
+        let policy = self.root_motion_policy();
         let Some(instance) = self.anim.instance.as_mut() else { return Ok(()) };
+        instance.set_root_motion_extraction(policy.mode.extracts());
         instance.advance(scaled, TimeStep::Variable, UpdateMode::Play);
         let position = instance.single_sequence_position();
-        if position.is_some_and(|p| !p.is_finite() || p > f32::MAX as f64) {
+        if position.is_some_and(|p| !p.is_finite() || p.abs() > f32::MAX as f64) {
             return Err("Animation playback time overflowed".into());
         }
-        let spans = std::mem::take(&mut instance.report.spans);
         let events = std::mem::take(&mut instance.report.montage_events);
-        self.anim.montage_events.extend(events);
-        for span in &spans {
-            self.notify_playback.collect(span)?;
-        }
+        self.anim.montage_events.extend(events.iter().cloned());
+        let collected = self.notify_playback.collect_report(&instance.report, &events);
+        self.pending_root_motion = Some(policy.delta(&instance.report.root_motion, &instance.report.montage_root_motion));
         if let (Some(position), Some(sequence)) = (position, self.loaded_animation.as_ref()) {
             let duration = sequence.clip.duration as f64;
-            self.elapsed_seconds = if looping && duration > 0.0 { (position % duration) as f32 } else { position.min(duration) as f32 };
-            // a one-shot (or zero-length) sequence stops at its end
-            if (!looping || duration == 0.0) && position >= duration {
+            self.elapsed_seconds = if looping && duration > 0.0 { position.rem_euclid(duration) as f32 } else { position.clamp(0.0, duration) as f32 };
+            // a one-shot (or zero-length) sequence stops at its end (its start, reversed)
+            let finished = if reverse { position <= 0.0 } else { position >= duration };
+            if (!looping || duration == 0.0) && finished {
                 self.playing = false;
             }
         }
         self.refresh_pose();
-        Ok(())
+        collected
     }
 
     pub(super) fn register_notify_events(&mut self, hub: &EventHub) -> Result<(), String> {
+        // Montages that are playing can raise their lifecycle and own notifies
+        let montages: Vec<Arc<CompiledMontage>> = self
+            .anim
+            .instance
+            .as_ref()
+            .map(|i| i.montages.instances().iter().map(|m| m.montage.clone()).collect())
+            .unwrap_or_default();
+        for montage in montages {
+            register_montage_events(&montage, hub)?;
+        }
         let Some(sequence) = &self.loaded_animation else {
             return Ok(());
         };
@@ -686,25 +1001,28 @@ impl SkeletalMeshComponent {
         }
         register_animation_notifies(sequence, hub)?;
         // a descriptor identifies this registration without retaining the session bus.
-        self.notify_playback.registered_descriptor =
-            sequence.features.notifies.first().and_then(|notify| {
-                hub.descriptor(animation_notify_descriptor(sequence, notify).id)
-            });
+        self.notify_playback.registered_descriptor = sequence
+            .features
+            .notifies
+            .first()
+            .map(animation_notify_descriptor_id(sequence))
+            .or_else(|| sequence.features.notify_states.first().map(|s| animation_notify_state_descriptor(sequence, s).id))
+            .and_then(|id| hub.descriptor(id));
         self.notify_playback.registered_sequence = Some(sequence.clone());
         Ok(())
     }
 
-    /// Register the descriptors of every sequence with queued occurrences (graph
-    /// players and blend space samples, not just the single-sequence player).
+    /// Register the descriptor of every queued occurrence (graph players, Blend
+    /// Space samples and Montages, not just the single-sequence player).
     fn register_pending_events(&mut self, hub: &EventHub) -> Result<(), String> {
-        let mut seen: Vec<Arc<AnimSeqAsset>> = Vec::new();
+        let mut seen: Vec<u64> = Vec::new();
         for pending in &self.notify_playback.pending {
-            if !seen.iter().any(|s| Arc::ptr_eq(s, &pending.sequence)) {
-                seen.push(pending.sequence.clone());
+            if seen.contains(&pending.descriptor.id) {
+                continue;
             }
-        }
-        for sequence in seen {
-            register_animation_notifies(&sequence, hub)?;
+            seen.push(pending.descriptor.id);
+            hub.register(pending.descriptor.clone(), EventCategory::Custom("Animation".into()))
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -722,7 +1040,20 @@ impl SkeletalMeshComponent {
             };
             // the generic bridge keeps its established owner/component compatibility.
             if !pending.generic_accepted {
-                events.animation_notify(pending.event.clone())?;
+                match &pending.bridge {
+                    Bridge::Notify => events.animation_notify(pending.event.clone())?,
+                    Bridge::Montage { kind, event } => {
+                        let event = event.clone();
+                        match *kind {
+                            "started" => events.montage_started(event)?,
+                            "blended_in" => events.montage_blended_in(event)?,
+                            "section_changed" => events.montage_section_changed(event)?,
+                            "blending_out" => events.montage_blending_out(event)?,
+                            "ended" => events.montage_ended(event)?,
+                            _ => events.montage_interrupted(event)?,
+                        }
+                    }
+                }
                 pending.generic_accepted = true;
             }
             if let Some(target) = target {
@@ -735,6 +1066,10 @@ impl SkeletalMeshComponent {
         }
         Ok(())
     }
+}
+
+fn animation_notify_descriptor_id(sequence: &AnimSeqAsset) -> impl Fn(&AnimationNotify) -> u64 + '_ {
+    move |notify| animation_notify_descriptor(sequence, notify).id
 }
 
 #[cfg(test)]
@@ -912,20 +1247,22 @@ mod tests {
         hub.flush(FlushPoint::AfterScripts);
         assert_eq!(got.lock().unwrap()[2].playback_time, 20.5);
         assert_eq!(got.lock().unwrap()[2].cycle, 20);
+        // a negative rate plays the single sequence backwards: 10 s of a 1 s loop with
+        // four notifies per cycle
         p.playback_rate = -1.0;
         step(&mut p, &mut context, 10.0, &hub, entity);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         hub.flush(FlushPoint::AfterScripts);
-        assert_eq!(got.lock().unwrap().len(), 4);
+        assert_eq!(got.lock().unwrap().len(), 44);
         p.restart_animation().unwrap();
         p.playback_rate = 1.0;
         step(&mut p, &mut context, 0.5, &hub, entity);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         hub.flush(FlushPoint::AfterScripts);
-        assert_eq!(got.lock().unwrap()[4].playback_time, 0.5);
+        assert_eq!(got.lock().unwrap()[44].playback_time, 0.5);
         {
             let events = got.lock().unwrap();
-            assert_ne!(events[4].generation, events[2].generation);
+            assert_ne!(events[44].generation, events[2].generation);
         }
         p.stop_animation();
         step(&mut p, &mut context, 1.0, &hub, entity);
@@ -936,8 +1273,8 @@ mod tests {
         step(&mut p, &mut context, 0.5, &hub, entity);
         flush_animation_notifies(&mut world, &hub, |_, _| None);
         hub.flush(FlushPoint::AfterScripts);
-        assert_ne!(got.lock().unwrap()[6].sequence_id, old_id);
-        assert_eq!(got.lock().unwrap().len(), 8);
+        assert_ne!(got.lock().unwrap()[46].sequence_id, old_id);
+        assert_eq!(got.lock().unwrap().len(), 48);
     }
 
     #[test]
