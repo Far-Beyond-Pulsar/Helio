@@ -17,6 +17,7 @@ use pulsar_reflection::{
     SkeletonAssetKind,
 };
 use pulsar_scenedb::{AssetId, AssetPayload, AssetView};
+use skeletal_assets::diagnostics::Diagnostic;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -72,7 +73,6 @@ pub struct LoadedAnimationSequence(pub Arc<skeletal_assets::assets::AnimSeqAsset
 #[scene_store(collect_handles = crate::components::collect_skeletal_assets)]
 pub struct SkeletalMeshComponent {
     pub mesh: Option<AssetRef<SkeletalMeshAssetKind>>,
-    pub skeleton: Option<AssetRef<SkeletonAssetKind>>,
     pub animation: Option<AssetRef<AnimationSequenceAssetKind>>,
     #[serde(default)]
     pub playing: bool,
@@ -83,8 +83,20 @@ pub struct SkeletalMeshComponent {
 
     #[serde(skip)]
     pub mesh_asset_id: AssetId,
+    /// The skeleton the mesh is bound to, read from the mesh header. The mesh
+    /// is the only authority; the component never stores a skeleton ref.
+    #[serde(skip)]
+    pub mesh_skeleton: Option<AssetRef<SkeletonAssetKind>>,
     #[serde(skip)]
     pub skeleton_asset_id: AssetId,
+    /// Repairable problems with the component's asset links, recomputed whenever
+    /// they change. Never serialized.
+    #[serde(skip)]
+    pub diagnostics: Vec<Diagnostic>,
+    /// A skeleton ref found in an old saved component; kept only to report a
+    /// disagreement with the mesh.
+    #[serde(skip)]
+    legacy_skeleton: Option<AssetRef<SkeletonAssetKind>>,
     #[serde(skip)]
     pub animation_asset_id: AssetId,
     #[serde(skip)]
@@ -157,12 +169,14 @@ impl SkeletalMeshComponent {
     pub fn attach_assets(&mut self) {
         register_skeletal_mesh_assets();
         self.mesh_asset_id = asset_id_for_ref(self.mesh.as_ref());
-        self.skeleton_asset_id = asset_id_for_ref(self.skeleton.as_ref());
+        self.mesh_skeleton = mesh_skeleton_ref(self.mesh.as_ref());
+        self.skeleton_asset_id = asset_id_for_ref(self.mesh_skeleton.as_ref());
         self.animation_asset_id = asset_id_for_ref(self.animation.as_ref());
         if self.mesh_asset_id.is_zero() {
             self.clear_mesh();
         }
         self.refresh_pose();
+        self.refresh_diagnostics();
     }
 
     /// Advance playback and refresh the GPU joint palette. Called by the
@@ -261,7 +275,7 @@ impl SkeletalMeshComponent {
             .as_ref()
             .filter(|animation| {
                 animation.skeleton.as_ref().is_none_or(|id| {
-                    id.as_str() == skeleton_id(self.skeleton.as_ref()).as_deref().unwrap_or("")
+                    id.as_str() == skeleton_id(self.mesh_skeleton.as_ref()).as_deref().unwrap_or("")
                 })
             })
             .map(|animation| &animation.clip);
@@ -290,6 +304,21 @@ impl SkeletalMeshComponent {
                 .map(|m| glam::Mat4::from_cols_array(&m.0).to_cols_array_2d())
                 .collect(),
         );
+    }
+
+    /// Recompute [`Self::diagnostics`] from the resolved links.
+    pub fn refresh_diagnostics(&mut self) {
+        self.diagnostics = link_diagnostics(
+            self.mesh.as_ref(),
+            self.mesh_asset_id.is_zero(),
+            self.mesh_skeleton.as_ref(),
+            self.legacy_skeleton.as_ref(),
+            self.loaded_animation.as_deref().and_then(|a| a.skeleton.as_ref()).map(|id| id.as_str().to_string()),
+            self.animation.is_some(),
+        );
+        for d in &self.diagnostics {
+            tracing::warn!(code = d.code, "{}", d.message);
+        }
     }
 
     /// Replace the evaluated pose with articulated-body transforms in
@@ -375,41 +404,96 @@ fn bounding_sphere(positions: impl Iterator<Item = [f32; 3]>) -> [f32; 4] {
     [center.x, center.y, center.z, radius]
 }
 
+/// Problems with a component's asset links, as repairable diagnostics.
+///
+/// `animation_skeleton` is the skeleton id of the loaded animation, if loaded.
+pub(crate) fn link_diagnostics(
+    mesh: Option<&AssetRef<SkeletalMeshAssetKind>>,
+    mesh_unresolved: bool,
+    mesh_skeleton: Option<&AssetRef<SkeletonAssetKind>>,
+    legacy_skeleton: Option<&AssetRef<SkeletonAssetKind>>,
+    animation_skeleton: Option<String>,
+    has_animation: bool,
+) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    if mesh.is_some() && mesh_unresolved {
+        out.push(
+            Diagnostic::error("component.mesh_unresolved", "The skeletal mesh is not in this project's asset index")
+                .at("mesh")
+                .repair("Pick the mesh again or restore the missing file"),
+        );
+    } else if mesh.is_some() && mesh_skeleton.is_none() {
+        out.push(
+            Diagnostic::error("component.mesh_without_skeleton", "The skeletal mesh names no skeleton, so it cannot be posed")
+                .at("mesh")
+                .repair("Bind the mesh to a skeleton in the Skeletal Mesh editor"),
+        );
+    }
+    if let Some(legacy) = legacy_skeleton {
+        if mesh_skeleton.is_some_and(|m| m != legacy) {
+            out.push(
+                Diagnostic::warning(
+                    "component.legacy_skeleton_disagrees",
+                    "This component was saved with a skeleton that differs from its mesh's; the mesh's skeleton is used and the old value is dropped on the next save",
+                )
+                .at("skeleton")
+                .repair("Check that the mesh is the one you meant, then save the scene"),
+            );
+        }
+    }
+    if has_animation {
+        if let (Some(animation), Some(mesh)) = (animation_skeleton, mesh_skeleton) {
+            if animation != mesh.as_str() {
+                out.push(
+                    Diagnostic::error(
+                        "component.animation_skeleton_mismatch",
+                        "The animation is for a different skeleton than the mesh, so it is not played",
+                    )
+                    .at("animation")
+                    .repair("Pick an animation made for the mesh's skeleton"),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// The skeleton the mesh at `mesh` is bound to, read from its header only.
+fn mesh_skeleton_ref(mesh: Option<&AssetRef<SkeletalMeshAssetKind>>) -> Option<AssetRef<SkeletonAssetKind>> {
+    let path = path_for_ref(mesh?)?;
+    match skeletal_assets::skmesh::SkeletalMeshAsset::peek_header_at(&path) {
+        Ok((_, skeleton)) => skeleton.map(|s| s.to_ref()),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "could not read the skeletal mesh header");
+            None
+        }
+    }
+}
+
 fn skeleton_id(reference: Option<&AssetRef<SkeletonAssetKind>>) -> Option<String> {
     reference.map(|reference| reference.as_str().to_owned())
 }
 
-fn asset_id_for_ref<K: AssetKind>(reference: Option<&AssetRef<K>>) -> AssetId {
-    let Some(reference) = reference else {
-        return AssetId::ZERO;
-    };
-    let Some(root) = engine_state::get_project_path() else {
-        return AssetId::ZERO;
-    };
-    let root = PathBuf::from(root);
+/// The project file a typed reference resolves to, through the file index.
+fn path_for_ref<K: AssetKind>(reference: &AssetRef<K>) -> Option<PathBuf> {
+    let root = PathBuf::from(engine_state::get_project_path()?);
     let path = engine_fs::open_project_file_index(&root)
         .ok()
         .flatten()
-        .and_then(|index| {
-            index
-                .path_for_asset_id_kind(K::KIND, reference.as_str())
-                .ok()
-                .flatten()
-        });
+        .and_then(|index| index.path_for_asset_id_kind(K::KIND, reference.as_str()).ok().flatten());
     let Some(path) = path else {
-        tracing::warn!(
-            kind = K::KIND,
-            id = reference.as_str(),
-            "skeletal asset id is not indexed in this project"
-        );
-        return AssetId::ZERO;
+        tracing::warn!(kind = K::KIND, id = reference.as_str(), "skeletal asset id is not indexed in this project");
+        return None;
     };
     let full_path = root.join(&path);
-    let source = std::fs::canonicalize(&full_path)
-        .unwrap_or(full_path)
-        .to_string_lossy()
-        .into_owned();
-    AssetId::declare(K::KIND, &source)
+    Some(std::fs::canonicalize(&full_path).unwrap_or(full_path))
+}
+
+fn asset_id_for_ref<K: AssetKind>(reference: Option<&AssetRef<K>>) -> AssetId {
+    let Some(path) = reference.and_then(path_for_ref) else {
+        return AssetId::ZERO;
+    };
+    AssetId::declare(K::KIND, &path.to_string_lossy())
 }
 
 pub fn register_skeletal_mesh_assets() {
@@ -494,7 +578,7 @@ pub(crate) fn collect_skeletal_assets(
     register_skeletal_mesh_assets();
     for id in [
         asset_id_for_ref(component.mesh.as_ref()),
-        asset_id_for_ref(component.skeleton.as_ref()),
+        asset_id_for_ref(mesh_skeleton_ref(component.mesh.as_ref()).as_ref()),
         asset_id_for_ref(component.animation.as_ref()),
     ] {
         out.push(id.handle());
@@ -503,6 +587,13 @@ pub(crate) fn collect_skeletal_assets(
 
 fn decode_skeletal_mesh_component(data: &Value) -> Result<SkeletalMeshComponent, String> {
     let mut component: SkeletalMeshComponent = pulsar_world_registry::decode_json(data)?;
+    // Scenes saved before the mesh became the only skeleton authority carry a
+    // `skeleton` ref. It is not part of the component any more; if it disagrees
+    // with the mesh the user is told, and the next save drops it.
+    component.legacy_skeleton = data
+        .get("skeleton")
+        .and_then(Value::as_str)
+        .and_then(AssetRef::parse);
     component.attach_assets();
     Ok(component)
 }
@@ -510,10 +601,11 @@ fn decode_skeletal_mesh_component(data: &Value) -> Result<SkeletalMeshComponent,
 fn skeletal_mesh_property_written(component: &mut SkeletalMeshComponent, property: Option<&str>) {
     if matches!(
         property,
-        None | Some("mesh") | Some("skeleton") | Some("animation")
+        None | Some("mesh") | Some("animation")
     ) {
         component.attach_assets();
     }
+    component.refresh_diagnostics();
 }
 
 #[register_component_runtime]
@@ -582,5 +674,67 @@ pulsar_scenedb::pulsar_reflection::inventory::submit! {
     pulsar_scenedb::gpu::GpuClearRegistration {
         component_id: pulsar_scenedb::component_id::<SkeletalMeshComponent>,
         clear: skeletal_mesh_draw_clear,
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+
+    const MESH: &str = "11111111-1111-4111-8111-111111111111";
+    const SKELETON_A: &str = "aaaaaaaa-0000-4000-8000-00000000000a";
+    const SKELETON_B: &str = "bbbbbbbb-0000-4000-8000-00000000000b";
+
+    fn skeleton(id: &str) -> Option<AssetRef<SkeletonAssetKind>> {
+        AssetRef::parse(id)
+    }
+
+    fn codes(d: &[Diagnostic]) -> Vec<&'static str> {
+        d.iter().map(|d| d.code).collect()
+    }
+
+    #[test]
+    fn the_component_has_no_authored_skeleton_and_old_values_do_not_come_back() {
+        let old = serde_json::json!({
+            "mesh": MESH,
+            "skeleton": SKELETON_B,
+            "animation": null,
+            "playing": true,
+            "looping": false,
+            "playback_rate": 1.0
+        });
+        let component = decode_skeletal_mesh_component(&old).expect("old scenes still load");
+        assert_eq!(component.mesh.as_ref().map(|m| m.as_str()), Some(MESH));
+        let saved = serde_json::to_value(&component).unwrap();
+        assert!(saved.get("skeleton").is_none(), "the skeleton is no longer written: {saved}");
+        assert_eq!(saved["mesh"], MESH);
+        // and a fresh component never writes one either
+        assert!(serde_json::to_value(SkeletalMeshComponent::default()).unwrap().get("skeleton").is_none());
+    }
+
+    #[test]
+    fn an_old_skeleton_that_disagrees_with_the_mesh_is_a_repairable_diagnostic() {
+        let mesh: AssetRef<SkeletalMeshAssetKind> = AssetRef::parse(MESH).unwrap();
+        let agree = link_diagnostics(Some(&mesh), false, skeleton(SKELETON_A).as_ref(), skeleton(SKELETON_A).as_ref(), None, false);
+        assert!(agree.is_empty(), "{agree:?}");
+        let disagree = link_diagnostics(Some(&mesh), false, skeleton(SKELETON_A).as_ref(), skeleton(SKELETON_B).as_ref(), None, false);
+        assert_eq!(codes(&disagree), ["component.legacy_skeleton_disagrees"]);
+        assert!(disagree[0].repair.is_some());
+        assert_eq!(disagree[0].severity, skeletal_assets::issue::Severity::Warning);
+        // no legacy value, no diagnostic
+        assert!(link_diagnostics(Some(&mesh), false, skeleton(SKELETON_A).as_ref(), None, None, false).is_empty());
+    }
+
+    #[test]
+    fn unresolved_meshes_meshes_without_skeletons_and_foreign_animations_are_reported() {
+        let mesh: AssetRef<SkeletalMeshAssetKind> = AssetRef::parse(MESH).unwrap();
+        assert_eq!(codes(&link_diagnostics(Some(&mesh), true, None, None, None, false)), ["component.mesh_unresolved"]);
+        assert_eq!(codes(&link_diagnostics(Some(&mesh), false, None, None, None, false)), ["component.mesh_without_skeleton"]);
+        let wrong = link_diagnostics(Some(&mesh), false, skeleton(SKELETON_A).as_ref(), None, Some(SKELETON_B.into()), true);
+        assert_eq!(codes(&wrong), ["component.animation_skeleton_mismatch"]);
+        let right = link_diagnostics(Some(&mesh), false, skeleton(SKELETON_A).as_ref(), None, Some(SKELETON_A.into()), true);
+        assert!(right.is_empty());
+        // no mesh at all is not an error: the component is simply empty
+        assert!(link_diagnostics(None, true, None, None, None, false).is_empty());
     }
 }
