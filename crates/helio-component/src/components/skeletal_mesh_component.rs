@@ -1759,3 +1759,7 @@ mod animation_runtime_tests {
 #[cfg(test)]
 #[path = "skeletal_phase3_tests.rs"]
 mod phase3_tests;
+
+#[cfg(test)]
+#[path = "skeletal_phase5_tests.rs"]
+mod phase5_tests;

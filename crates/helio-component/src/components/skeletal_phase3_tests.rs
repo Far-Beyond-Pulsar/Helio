@@ -27,21 +27,21 @@ use skeletal_assets::runtime::anim_instance::{TimeStep, UpdateMode};
 use skeletal_assets::runtime::memory::MemorySource;
 use std::sync::Mutex;
 
-struct Rig {
-    skeleton: Arc<SkeletonAsset>,
-    runtime: Arc<RuntimeSkeleton>,
-    source: MemorySource,
-    walk_id: String,
+pub(super) struct Rig {
+    pub(super) skeleton: Arc<SkeletonAsset>,
+    pub(super) runtime: Arc<RuntimeSkeleton>,
+    pub(super) source: MemorySource,
+    pub(super) walk_id: String,
 }
 
-fn track(bone: &str, to: [f32; 3], duration: f32) -> BoneTrack {
+pub(super) fn track(bone: &str, to: [f32; 3], duration: f32) -> BoneTrack {
     let at = |p: [f32; 3]| AssetTransform { translation: AssetVec3::new(p[0], p[1], p[2]), ..AssetTransform::IDENTITY };
     BoneTrack { bone_id: bone.into(), keyframes: vec![Keyframe::linear(0.0, at([0.0; 3])), Keyframe::linear(duration, at(to))] }
 }
 
 /// A 2 s "Walk": b0 (the root) travels 8 m along +z, b1 slides 4 m along x.
 /// Sequence-owned: notify `step` at 0.5, state `swing` over 1.0..1.5.
-fn rig() -> Rig {
+pub(super) fn rig() -> Rig {
     let bones: Vec<_> = (0..3)
         .map(|i| skeletal_assets::skeleton::Bone {
             id: format!("b{i}"),
@@ -76,7 +76,7 @@ fn rig() -> Rig {
 }
 
 /// Only a Slot over the reference pose: nothing but Montages plays on it.
-fn slot_graph(rig: &Rig) -> Arc<CompiledGraph> {
+pub(super) fn slot_graph(rig: &Rig) -> Arc<CompiledGraph> {
     let mut asset = AnimationGraphAsset::default();
     asset.skeleton = Some(skeletal_assets::ids::SkeletonId::parse(rig.skeleton.id.as_str()).unwrap().to_ref());
     let mut b = GraphBuilder::new("main", &[]);
@@ -89,7 +89,7 @@ fn slot_graph(rig: &Rig) -> Arc<CompiledGraph> {
     out.graph.unwrap_or_else(|| panic!("{:#?}", out.diagnostics))
 }
 
-fn walk_graph(rig: &Rig, slot: bool) -> Arc<CompiledGraph> {
+pub(super) fn walk_graph(rig: &Rig, slot: bool) -> Arc<CompiledGraph> {
     let mut asset = AnimationGraphAsset::default();
     asset.skeleton = Some(skeletal_assets::ids::SkeletonId::parse(rig.skeleton.id.as_str()).unwrap().to_ref());
     let mut b = GraphBuilder::new("main", &[]);
@@ -108,7 +108,7 @@ fn walk_graph(rig: &Rig, slot: bool) -> Arc<CompiledGraph> {
 
 /// A one-segment Montage over the Walk clip with its own notify `mn` (0.5), state
 /// `ms` (0.25..1.0, payload `amount` = 7) and sections `A` (0..1) -> `B` (1..2).
-fn montage_asset(rig: &Rig, root_motion: skeletal_assets::montage::MontageRootMotion) -> AnimationMontageAsset {
+pub(super) fn montage_asset(rig: &Rig, root_motion: skeletal_assets::montage::MontageRootMotion) -> AnimationMontageAsset {
     let mut montage = AnimationMontageAsset::default();
     let mut track = SlotTrack::new("Body", "DefaultGroup");
     track.segments.push(MontageSegment::new(AssetRef::parse(&rig.walk_id), 0.0));
@@ -128,7 +128,7 @@ fn montage_asset(rig: &Rig, root_motion: skeletal_assets::montage::MontageRootMo
     montage
 }
 
-fn compile_montage_asset(rig: &Rig, asset: &AnimationMontageAsset) -> Arc<CompiledMontage> {
+pub(super) fn compile_montage_asset(rig: &Rig, asset: &AnimationMontageAsset) -> Arc<CompiledMontage> {
     let sequences = &rig.source.sequences;
     Arc::new(
         CompiledMontage::compile(asset, &rig.runtime, &mut |id| sequences.get(id).map(|seq| Arc::new(CompiledClip::compile_shared(seq, &rig.runtime))))
@@ -136,20 +136,20 @@ fn compile_montage_asset(rig: &Rig, asset: &AnimationMontageAsset) -> Arc<Compil
     )
 }
 
-fn registered_hub() -> EventHub {
+pub(super) fn registered_hub() -> EventHub {
     let hub = EventHub::new();
     pulsar_world_registry::register_component_events(&hub).unwrap();
     hub
 }
 
-fn frame(world: &mut World, hub: &EventHub, dt: f32, state: &mut ComponentRuntimeState) {
+pub(super) fn frame(world: &mut World, hub: &EventHub, dt: f32, state: &mut ComponentRuntimeState) {
     run_animation_phase(world, dt);
     pulsar_world_registry::tick_live_components(world, hub, dt, 1, state);
     flush_animation_notifies(world, hub, |_, _| None);
     hub.flush(FlushPoint::AfterScripts);
 }
 
-fn component(rig: &Rig, graph: &Arc<CompiledGraph>) -> SkeletalMeshComponent {
+pub(super) fn component(rig: &Rig, graph: &Arc<CompiledGraph>) -> SkeletalMeshComponent {
     let mut c = SkeletalMeshComponent::default();
     c.loaded_skeleton = Some(rig.skeleton.clone());
     c.loaded_graph = Some(graph.clone());
@@ -161,13 +161,13 @@ fn component(rig: &Rig, graph: &Arc<CompiledGraph>) -> SkeletalMeshComponent {
 /// Everything one component raised: the typed generic notify events and the
 /// canonical per-asset events on the owner's channel.
 #[derive(Default)]
-struct Sink {
-    notifies: Vec<AnimationNotifyEvent>,
-    montage: Vec<(String, MontageLifecycleEvent)>,
-    authored: Vec<(String, Vec<DynValue>)>,
+pub(super) struct Sink {
+    pub(super) notifies: Vec<AnimationNotifyEvent>,
+    pub(super) montage: Vec<(String, MontageLifecycleEvent)>,
+    pub(super) authored: Vec<(String, Vec<DynValue>)>,
 }
 
-fn listen(hub: &EventHub, instance: pulsar_scenedb::Entity, owner: pulsar_scenedb::Entity, descriptors: &[EventDescriptor]) -> (Arc<Mutex<Sink>>, Vec<pulsar_events::gamma::SyncSubscription>) {
+pub(super) fn listen(hub: &EventHub, instance: pulsar_scenedb::Entity, owner: pulsar_scenedb::Entity, descriptors: &[EventDescriptor]) -> (Arc<Mutex<Sink>>, Vec<pulsar_events::gamma::SyncSubscription>) {
     let sink = Arc::new(Mutex::new(Sink::default()));
     let mut subscriptions = Vec::new();
     let decode = |name: &str, event: &pulsar_events::gamma::DynEvent| {
@@ -197,11 +197,11 @@ fn listen(hub: &EventHub, instance: pulsar_scenedb::Entity, owner: pulsar_scened
     (sink, subscriptions)
 }
 
-fn phases(sink: &Sink, id: &str) -> Vec<String> {
+pub(super) fn phases(sink: &Sink, id: &str) -> Vec<String> {
     sink.notifies.iter().filter(|e| e.notify_id == id).map(|e| e.notify_phase.clone()).collect()
 }
 
-fn lifecycle(sink: &Sink) -> Vec<String> {
+pub(super) fn lifecycle(sink: &Sink) -> Vec<String> {
     sink.montage.iter().map(|(kind, _)| kind.clone()).collect()
 }
 
@@ -395,13 +395,13 @@ fn a_graph_swapped_under_a_running_component_ends_states_as_reload_and_keeps_goi
     assert!(x > 2.0, "still past the half-way point of the slide: {x}");
 }
 
-fn owner_with_transform(world: &mut World) -> pulsar_scenedb::Entity {
+pub(super) fn owner_with_transform(world: &mut World) -> pulsar_scenedb::Entity {
     let owner = world.spawn();
     world.insert(owner, Transform { position: [10.0, 0.0, 0.0], rotation: [0.0, 90.0, 0.0], scale: [1.0; 3] });
     owner
 }
 
-fn owner_position(world: &World, owner: pulsar_scenedb::Entity) -> [f64; 3] {
+pub(super) fn owner_position(world: &World, owner: pulsar_scenedb::Entity) -> [f64; 3] {
     world.get::<Transform>(owner).unwrap().position
 }
 
