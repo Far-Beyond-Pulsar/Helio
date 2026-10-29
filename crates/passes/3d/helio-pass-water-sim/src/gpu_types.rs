@@ -21,9 +21,9 @@ use bytemuck::{Pod, Zeroable};
 /// 1  bounds_max              → vec4 containing (x,y,z,_)
 /// 2  wave_params             → (amplitude, frequency, speed, steepness)
 /// 3  wave_direction          → (dx, dz, _, _)
-/// 4  water_color             → (r, g, b, foam_threshold)
-/// 5  extinction              → (r, g, b, foam_amount)  [Beer-Lambert per-channel]
-/// 6  reflection_refraction   → (refl_strength, refr_strength, fresnel_power, _)
+/// 4  water_color             → (r, g, b, Jacobian foam bias)
+/// 5  extinction              → (r, g, b, Jacobian foam scale) [rgb absorption is Beer-Lambert]
+/// 6  reflection_refraction   → (refl_strength, refr_strength, fresnel_power, foam brightness)
 /// 7  caustics_params         → (enabled, intensity, scale, speed)
 /// 8  fog_params              → (density, god_rays, _, _)
 /// 9  sim_params              → (ior, caustic_intensity, fresnel_min, density)
@@ -48,13 +48,15 @@ pub struct GpuWaterVolume {
     /// Wave direction (dx, dz) + padding
     pub wave_direction: [f32; 4],
 
-    /// Water base color (rgb) + foam_threshold (w)
+    /// Water base color (rgb) + Jacobian foam bias (w; Ultra-Water default 0.05).
     pub water_color: [f32; 4],
 
-    /// Color absorption per meter (rgb) + foam_amount (w)  [Beer-Lambert]
+    /// Color absorption per meter (rgb) + Jacobian foam scale (w; Ultra-Water default 1.3).
+    /// `w` is independent of Beer-Lambert absorption and does not scale shoreline foam.
     pub extinction: [f32; 4],
 
-    /// Reflection strength, refraction strength, fresnel power, padding
+    /// Reflection strength, refraction strength, fresnel power, foam brightness.
+    /// A zero `w` retains compatibility with older rows and selects brightness 0.85.
     pub reflection_refraction: [f32; 4],
 
     /// Caustics: enabled (0/1), intensity, scale, speed
@@ -105,9 +107,9 @@ impl GpuWaterVolume {
             bounds_max: [100.0, 50.0, 100.0, 0.0],
             wave_params: [0.5, 0.3, 1.5, 0.5],
             wave_direction: [1.0, 0.0, 0.0, 0.0],
-            water_color: [0.0, 0.2, 0.4, 0.8],
-            extinction: [0.1, 0.05, 0.02, 0.6],
-            reflection_refraction: [0.8, 0.2, 5.0, 0.0],
+            water_color: [0.0, 0.2, 0.4, 0.05],
+            extinction: [0.1, 0.05, 0.02, 1.3],
+            reflection_refraction: [0.8, 0.2, 5.0, 0.85],
             caustics_params: [1.0, 1.5, 5.0, 0.5],
             fog_params: [0.03, 1.0, 0.0, 0.0],
             // ior=1.333, caustic_intensity=1.5, fresnel_min=0.1, density=0.03
@@ -132,9 +134,9 @@ impl GpuWaterVolume {
             bounds_max: [50.0, 20.0, 50.0, 0.0],
             wave_params: [0.2, 0.5, 0.8, 0.3],
             wave_direction: [1.0, 0.0, 0.0, 0.0],
-            water_color: [0.1, 0.3, 0.2, 0.7],
-            extinction: [0.2, 0.1, 0.08, 0.5],
-            reflection_refraction: [0.6, 0.3, 4.0, 0.0],
+            water_color: [0.1, 0.3, 0.2, 0.05],
+            extinction: [0.2, 0.1, 0.08, 1.3],
+            reflection_refraction: [0.6, 0.3, 4.0, 0.85],
             caustics_params: [1.0, 1.2, 4.0, 0.4],
             fog_params: [0.05, 0.5, 0.0, 0.0],
             sim_params: [1.333, 1.2, 0.1, 0.05],

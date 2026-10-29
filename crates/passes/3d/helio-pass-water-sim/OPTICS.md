@@ -12,9 +12,15 @@ samples back to the unshifted scene. Water-column transmission uses
 Beer-Lambert extinction with view/sun inscatter. Crest scattering and shoreline
 travel-time waves contribute to the surface shading and breaking foam.
 
-Foam coverage combines shoreline contact, FFT Jacobian compression, wave crest,
-and authored shoreline-break sources. A tileable 512² cellular lace/billow
-material is baked once with explicit mips; source strength erodes it into
+Foam coverage combines Ultra-Water's three-band, depth-damped FFT Jacobian
+source with independent shoreline contact and authored shoreline-break sources;
+there is no extra normal-steepness crest source. The volume maps
+`water_color.w` to Jacobian bias (default `0.05`), `extinction.w` to Jacobian
+scale only (default `1.3`), and `reflection_refraction.w` to foam brightness
+(default `0.85`; legacy zero lanes fall back to `0.85`). Contact foam and
+shoreline breaker/lace coverage are not multiplied by the Jacobian scale. A
+tileable 512² cellular lace/billow material is baked once with explicit mips;
+source strength erodes it into
 filaments and open water, and its normal/billow channels shade surviving foam.
 The surface shader now advects a coherent low-frequency freshness field through
 the global patch phase and attenuates older foam while the fine material breaks

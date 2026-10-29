@@ -16,6 +16,7 @@
 //! this runs as a live window and never writes a file automatically.
 
 #[path = "voxel_flight/worlds.rs"]
+#[allow(dead_code)]
 mod worlds;
 
 use glam::{DVec3, Vec3};
@@ -63,7 +64,7 @@ fn terrain(seed: u64) -> Planet {
         plane_size_m: EXTENT as f64 * 2.0,
         voxel_size_m: 0.5,
         terrain: {
-            let mut seabed = helio_pass_voxel_planet::layers::TerrainLayers::flat_at(-240.0)
+            let mut seabed = helio_pass_voxel_planet::layers::TerrainLayers::flat_at(-42.0)
                 .heightfield();
             seabed.surface = "Sand".into();
             seabed.source(seed)
@@ -73,26 +74,19 @@ fn terrain(seed: u64) -> Planet {
     })
     .expect("create deterministic island terrain");
 
-    // Broad overlapping low-relief additions shape a sloped island and beach.
-    // Their waterline cross-sections are hundreds of metres across, avoiding
-    // the steep little domes made by small sphere stamps. The bake below
-    // samples this exact edited terrain via `from_voxel_planet`.
-    for (center, radius) in [
-        ([0.0, -1_090.0, 10.0], 1_200.0),
-        ([390.0, -825.0, -280.0], 880.0),
-        ([-440.0, -790.0, 310.0], 820.0),
-    ] {
-        planet
-            .apply(Brush {
-                center,
-                radius,
-                shape: BrushShape::Sphere,
-                op: BrushOp::Add,
-                material: helio_pass_voxel_planet::terrain::material::GRASS,
-                height: 0.0,
-            })
-            .expect("sculpt seeded island");
-    }
+    // Broad island profile: a ~330 m waterline radius, gentle beach slope and
+    // a ~60 m peak, matching the scale of the Ultra-Water reference island.
+    // The bake below samples this exact edited terrain via `from_voxel_planet`.
+    planet
+        .apply(Brush {
+            center: [0.0, -878.0, 0.0],
+            radius: 938.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Add,
+            material: helio_pass_voxel_planet::terrain::material::GRASS,
+            height: 0.0,
+        })
+        .expect("sculpt seeded island");
     planet
 }
 
@@ -174,7 +168,11 @@ impl Showcase {
                 .around_planet([0.0, -world_radius as f32, 0.0], world_radius),
         );
 
-        let meadow = worlds::Preset::Earth.meadow().expect("Earth meadow recipe");
+        let meadow = worlds::Preset::Earth
+            .meadow()
+            .expect("Earth meadow recipe")
+            .with_tall_stands()
+            .with_wind([1.0, 0.35], 4.5, 0.8);
         for row in &meadow.types {
             let entity = scene.world.spawn();
             scene.world.insert(entity, *row);
@@ -185,17 +183,24 @@ impl Showcase {
         let mut water = GpuWaterVolume::default_ocean();
         water.bounds_min = [-EXTENT, -500.0, -EXTENT, 0.0];
         water.bounds_max = [EXTENT, 300.0, EXTENT, REST_Y as f32];
-        water.wave_params = [0.52, 0.26, 1.4, 0.52];
-        water.water_color = [0.005, 0.025, 0.09, 0.78];
-        // Keep foam detail in the breakers without allowing the very broad
-        // ocean domain to read as a continuous pale sheet in this showcase.
-        water.extinction = [0.22, 0.08, 0.035, 0.26];
-        water.water_color[3] = 0.95;
-        water.reflection_refraction = [0.72, 0.35, 5.0, 0.0];
-        water.caustics_params = [1.0, 1.35, 5.0, 0.5];
-        water.fog_params = [0.018, 0.8, 0.0, 0.0];
-        water.sim_dynamics = [1.2, 0.985, 1.0, 0.0];
-        water.wind_params = [0.85, 0.52, 7.5, 0.0];
+        water.wave_params = [0.55, 30.0, 1.0, 1.0];
+        // Ultra-Water OceanSurface defaults. Helio's row maps medium scatter
+        // to water_color.rgb, absorption to extinction.rgb, foam bias/scale
+        // to water_color.w/extinction.w, refraction to reflection_refraction.y,
+        // foam brightness to reflection_refraction.w, and exponential depth
+        // fog to fog_params.x. wave_params carries the closest amplitude / 
+        // wavelength / speed / steepness values for uShoreWave; the current
+        // Helio shoreline train already uses the same 0.55 / 30 / 1 / 1 defaults.
+        water.water_color = [0.0, 0.05, 0.08, 0.05];
+        water.extinction = [0.42, 0.075, 0.048, 1.3];
+        water.reflection_refraction[1] = 0.06;
+        water.reflection_refraction[3] = 0.85;
+        water.fog_params[0] = 1.0 / 18_000.0;
+        // No direct WaterVolume equivalents exist for uSSS, uOptics roughness
+        // or underwater-window distortion, the foam tint, or the uFoam shore
+        // band (whose default .35 is already the shoreline shader's floor).
+        // Keep Helio's independent caustics, refraction and Fresnel defaults.
+        water.wind_params = [0.939_692_6, 0.342_020_15, 9.0, 1.0];
         let water_entity = scene.world.spawn();
         scene.world.insert(water_entity, WaterVolumeComponent::from(water));
 
@@ -253,30 +258,10 @@ impl Showcase {
             .expect("bake shoreline from the edited voxel terrain");
             sim.set_ocean_rest_height(REST_Y)
                 .expect("match the ocean volume rest plane");
-            sim.set_wind([0.85, 0.52], 7.5);
-            sim.set_ocean_spectrum(OceanSpectrum {
-                wind_speed: 7.5,
-                wind_direction_degrees: 25.0,
-                fetch_km: 45.0,
-                wave_scale: 0.9,
-                swell_scale: 0.5,
-                swell_wind_speed: 6.0,
-                swell_direction_degrees: -10.0,
-                swell_fetch_km: 140.0,
-                swell_swell: 0.6,
-                choppiness: 0.7,
-                foam_recovery: 0.8,
-                time_scale: 1.0,
-                seed: SEED as u32,
-                ..Default::default()
-            });
-            sim.set_spray_settings(WaterSpraySettings {
-                enabled: true,
-                amount: 0.35,
-                size: 0.45,
-                max_distance: 250.0,
-                emitter_count: 1_200,
-            });
+            // Match `defaultOceanParams()` and the JS Spray defaults exactly.
+            sim.set_wind([0.939_692_6, 0.342_020_15], 9.0);
+            sim.set_ocean_spectrum(OceanSpectrum::default());
+            sim.set_spray_settings(WaterSpraySettings::default());
         } else {
             panic!("the default render graph did not build WaterSimPass");
         }
@@ -585,12 +570,12 @@ fn preset_view(preset: &str) -> (DVec3, Vec3) {
             Vec3::new(0.62, -0.025, 0.78),
         ),
         "shoreline" => (
-            DVec3::new(-280.0, 55.0, -280.0),
-            Vec3::new(-0.58, -0.18, -0.80),
+            DVec3::new(-210.0, 36.0, -220.0),
+            Vec3::new(-0.68, -0.12, 0.72),
         ),
         "underwater" => (
-            DVec3::new(-520.0, -55.0, -760.0),
-            Vec3::new(0.38, 0.14, 0.91),
+            DVec3::new(-1_120.0, -28.0, -1_060.0),
+            Vec3::new(0.68, 0.035, 0.73),
         ),
         other => panic!("unknown preset {other}; use coast, shoreline, or underwater"),
     }
@@ -611,7 +596,7 @@ impl ApplicationHandler for App {
                 .expect("create water-world window"),
         );
         let size = window.inner_size();
-        let mut graphics = pollster::block_on(helio::HelioGraphicsContext::new(
+        let graphics = pollster::block_on(helio::HelioGraphicsContext::new(
             window.clone(),
             size.width.max(1),
             size.height.max(1),

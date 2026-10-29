@@ -346,6 +346,7 @@ pub fn component_animation_notify_events(
     let mut catalog = AnimationNotifyCatalog::default();
     let mut sequences: BTreeSet<String> = BTreeSet::new();
     let mut slots: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut montages: Vec<Arc<skeletal_assets::montage::AnimationMontageAsset>> = Vec::new();
     let mut graphs_seen: BTreeSet<String> = BTreeSet::new();
     let mut graph_stack: Vec<String> = Vec::new();
     let index = engine_fs::open_project_file_index(root).ok().flatten();
@@ -417,6 +418,7 @@ pub fn component_animation_notify_events(
                 let Some(montage) = source.montage(&id) else { continue };
                 if montage.tracks.iter().any(|t| slots.contains(&(t.slot.clone(), t.group.clone()))) {
                     sequences.extend(montage.segments().filter_map(|s| s.sequence.as_ref().map(|s| s.as_str().to_string())));
+                    montages.push(montage);
                 }
             }
         }
@@ -436,7 +438,24 @@ pub fn component_animation_notify_events(
             (origin, loaded)
         })
         .collect();
-    catalog_from(items, catalog)
+    let mut catalog = catalog_from(items, catalog);
+    // what the Montages own: their notifies and states, and their lifecycle events
+    for montage in &montages {
+        let id = montage.id.as_str();
+        let name = if montage.name.is_empty() { id.chars().take(8).collect::<String>() } else { montage.name.clone() };
+        let short = |item: &str| item.chars().take(8).collect::<String>();
+        for notify in &montage.notifies {
+            catalog.events.push((format!("{name}.{} [{}]", notify.name, short(&notify.id)), montage_notify_descriptor(id, notify)));
+        }
+        for state in &montage.notify_states {
+            catalog.events.push((format!("{name}.{} [{}]", state.name, short(&state.id)), montage_notify_state_descriptor(id, state)));
+        }
+        for kind in MONTAGE_LIFECYCLE_KINDS {
+            catalog.events.push((format!("{name} {}", kind.replace('_', " ")), montage_lifecycle_descriptor(id, kind)));
+        }
+    }
+    catalog.events.sort_by_key(|(_, descriptor)| descriptor.id);
+    catalog
 }
 
 /// How a pending occurrence is also shown to the generic component event bridge.

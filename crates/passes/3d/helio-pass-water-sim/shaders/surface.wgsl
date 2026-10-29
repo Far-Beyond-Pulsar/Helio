@@ -33,9 +33,9 @@ struct WaterVolume {
     bounds_max:            vec4f,  // xyz = max corner, w = surface_height
     wave_params:           vec4f,  // x = wave_amplitude (metres), y = freq, z = speed, w = steepness
     wave_direction:        vec4f,
-    water_color:           vec4f,  // xyz = medium colour, w = foam_threshold
-    extinction:            vec4f,  // xyz = absorption per metre, w = foam_amount
-    reflection_refraction: vec4f,  // x = reflection_str, y = refraction_str, z = fresnel_power
+    water_color:           vec4f,  // xyz = medium colour, w = Jacobian foam bias
+    extinction:            vec4f,  // xyz = absorption per metre, w = Jacobian foam scale
+    reflection_refraction: vec4f,  // x = reflection_str, y = refraction_str, z = fresnel_power, w = foam brightness
     caustics_params:       vec4f,
     fog_params:            vec4f,
     sim_params:            vec4f,  // x = ior, y = caustic_intensity, z = fresnel_min, w = density
@@ -366,12 +366,11 @@ fn water_shore_factor(path: f32, vol: WaterVolume) -> f32 {
     return smoothstep(0.0, fade, path);
 }
 
-/// Foam coverage in [0,1] from two sources, driven by `foam_threshold`
-/// (`water_color.w`) and scaled by `foam_amount` (`extinction.w`).
+/// Foam coverage from Ultra-Water's combined damped Jacobian field plus
+/// independent shoreline contact foam.
 fn water_foam(
     path: f32,
     world_xz: vec2f,
-    normal: vec3f,
     vol: WaterVolume,
     cell_size: f32,
 ) -> f32 {
@@ -391,13 +390,6 @@ fn water_foam(
     let shore      = 1.0 - smoothstep(0.0, band, path);
     let shore_foam = smoothstep(0.25, 0.85, shore * (0.55 + n * 0.75));
 
-    // Crest foam, from the horizontal slope magnitude. Note this stays subtle
-    // until the sim gains resolution (#148): at 0.78 m per texel the steepest
-    // representable slope is well below the default `foam_threshold`.
-    let threshold  = max(vol.water_color.w, 1e-3);
-    let steepness  = length(normal.xz) / max(normal.y, 1e-3);
-    let crest_foam = smoothstep(threshold, threshold * 1.6, steepness) * (0.5 + n * 0.5);
-
     var jacobian = 0.0;
     let cascade_damp = shore_ocean_damp(world_xz);
     // Ultra-Water aggregates each cascade around the neutral Jacobian value
@@ -412,8 +404,8 @@ fn water_foam(
         jacobian += mix(1.0, band_jacobian, cascade_damp[cascade]);
     }
     jacobian -= 2.0;
-    let spectral_foam = clamp((0.05 - jacobian) * 1.3, 0.0, 1.0);
-    return clamp(max(max(shore_foam, crest_foam), spectral_foam) * vol.extinction.w, 0.0, 1.0);
+    let spectral_foam = clamp((vol.water_color.w - jacobian) * vol.extinction.w, 0.0, 1.0);
+    return max(shore_foam, spectral_foam);
 }
 
 struct FoamMaterial {
@@ -429,7 +421,6 @@ fn water_foam_material(
     world_xz: vec2f,
     source_strength: f32,
     shore: ShoreWave,
-    foam_scale: f32,
 ) -> FoamMaterial {
     let t = cameras[0].jitter_frame.z * 0.016;
     let flow = vec2f(0.11, -0.075) * t;
@@ -451,7 +442,7 @@ fn water_foam_material(
 
     // Fresh breaker foam rides shoreward with the bore. Crossfading two
     // travelling phases avoids a hard reset every 2.5 seconds.
-    let breaker = clamp(shore.foam * max(foam_scale, 0.0), 0.0, 1.0);
+    let breaker = clamp(shore.foam, 0.0, 1.0);
     if breaker > 0.0 {
         let flow_time = 2.5;
         let speed = shore.first_train.z / max(shore.first_train.y, 1e-3);
@@ -492,7 +483,7 @@ fn water_foam_material(
     // The breaker leaves a slower, thinner lace trail. Positive phase wrapping
     // is handled when the residual source is formed in shore_wave; this flow
     // uses fract so negative times also remain in [0, 1).
-    let residual = clamp(shore.residual * max(foam_scale, 0.0), 0.0, 1.0);
+    let residual = clamp(shore.residual, 0.0, 1.0);
     if residual > 0.0 {
         let flow_time = 8.0;
         let f0 = fract(shore_params.state.y / flow_time);
@@ -810,11 +801,14 @@ fn fs_above(in: VertexOutput) -> vec4f {
 
     // ── Foam ─────────────────────────────────────────────────────────────────
     let shore = shore_wave(in.world_pos.xz);
-    let foam_source = water_foam(path, in.world_pos.xz, normal, vol, in.cell_size);
-    let foam = water_foam_material(in.world_pos.xz, foam_source, shore, vol.extinction.w);
+    let foam_source = water_foam(path, in.world_pos.xz, vol, in.cell_size);
+    let foam = water_foam_material(in.world_pos.xz, foam_source, shore);
     let foam_normal = normalize(vec3f(-foam.gradient.x, 1.0, -foam.gradient.y));
     let foam_light = 0.78 + 0.22 * max(dot(foam_normal, light_dir), 0.0);
-    let foam_color = vec3f(0.92, 0.96, 1.00) * foam_light * (0.94 + foam.billow * 0.12);
+    // Zero is the legacy value of this formerly-unused lane; interpret it as
+    // Ultra-Water's default brightness so older volume rows remain visible.
+    let foam_brightness = select(0.85, vol.reflection_refraction.w, vol.reflection_refraction.w > 0.0);
+    let foam_color = vec3f(0.92, 0.96, 1.00) * foam_brightness * foam_light * (0.94 + foam.billow * 0.12);
     color = mix(color, foam_color, foam.coverage);
 
     return vec4f(color, 1.0);

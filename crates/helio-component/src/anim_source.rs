@@ -37,6 +37,10 @@ impl ProjectAnimSource {
         Some(Self::at(root))
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn at(root: PathBuf) -> Self {
         Self { root, cache: RefCell::new(HashMap::new()) }
     }
