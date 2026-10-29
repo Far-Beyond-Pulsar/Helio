@@ -108,8 +108,8 @@ impl Renderer {
         // next batch. Dropping the batch commits it.
         let batch = hot::begin_reload();
 
-        if self.pending_graph_rebuild {
-            // The pending graph rebuild uses the latest sources
+        if self.pending_rebuild {
+            // The pending rebuild builds the graph from the latest sources
             // anyway (the override table is global); don't build twice.
             self.shader_reload.generation = generation;
             self.shader_reload.rebuild_error = None;

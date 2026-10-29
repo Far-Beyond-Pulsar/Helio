@@ -1438,7 +1438,8 @@ impl RenderPass for PostProcessPass {
         builder.read("color_grading_lut");
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.output;
         self.width = width;
         self.height = height;
         self.resize_analysis(device, width, height);

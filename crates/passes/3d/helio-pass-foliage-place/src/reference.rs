@@ -101,8 +101,8 @@ pub fn type_grows(foliage: &GpuFoliageType, ground: &ReferenceGround) -> bool {
         || (ground.ground < 32 && (foliage.ground_mask >> ground.ground) & 1 != 0);
     foliage.density > 0.0
         && on_ground
-        && ground.slope_cos >= foliage.slope_range[0]
-        && ground.slope_cos <= foliage.slope_range[1]
+        && ground.slope_cos.clamp(-1.0, 1.0) >= foliage.slope_range[0]
+        && ground.slope_cos.clamp(-1.0, 1.0) <= foliage.slope_range[1]
         && ground.height >= foliage.altitude_range[0]
         && ground.height <= foliage.altitude_range[1]
 }
@@ -430,6 +430,19 @@ mod tests {
         };
         t.set_blades_per_tuft(blades);
         t
+    }
+
+    /// Flat ground whose normal and tile up are a hair apart dots to just over 1: a type
+    /// growing on any slope grows there (whole tiles of the Earth meadow grew nothing).
+    #[test]
+    fn flat_ground_a_rounding_over_one_still_grows() {
+        let ground = ReferenceGround {
+            height: 0.0,
+            slope_cos: 1.0 + 4.0 * f32::EPSILON,
+            ground: 0,
+            colour: 0,
+        };
+        assert!(type_grows(&grass(1.0, [1, 1]), &ground));
     }
 
     fn place(

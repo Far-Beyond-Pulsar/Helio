@@ -384,7 +384,7 @@ impl RenderPass for FogCompositePass {
         }
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
         // The graph may reuse a pool slot on resize; view identity is not a
         // reliable generation, so rebuild on the next frame.
         self.bind_group = None;

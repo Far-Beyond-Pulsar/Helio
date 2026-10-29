@@ -652,7 +652,7 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
         binding: 21,
         resource: wgpu::BindingResource::TextureView(&glass_view),
     });
-    // No terrain's sun occlusion: an empty map, a frame of no levels.
+    // No terrain's sun occlusion: an empty atlas, a frame of none, no pages.
     let no_occlusion = device
         .create_texture(&wgpu::TextureDescriptor {
             label: None,
@@ -668,14 +668,17 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         })
-        .create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
+        .create_view(&Default::default());
     let no_frame = device.create_buffer(&wgpu::BufferDescriptor {
         label: None,
         size: helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME_BYTES,
         usage: wgpu::BufferUsages::UNIFORM,
+        mapped_at_creation: false,
+    });
+    let no_pages = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE,
         mapped_at_creation: false,
     });
     entries.push(wgpu::BindGroupEntry {
@@ -685,6 +688,10 @@ fn point_shadow_cube_matches_real_matrix_producer_and_shadow_strength_adapter() 
     entries.push(wgpu::BindGroupEntry {
         binding: 23,
         resource: no_frame.as_entire_binding(),
+    });
+    entries.push(wgpu::BindGroupEntry {
+        binding: 26,
+        resource: no_pages.as_entire_binding(),
     });
     // No clouds' shadow.
     let (no_clouds, no_cloud_frame) = helio_pass_sky::clouds::cloud_shadow_fallback(&device);

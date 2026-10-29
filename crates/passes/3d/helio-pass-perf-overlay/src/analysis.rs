@@ -31,6 +31,15 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         "PerfOverlay Color Analyzer"
     }
 
+    /// A member while the pass overdraw overlay is on.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.shared.lock().unwrap().get_mode() == PerfOverlayMode::PassOverdraw
+    }
+
+    fn on_leave(&mut self, device: &wgpu::Device) {
+        self.shared.lock().unwrap().release_targets(device);
+    }
+
     fn chain_transparent(&self) -> bool {
         true
     }
@@ -45,6 +54,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.shared.lock().unwrap().ensure_targets(ctx.device);
         let shared = self.shared.lock().unwrap();
         let color_compare_params = ColorCompareParams {
             screen_width: shared.internal_width,
@@ -158,7 +168,8 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         Ok(())
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.shared.lock().unwrap().on_resize(device, width, height);
     }
 }
@@ -183,6 +194,15 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
         "PerfOverlay Cost Analyzer"
     }
 
+    /// A member while the shader complexity overlay is on.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.shared.lock().unwrap().get_mode() == PerfOverlayMode::ShaderComplexity
+    }
+
+    fn on_leave(&mut self, device: &wgpu::Device) {
+        self.shared.lock().unwrap().release_targets(device);
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
@@ -194,6 +214,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let mut shared = self.shared.lock().unwrap();
+        shared.ensure_targets(ctx.device);
 
         if *shared.mode.lock().unwrap() == PerfOverlayMode::ShaderComplexity
             && shared.material_profiler.is_none()
@@ -330,7 +351,8 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
         Ok(())
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         self.shared.lock().unwrap().on_resize(device, width, height);
     }
 }

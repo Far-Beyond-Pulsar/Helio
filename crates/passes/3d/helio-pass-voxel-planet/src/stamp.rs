@@ -427,8 +427,13 @@ impl CompiledPart {
     /// Whether it holds point `p` (sixteenths of a cell). A base cell
     /// (`cell`) is left out by hash where the part is sparse, and its edge
     /// broken by hash where it is rough; a coarse cell (`None`) is smooth,
-    /// held where the part keeps half its cells.
+    /// held where the part keeps half its cells. Nothing outside its cell
+    /// box: there the distance test would overflow (and the box is what
+    /// classification bounds a stamp by, so the GPU never asks).
     pub fn holds(&self, p: [i32; 3], cell: Option<[i32; 3]>) -> bool {
+        if (0..3).any(|k| p[k] < self.lo[k] * UNIT || p[k] >= (self.hi[k] + 1) * UNIT) {
+            return false;
+        }
         let h = cell.map_or(0, |c| hash3(c[0], c[1], c[2], self.seed));
         match cell {
             Some(_) => {
@@ -683,6 +688,27 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// A capsule holds nothing far outside its box, where its distance test
+    /// would overflow (a Moon boulder once held cells 290 m over its anchor).
+    #[test]
+    fn a_capsule_holds_nothing_far_outside_its_box() {
+        let part = Part::solid(
+            Shape::Capsule {
+                a: [0.0, 0.0, 0.0],
+                b: [0.0, 4.0, 0.0],
+                radius: [6.0, 3.0],
+            },
+            19,
+        );
+        let compiled = CompiledPart::new(&part, 9).unwrap();
+        assert!(cell_of(&[compiled], [0, 2, 0]).is_some());
+        for y in [2902, 3000, -2902, 100_000] {
+            for (x, z) in [(31, 30), (0, 0), (-500, 500)] {
+                assert_eq!(cell_of(&[compiled], [x, y, z]), None, "{:?}", [x, y, z]);
             }
         }
     }

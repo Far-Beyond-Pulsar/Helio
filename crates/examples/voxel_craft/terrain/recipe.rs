@@ -7,8 +7,9 @@
 
 use crate::config::{PLANET_RADIUS_M, VOXEL_M, WORLD_SEED};
 use helio_pass_voxel_planet::layers::{
-    self, Caves, Layer, LayerKind, LayerMask, MaterialRule, MaterialStyle, Overhangs, TerrainLayers,
+    self, Climate, Layer, LayerKind, LayerMask, MaterialRule, MaterialStyle, TerrainLayers,
 };
+use helio_pass_voxel_planet::volumes::{Caves, Volumes};
 use helio_pass_voxel_planet::terrain::TerrainSource;
 use helio_pass_voxel_planet::PlanetRecipe;
 
@@ -61,25 +62,27 @@ pub fn terrain_layers() -> TerrainLayers {
                 l.mask = LayerMask::Everywhere;
             }),
         ],
-        caves: Caves {
-            enabled: true,
-            depth_m: 55.0,
-            share: 0.5,
-            region_km: 1.6,
-            tunnel_radius_m: 2.6,
-            tunnel_wavelength_m: 70.0,
-            cavern_wavelength_m: 60.0,
-            cavern_share: 0.06,
-            cover_m: 5.0,
-            entrance_share: 0.12,
-            entrance_spacing_m: 55.0,
-        },
-        overhangs: Overhangs {
-            enabled: false,
-            ..Overhangs::default()
+        // Minecraft-scaled cave systems: shallow, many entrances.
+        volumes: Volumes {
+            caves: Caves {
+                spacing_m: 120.0,
+                share: 0.6,
+                depth_min_m: 12.0,
+                depth_max_m: 45.0,
+                max_depth_m: 90.0,
+                cover_m: 4.0,
+                chamber_min_m: 6.0,
+                chamber_max_m: 16.0,
+                tunnel_min_m: 1.6,
+                tunnel_max_m: 3.0,
+                entrances: 0.45,
+                ..Caves::default()
+            },
+            ..Volumes::none()
         },
         materials: MaterialStyle::Rules,
-        snowline_m: 1.0e5,
+        // Half wet everywhere (a 16 km world under one sky).
+        climate: Climate::uniform(20.0, 1.0),
         soil_depth_m: 4.0,
         surface: "Grass".into(),
         soil: "Dirt".into(),

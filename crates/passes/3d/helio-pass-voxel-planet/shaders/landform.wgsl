@@ -5,23 +5,22 @@ struct LandformOctave { shift: u32, amplitude: i32, seed: u32, kind: u32 } // ki
 struct StackLayer { kind: u32, mask: u32, a: i32, b: i32 }
 // `landform::PackedRule`: material, speck share, patch shift and threshold;
 // height and slope ranges; depth and moisture ranges; erosion range, band
-// period and parity.
-struct MaterialRule { head: vec4<i32>, height_slope: vec4<i32>, depth_moisture: vec4<i32>, surface_bands: vec4<i32> }
+// period and parity; temperature range and river beds (0 any, 1 only, 2
+// never).
+struct MaterialRule { head: vec4<i32>, height_slope: vec4<i32>, depth_moisture: vec4<i32>, surface_bands: vec4<i32>, climate: vec4<i32> }
 struct TerrainConstants {
     header: vec4<i32>, // octave count, layer mm, soil depth (cells), seed
-    levels: vec4<i32>, // moisture shift, continents layer + 1, snowline, low-basin height (mm)
+    levels: vec4<i32>, // pad, continents layer + 1, pad, low-basin height (mm)
     shape: vec4<i32>,  // ridge display layer + 1, steep slope (cells), ridge display flag, plane (+Y up)
     style: vec4<i32>,  // material style, Layered surface / soil / rock ids
     stack: vec4<i32>,  // layer count, erosion amplitude sum, domain radius, warp octaves
     materials: vec4<i32>, // rules style: rule count, fallback material; coarsest erosion octave's shift (-1: none)
+    // Planet maps (`planet_maps::MAP_HEADER`): lookups and the climate.
+    maps: array<vec4<i32>, 5>,
     layers: array<StackLayer, 8>,
     octaves: array<LandformOctave, 64>,
     rules: array<MaterialRule, 16>,
     ridge_suffix: array<vec4<i32>, 66>, // signed conditional suffix means
-    // Caves and overhangs (`LandformVolume`): flags/region/depth, tunnel
-    // and cavern shapes, overhangs, sizes (tunnel radius, cavern, cover, layer
-    // mm), entrances (shift, threshold, tunnel and cavern tapers mm).
-    volume: array<vec4<i32>, 5>,
     // Per-level column programs (`landform::LandformPlan`): each level's
     // first op and count (`first | count << 16`), node words in use, ops.
     plan_lists: array<vec4<u32>, 8>,
@@ -46,6 +45,16 @@ const LAYER_CRATERS: u32 = 7u;
 const LAYER_BASINS: u32 = 8u;
 const LAYER_PLATEAU: u32 = 9u;
 const LAYER_CLIFFS: u32 = 10u;
+const LAYER_RIVERS: u32 = 11u;
+// Surface words of a river's channel and of sediment (`landform::RIVER_BED`,
+// `landform::ALLUVIUM`).
+const RIVER_BED: u32 = 0x80u;
+const ALLUVIUM: u32 = 0x81u;
+const ALLUVIUM_DEPTH: i32 = 1000;
+
+fn landform_smooth_max(a: i32, b: i32, k: i32) -> i32 {
+    return -landform_smooth_min(-a, -b, k);
+}
 
 // `landform::terrace`: terraces of `step` height units, rising over the last
 // `riser_q10` / 1024 of each step.
@@ -56,281 +65,6 @@ fn landform_terrace(h: i32, step: i32, riser_q10: i32) -> i32 {
     let riser = max((step * riser_q10) >> 10u, 1);
     let t = (max(f - (step - riser), 0) << 10u) / riser;
     return q * step + ((min(t, 1024) * step) >> 10u);
-}
-
-const SEED_CAVE_REGION: u32 = 0xA511E9B3u;
-const SEED_TUNNEL_A: u32 = 0x63D83595u;
-const SEED_TUNNEL_B: u32 = 0x2B1F4C7Au;
-const SEED_CAVERN: u32 = 0x9E3779B1u;
-const SEED_LEAN_U: u32 = 0x7F4A7C15u;
-const SEED_LEAN_V: u32 = 0x3C6EF372u;
-// The lean varies 2^LEAN_STRETCH times more slowly across the ground
-// (`landform::LEAN_STRETCH`).
-const LEAN_STRETCH: u32 = 3u;
-const SEED_OVERHANG_REGION: u32 = 0x4CF5AD43u;
-const SEED_CAVE_ENTRANCE: u32 = 0x1B873593u;
-
-// `x / span` in Q16 for `x` clamped to `[0, span]` (`landform::ramp_q16`).
-fn landform_ramp(x: i32, span: i32) -> i32 {
-    if span <= 0 { return select(0, NOISE_ONE, x >= 0); }
-    let xc = clamp(x, 0, span);
-    let s = u32(max(i32(firstLeadingBit(u32(span))) + 1 - 15, 0));
-    return ((xc >> s) << 16u) / max(span >> s, 1);
-}
-
-// A noise's ramp from 0 at `threshold` to one unit a quarter unit above it.
-fn landform_noise_ramp(n: i32, threshold: i32) -> i32 {
-    return clamp((n - threshold) * 4, 0, NOISE_ONE);
-}
-
-fn landform_seed() -> u32 { return bitcast<u32>(terrain.header.w); }
-
-// Tunnels and caverns resolved at `level` (`LandformVolume::caves_at`).
-fn landform_caves_at(level: u32) -> vec2<bool> {
-    let v = terrain.volume;
-    if (v[0].x & 1) == 0 { return vec2<bool>(false); }
-    let layer = v[3].w;
-    // Covered caverns also need a cell within their cover (`caves_at`).
-    let cavern = select(v[3].y, min(v[3].y, v[3].z), v[3].z > 0);
-    return vec2<bool>((v[3].x >> level) >= layer, (cavern >> level) >= layer);
-}
-
-fn landform_cave_region(p: vec3<i32>) -> bool {
-    let v = terrain.volume;
-    return noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION) > v[0].z;
-}
-
-fn landform_overhang_amplitude(p: vec3<i32>, level: u32) -> i32 {
-    let v = terrain.volume;
-    if (v[0].x & 2) == 0 { return 0; }
-    let n = noise(p, u32(v[2].z), landform_seed() ^ SEED_OVERHANG_REGION);
-    let ramp = clamp((n - v[2].w) * 4, 0, NOISE_ONE);
-    let a = scale_q16(ramp, v[2].x);
-    if (a >> level) <= 2 * v[3].w { return 0; }
-    // Grows from 0 at the region edge (`overhang_amplitude`).
-    return a - ((2 * v[3].w) << level);
-}
-
-// Lean lattice of `level`: reach and node spacing (`LandformVolume::lean`).
-fn terrain_lean(level: u32) -> vec2<i32> {
-    let v = terrain.volume;
-    if (v[0].x & 2) == 0 || (v[2].x >> level) <= 2 * v[3].w { return vec2<i32>(0); }
-    let reach = v[2].x / (v[3].w << level) + 2;
-    return vec2<i32>(reach, (7 + 2 * reach) / 6 + 1);
-}
-
-// Horizontal offset (Q8 level cells) of the heightfield under cell
-// `(i, j, k)` (`LandformVolume::lean_offset`).
-fn terrain_lean_offset(p: vec3<i32>, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> {
-    return terrain_lean_offset_with(landform_overhang_amplitude(p, level), i, j, k, level);
-}
-
-// `terrain_lean_offset` with its column's overhang amplitude `a` given.
-fn terrain_lean_offset_with(a: i32, i: i32, j: i32, k: i32, level: u32) -> vec2<i32> {
-    if a == 0 { return vec2<i32>(0); }
-    let v = terrain.volume;
-    let half = (1 << level) >> 1u;
-    let input = vec3<i32>(((i << level) + half) >> LEAN_STRETCH, ((j << level) + half) >> LEAN_STRETCH, (k << level) + half);
-    let amplitude = (a * 256) / (v[3].w << level);
-    let shift = u32(v[2].y);
-    return vec2<i32>(
-        scale_q16(noise(input, shift, landform_seed() ^ SEED_LEAN_U), amplitude),
-        scale_q16(noise(input, shift, landform_seed() ^ SEED_LEAN_V), amplitude),
-    );
-}
-
-fn terrain_extent(p: vec3<i32>, level: u32) -> vec2<i32> {
-    let v = terrain.volume;
-    let layer = v[3].w;
-    let caves = landform_caves_at(level);
-    var below = 0;
-    if (caves.x || caves.y) && landform_cave_region(p) {
-        below = ((v[0].w / layer) >> level) + 2;
-    }
-    let a = landform_overhang_amplitude(p, level);
-    var above = 0;
-    if a > 0 {
-        above = ((a / layer) >> level) + 2;
-        below = max(below, above);
-    }
-    return vec2<i32>(below, above);
-}
-
-// The lattice cells a column's scan last evaluated the caves' noises in and
-// their corners' gradient codes (`noise_codes`): the tunnels' (both noises
-// share their lattice) and the cavern's. Cells along a lane mostly share
-// them, so their corners are hashed once a lattice cell, not once a cell.
-struct CaveLattice {
-    tunnel: vec3<i32>,
-    tunnel_a: u32,
-    tunnel_b: u32,
-    cavern: vec3<i32>,
-    cavern_codes: u32,
-}
-
-// None evaluated yet (no lattice cell is this far out).
-fn cave_lattice() -> CaveLattice {
-    return CaveLattice(vec3<i32>(0x7fffffff), 0u, 0u, vec3<i32>(0x7fffffff), 0u);
-}
-
-// The caves' noises at a cell's volume point `q`, as `terrain_density` and
-// `cave_clearance` read them: the tunnels' two (absolute) and the cavern's
-// (0 for a kind not resolved at `level`).
-fn cave_noise(q: vec3<i32>, level: u32, lattice: ptr<function, CaveLattice>) -> vec3<i32> {
-    let v = terrain.volume;
-    let caves = landform_caves_at(level);
-    var n = vec3<i32>(0);
-    if caves.x {
-        let shift = u32(v[1].x);
-        let c = q >> vec3<u32>(shift);
-        if any(c != (*lattice).tunnel) {
-            (*lattice).tunnel = c;
-            (*lattice).tunnel_a = noise_codes(c, landform_seed() ^ SEED_TUNNEL_A);
-            (*lattice).tunnel_b = noise_codes(c, landform_seed() ^ SEED_TUNNEL_B);
-        }
-        n.x = abs(noise_at(q, shift, (*lattice).tunnel_a));
-        n.y = abs(noise_at(q, shift, (*lattice).tunnel_b));
-    }
-    if caves.y {
-        let shift = u32(v[1].z);
-        let c = q >> vec3<u32>(shift);
-        if any(c != (*lattice).cavern) {
-            (*lattice).cavern = c;
-            (*lattice).cavern_codes = noise_codes(c, landform_seed() ^ SEED_CAVERN);
-        }
-        n.z = noise_at(q, shift, (*lattice).cavern_codes);
-    }
-    return n;
-}
-
-// Level cells along a column's lane, from a cell whose `cave_noise` is `n`,
-// in which no cave can carve (`terrain_density`'s tunnels and caverns): a
-// tunnel needs both of its noises within the tunnel width, a cavern its
-// noise over the cavern threshold (at their widest and lowest, whatever
-// the depth's ramps), and no noise moves faster than NOISE_SLOPE per
-// lattice unit while the point moves `step` volume units per level cell
-// along the lane. 0: a cave may carve near this cell. Generation steps over
-// solid rock by it instead of evaluating every cell down to the cave depth
-// (a mountain's columns cost 100 heightfield columns each).
-fn cave_clearance(n: vec3<i32>, level: u32, step: f32) -> i32 {
-    let v = terrain.volume;
-    let caves = landform_caves_at(level);
-    var clear = 1.0e9;
-    if caves.x {
-        let shift = u32(v[1].x);
-        let excess = max(n.x, n.y) - (v[1].y + 16) - NOISE_ROUNDING;
-        clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
-    }
-    if caves.y {
-        let shift = u32(v[1].z);
-        let excess = (v[1].w - 2) - n.z - NOISE_ROUNDING;
-        clear = min(clear, f32(excess) / (NOISE_SLOPE * step / exp2(f32(shift))));
-    }
-    return i32(clamp(floor(clear), 0.0, 1.0e9));
-}
-
-// mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17 (`density`).
-fn landform_noise_mm(excess: i32, shift: i32) -> i32 {
-    return mul_shr_signed(excess, 25 << u32(shift), 18u);
-}
-
-// What the volume reads of a column alone, whatever the cell: its overhang
-// amplitude and its caves' region and entrance ramps.
-struct ColumnVolume {
-    overhang: i32,
-    region: i32,
-    entrance: i32,
-}
-
-fn column_volume(p: vec3<i32>, level: u32) -> ColumnVolume {
-    let v = terrain.volume;
-    let caves = landform_caves_at(level);
-    var c = ColumnVolume(landform_overhang_amplitude(p, level), 0, 0);
-    if caves.x || caves.y {
-        c.region = landform_noise_ramp(noise(p, u32(v[0].y), landform_seed() ^ SEED_CAVE_REGION), v[0].z);
-        c.entrance = landform_noise_ramp(noise(p, u32(v[4].x), landform_seed() ^ SEED_CAVE_ENTRANCE), v[4].y);
-    }
-    return c;
-}
-
-// Cells [lo, hi] of a column (field height `height` mm, volume `c`) a cave
-// may carve: in a cave region, between the rock cover and the cave depth
-// (any depth over that at a tunnel entrance), where both depth ramps of
-// `terrain_density` can open (lo > hi: none). Elsewhere a cell is solid as
-// the surface and overhangs make it.
-fn cave_window(c: ColumnVolume, height: i32, level: u32) -> vec2<i32> {
-    let v = terrain.volume;
-    let caves = landform_caves_at(level);
-    if !(caves.x || caves.y) || c.region == 0 { return vec2<i32>(1, 0); }
-    let cell = v[3].w << level;
-    // A cell's depth is height - (k cell + cell / 2).
-    let lo = -div_floor(v[0].w + cell / 2 - height, cell);
-    var hi = div_floor(height - v[3].z - cell / 2, cell);
-    if caves.x && c.entrance > 0 { hi = 0x3fffffff; }
-    return vec2<i32>(lo, hi);
-}
-
-// Signed distance of a cell to the surface, CSG of the surface, overhangs
-// and caves (`LandformVolume::density`); `height` is the column's field
-// height (mm), the surface the volume folds, and `lean_height` the height
-// under the cell's lean offset (`terrain::lean_height`).
-fn terrain_density(p: vec3<i32>, q: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
-    var lattice = cave_lattice();
-    return terrain_density_with(column_volume(p, level), cave_noise(q, level, &lattice), level, top, height, lean_height, k);
-}
-
-// `terrain_density` with its column's `column_volume` given (a column's
-// cells evaluate it once) and the cell's `cave_noise`.
-fn terrain_density_with(column: ColumnVolume, noises: vec3<i32>, level: u32, top: i32, height: i32, lean_height: i32, k: i32) -> i32 {
-    let v = terrain.volume;
-    let a = column.overhang;
-    let caves = landform_caves_at(level);
-    if a == 0 && !caves.x && !caves.y { return heightfield_density(top, k); }
-    let layer = v[3].w;
-    let cell = layer << level;
-    let d = k * cell + cell / 2 - height;
-    var solid = k < top;
-    var f = -d;
-    if a > 0 {
-        // The leaning heightfield, within the overhang height of the surface.
-        let lean = clamp(lean_height, height - a, height + a);
-        let dl = k * cell + cell / 2 - lean;
-        solid = dl < 0;
-        f = -dl;
-    }
-    if caves.x || caves.y {
-        let depth = -d;
-        // Caves fade in over a region's edge and close towards the rock cover
-        // and the cave depth; at an entrance tunnels open to the surface.
-        let region = column.region;
-        let entrance = column.entrance;
-        let cover = v[3].z;
-        var walls = 0x7fffffff;
-        var carved = false;
-        if caves.x {
-            let taper = v[4].z;
-            let open = min(min(max(landform_ramp(depth - cover, taper), entrance), region), landform_ramp(v[0].w - depth, taper));
-            let w = scale_q16(open, v[1].y);
-            let na = noises.x;
-            let nb = noises.y;
-            walls = min(walls, landform_noise_mm(max(na, nb) - w, v[1].x));
-            carved = carved || (na < w && nb < w);
-        }
-        if caves.y {
-            let taper = v[4].w;
-            let open = min(min(region, landform_ramp(depth - cover, taper)), landform_ramp(v[0].w - depth, taper));
-            // The threshold rises to the noise's top as the cavern closes.
-            let threshold = v[1].w + scale_q16(NOISE_ONE - open, NOISE_ONE - v[1].w);
-            let n = noises.z;
-            walls = min(walls, landform_noise_mm(threshold - n, v[1].z));
-            carved = carved || n > threshold;
-        }
-        f = min(f, walls);
-        if solid && carved { solid = false; }
-    }
-    let density = clamp(f, -(1 << 22u), 1 << 22u) * 256 / max(cell, 1);
-    if solid { return max(density, 1); }
-    return min(density, 0);
 }
 
 // Masks are always evaluated; other detail finer than about four level
@@ -916,9 +650,29 @@ fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     let lw = landform_land(c);
     var h = 0;
     var basin = 0;
+    var river_bed = false;
+    var alluvium = false;
     for (var l = 0u; l < landform_layer_count(); l++) {
         let layer = terrain.layers[l];
         var x = 0;
+        if layer.kind == LAYER_RIVERS {
+            // The worn terrain (`terrain_erosion`), then valleys and channels
+            // along the river segments (`map_carve`).
+            if (terrain.maps[0].x & MAP_FLAG_EROSION) != 0 {
+                let e = terrain_erosion(p);
+                let worn = h + e.x;
+                h = landform_smooth_max(worn, e.y, terrain.maps[4].z);
+                alluvium = e.y > worn + ALLUVIUM_DEPTH;
+            }
+            let carved = map_carve(p, level, h);
+            h = carved.x;
+            river_bed = river_bed || carved.y != 0;
+            // The streams below the maps' texels (`map_streams`).
+            let streams = map_streams(p, level, h);
+            h = streams.x;
+            river_bed = river_bed || streams.y != 0;
+            continue;
+        }
         if layer.kind == LAYER_CONTINENTS {
             x = landform_base(c, layer.a, layer.b);
         } else if layer.kind == LAYER_MOUNTAINS {
@@ -944,26 +698,16 @@ fn landform_column(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
         h += landform_masked(layer.mask, x, lw);
     }
     var surface = 0;
-    if terrain.style.x == 0 || terrain.style.x == 3 {
-        surface = clamp(eroded * 127 / max(terrain.stack.y, 1), -127, 127) & 0xff;
+    if (terrain.style.x == 0 || terrain.style.x == 3) && river_bed {
+        surface = i32(RIVER_BED);
+    } else if (terrain.style.x == 0 || terrain.style.x == 3) && alluvium {
+        surface = i32(ALLUVIUM);
+    } else if terrain.style.x == 0 || terrain.style.x == 3 {
+        surface = clamp(eroded * 126 / max(terrain.stack.y, 1), -126, 126) & 0xff;
     } else if terrain.style.x == 1 {
         surface = (ejecta >> 1u) | (select(0, 1, basin >= FINE_ONE / 2) << 7u);
     }
-    landform_surface = surface;
-    landform_surface_at = vec4<i32>(p, i32(level));
     return vec2<i32>(h, surface);
-}
-
-// Surface word of the last height evaluated in this invocation: generation
-// asks for it right after the column's height.
-var<private> landform_surface: i32 = 0;
-var<private> landform_surface_at: vec4<i32> = vec4<i32>(0x7fffffff);
-
-// Surface word (`landform::surface`), by material style: the column's at
-// `p`, evaluated just before (`field_height`).
-fn terrain_surface(p: vec3<i32>, level: u32, height: i32) -> u32 {
-    if any(landform_surface_at != vec4<i32>(p, i32(level))) { return 0u; }
-    return u32(landform_surface);
 }
 
 // Height and surface word of the column at `p` (`landform::column_parts`;
@@ -972,9 +716,17 @@ fn terrain_column_nodes(p: vec3<i32>, level: u32, display: bool) -> vec2<i32> {
     return landform_column(p, level, display && terrain.shape.z != 0);
 }
 
-fn landform_moisture(p: vec3<i32>) -> i32 {
-    return (noise_fine(p, u32(max(terrain.levels.x, 1)), bitcast<u32>(terrain.header.w) ^ 0x51ED270Bu) + FINE_ONE) / 2;
+// Snowline (mm) where the sea-level temperature is `t0` (`landform::snowline`).
+fn landform_snowline(t0: i32) -> i32 {
+    let snow = terrain.maps[3].x;
+    let per = terrain.maps[3].y;
+    if per == 0 { return select(-1073741824, 1073741823, t0 > snow); }
+    return clamp(t0 - snow, -8192, 8192) * per;
 }
+
+// The Earthlike snowline's spread by moisture and its rock band (`landform::SNOW_*`).
+const SNOW_WET: i32 = 750000;
+const SNOW_BAND: i32 = 500000;
 
 // Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts through
 // them never show flat rings (`strata` in landform.rs).
@@ -1219,13 +971,18 @@ fn ground_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slop
 // height, slope and erosion tests pass (bit by rule; 0 in other styles).
 fn ground_rules(surface: u32, top_height: i32, slope: i32) -> u32 {
     if terrain.style.x != 3 { return 0u; }
-    let erosion = i32(surface << 24u) >> 24u;
+    // A river bed counts as the deepest gully.
+    let river = surface == RIVER_BED;
+    // Sediment is no gully.
+    let erosion = select(max(i32(surface << 24u) >> 24u, -126), 0, surface == ALLUVIUM);
     let count = min(u32(max(terrain.materials.x, 0)), 16u);
     var rules = 0u;
     for (var index = 0u; index < count; index++) {
         let height_slope = terrain.rules[index].height_slope;
         let bands = terrain.rules[index].surface_bands.xy;
         if top_height < height_slope.x || top_height > height_slope.y || slope < height_slope.z || slope > height_slope.w || erosion < bands.x || erosion > bands.y { continue; }
+        let mode = terrain.rules[index].climate.z;
+        if (mode == 1 && !river) || (mode == 2 && river) { continue; }
         rules |= 1u << index;
     }
     return rules;
@@ -1253,21 +1010,23 @@ fn column_ground_material(rules: u32, p: vec3<i32>, surface: u32, top_height: i3
 fn rules_material(rules: u32, p: vec3<i32>, depth: i32, layer: i32) -> u32 {
     let altitude = layer * terrain.header.y;
     let seed = bitcast<u32>(terrain.header.w);
-    // The moisture noise once a rule reaches it (most fail on depth
-    // first); each rule's words as its tests read them.
-    var wet = 0;
-    var wet_known = false;
+    // The climate once a rule reaches it (most fail on depth first); each
+    // rule's words as its tests read them.
+    var climate = vec2<i32>(0);
+    var climate_known = false;
     var left = rules;
     while left != 0u {
         let index = firstTrailingBit(left);
         left &= left - 1u;
         let depth_moisture = terrain.rules[index].depth_moisture;
         if depth < depth_moisture.x || depth > depth_moisture.y { continue; }
-        if !wet_known {
-            wet = landform_moisture(p) >> 8u;
-            wet_known = true;
+        if !climate_known {
+            climate = terrain_climate(p, altitude);
+            climate_known = true;
         }
-        if wet < depth_moisture.z || wet > depth_moisture.w { continue; }
+        if climate.y < depth_moisture.z || climate.y > depth_moisture.w { continue; }
+        let temperature = terrain.rules[index].climate.xy;
+        if climate.x < temperature.x || climate.x > temperature.y { continue; }
         let bands = terrain.rules[index].surface_bands;
         let salt = index * 0x9E3779B9u;
         if bands.z > 0 && (div_floor(landform_strata(p, altitude), bands.z) & 1) != bands.w { continue; }
@@ -1300,10 +1059,16 @@ fn lunar_material(p: vec3<i32>, surface: u32, depth: i32, slope: i32, layer: i32
 fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, slope: i32, layer: i32) -> u32 {
     let dirt = terrain.header.z;
     let steep = slope >= terrain.shape.y;
-    let wet = landform_moisture(p);
+    let climate = terrain_climate(p, 0);
+    let wet = climate.y << 8u;
     // Hash every domain axis: on a face one of them is nearly constant.
     let h = hash3(p.x, p.y, p.z ^ (layer * 0x9e37), 0x2545F491u);
     let altitude = layer * terrain.header.y;
+    if surface == RIVER_BED && depth < dirt * 2 {
+        // River beds: gravel and sand over silt (`earthlike_material`).
+        if depth == 0 && (h & 3u) == 0u { return M_SAND; }
+        return select(M_CLAY, M_GRAVEL, depth < dirt);
+    }
     if top_height < terrain.levels.w {
         // Low basins: meadow with mud patches of a few metres (position
         // noise, never aligned with height contours) over silt, gravel and
@@ -1317,12 +1082,13 @@ fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, s
         }
         return M_STONE;
     }
-    // A wandering snowline over a narrow rock band (`earthlike_material`).
-    let wander = scale_q16(noise(p, 17u, bitcast<u32>(terrain.header.w) ^ 0x3C6EF372u), terrain.levels.z / 6);
-    let snowline = terrain.levels.z + mul_fine(terrain.levels.z / 4, wet - FINE_ONE / 2) + wander;
+    // A wandering snowline (the climate's) over a narrow rock band
+    // (`earthlike_material`).
+    let wander = scale_q16(noise(p, 17u, bitcast<u32>(terrain.header.w) ^ 0x3C6EF372u), SNOW_BAND);
+    let snowline = landform_snowline(climate.x) + mul_fine(SNOW_WET, wet - FINE_ONE / 2) + wander;
     // Alpine weight: 0 below the rockline, NOISE_ONE at the snowline.
-    let rockline = snowline - terrain.levels.z / 6;
-    let band = max(snowline - rockline, 256);
+    let rockline = snowline - SNOW_BAND;
+    let band = SNOW_BAND;
     let alpine = (clamp(top_height - rockline, 0, band) / 256) * NOISE_ONE / (band / 256);
     // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.
     // Noise is clamped to +-NOISE_ONE, so below the rockline on gentler slopes no
@@ -1361,6 +1127,13 @@ fn earthlike_material(p: vec3<i32>, surface: u32, top_height: i32, depth: i32, s
     }
     // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 { return M_SNOW; }
+    if surface == ALLUVIUM && !steep && depth < dirt * 3 {
+        // Sediment: dry fans of sand and gravel, wet plains of meadow over
+        // soil and silt (`earthlike_material`).
+        if wet < FINE_ONE / 10 * 3 { return select(M_GRAVEL, M_SAND, depth == 0 && (h & 3u) != 0u); }
+        if depth == 0 { return M_GRASS; }
+        return select(M_CLAY, M_DIRT, depth < dirt);
+    }
     if wet < FINE_ONE / 10 * 3 {
         if depth < dirt && !steep { return M_SAND; }
         let band = rem_floor(div_floor(landform_strata(p, altitude), 2100), 5);

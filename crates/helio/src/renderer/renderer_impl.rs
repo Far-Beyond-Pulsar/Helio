@@ -13,7 +13,8 @@ use super::config::{RenderMode, RendererConfig};
 #[cfg(not(target_arch = "wasm32"))]
 use super::stereo_mirror::StereoMirror;
 
-/// Closure that rebuilds the render graph when graph-level configuration changes.
+/// Closure that rebuilds the render graph when its configuration changes
+/// (and for shader hot reload); a resize keeps the graph.
 pub type GraphRebuilder = Arc<
     dyn Fn(
             &Arc<wgpu::Device>,
@@ -28,7 +29,7 @@ pub type GraphRebuilder = Arc<
         + Sync,
 >;
 
-/// Reapplies application-owned pass settings after a graph rebuild.
+/// Reapplies application-owned pass settings after a rebuild replaces the graph.
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
 use crate::camera::Camera;
@@ -103,8 +104,8 @@ pub struct Renderer {
     pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
-    /// rebuild hands the graph builder, so the new graph has the same passes
-    /// and pass settings (Helio#254/#255).
+    /// rebuild (a config change, shader reload) hands the graph builder, so the new
+    /// graph has the same passes and pass settings (Helio#254/#255).
     ///
     /// Opaque to the renderer: it never interprets pass-specific fields
     /// (shadow atlas, SSR, foliage, portals, TSR, reflections), it only
@@ -168,10 +169,10 @@ pub struct Renderer {
     pub(crate) bake_scene: Option<helio_bake::SceneGeometry>,
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
-    /// A pending size update also needs a fresh graph because graph-level
-    /// settings or the pass topology changed. Ordinary viewport resizes keep
-    /// the existing passes and resize their resources in place.
-    pub(crate) pending_graph_rebuild: bool,
+    /// A configuration change asks for a graph rebuild before the next frame.
+    pub(crate) pending_rebuild: bool,
+    /// CPU time of the last resize, in milliseconds.
+    pub(crate) last_resize_ms: f64,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
@@ -402,8 +403,7 @@ impl Renderer {
     /// Rebuild the graph from [`Self::renderer_config`] before the next frame.
     /// No-op for graphs installed without a rebuilder.
     pub fn request_graph_rebuild(&mut self) {
-        self.pending_graph_rebuild = true;
-        self.pending_resize = Some((self.output_width, self.output_height));
+        self.pending_rebuild = true;
     }
 
     /// Overrides the graph-derived per-frame camera-jitter setting.
@@ -571,6 +571,13 @@ impl Renderer {
         self.graph.collect_graph_timeline()
     }
 
+    /// The passes the current frame runs, in order: the graph's members for
+    /// the scene's content (see `RenderPass::is_member`). The other passes
+    /// are dormant until their content appears.
+    pub fn graph_members(&self) -> Vec<&'static str> {
+        self.graph.member_names()
+    }
+
     /// The queue submission carrying the last rendered frame's graph, for a
     /// host that must wait on or hand off the frame (a compositor sampling
     /// the target). Saves the host an extra empty `queue.submit` just to
@@ -584,14 +591,6 @@ impl Renderer {
     /// `HELIO_FINISH_BREAKDOWN` environment variable so rebuilt graphs keep it.
     pub fn finish_breakdown(&self) -> &[helio_core::FinishSegment] {
         self.graph.finish_breakdown()
-    }
-
-    /// Which passes the recording cache resubmitted or re-encoded, and why;
-    /// see [`helio_core::RenderGraph::set_recording_cache`]. The cache is on
-    /// by default; `HELIO_RECORDING_CACHE=0` switches it off for every graph,
-    /// rebuilt ones included.
-    pub fn recording_cache_stats(&self) -> helio_core::RecordingCacheStats {
-        self.graph.recording_cache_stats()
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn helio_core::RenderPass>) {
@@ -614,7 +613,7 @@ impl Renderer {
         self.graph.find_pass::<T>()
     }
 
-    /// Configure passes in the current graph and every graph created by resize.
+    /// Configure passes in the current graph and every graph a rebuild creates.
     /// Use this for settings applied directly to passes, which a fresh graph
     /// would otherwise reset to defaults.
     pub fn set_graph_rebuild_hook(
@@ -685,7 +684,7 @@ impl Renderer {
 
     /// Access the gbuffer template registry (preserved across graph rebuilds).
     /// Register custom surface templates here instead of through the pass
-    /// directly to ensure they survive window resize.
+    /// directly to ensure they survive graph rebuilds.
     pub fn template_registry_mut(
         &mut self,
     ) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {

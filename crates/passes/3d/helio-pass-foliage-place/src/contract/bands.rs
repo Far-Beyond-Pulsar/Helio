@@ -12,7 +12,11 @@
 //! What thins it out is the tufts' **rank**. A tuft (a placement candidate) carries a
 //! uniform rank; at distance `d` it is drawn while its rank is under [`keep`]`(d)` — whole
 //! tufts drop out, never blades of one, and the ones left grow a little
-//! ([`growth`]) so the meadow's cover holds. A band holds tufts only at the density its
+//! ([`growth`]) so the meadow's cover holds. The share falls steeply near, where tufts
+//! are many pixels and their blades the cost, and slowly past a knee, where a tuft is
+//! one cheap shape and the cover is what reads: fallen as steeply to the range, the
+//! middle distance went bare (the turf showing between a ring of near grass and the
+//! far tufts). A band holds tufts only at the density its
 //! nearest point needs (its *share*, `keep` at its inner edge), so the far bands' arenas
 //! stay small. Between bands both draw across a fade, the near one shrinking out as the
 //! far one grows in.
@@ -89,7 +93,8 @@ pub struct GpuFoliageBand {
 pub struct GpuFoliageBands {
     pub count: u32,
     /// [`keep`]: full density within `keep_distance` metres, falling as
-    /// `(keep_distance / d)^keep_power` past it.
+    /// `(keep_distance / d)^keep_power` past it, and as `d^-keep_far_power` past
+    /// `keep_knee` metres.
     pub keep_distance: f32,
     pub keep_power: f32,
     /// [`growth`]: surviving tufts grow by `keep^-growth_power`, at most `growth_max`.
@@ -97,7 +102,8 @@ pub struct GpuFoliageBands {
     pub growth_max: f32,
     /// Where the last band ends (metres).
     pub range: f32,
-    pub _pad: [u32; 2],
+    pub keep_knee: f32,
+    pub keep_far_power: f32,
     pub bands: [GpuFoliageBand; FOLIAGE_MAX_BANDS],
 }
 
@@ -115,9 +121,11 @@ pub struct FoliageRange {
     pub tufts_per_m2: f32,
     /// Blades a tuft averages (sizes the near band's slabs).
     pub blades_per_tuft: f32,
-    /// [`GpuFoliageBands::keep_distance`] and the powers.
+    /// [`GpuFoliageBands::keep_distance`], `keep_knee` and the powers.
     pub keep_distance: f32,
     pub keep_power: f32,
+    pub keep_knee: f32,
+    pub keep_far_power: f32,
     pub growth_power: f32,
     pub growth_max: f32,
     /// Candidate-grid granularity (the cull's cluster block edge).
@@ -128,10 +136,14 @@ impl Default for FoliageRange {
     fn default() -> Self {
         Self {
             range: 200.0,
-            tufts_per_m2: 8.0,
-            blades_per_tuft: 8.0,
+            // The engine meadow's (`helio_pass_voxel_planet::meadow`): a host that sizes
+            // nothing (an editor's project settings) still grows it at its density.
+            tufts_per_m2: 16.0,
+            blades_per_tuft: 10.0,
             keep_distance: 14.0,
             keep_power: 1.5,
+            keep_knee: 20.0,
+            keep_far_power: 1.1,
             growth_power: 0.3,
             growth_max: 2.0,
             cluster_edge: 4,
@@ -141,9 +153,11 @@ impl Default for FoliageRange {
 
 /// Share of the tufts drawn at `d` metres (`foliage_keep` in the shaders).
 pub fn keep(bands: &GpuFoliageBands, d: f32) -> f32 {
-    (bands.keep_distance / d.max(1.0e-3))
-        .powf(bands.keep_power)
-        .min(1.0)
+    let near = |d: f32| (bands.keep_distance / d.max(1.0e-3)).powf(bands.keep_power).min(1.0);
+    if d <= bands.keep_knee {
+        return near(d);
+    }
+    near(bands.keep_knee) * (bands.keep_knee / d).powf(bands.keep_far_power)
 }
 
 /// How much a surviving tuft grows at `d` metres.
@@ -185,6 +199,8 @@ pub fn plan_bands(range: &FoliageRange) -> GpuFoliageBands {
     let mut table = GpuFoliageBands {
         keep_distance: range.keep_distance.max(0.1),
         keep_power: range.keep_power.max(0.0),
+        keep_knee: range.keep_knee.max(range.keep_distance).max(0.1),
+        keep_far_power: range.keep_far_power.clamp(0.0, range.keep_power.max(0.0)),
         growth_power: range.growth_power.max(0.0),
         growth_max: range.growth_max.max(1.0),
         range: range.range.max(1.0),
@@ -352,6 +368,21 @@ mod tests {
     }
 
     #[test]
+    fn the_share_falls_slower_past_the_knee() {
+        let table = plan_bands(&FoliageRange::default());
+        let knee = table.keep_knee;
+        // Continuous at the knee.
+        assert!((keep(&table, knee - 1.0e-3) - keep(&table, knee + 1.0e-3)).abs() < 1.0e-3);
+        // Past it the share halves over a longer distance than before it.
+        let steep = (table.keep_distance / (2.0 * table.keep_distance)).powf(table.keep_power);
+        let slow = keep(&table, 2.0 * knee) / keep(&table, knee);
+        assert!(slow > steep, "{slow} past the knee, {steep} before");
+        // The middle distance keeps a cover: about a tenth of the tufts at 100 m (a
+        // twentieth with one power to the range).
+        assert!(keep(&table, 100.0) > 0.09, "{}", keep(&table, 100.0));
+    }
+
+    #[test]
     fn the_kept_share_falls_and_tufts_left_grow_a_little() {
         let table = plan_bands(&FoliageRange::default());
         assert_eq!(keep(&table, 5.0), 1.0);
@@ -368,10 +399,18 @@ mod tests {
                 b.share
             );
         }
-        // A tuft drawn in its band at full scale near, gone once its rank is past the share.
-        let far = &table.bands()[table.count as usize - 1];
-        let d = (far.inner + far.outer) * 0.5;
-        assert!(tuft_scale(&table, far, d, 0.0) > 0.0);
-        assert_eq!(tuft_scale(&table, far, d, 0.999), 0.0);
+        // A tuft drawn in its band at full scale near, gone once its rank is past the share
+        // (in the bands holding more than their middle keeps; the farthest may hold less,
+        // its grid full).
+        let mut thinned = 0;
+        for b in table.bands() {
+            let d = (b.inner + b.outer) * 0.5;
+            assert!(tuft_scale(&table, b, d, 0.0) > 0.0);
+            if keep(&table, d) / b.share < 0.9 {
+                assert_eq!(tuft_scale(&table, b, d, 0.999), 0.0);
+                thinned += 1;
+            }
+        }
+        assert!(thinned >= 2, "{thinned} bands thin out");
     }
 }

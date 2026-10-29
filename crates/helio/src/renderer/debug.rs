@@ -420,6 +420,33 @@ impl Default for DebugDrawState {
 
 const MAX_DEBUG_VERTS: u32 = 65536;
 const MAX_DEBUG_TRIS: u32 = 65536;
+/// What the vertex buffers start with; they grow with the geometry.
+const MIN_DEBUG_VERTS: usize = 256;
+
+fn debug_vertex_buffer(device: &wgpu::Device, label: &str, vertices: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: (vertices * std::mem::size_of::<DebugVertex>()) as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+/// Replaces `buffer` with a larger one (a power of two of vertices) when
+/// `vertices` do not fit. The contents are not kept: callers upload all of
+/// them after.
+fn grow_debug_buffer(
+    device: &wgpu::Device,
+    buffer: &mut wgpu::Buffer,
+    label: &str,
+    vertices: usize,
+) {
+    let bytes = (vertices * std::mem::size_of::<DebugVertex>()) as u64;
+    if bytes > buffer.size() {
+        *buffer = debug_vertex_buffer(device, label, vertices.next_power_of_two());
+    }
+}
+
 const MAX_EDITOR_LINE_LAYERS: usize = 32;
 const MAX_EDITOR_LAYER_VERTS: usize = 65536;
 
@@ -477,12 +504,7 @@ impl DebugPass {
             immediate_size: 0,
         });
 
-        let vertex_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Vertex Buffer"),
-            size: (MAX_DEBUG_VERTS as usize * std::mem::size_of::<DebugVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let vertex_buf = debug_vertex_buffer(device, "Debug Vertex Buffer", MIN_DEBUG_VERTS);
 
         let pipeline_depth = helio_core::shader::create_render_pipeline(
             &device,
@@ -668,12 +690,7 @@ impl DebugPass {
             },
         );
 
-        let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Debug Tri Buffer"),
-            size: (MAX_DEBUG_TRIS as usize * std::mem::size_of::<DebugVertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let tri_buf = debug_vertex_buffer(device, "Debug Tri Buffer", MIN_DEBUG_VERTS);
 
         Self {
             pipeline_depth,
@@ -699,8 +716,16 @@ impl DebugPass {
         self.use_scene_depth = enabled;
     }
 
-    pub fn update_lines(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
+    /// Uploads line vertices (pairs), growing the buffer to fit up to
+    /// `MAX_DEBUG_VERTS`.
+    pub fn update_lines(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        verts: &[DebugVertex],
+    ) {
         let count = verts.len().min(MAX_DEBUG_VERTS as usize);
+        grow_debug_buffer(device, &mut self.vertex_buf, "Debug Vertex Buffer", count);
         if count > 0 {
             helio_core::upload::write_buffer(
                 queue,
@@ -712,16 +737,19 @@ impl DebugPass {
         self.vertex_count = count as u32;
     }
 
+    /// Overwrites vertices from `first_vertex` within what the last
+    /// [`update_lines`](Self::update_lines) made room for.
     pub fn update_lines_at(
         &mut self,
         queue: &wgpu::Queue,
         first_vertex: usize,
         verts: &[DebugVertex],
     ) {
-        if verts.is_empty() || first_vertex >= MAX_DEBUG_VERTS as usize {
+        let capacity = (self.vertex_buf.size() as usize) / std::mem::size_of::<DebugVertex>();
+        if verts.is_empty() || first_vertex >= capacity {
             return;
         }
-        let max_writable = (MAX_DEBUG_VERTS as usize).saturating_sub(first_vertex);
+        let max_writable = capacity.saturating_sub(first_vertex);
         let count = verts.len().min(max_writable);
         if count == 0 {
             return;
@@ -739,8 +767,16 @@ impl DebugPass {
         self.vertex_count = count.min(MAX_DEBUG_VERTS as usize) as u32;
     }
 
-    pub fn update_tris(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
+    /// Uploads triangle vertices (triples), growing the buffer to fit up to
+    /// `MAX_DEBUG_TRIS`.
+    pub fn update_tris(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        verts: &[DebugVertex],
+    ) {
         let count = verts.len().min(MAX_DEBUG_TRIS as usize);
+        grow_debug_buffer(device, &mut self.tri_buf, "Debug Tri Buffer", count);
         if count > 0 {
             helio_core::upload::write_buffer(
                 queue,
@@ -755,6 +791,14 @@ impl DebugPass {
     pub fn clear(&mut self) {
         self.vertex_count = 0;
         self.tri_count = 0;
+    }
+
+    /// Drops the geometry and shrinks the buffers back to their starting
+    /// size.
+    fn release(&mut self, device: &wgpu::Device) {
+        self.vertex_buf = debug_vertex_buffer(device, "Debug Vertex Buffer", MIN_DEBUG_VERTS);
+        self.tri_buf = debug_vertex_buffer(device, "Debug Tri Buffer", MIN_DEBUG_VERTS);
+        self.clear();
     }
 
     pub fn set_depth_test(&mut self, enabled: bool) {
@@ -1129,6 +1173,29 @@ impl RenderPass for DebugDrawPass {
         "DebugDraw"
     }
 
+    /// The editor overlay is a member while the editor draws its overlay;
+    /// the user instance while there is user debug geometry.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        let Ok(state) = self.state.lock() else {
+            return false;
+        };
+        if self.editor_mode {
+            state.editor_enabled
+        } else {
+            !state.user_lines.is_empty() || !state.user_tris.is_empty()
+        }
+    }
+
+    fn on_leave(&mut self, device: &wgpu::Device) {
+        // Uploaded again, into small buffers, when the pass joins.
+        self.pass.release(device);
+        self.cached_line_gen = u64::MAX;
+        self.cached_tri_gen = u64::MAX;
+        self.editor_origin = None;
+        self.user_origin = None;
+        self.editor_last_volume_gen = None;
+    }
+
     fn render_pass_descriptor<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
@@ -1159,11 +1226,11 @@ impl RenderPass for DebugDrawPass {
 
             if !editor_enabled {
                 if self.cached_line_gen != 0 {
-                    self.pass.update_lines(ctx.queue, &[]);
+                    self.pass.update_lines(ctx.device, ctx.queue, &[]);
                     self.cached_line_gen = 0;
                 }
                 self.editor_origin = None;
-                self.pass.update_tris(ctx.queue, &[]);
+                self.pass.update_tris(ctx.device, ctx.queue, &[]);
                 self.cached_tri_gen = 0;
                 return Ok(());
             }
@@ -1192,7 +1259,7 @@ impl RenderPass for DebugDrawPass {
                     .iter()
                     .map(|v| v.in_frame(origin))
                     .collect();
-                self.pass.update_lines(ctx.queue, &lines);
+                self.pass.update_lines(ctx.device, ctx.queue, &lines);
                 self.editor_origin = Some(origin);
                 self.cached_line_gen = self.cached_line_gen.wrapping_add(1);
                 if self.cached_line_gen == u64::MAX {
@@ -1201,7 +1268,7 @@ impl RenderPass for DebugDrawPass {
             }
 
             if self.cached_tri_gen != 0 {
-                self.pass.update_tris(ctx.queue, &[]);
+                self.pass.update_tris(ctx.device, ctx.queue, &[]);
                 self.cached_tri_gen = 0;
             }
             return Ok(());
@@ -1217,11 +1284,12 @@ impl RenderPass for DebugDrawPass {
         };
         if user_lines_generation != self.cached_line_gen || moved {
             self.pass
-                .update_lines(ctx.queue, &rebase(&state.user_lines));
+                .update_lines(ctx.device, ctx.queue, &rebase(&state.user_lines));
             self.cached_line_gen = user_lines_generation;
         }
         if user_tris_generation != self.cached_tri_gen || moved {
-            self.pass.update_tris(ctx.queue, &rebase(&state.user_tris));
+            self.pass
+                .update_tris(ctx.device, ctx.queue, &rebase(&state.user_tris));
             self.cached_tri_gen = user_tris_generation;
         }
         self.user_origin = Some(origin);

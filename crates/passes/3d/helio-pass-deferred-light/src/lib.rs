@@ -926,7 +926,7 @@ impl RenderPass for DeferredLightPass {
         builder.read("ies_textures");
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {}
 
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 

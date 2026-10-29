@@ -253,12 +253,14 @@ fn every_wgsl_shader_parses_and_validates() {
 
     // Guard the skip heuristic: fragments are deliberate source modules and
     // composed shaders. If this trips, the source-module set has grown enough
-    // to require an explicit audit. Last audited at 54 (2026-10-23): Radiant
+    // to require an explicit audit. Last audited at 56 (2026-10-28): Radiant
     // templates, shared prelude/common pieces, the voxel planet's source
-    // pieces, and the virtual geometry's declaration pieces (vg-format,
-    // vg-stream, vg-bvh, vg-dense, vg-raster, vg-shade, helio-mats' vg_alpha).
+    // pieces (volumes.wgsl for caves and cliffs, planet_maps.wgsl for the
+    // baked maps, joined them), and the virtual geometry's declaration pieces
+    // (vg-format, vg-stream, vg-bvh, vg-dense, vg-raster, vg-shade,
+    // helio-mats' vg_alpha).
     assert!(
-        skipped.len() <= 54,
+        skipped.len() <= 56,
         "{} shaders were skipped as fragments/composed modules, which is more than expected:\n{}",
         skipped.len(),
         skipped.join("\n")

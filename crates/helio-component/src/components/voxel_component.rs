@@ -1,4 +1,4 @@
-//! Reflected, SceneDB-owned authoring components for voxel objects and terrain.
+//! Reflected, SceneDB-owned authoring components for voxel terrain.
 //!
 //! These structs contain reflected configuration and runtime-only live data.
 //! Voxel encodings, edit batches, and generation behavior belong to the
@@ -7,28 +7,16 @@
 
 use engine_class_derive::{component_events, engine_class};
 use super::VoxelFeatureSpawn;
-use helio_voxel_data::{
-    VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal, VoxelStoredPayload,
-};
-pub use helio_voxel_data::{VoxelPayloadKey, VoxelPayloadStore};
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
-
-/// Generic live payload storage owned by a voxel component row.
-///
-/// Keys are intentionally opaque to this crate; voxel chunk/key semantics are
-/// defined by the voxel data contract. The tuple contains the live data revision and
-/// payload map so a batch can publish both under one lock. Values are immutable
-/// so readers can retain a cheap snapshot while a writer replaces one entry.
-/// Component clones create fresh stores; callers can explicitly clone the
-/// `Arc` when shared access is intended. Four opaque words allow collision-free
-/// chunk keys (for example signed XYZ bit patterns plus an LOD word).
+use helio_pass_voxel_planet::layers::TerrainLayers;
+use helio_pass_voxel_planet::volumes;
+use helio_voxel_data::{VOXEL_TERRAIN_GENERATOR, VOXEL_TERRAIN_GENERATOR_VERSION, VoxelEditJournal};
 
 /// Typed payload for block lifecycle events. Coordinates are the exact
 /// world-space centre of the base cell; `material` is the material present
-/// when the event occurred (before a break, or after a placement).
+/// when the event occurred (before a break, or after a placement). An edit
+/// changing more than `helio_pass_voxel_planet::edit_yield::EXACT_CELLS`
+/// cells reports regions instead: `count` cells of that material around a
+/// brick's centre (1 for a single block).
 #[engine_class(no_register)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockData {
@@ -40,10 +28,12 @@ pub struct BlockData {
     pub z: f64,
     #[property]
     pub material: u32,
+    #[property]
+    pub count: u64,
 }
 
 /// Typed payload for a terrain cell whose material changed from one solid
-/// material to another.
+/// material to another (`count` cells of a region, as `BlockData`).
 #[engine_class(no_register)]
 #[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BlockMaterialChange {
@@ -57,6 +47,8 @@ pub struct BlockMaterialChange {
     pub previous_material: u32,
     #[property]
     pub material: u32,
+    #[property]
+    pub count: u64,
 }
 
 #[component_events(class = "VoxelTerrainComponent")]
@@ -129,153 +121,6 @@ fn deserialize_generator_ref_json(
 )]
 #[allow(dead_code)]
 type RegisteredVoxelGeneratorRef = VoxelGeneratorRef;
-
-fn filled_cube_payload_store(dimensions: [u32; 3], slot: u8) -> VoxelPayloadStore {
-    let mut chunks = HashMap::new();
-    for z in 0..dimensions[2].div_ceil(8) {
-        for y in 0..dimensions[1].div_ceil(8) {
-            for x in 0..dimensions[0].div_ceil(8) {
-                let mut samples = [0u8; 8 * 8 * 8];
-                for local_z in 0..8 {
-                    for local_y in 0..8 {
-                        for local_x in 0..8 {
-                            if x * 8 + local_x < dimensions[0]
-                                && y * 8 + local_y < dimensions[1]
-                                && z * 8 + local_z < dimensions[2]
-                            {
-                                samples[(local_z * 64 + local_y * 8 + local_x) as usize] = slot;
-                            }
-                        }
-                    }
-                }
-                chunks.insert(
-                    [u64::from(x), u64::from(y), u64::from(z), 0],
-                    VoxelStoredPayload::raw_material(samples),
-                );
-            }
-        }
-    }
-    Arc::new(RwLock::new((0, chunks)))
-}
-
-fn clone_payload_store(store: &VoxelPayloadStore) -> VoxelPayloadStore {
-    // `Clone` must preserve component value semantics for SceneDB snapshots
-    // and transactions. Share immutable payload allocations, but copy the
-    // mutable index/revision so two cloned entries never alias future edits.
-    let state = store
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    Arc::new(RwLock::new((state.0, state.1.clone())))
-}
-
-/// Authoring component for a small deformable voxel object.
-///
-/// A newly-created object describes a cubic 16³ voxel volume. Its editable
-/// voxel contents are SceneDB-owned data managed through the voxel data API;
-/// this component stores configuration and the SceneDB material-ID palette.
-/// The host's voxel mesh renderer draws it as a mesh placed by its object
-/// ([`super::voxel_mesh`]).
-#[engine_class(category = "Voxel", debug, serialize, deserialize)]
-#[category("Volume", category_color = "#8F8F8F")]
-#[category("Rendering", category_color = "#7C9DC9")]
-#[category("Materials", category_color = "#D1A73F")]
-#[category("Editing", category_color = "#D18F6F")]
-pub struct VoxelComponent {
-    /// Runtime-only live payloads and data revision. Not an inspector
-    /// property, serialized configuration, or GPU-mirrored field. Component
-    /// clones copy the index/revision and share immutable payload allocations.
-    #[serde(skip)]
-    payloads: VoxelPayloadStore,
-    /// Whether the object participates in voxel rendering and queries.
-    #[property]
-    pub enabled: bool,
-    /// Edge length of one base-resolution voxel in world units.
-    #[property(min = 0.0001, max = 10000.0, step = 0.01, category = "Volume")]
-    pub voxel_size: f64,
-    /// Initial cubic grid dimensions. The default is 16 × 16 × 16.
-    #[property(category = "Volume")]
-    pub dimensions: [u32; 3],
-    /// Stable renderer backend identifier. Empty leaves selection to the host.
-    #[serde(default)]
-    #[property(category = "Rendering")]
-    pub renderer_id: String,
-    /// Palette of IDs into Helio's existing SceneDB material records.
-    #[property(category = "Materials")]
-    pub material_ids: Vec<u32>,
-    /// Palette slot used for newly initialized voxels.
-    #[property(category = "Materials")]
-    pub default_material_slot: u32,
-    /// Whether external callers may submit deformation/edit batches.
-    #[property(category = "Editing")]
-    pub editable: bool,
-}
-
-impl Default for VoxelComponent {
-    fn default() -> Self {
-        Self {
-            payloads: filled_cube_payload_store([16; 3], 1),
-            enabled: true,
-            voxel_size: 1.0,
-            dimensions: [16; 3],
-            renderer_id: String::new(),
-            material_ids: vec![0],
-            default_material_slot: 1,
-            editable: true,
-        }
-    }
-}
-
-impl VoxelComponent {
-    /// Construct a filled, editable volume in the canonical 8³ material-chunk
-    /// encoding. Partial edge chunks are zero-padded; material slot zero is air.
-    pub fn filled_cube(
-        dimensions: [u32; 3],
-        material_ids: Vec<u32>,
-        slot: u8,
-    ) -> Result<Self, &'static str> {
-        if dimensions.iter().any(|&size| size == 0 || size > 256) {
-            return Err("cube dimensions must be within 1..=256 on each axis");
-        }
-        if material_ids.len() > 255 || slot == 0 || usize::from(slot) > material_ids.len() {
-            return Err("cube material slot must reference one of at most 255 material IDs");
-        }
-        Ok(Self {
-            payloads: filled_cube_payload_store(dimensions, slot),
-            enabled: true,
-            voxel_size: 1.0,
-            dimensions,
-            renderer_id: String::new(),
-            material_ids,
-            default_material_slot: u32::from(slot),
-            editable: true,
-        })
-    }
-    /// Low-level live SceneDB data capability. Normal
-    /// producers should mutate through `VoxelSourceWriter` so validation and
-    /// revision checks are preserved; scripts should export via data snapshots.
-    /// This handle carries no persistence policy.
-    pub fn payload_store(&self) -> VoxelPayloadStore {
-        Arc::clone(&self.payloads)
-    }
-}
-
-// Cloning a component preserves its live value while isolating future map
-// mutations. The immutable Arc payload allocations remain shared until one
-// entry replaces/deletes them.
-impl Clone for VoxelComponent {
-    fn clone(&self) -> Self {
-        Self {
-            payloads: clone_payload_store(&self.payloads),
-            enabled: self.enabled,
-            voxel_size: self.voxel_size,
-            dimensions: self.dimensions,
-            renderer_id: self.renderer_id.clone(),
-            material_ids: self.material_ids.clone(),
-            default_material_slot: self.default_material_slot,
-            editable: self.editable,
-        }
-    }
-}
 
 /// Overall form of a voxel world.
 #[derive(
@@ -660,6 +505,15 @@ pub enum VoxelLayerKind {
     /// before it step into terraces Height tall, joined by cliffs over the
     /// last Ratio of each step.
     Cliffs,
+    /// Rivers and lakes from the planet's drainage: valleys cut into the
+    /// layers before it, from sources draining Region size squared of wet
+    /// land to the sea. At a source the valley sinks Height, its
+    /// floodplain is Scale wide with a channel Ratio 2 of it, Base deep;
+    /// walls slope Ratio, shoulders rounded over Ratio 3 metres. Coverage
+    /// is how much the drainage has worn the planet (ranges lowered,
+    /// basins filled with sediment); Octaves refines it into streams that
+    /// many levels (at most three: creeks).
+    Rivers,
 }
 
 /// Where a terrain layer applies.
@@ -708,6 +562,28 @@ pub enum VoxelMaterialStyle {
     Rules,
 }
 
+/// Where a material rule holds on river beds
+/// (`helio_pass_voxel_planet::layers::RiverBed`).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    pulsar_reflection::Reflectable,
+)]
+pub enum VoxelRiverBed {
+    #[default]
+    Any,
+    /// Only in rivers' channels.
+    Only,
+    /// Never in them.
+    Never,
+}
+
 /// One material rule: the material of a ground cell where every condition
 /// holds (ranges are inclusive). Rules are tried in order.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
@@ -730,11 +606,19 @@ pub struct VoxelMaterialRule {
     pub min_depth_m: f64,
     #[property(min = 0.0, max = 1000000.0, step = 0.1, label = "Max depth (m)")]
     pub max_depth_m: f64,
-    /// Moisture, 0 (dry) to 1 (wet).
+    /// Moisture, 0 (dry) to 1 (wet): the climate's.
     #[property(min = 0.0, max = 1.0, step = 0.01)]
     pub min_moisture: f64,
     #[property(min = 0.0, max = 1.0, step = 0.01)]
     pub max_moisture: f64,
+    /// Annual mean temperature at the cell (the climate's, cooler higher).
+    #[property(min = -1000.0, max = 1000.0, step = 0.5, label = "Min temperature (C)")]
+    pub min_temperature_c: f64,
+    #[property(min = -1000.0, max = 1000.0, step = 0.5, label = "Max temperature (C)")]
+    pub max_temperature_c: f64,
+    /// Where river beds count.
+    #[property(label = "River beds")]
+    pub river_bed: VoxelRiverBed,
     /// Erosion, -1 (gully floors) to 1 (the ribs between gullies).
     #[property(min = -1.0, max = 1.0, step = 0.05)]
     pub min_erosion: f64,
@@ -767,6 +651,9 @@ impl Default for VoxelMaterialRule {
             max_depth_m: 1.0e6,
             min_moisture: 0.0,
             max_moisture: 1.0,
+            min_temperature_c: -1.0e3,
+            max_temperature_c: 1.0e3,
+            river_bed: VoxelRiverBed::Any,
             min_erosion: -1.0,
             max_erosion: 1.0,
             patch_km: 0.0,
@@ -918,7 +805,8 @@ fn deserialize_terrain_layer_json(
 #[allow(dead_code)]
 type RegisteredVoxelTerrainLayer = VoxelTerrainLayer;
 
-/// Generated caves: tunnels and caverns inside cave regions.
+/// Cave networks (`volumes::Caves`): per region a hub, chambers joined to
+/// it, tunnels linking neighbouring regions' hubs, and entrances.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
 #[category("Caves", category_color = "#7A6A9E")]
 #[derive(pulsar_reflection::Reflectable)]
@@ -926,170 +814,261 @@ type RegisteredVoxelTerrainLayer = VoxelTerrainLayer;
 pub struct VoxelCaves {
     #[property(category = "Caves")]
     pub enabled: bool,
-    /// Deepest cave cell below the local surface.
-    #[property(
-        min = 0.0,
-        max = 170.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Depth (m)"
-    )]
-    pub depth_m: f64,
-    /// Rough share of the land inside cave regions.
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Caves",
-        label = "Regions (share)"
-    )]
+    /// Region size: one network a region at most.
+    #[property(min = 50.0, max = 5000.0, step = 10.0, category = "Caves", label = "Spacing (m)")]
+    pub spacing_m: f64,
+    /// Share of regions with a network.
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Networks (share)")]
     pub share: f64,
-    #[property(
-        min = 0.1,
-        max = 500.0,
-        step = 0.1,
-        category = "Caves",
-        label = "Region size (km)"
-    )]
-    pub region_km: f64,
-    #[property(
-        min = 0.0,
-        max = 20.0,
-        step = 0.1,
-        category = "Caves",
-        label = "Tunnel radius (m)"
-    )]
-    pub tunnel_radius_m: f64,
-    #[property(
-        min = 4.0,
-        max = 2000.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Tunnel winding (m)"
-    )]
-    pub tunnel_wavelength_m: f64,
-    #[property(
-        min = 8.0,
-        max = 4000.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Cavern size (m)"
-    )]
-    pub cavern_wavelength_m: f64,
-    /// Rough share of the cave volume opened as caverns.
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Caves",
-        label = "Caverns (share)"
-    )]
-    pub cavern_share: f64,
-    /// Rock kept over every cave: tunnels and caverns close towards it
-    /// instead of breaking the surface, except at entrances.
-    #[property(
-        min = 0.0,
-        max = 100.0,
-        step = 0.5,
-        category = "Caves",
-        label = "Cover (m)"
-    )]
+    /// Depth of hubs and chambers under the ground.
+    #[property(min = 0.0, max = 1000.0, step = 1.0, category = "Caves", label = "Shallowest (m)")]
+    pub depth_min_m: f64,
+    #[property(min = 0.0, max = 1000.0, step = 1.0, category = "Caves", label = "Deepest (m)")]
+    pub depth_max_m: f64,
+    /// Cells deeper than this under the surface are never carved.
+    #[property(min = 1.0, max = 4000.0, step = 1.0, category = "Caves", label = "Depth limit (m)")]
+    pub max_depth_m: f64,
+    /// Rock kept over caves, except along entrances.
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Cover (m)")]
     pub cover_m: f64,
-    /// Rough share of a cave region where tunnels open to the surface.
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Caves",
-        label = "Entrances (share)"
-    )]
-    pub entrance_share: f64,
-    #[property(
-        min = 4.0,
-        max = 2000.0,
-        step = 1.0,
-        category = "Caves",
-        label = "Entrance spacing (m)"
-    )]
-    pub entrance_spacing_m: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Hub chambers (share)")]
+    pub hub_chambers: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Chambers (share)")]
+    pub chambers: f64,
+    #[property(min = 0.5, max = 200.0, step = 0.5, category = "Caves", label = "Chamber radius min (m)")]
+    pub chamber_min_m: f64,
+    #[property(min = 0.5, max = 200.0, step = 0.5, category = "Caves", label = "Chamber radius max (m)")]
+    pub chamber_max_m: f64,
+    #[property(min = 0.1, max = 1.0, step = 0.01, category = "Caves", label = "Chamber height (share)")]
+    pub chamber_height: f64,
+    #[property(min = 0.2, max = 50.0, step = 0.1, category = "Caves", label = "Tunnel radius min (m)")]
+    pub tunnel_min_m: f64,
+    #[property(min = 0.2, max = 50.0, step = 0.1, category = "Caves", label = "Tunnel radius max (m)")]
+    pub tunnel_max_m: f64,
+    #[property(min = 0.1, max = 1.0, step = 0.01, category = "Caves", label = "Tunnel height (share)")]
+    pub tunnel_height: f64,
+    /// Share of a vertical radius under the axis kept as floor (1: none).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Chamber floor")]
+    pub chamber_floor: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Tunnel floor")]
+    pub tunnel_floor: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Links (share)")]
+    pub links: f64,
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Caves", label = "Entrances (share)")]
+    pub entrances: f64,
+    #[property(min = 0.0, max = 200.0, step = 1.0, category = "Caves", label = "Entrance lift (m)")]
+    pub entrance_lift_m: f64,
+    #[property(min = 0.0, max = 100.0, step = 0.5, category = "Caves", label = "Bend (m)")]
+    pub bend_m: f64,
+    #[property(min = 0.0, max = 0.5, step = 0.01, category = "Caves", label = "Roughness")]
+    pub roughness: f64,
+    #[property(min = 0.2, max = 100.0, step = 0.1, category = "Caves", label = "Roughness size (m)")]
+    pub roughness_m: f64,
 }
 
 impl Default for VoxelCaves {
     fn default() -> Self {
+        Self::from_volumes(&volumes::Caves::default())
+    }
+}
+
+impl VoxelCaves {
+    fn from_volumes(c: &volumes::Caves) -> Self {
         Self {
-            enabled: true,
-            depth_m: 120.0,
-            share: 0.45,
-            region_km: 6.0,
-            tunnel_radius_m: 2.5,
-            tunnel_wavelength_m: 160.0,
-            cavern_wavelength_m: 160.0,
-            cavern_share: 0.04,
-            cover_m: 6.0,
-            entrance_share: 0.05,
-            entrance_spacing_m: 80.0,
+            enabled: c.enabled,
+            spacing_m: c.spacing_m,
+            share: c.share,
+            depth_min_m: c.depth_min_m,
+            depth_max_m: c.depth_max_m,
+            max_depth_m: c.max_depth_m,
+            cover_m: c.cover_m,
+            hub_chambers: c.hub_chambers,
+            chambers: c.chambers,
+            chamber_min_m: c.chamber_min_m,
+            chamber_max_m: c.chamber_max_m,
+            chamber_height: c.chamber_height,
+            tunnel_min_m: c.tunnel_min_m,
+            tunnel_max_m: c.tunnel_max_m,
+            tunnel_height: c.tunnel_height,
+            chamber_floor: c.chamber_floor,
+            tunnel_floor: c.tunnel_floor,
+            links: c.links,
+            entrances: c.entrances,
+            entrance_lift_m: c.entrance_lift_m,
+            bend_m: c.bend_m,
+            roughness: c.roughness,
+            roughness_m: c.roughness_m,
         }
     }
 }
 
-/// Generated overhangs: steep ground leaning over, a continuous
-/// deformation of the heightfield (no floating rock).
+/// A world's climate (`helio_pass_voxel_planet::layers::Climate`):
+/// temperature from latitude and height, moisture from the rain belts, the
+/// way to the sea and rain shadows; baked over the whole planet with Maps,
+/// else Latitude's everywhere.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
-#[category("Overhangs", category_color = "#A8826F")]
+#[category("Climate", category_color = "#5E9EA8")]
 #[derive(pulsar_reflection::Reflectable)]
 #[serde(default)]
-pub struct VoxelOverhangs {
-    #[property(category = "Overhangs")]
+pub struct VoxelClimate {
+    /// Bake planet maps: climate over the whole planet, and the drainage a
+    /// Rivers layer carves.
+    #[property(category = "Climate", label = "Maps")]
+    pub maps: bool,
+    /// The planet's axis (world direction): latitudes run around it.
+    #[property(category = "Climate")]
+    pub pole: [f32; 3],
+    /// Latitude of a flat world's origin (north is -Z), and of an unmapped
+    /// world's climate.
+    #[property(min = -90.0, max = 90.0, step = 1.0, category = "Climate", label = "Latitude (deg)")]
+    pub latitude_deg: f64,
+    /// Annual mean temperatures at sea level.
+    #[property(min = -100.0, max = 100.0, step = 0.5, category = "Climate", label = "Equator (C)")]
+    pub equator_c: f64,
+    #[property(min = -100.0, max = 100.0, step = 0.5, category = "Climate", label = "Poles (C)")]
+    pub pole_c: f64,
+    /// Cooling with height.
+    #[property(min = 0.0, max = 20.0, step = 0.1, category = "Climate", label = "Lapse rate (C/km)")]
+    pub lapse_c_per_km: f64,
+    /// Ground colder than this keeps its snow.
+    #[property(min = -50.0, max = 50.0, step = 0.5, category = "Climate", label = "Snow (C)")]
+    pub snow_c: f64,
+    /// Scale of the rain (1: Earth's); an unmapped world's moisture is its
+    /// latitude's rain belt times it.
+    #[property(min = 0.0, max = 4.0, step = 0.05, category = "Climate")]
+    pub wetness: f64,
+    /// How far inland, upwind, the rain halves.
+    #[property(min = 1.0, max = 20000.0, step = 10.0, category = "Climate", label = "Continentality (km)")]
+    pub continentality_km: f64,
+    /// Height of ground upwind that halves the rain behind it.
+    #[property(min = 1.0, max = 20000.0, step = 10.0, category = "Climate", label = "Rain shadow (m)")]
+    pub rain_shadow_m: f64,
+    /// Ground under the datum is sea.
+    #[property(category = "Climate")]
+    pub ocean: bool,
+    /// Size of the maps' texels at face centres.
+    #[property(min = 0.1, max = 1000.0, step = 1.0, category = "Climate", label = "Map texel (km)")]
+    pub texel_km: f64,
+}
+
+impl VoxelClimate {
+    /// The generator's climate as the component holds it. Field by field:
+    /// a serde round trip would build `Self::default()` (`#[serde(default)]`),
+    /// which is this.
+    fn from_generator(c: helio_pass_voxel_planet::layers::Climate) -> Self {
+        Self {
+            maps: c.maps,
+            pole: c.pole.map(|v| v as f32),
+            latitude_deg: c.latitude_deg,
+            equator_c: c.equator_c,
+            pole_c: c.pole_c,
+            lapse_c_per_km: c.lapse_c_per_km,
+            snow_c: c.snow_c,
+            wetness: c.wetness,
+            continentality_km: c.continentality_km,
+            rain_shadow_m: c.rain_shadow_m,
+            ocean: c.ocean,
+            texel_km: c.texel_km,
+        }
+    }
+    /// Earth's: warm tropics, frozen poles, oceans, rain belts.
+    pub fn earth() -> Self {
+        Self::from_generator(helio_pass_voxel_planet::layers::Climate::earth())
+    }
+    /// `latitude_deg`'s climate everywhere, unbaked.
+    pub fn uniform(latitude_deg: f64, wetness: f64) -> Self {
+        Self::from_generator(helio_pass_voxel_planet::layers::Climate::uniform(
+            latitude_deg,
+            wetness,
+        ))
+    }
+}
+
+impl Default for VoxelClimate {
+    fn default() -> Self {
+        Self::earth()
+    }
+}
+
+/// Cliff shapes (`volumes::Cliffs`): ledges, undercuts and overhangs on
+/// steep ground.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[category("Cliffs", category_color = "#A8826F")]
+#[derive(pulsar_reflection::Reflectable)]
+#[serde(default)]
+pub struct VoxelCliffs {
+    #[property(category = "Cliffs")]
     pub enabled: bool,
-    /// Largest horizontal lean of the ground.
-    #[property(
-        min = 0.0,
-        max = 20.0,
-        step = 0.5,
-        category = "Overhangs",
-        label = "Height (m)"
-    )]
-    pub height_m: f64,
-    /// Vertical wavelength of the lean (ledge spacing).
-    #[property(
-        min = 2.0,
-        max = 500.0,
-        step = 1.0,
-        category = "Overhangs",
-        label = "Ledge spacing (m)"
-    )]
-    pub wavelength_m: f64,
-    #[property(
-        min = 0.1,
-        max = 500.0,
-        step = 0.1,
-        category = "Overhangs",
-        label = "Region size (km)"
-    )]
+    /// Largest displacement along the surface's normal.
+    #[property(min = 0.0, max = 40.0, step = 0.5, category = "Cliffs", label = "Depth (m)")]
+    pub depth_m: f64,
+    /// Ledge spacing.
+    #[property(min = 0.2, max = 100.0, step = 0.1, category = "Cliffs", label = "Strata (m)")]
+    pub strata_m: f64,
+    /// Slope (rise over run) over which shapes fade in.
+    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Cliffs", label = "Slope from")]
+    pub slope_min: f64,
+    #[property(min = 0.0, max = 10.0, step = 0.05, category = "Cliffs", label = "Slope to")]
+    pub slope_max: f64,
+    /// Share of the displacement from 3D noise (the rest from strata).
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Cliffs", label = "Noise (share)")]
+    pub noise: f64,
+    #[property(min = 0.1, max = 500.0, step = 0.1, category = "Cliffs", label = "Region size (km)")]
     pub region_km: f64,
-    #[property(
-        min = 0.0,
-        max = 1.0,
-        step = 0.01,
-        category = "Overhangs",
-        label = "Regions (share)"
-    )]
+    #[property(min = 0.0, max = 1.0, step = 0.01, category = "Cliffs", label = "Regions (share)")]
     pub share: f64,
 }
 
-impl Default for VoxelOverhangs {
+impl Default for VoxelCliffs {
     fn default() -> Self {
+        Self::from_volumes(&volumes::Cliffs::default())
+    }
+}
+
+impl VoxelCliffs {
+    fn from_volumes(c: &volumes::Cliffs) -> Self {
         Self {
-            enabled: true,
-            height_m: 6.0,
-            wavelength_m: 6.0,
-            region_km: 3.0,
-            share: 0.3,
+            enabled: c.enabled,
+            depth_m: c.depth_m,
+            strata_m: c.strata_m,
+            slope_min: c.slope_min,
+            slope_max: c.slope_max,
+            noise: c.noise,
+            region_km: c.region_km,
+            share: c.share,
         }
     }
 }
 
-/// An ordered terrain layer stack, its caves and overhangs and its
+/// The terrain's volumetric shapes (`volumes::Volumes`, docs/volumes.md):
+/// cave networks and cliff shapes.
+#[engine_class(no_register, clone, debug, serialize, deserialize)]
+#[derive(pulsar_reflection::Reflectable)]
+#[serde(default)]
+pub struct VoxelVolumes {
+    #[property]
+    pub caves: VoxelCaves,
+    #[property]
+    pub cliffs: VoxelCliffs,
+}
+
+impl Default for VoxelVolumes {
+    fn default() -> Self {
+        Self::from_volumes(&volumes::Volumes::default())
+    }
+}
+
+impl VoxelVolumes {
+    /// The engine's settings as the component holds them.
+    pub fn from_volumes(v: &volumes::Volumes) -> Self {
+        Self {
+            caves: VoxelCaves::from_volumes(&v.caves),
+            cliffs: VoxelCliffs::from_volumes(&v.cliffs),
+        }
+    }
+}
+
+/// An ordered terrain layer stack, its caves and cliff shapes and its
 /// materials: the `helio.terrain` settings, edited as one value (the
 /// inspector's stack editor), so a preset replaces all of it at once.
 #[engine_class(no_register, clone, debug, serialize, deserialize)]
@@ -1098,15 +1077,15 @@ pub struct VoxelTerrainStack {
     /// Applied in order; at most eight enabled.
     #[property]
     pub layers: Vec<VoxelTerrainLayer>,
+    /// Caves and cliff shapes (docs/volumes.md).
     #[property]
-    pub caves: VoxelCaves,
-    #[property]
-    pub overhangs: VoxelOverhangs,
+    pub volumes: VoxelVolumes,
     #[property(label = "Material style")]
     pub materials: VoxelMaterialStyle,
-    /// Earthlike: flat ground above this height is snow.
-    #[property(min = -10000.0, max = 100000.0, step = 10.0, label = "Snowline (m)")]
-    pub snowline_m: f64,
+    /// Temperature and moisture: the Earthlike snow and dry lands, rules'
+    /// and features' climate ranges, and the maps rivers come from.
+    #[property]
+    pub climate: VoxelClimate,
     /// Depth of the soil (Earthlike, Layered) or regolith (Lunar).
     #[property(min = 0.0, max = 1000.0, step = 0.1, label = "Soil depth (m)")]
     pub soil_depth_m: f64,
@@ -1160,7 +1139,7 @@ type RegisteredVoxelTerrainStack = VoxelTerrainStack;
 
 /// Settings of the layered terrain generator (`helio.terrain`): an ordered
 /// stack of layers (continents, mountains, erosion, hills, craters,
-/// basins, plateaus), caves, overhangs and materials. Any world is a stack:
+/// basins, plateaus), cave networks, cliff shapes and materials. Any world is a stack:
 /// an Earth-like planet, a cratered moon, a desert, a flat block world, or
 /// one a game builds from a seed. It configures the [`VoxelTerrainComponent`]
 /// on the same entity, whose seed varies it; its serialized form (the
@@ -1219,7 +1198,8 @@ impl VoxelTerrainStack {
     }
 
     /// Continents and oceans, ridged mountains with branching erosion,
-    /// hills and roughness; caves, overhangs, meadows, rock and snow.
+    /// hills, river valleys and lakes, and roughness; karst caves, ledged
+    /// cliffs; Earth's climate over meadows, dry lands, rock and snow.
     pub fn earth() -> Self {
         use VoxelLayerKind::*;
         Self {
@@ -1232,15 +1212,15 @@ impl VoxelTerrainStack {
                 },
                 VoxelTerrainLayer::new(Erosion),
                 Self::earth_hills(),
+                VoxelTerrainLayer::new(Rivers),
                 VoxelTerrainLayer {
                     mask: VoxelLayerMask::AboveDeepSea,
                     ..VoxelTerrainLayer::new(Roughness)
                 },
             ],
-            caves: VoxelCaves::default(),
-            overhangs: VoxelOverhangs::default(),
+            volumes: VoxelVolumes::default(),
             materials: VoxelMaterialStyle::Earthlike,
-            snowline_m: 3_000.0,
+            climate: VoxelClimate::earth(),
             soil_depth_m: 0.7,
             surface: VoxelTerrainMaterial::Grass,
             soil: VoxelTerrainMaterial::Dirt,
@@ -1265,9 +1245,9 @@ impl VoxelTerrainStack {
     pub fn desert() -> Self {
         use VoxelTerrainMaterial as M;
         let mut earth = Self::earth();
-        earth
-            .layers
-            .retain(|l| l.kind != VoxelLayerKind::Continents);
+        earth.layers.retain(|l| {
+            l.kind != VoxelLayerKind::Continents && l.kind != VoxelLayerKind::Rivers
+        });
         // The desert's hills stay gentle under its dunes.
         for l in earth
             .layers
@@ -1316,12 +1296,13 @@ impl VoxelTerrainStack {
                 },
             ],
             rock: M::Sandstone,
-            snowline_m: 1.0e5,
+            climate: VoxelClimate::uniform(25.0, 0.2),
+            volumes: VoxelVolumes::from_volumes(&TerrainLayers::desert().volumes),
             ..earth
         }
     }
 
-    /// Cratered highlands and dark basalt plains over regolith, no caves.
+    /// Cratered highlands and dark basalt plains over regolith, lava tubes.
     pub fn moon() -> Self {
         use VoxelLayerKind::*;
         Self {
@@ -1349,15 +1330,9 @@ impl VoxelTerrainStack {
                     ..VoxelTerrainLayer::new(Craters)
                 },
             ],
-            caves: VoxelCaves {
-                enabled: false,
-                ..VoxelCaves::default()
-            },
-            overhangs: VoxelOverhangs {
-                enabled: false,
-                ..VoxelOverhangs::default()
-            },
+            volumes: VoxelVolumes::from_volumes(&TerrainLayers::moon().volumes),
             materials: VoxelMaterialStyle::Lunar,
+            climate: VoxelClimate::uniform(0.0, 0.0),
             soil_depth_m: 4.0,
             ..Self::earth()
         }
@@ -1370,68 +1345,12 @@ impl VoxelTerrainStack {
                 height_m,
                 ..VoxelTerrainLayer::new(VoxelLayerKind::Plateau)
             }],
-            caves: VoxelCaves {
-                enabled: false,
-                ..VoxelCaves::default()
-            },
-            overhangs: VoxelOverhangs {
-                enabled: false,
-                ..VoxelOverhangs::default()
-            },
+            volumes: VoxelVolumes::from_volumes(&volumes::Volumes::none()),
             materials: VoxelMaterialStyle::Layered,
+            climate: VoxelClimate::uniform(45.0, 1.0),
             soil_depth_m: 1.0,
             ..Self::earth()
         }
-    }
-}
-
-// SceneDB component methods are the stable scripting/registry surface for
-// individual edits and bounded brush batches. The editor uses
-// `VoxelSourceSession` for asynchronous, generation-checked brush strokes.
-#[pulsar_scenedb::component_methods]
-impl VoxelComponent {
-    #[world_method]
-    fn paint_sample(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        x: i64,
-        y: i64,
-        z: i64,
-        material_slot: u8,
-    ) -> Result<(), String> {
-        validate_paint_slot(material_slot)?;
-        edit_object_sample(world, entity, [x, y, z], material_slot)
-    }
-
-    #[world_method]
-    fn paint_samples(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        samples: Vec<[i64; 3]>,
-        material_slot: u8,
-    ) -> Result<(), String> {
-        validate_paint_slot(material_slot)?;
-        edit_object_samples(world, entity, &samples, material_slot)
-    }
-
-    #[world_method]
-    fn erase_sample(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        x: i64,
-        y: i64,
-        z: i64,
-    ) -> Result<(), String> {
-        edit_object_sample(world, entity, [x, y, z], 0)
-    }
-
-    #[world_method]
-    fn erase_samples(
-        world: &mut pulsar_scenedb::World,
-        entity: pulsar_scenedb::Entity,
-        samples: Vec<[i64; 3]>,
-    ) -> Result<(), String> {
-        edit_object_samples(world, entity, &samples, 0)
     }
 }
 
@@ -1482,58 +1401,6 @@ impl VoxelTerrainComponent {
     }
 }
 
-fn edit_object_sample(
-    world: &mut pulsar_scenedb::World,
-    entity: pulsar_scenedb::Entity,
-    xyz: [i64; 3],
-    material_slot: u8,
-) -> Result<(), String> {
-    edit_object_samples(world, entity, &[xyz], material_slot)
-}
-
-fn edit_object_samples(
-    world: &mut pulsar_scenedb::World,
-    entity: pulsar_scenedb::Entity,
-    samples: &[[i64; 3]],
-    material_slot: u8,
-) -> Result<(), String> {
-    let component = world
-        .get::<VoxelComponent>(entity)
-        .ok_or_else(|| "voxel object component is absent".to_string())?;
-    if !component.enabled || !component.editable {
-        return Err("voxel object is disabled or not editable".into());
-    }
-    if component
-        .dimensions
-        .iter()
-        .any(|&size| size == 0 || size > 256)
-    {
-        return Err("voxel object dimensions must be between 1 and 256 samples".into());
-    }
-    if samples.iter().any(|sample| {
-        sample
-            .iter()
-            .enumerate()
-            .any(|(axis, &coord)| coord < 0 || coord >= i64::from(component.dimensions[axis]))
-    }) {
-        return Err("voxel sample is outside the object dimensions".into());
-    }
-    publish_samples(
-        component.payload_store(),
-        helio_voxel_data::VoxelTerrainId(u128::from(entity.bits())),
-        samples,
-        material_slot,
-        &component.material_ids,
-        helio_voxel_data::VoxelDomain::Bounded {
-            min: [0; 3],
-            max: component
-                .dimensions
-                .map(|size| i64::from(size.div_ceil(8) - 1)),
-            max_lod: 0,
-        },
-    )
-}
-
 fn edit_terrain_sample(
     world: &mut pulsar_scenedb::World,
     entity: pulsar_scenedb::Entity,
@@ -1570,48 +1437,6 @@ fn edit_terrain_samples(
     super::voxel_world::append_edits(world, entity, edits)
 }
 
-fn publish_samples(
-    store: VoxelPayloadStore,
-    terrain: helio_voxel_data::VoxelTerrainId,
-    samples: &[[i64; 3]],
-    material_slot: u8,
-    material_ids: &[u32],
-    domain: helio_voxel_data::VoxelDomain,
-) -> Result<(), String> {
-    if samples.is_empty() {
-        return Ok(());
-    }
-    if samples.len() > helio_voxel_data::VOXEL_EDIT_MAX_SAMPLES_PER_JOB {
-        return Err(format!(
-            "voxel sample batch exceeds the {} sample limit",
-            helio_voxel_data::VOXEL_EDIT_MAX_SAMPLES_PER_JOB
-        ));
-    }
-    if usize::from(material_slot) > material_ids.len() {
-        return Err(format!(
-            "material slot {material_slot} is outside the palette"
-        ));
-    }
-    let writer = helio_voxel_data::VoxelSourceWriter::new(
-        terrain,
-        helio_voxel_data::VoxelSourceId(0),
-        store,
-    );
-    let edits: Vec<_> = samples
-        .iter()
-        .copied()
-        .map(|xyz| helio_voxel_data::VoxelSampleEdit {
-            xyz,
-            lod: 0,
-            material_slot,
-        })
-        .collect();
-    writer
-        .publish_sample_edits(&edits, domain, material_ids)
-        .map(|_| ())
-        .map_err(|error| format!("voxel sample edit failed: {error:?}"))
-}
-
 fn validate_paint_slot(material_slot: u8) -> Result<(), String> {
     if material_slot == 0 {
         Err("material slot 0 is reserved for erase operations".into())
@@ -1626,41 +1451,41 @@ mod tests {
     use pulsar_reflection::EngineClass;
 
     #[test]
-    fn voxel_component_starts_as_eight_filled_chunks_hidden_from_serialization() {
-        let component = VoxelComponent::default();
-        let store = component.payload_store();
-        let state = store.read().unwrap();
-        assert_eq!(state.1.len(), 8);
-        assert!(
-            state
-                .1
-                .values()
-                .all(|bytes| bytes.len() == 512 && bytes.iter().all(|&slot| slot == 1))
-        );
-        drop(state);
-        let serialized = serde_json::to_value(&component).unwrap();
-        assert!(serialized.get("payloads").is_none());
-        assert!(
-            !component
-                .get_properties()
-                .iter()
-                .any(|property| property.name == "payloads")
-        );
-    }
-
-    #[test]
-    fn filled_cube_zero_pads_partial_edges_and_checks_palette() {
-        let cube = VoxelComponent::filled_cube([9, 1, 1], vec![7], 1).unwrap();
-        let store = cube.payload_store();
-        let state = store.read().unwrap();
-        assert_eq!(state.1.len(), 2);
-        assert_eq!(state.1[&[0, 0, 0, 0]][0], 1);
-        assert_eq!(state.1[&[0, 0, 0, 0]][1], 1);
-        assert_eq!(state.1[&[0, 0, 0, 0]][8], 0);
-        assert_eq!(state.1[&[1, 0, 0, 0]][0], 1);
-        assert_eq!(state.1[&[1, 0, 0, 0]][1], 0);
-        assert!(VoxelComponent::filled_cube([0, 1, 1], vec![7], 1).is_err());
-        assert!(VoxelComponent::filled_cube([1, 1, 1], vec![], 1).is_err());
+    fn climates_and_stacks_construct() {
+        // `VoxelClimate`'s default is Earth's, built from the generator's:
+        // not through serde, whose `#[serde(default)]` asks for the default.
+        assert_eq!(VoxelClimate::default().snow_c, VoxelClimate::earth().snow_c);
+        assert_eq!(VoxelTerrainStack::earth().climate.equator_c, 28.0);
+        let _ = VoxelTerrainLayersComponent::default();
+        for name in VoxelTerrainStack::PRESETS {
+            assert!(VoxelTerrainStack::preset(name).is_some(), "{name}");
+        }
+        use helio_pass_voxel_planet::layers::Climate;
+        for generator in [Climate::earth(), Climate::uniform(25.0, 0.2)] {
+            let c = VoxelClimate::from_generator(generator.clone());
+            assert_eq!(
+                serde_json::to_value(&c).unwrap(),
+                serde_json::to_value(Climate {
+                    pole: c.pole.map(f64::from),
+                    ..generator
+                })
+                .unwrap(),
+                "every field carried over"
+            );
+            assert_eq!(c.pole, generator.pole.map(|v| v as f32));
+        }
+        // The component's presets are the generator's, exactly.
+        use helio_pass_voxel_planet::layers::TerrainLayers;
+        for (component, generator) in [
+            (VoxelTerrainStack::earth(), TerrainLayers::earth()),
+            (VoxelTerrainStack::moon(), TerrainLayers::moon()),
+            (VoxelTerrainStack::desert(), TerrainLayers::desert()),
+            (VoxelTerrainStack::flat(2.0), TerrainLayers::flat_at(2.0)),
+        ] {
+            let parsed: TerrainLayers =
+                serde_json::from_value(serde_json::to_value(&component).unwrap()).unwrap();
+            assert_eq!(parsed, generator);
+        }
     }
 
     #[test]
@@ -1725,36 +1550,5 @@ mod tests {
         }
         assert_eq!(VoxelAir::from_name("Mars"), Some(VoxelAir::Thin));
         assert_eq!(VoxelAir::from_name("vacuum"), None);
-    }
-
-    #[test]
-    fn cloned_component_preserves_live_state_without_aliasing_future_mutations() {
-        let original = VoxelComponent::default();
-        let chunks = original.payloads.read().unwrap().1.len();
-        let payload: Arc<[u8]> = Arc::from([1, 2, 3]);
-        original.payloads.write().unwrap().1.insert(
-            [u64::MAX, 0, 42, 7],
-            VoxelStoredPayload::raw_material(payload.clone()),
-        );
-        let clone = original.clone();
-
-        assert!(!Arc::ptr_eq(&original.payloads, &clone.payloads));
-        assert_eq!(original.payloads.read().unwrap().1.len(), chunks + 1);
-        assert_eq!(clone.payloads.read().unwrap().1.len(), chunks + 1);
-
-        clone
-            .payloads
-            .write()
-            .unwrap()
-            .1
-            .remove(&[u64::MAX, 0, 42, 7]);
-        assert_eq!(original.payloads.read().unwrap().1.len(), chunks + 1);
-
-        // Shared snapshots are explicit and retain immutable bytes cheaply.
-        let shared_handle = Arc::clone(&original.payloads);
-        let shared_payload = shared_handle.read().unwrap().1[&[u64::MAX, 0, 42, 7]]
-            .bytes
-            .clone();
-        assert!(Arc::ptr_eq(&payload, &shared_payload));
     }
 }

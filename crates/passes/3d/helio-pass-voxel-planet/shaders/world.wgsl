@@ -5,7 +5,7 @@ const HEIGHT_ONE: i32 = 1000; // height units (mm) per metre
 struct World {
     grid: vec4<i32>,  // reference cells, layer thickness (mm), grid cells, level offset
     scale: vec4<u32>, // domain scale (Q24), volume inv, volume shift, half layer (Q16 domain units)
-    sphere: vec4<u32>, // sphere domain: 1 / reference (inv, shift), domain radius; w: surface words stored
+    sphere: vec4<u32>, // sphere domain: 1 / reference (inv, shift), domain radius; w: pad
 }
 
 // Engine material ids (terrain::material).
@@ -153,13 +153,6 @@ fn volume_point_half(p: vec3<i32>, h: i32) -> vec3<i32> {
 
 fn top_cells(height: i32, level: u32) -> i32 {
     return div_floor(height, world.grid.y) >> level;
-}
-
-// Density of a heightfield cell (`terrain::heightfield_density`): its
-// distance to the column top, 256 per level cell, positive inside solid.
-fn heightfield_density(top: i32, k: i32) -> i32 {
-    let cells = clamp(top - k, -65536, 65536);
-    return cells * 256 - 128;
 }
 
 fn terrain_kind(top: i32, k: i32) -> u32 {

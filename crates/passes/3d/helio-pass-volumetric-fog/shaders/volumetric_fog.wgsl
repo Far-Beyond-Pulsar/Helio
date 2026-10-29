@@ -129,8 +129,9 @@ const NO_SHADOW: u32 = 4294967295u;
 @group(0) @binding(21) var               shadow_transmittance: texture_2d_array<f32>;
 // The sun's occlusion by terrain outside the shadow maps (voxel terrain:
 // `sun_occlusion`), its levels 0 when none is published.
-@group(0) @binding(22) var               sun_occlusion_maps: texture_2d_array<f32>;
+@group(0) @binding(22) var               sun_occlusion_maps: texture_2d<f32>;
 @group(0) @binding(23) var<uniform>      sun_occlusion_frame: SunOcclusionFrame;
+@group(0) @binding(26) var<storage, read> sun_occlusion_pages: array<u32>;
 // The clouds' shadow along the sun (helio-pass-sky's `cloud_shadow`), its
 // frame zero when no clouds are published.
 @group(0) @binding(24) var               cloud_shadow_map: texture_2d<f32>;
@@ -853,7 +854,9 @@ fn shaft_visibility(light_idx: u32, p0: vec3<f32>) -> vec3<f32> {
     var lit = shadow_map_visibility(light_idx, p0);
     if lights[light_idx].light_type == LIGHT_DIRECTIONAL {
         let from_camera = p0 - cameras[0].position_near.xyz;
-        lit *= sun_occlusion(from_camera) * cloud_shadow(from_camera);
+        // A froxel's footprint: a tenth of its distance (fog's shafts are
+        // soft; coarse levels are resident around the eye).
+        lit *= sun_occlusion_point(from_camera, 0.1 * length(from_camera)) * cloud_shadow(from_camera);
     }
     return lit;
 }

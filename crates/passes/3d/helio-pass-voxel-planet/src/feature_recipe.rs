@@ -205,6 +205,12 @@ pub struct SpawnRecipe {
     pub max_height_m: f64,
     pub height_wander_m: f64,
     pub height_wander_scale_m: f64,
+    /// The climate it grows in: annual mean temperature (°C) and moisture
+    /// (0 dry to 1 wet) at its ground (the terrain's `climate`).
+    pub min_temperature_c: f64,
+    pub max_temperature_c: f64,
+    pub min_moisture: f64,
+    pub max_moisture: f64,
     /// Most rise (m) between the ground at its anchor and its footprint's
     /// corners; 0: any.
     pub max_relief_m: f64,
@@ -230,6 +236,10 @@ impl Default for SpawnRecipe {
             max_height_m: 1e9,
             height_wander_m: 0.0,
             height_wander_scale_m: 0.0,
+            min_temperature_c: -1e3,
+            max_temperature_c: 1e3,
+            min_moisture: 0.0,
+            max_moisture: 1.0,
             max_relief_m: 0.0,
             sink_m: 0.0,
             far_material: 0,
@@ -278,6 +288,8 @@ impl FeatureRecipe {
                 surfaces: s.surfaces.clone(),
                 heights_m: [s.min_height_m, s.max_height_m],
                 height_wander_m: [s.height_wander_m, s.height_wander_scale_m],
+                temperature_c: [s.min_temperature_c, s.max_temperature_c],
+                moisture: [s.min_moisture, s.max_moisture],
                 max_relief: if s.max_relief_m > 0.0 {
                     cells(s.max_relief_m)
                 } else {
@@ -309,15 +321,17 @@ impl FeatureRecipe {
         }
     }
 
-    /// Broadleaf and birch woods in the lowlands, conifers up to the tree
-    /// line, boulders on rock, scree and snow, bushes in the meadows,
+    /// Broadleaf and birch woods where it is mild and wet, conifers where
+    /// it is cold up to the tree line (the climate's: lower toward the
+    /// poles), boulders on rock, scree and snow, bushes in the meadows,
     /// shrubs and rocks on dry land.
     pub fn earth() -> Self {
         use material::*;
-        // Broadleaves give way to conifers over this height (m), and those
-        // stop at the tree line, below the snow; both lines wander a few
-        // hundred metres over half a kilometre (no contour lines).
-        let (conifer_line, tree_line) = (1_100.0, 2_600.0);
+        // Broadleaves give way to conifers under this annual mean
+        // temperature (°C), and those stop at the tree line, below the
+        // snow; both lines wander a few hundred metres over half a
+        // kilometre (no contour lines). Woods need rain.
+        let (conifer_line, tree_line, woods_moisture) = (7.5, 0.5, 0.36);
         let ([lowland_wander, lowland_scale], [tree_line_wander, tree_line_scale]) =
             ([150.0, 500.0], [200.0, 450.0]);
         let meadow = vec![GRASS, DIRT];
@@ -333,7 +347,8 @@ impl FeatureRecipe {
             field_scale_m,
             field_threshold,
             surfaces: meadow.clone(),
-            max_height_m: conifer_line,
+            min_temperature_c: conifer_line,
+            min_moisture: woods_moisture,
             height_wander_m: lowland_wander,
             height_wander_scale_m: lowland_scale,
             max_relief_m: 3.0,
@@ -360,8 +375,9 @@ impl FeatureRecipe {
                     LEAVES,
                 ),
                 SpawnRecipe {
-                    min_height_m: conifer_line,
-                    max_height_m: tree_line,
+                    min_temperature_c: tree_line,
+                    max_temperature_c: conifer_line,
+                    min_moisture: woods_moisture - 0.08,
                     height_wander_m: tree_line_wander,
                     height_wander_scale_m: tree_line_scale,
                     ..forest("conifers", conifers, 1_600.0, -0.25, NEEDLES)
@@ -401,7 +417,7 @@ impl FeatureRecipe {
                     field_scale_m: 200.0,
                     field_threshold: -0.2,
                     surfaces: meadow.clone(),
-                    max_height_m: tree_line,
+                    min_temperature_c: tree_line,
                     height_wander_m: tree_line_wander,
                     height_wander_scale_m: tree_line_scale,
                     max_relief_m: 1.0,

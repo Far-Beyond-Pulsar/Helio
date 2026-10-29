@@ -87,9 +87,13 @@ This uses the SceneDB handle only as `RendererBuilder` input. Passes see its reg
 
 ## Resize and rebuild policy
 
-For a directly owned `RenderGraph`, `set_render_size` reallocates graph resources and calls `on_resize` on its passes. The `Renderer` can rebuild a fresh graph on resize when a `GraphRebuilder` is stored on the graph or supplied through `set_graph_with_builder`; otherwise it resizes the existing graph. Use a rebuilder when your pipeline's pass set or constructors depend on current config/dimensions. `GraphRebuilder` is an `Arc` closure over the device, queue, config, debug state, and renderer buffers; default graph builders store one on the graph.
+A resize keeps the graph and its passes: `RenderGraph::resize(RenderSize)` (or `set_render_size` for one size) reallocates graph textures in place and calls `on_resize` on every pass, members and dormant ones alike, with both the internal (render) and output (presented) sizes. The `Renderer` does this on every window resize. It builds a fresh graph only on `request_graph_rebuild` (config changes, TSR quality), through the `GraphRebuilder` stored on the graph or supplied through `set_graph_with_builder`; the rebuilt graph inherits the old graph's members. Use a rebuilder when your pipeline's pass set or constructors depend on config. `GraphRebuilder` is an `Arc` closure over the device, queue, config, debug state, and renderer buffers; default graph builders store one on the graph.
 
 Passes whose persistent state can safely move to the rebuilt graph may implement `inherit_persistent_state`. The replacement pass must check that its type/configuration matches, avoid retaining old graph-pool views, and return `true` only when it actually moved the state. The graph calls `on_resize` after successful transfer.
+
+## Scene membership
+
+The graph holds every pass a pipeline can use, but each frame schedules only its members. Before a frame the graph asks each pass `is_member(&mut SceneContent)`; a pass that answers false is dormant: not prepared or executed, given no graph textures, but still found by `find_pass` and still told about debug mode, editor mode, frame inputs and resizes. A pass whose work depends on scene content answers from that content, usually `scene.holds_rows("key")` (whether a SceneDB buffer has a live row, read back asynchronously by the graph) or from state a host set (a debug mode, a projection count). Passes allocate their content resources when they join (first `prepare`) and free them in `on_leave`. When the members change, the graph schedules again, keeping every graph texture whose declaration is unchanged; a new member joins a frame or two after its rows appear. Code builders and graph assets get this alike, because the predicate lives in the pass.
 
 ## Render-pass chaining, external inputs, and runtime additions
 

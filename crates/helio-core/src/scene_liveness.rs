@@ -146,10 +146,28 @@ impl SceneBufferLiveness {
     /// False only when the current contents are known to hold no live row
     /// (per the row predicate).
     pub fn maybe_live(&self, handle: &BufferHandle) -> bool {
+        self.answer(handle).unwrap_or(true)
+    }
+
+    /// Whether the current contents hold a live row, once their readback has
+    /// arrived; `None` until then. A buffer too large to read back counts as
+    /// live, an empty one as not.
+    pub fn answer(&self, handle: &BufferHandle) -> Option<bool> {
+        match handle.buffer.size() {
+            0 => return Some(false),
+            size if size > MAX_READBACK_BYTES => return Some(true),
+            _ => {}
+        }
         let key = (handle.epoch, handle.content_generation);
         match self.known {
-            Some((known, live)) if known == key => live,
-            _ => true,
+            Some((known, live)) if known == key => Some(live),
+            _ => None,
         }
+    }
+
+    /// The latest answer for any contents, current or not; `None` before the
+    /// first readback has arrived.
+    pub fn last_answer(&self) -> Option<bool> {
+        self.known.map(|(_, live)| live)
     }
 }

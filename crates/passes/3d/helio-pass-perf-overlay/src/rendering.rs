@@ -16,6 +16,13 @@ pub struct PerfOverlayShared {
     pub(crate) num_tiles_x: u32,
     pub(crate) num_tiles_y: u32,
 
+    /// Whether the per-pixel targets below are full size. They are 1-texel
+    /// placeholders until a mode asks for them (the passes are graph members
+    /// only then), and go back to placeholders when the overlay is off.
+    pub(crate) targets_allocated: bool,
+    /// Advances whenever the per-pixel targets are replaced, so passes drop
+    /// bind groups built over the old ones.
+    pub(crate) targets_generation: u64,
     pub(crate) color_snapshot_prev: wgpu::Texture,
     pub(crate) color_snapshot_prev_view: wgpu::TextureView,
     pub(crate) pass_overdraw_buf: wgpu::Buffer,
@@ -39,11 +46,18 @@ pub struct PerfOverlayShared {
     pub(crate) runtime: Mutex<PerfOverlayRuntime>,
 }
 
-impl PerfOverlayShared {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Arc<Mutex<Self>> {
-        let num_tiles_x = width.div_ceil(TILE_SIZE);
-        let num_tiles_y = height.div_ceil(TILE_SIZE);
+/// The overlay's per-pixel targets: the previous colour snapshot and the
+/// overdraw and shader-cost counters, `width` x `height`.
+struct PixelTargets {
+    color_snapshot_prev: wgpu::Texture,
+    color_snapshot_prev_view: wgpu::TextureView,
+    pass_overdraw_buf: wgpu::Buffer,
+    shader_cost_buf: wgpu::Buffer,
+}
 
+impl PixelTargets {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
         let color_snapshot_prev = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PerfOverlay Color Snapshot"),
             size: wgpu::Extent3d {
@@ -60,14 +74,35 @@ impl PerfOverlayShared {
         });
         let color_snapshot_prev_view =
             color_snapshot_prev.create_view(&wgpu::TextureViewDescriptor::default());
-
         let pixel_count = (width as u64) * (height as u64);
-        let pass_overdraw_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PerfOverlay Pass Overdraw Counters"),
-            size: pixel_count * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let counters = |label| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: pixel_count * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        };
+        Self {
+            color_snapshot_prev,
+            color_snapshot_prev_view,
+            pass_overdraw_buf: counters("PerfOverlay Pass Overdraw Counters"),
+            shader_cost_buf: counters("PerfOverlay Shader Cost"),
+        }
+    }
+}
+
+impl PerfOverlayShared {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Arc<Mutex<Self>> {
+        let num_tiles_x = width.div_ceil(TILE_SIZE);
+        let num_tiles_y = height.div_ceil(TILE_SIZE);
+
+        let PixelTargets {
+            color_snapshot_prev,
+            color_snapshot_prev_view,
+            pass_overdraw_buf,
+            shader_cost_buf,
+        } = PixelTargets::new(device, 1, 1);
 
         let color_compare_shader = helio_core::shader::module(
             device,
@@ -197,13 +232,6 @@ impl PerfOverlayShared {
             },
         );
 
-        let shader_cost_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PerfOverlay Shader Cost"),
-            size: pixel_count * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let material_timing_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Material Timing Data"),
             size: 128 * 16,
@@ -316,6 +344,8 @@ impl PerfOverlayShared {
             display_height: height,
             num_tiles_x,
             num_tiles_y,
+            targets_allocated: false,
+            targets_generation: 0,
             color_snapshot_prev,
             color_snapshot_prev_view,
             pass_overdraw_buf,
@@ -338,12 +368,50 @@ impl PerfOverlayShared {
         }))
     }
 
-    pub fn on_resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
-        if width == self.display_width && height == self.display_height {
+    pub fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if width == self.internal_width && height == self.internal_height {
             return;
         }
+        self.internal_width = width;
+        self.internal_height = height;
         self.display_width = width;
         self.display_height = height;
+        self.num_tiles_x = width.div_ceil(TILE_SIZE);
+        self.num_tiles_y = height.div_ceil(TILE_SIZE);
+        if self.targets_allocated {
+            self.set_targets(device, true);
+        }
+    }
+
+    /// Full-size per-pixel targets (`true`) or placeholders.
+    fn set_targets(&mut self, device: &wgpu::Device, allocated: bool) {
+        let targets = if allocated {
+            PixelTargets::new(device, self.internal_width, self.internal_height)
+        } else {
+            PixelTargets::new(device, 1, 1)
+        };
+        self.color_snapshot_prev = targets.color_snapshot_prev;
+        self.color_snapshot_prev_view = targets.color_snapshot_prev_view;
+        self.pass_overdraw_buf = targets.pass_overdraw_buf;
+        self.shader_cost_buf = targets.shader_cost_buf;
+        self.targets_allocated = allocated;
+        self.targets_generation += 1;
+        self.runtime.lock().unwrap().snapshot_valid = false;
+    }
+
+    /// Gives the per-pixel targets their full size; called by a pass that
+    /// has joined the graph, before it uses them.
+    pub(crate) fn ensure_targets(&mut self, device: &wgpu::Device) {
+        if !self.targets_allocated {
+            self.set_targets(device, true);
+        }
+    }
+
+    /// Back to placeholders once no mode is on (a pass leaving the graph).
+    pub(crate) fn release_targets(&mut self, device: &wgpu::Device) {
+        if self.targets_allocated && self.get_mode() == PerfOverlayMode::Disabled {
+            self.set_targets(device, false);
+        }
     }
 
     pub fn get_mode(&self) -> PerfOverlayMode {
@@ -390,8 +458,10 @@ pub struct PerfOverlayPass {
     pub(crate) visualize_bgl: wgpu::BindGroupLayout,
     pub(crate) visualize_params_buf: wgpu::Buffer,
     pub(crate) visualize_bind_group: Option<wgpu::BindGroup>,
-    pub(crate) aggregate_bind_group_key: Option<(usize, usize)>,
-    pub(crate) visualize_bind_group_key: Option<usize>,
+    /// (G-buffer ORM view, tile light counts, shared targets generation).
+    pub(crate) aggregate_bind_group_key: Option<(usize, usize, u64)>,
+    /// (G-buffer ORM view, shared targets generation).
+    pub(crate) visualize_bind_group_key: Option<(usize, u64)>,
 }
 
 impl PerfOverlayPass {
@@ -638,7 +708,17 @@ impl RenderPass for PerfOverlayPass {
         "PerfOverlay"
     }
 
+    /// A member while some overlay mode is on.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.shared.lock().unwrap().get_mode() != PerfOverlayMode::Disabled
+    }
+
+    fn on_leave(&mut self, device: &wgpu::Device) {
+        self.shared.lock().unwrap().release_targets(device);
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.shared.lock().unwrap().ensure_targets(ctx.device);
         let shared = self.shared.lock().unwrap();
         let mode = *shared.mode.lock().unwrap();
         if mode == PerfOverlayMode::Disabled {
@@ -732,7 +812,11 @@ impl RenderPass for PerfOverlayPass {
         ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
-            let key = (gbuffer_orm_ptr, tile_light_counts_ptr);
+            let key = (
+                gbuffer_orm_ptr,
+                tile_light_counts_ptr,
+                shared.targets_generation,
+            );
 
             if self.aggregate_bind_group_key != Some(key) {
                 self.aggregate_bind_group =
@@ -782,7 +866,7 @@ impl RenderPass for PerfOverlayPass {
                 .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
         ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
-            let key = gbuffer_orm_ptr;
+            let key = (gbuffer_orm_ptr, shared.targets_generation);
 
             if self.visualize_bind_group_key != Some(key) || self.visualize_bind_group.is_none() {
                 self.visualize_bind_group =
@@ -824,7 +908,8 @@ impl RenderPass for PerfOverlayPass {
         Ok(())
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+    fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
+        let [width, height] = size.internal;
         let mut shared = self.shared.lock().unwrap();
         shared.on_resize(device, width, height);
 

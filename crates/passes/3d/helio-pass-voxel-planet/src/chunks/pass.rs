@@ -1,9 +1,10 @@
 //! Chunk trees in Helio's render graph: residency, primary visibility, sun
-//! and sky light, and the gbuffer, from a host's [`SharedPlanetFrame`].
-//! Lighting is Helio's deferred lighting, its sun shadowed by walks through
-//! the chunk trees (`directional_visibility`).
+//! and sky light, and the gbuffer, from a host's [`SharedPlanetFrame`]: its
+//! volumes, each placed by its transform, in one world. Lighting is Helio's
+//! deferred lighting, its sun shadowed by walks through the chunk trees
+//! (`directional_visibility`).
 
-use super::{residency, ChunkWorld, FrameTimings, ResidencyConfig, UpdateStats};
+use super::{residency, ChunkWorld, EditSync, FrameTimings, ResidencyConfig, UpdateStats, VolumeId};
 use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
 use glam::{DVec3, Mat4, Vec2, Vec3};
 use helio_core::Result as HelioResult;
@@ -12,19 +13,27 @@ use helio_core::{
     RenderPass,
 };
 
+/// A frame's volume as the world holds it: the host's id, the world's, the
+/// recipe it was added for (fingerprint), and a save's export underway (its
+/// resident edited chunks packing).
+struct HeldVolume {
+    id: u64,
+    volume: VolumeId,
+    recipe: u64,
+    exporting: bool,
+}
+
 pub struct ChunkPass {
     source: SharedPlanetFrame,
     config: ResidencyConfig,
-    /// The host's art settings (none: the terrain generator's).
+    /// The host's art settings (none: each terrain generator's).
     appearance: Option<TerrainAppearance>,
     debug_mode: u32,
     world: Option<ChunkWorld>,
-    /// The planet the world was built for (recipe fingerprint).
-    built_for: Option<u64>,
+    /// The frame's volumes the world holds.
+    held: Vec<HeldVolume>,
     shown: Option<PlanetFrame>,
-    /// A save's export underway: the resident edited chunks are packing.
-    exporting: bool,
-    /// How the frame's kept chunks went into the last world built: how
+    /// How the kept chunks of the last volume added went into it: how
     /// many, or why they were refused.
     kept_loaded: Option<Result<usize, String>>,
     last_eye: [Option<(DVec3, std::time::Instant)>; 2],
@@ -77,9 +86,8 @@ impl ChunkPass {
             appearance: None,
             debug_mode: 0,
             world: None,
-            built_for: None,
+            held: Vec::new(),
             shown: None,
-            exporting: false,
             kept_loaded: None,
             last_eye: [None; 2],
             residency_eye: None,
@@ -131,14 +139,21 @@ impl ChunkPass {
         self.residency_eye = eye;
     }
 
-    /// The host's art settings; whether they changed.
+    /// The host's art settings (every volume's); whether they changed.
     pub fn set_appearance(&mut self, appearance: Option<TerrainAppearance>) -> bool {
         if self.appearance == appearance {
             return false;
         }
         self.appearance = appearance;
         if let (Some(world), Some(frame)) = (&mut self.world, &self.shown) {
-            world.set_appearance(&appearance.unwrap_or_else(|| frame.planet.field().appearance()));
+            for v in &frame.volumes {
+                if let Some(held) = self.held.iter().find(|h| h.id == v.volume.id) {
+                    world.set_appearance(
+                        held.volume,
+                        &appearance.unwrap_or_else(|| v.volume.planet.field().appearance()),
+                    );
+                }
+            }
         }
         true
     }
@@ -152,25 +167,31 @@ impl ChunkPass {
         let Some(frame) = source.as_ref() else {
             return false;
         };
-        let exporting = frame
-            .export
-            .as_ref()
-            .is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted));
+        let exporting = frame.volumes.iter().any(|v| {
+            v.export
+                .as_ref()
+                .is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted))
+        });
         exporting || self.world.as_ref().is_none_or(|w| !w.settled())
     }
 
-    /// How the frame's kept chunks went into the last world built: how
-    /// many it keeps, or why they were refused (`None`: it had none).
+    /// How the kept chunks of the last volume added went into it: how many
+    /// it keeps, or why they were refused (`None`: it had none).
     pub fn kept_loaded(&self) -> Option<&Result<usize, String>> {
         self.kept_loaded.as_ref()
     }
 
-    /// Whether a planet's chunks are held.
+    /// Whether volumes' chunks are held.
     pub fn has_world(&self) -> bool {
         self.world.is_some()
     }
 
-    /// The planet's chunks, for diagnostics (trace counts, a pixel's trace).
+    /// The world's volume of host volume `id`, once it holds it.
+    pub fn volume_of(&self, id: u64) -> Option<VolumeId> {
+        self.held.iter().find(|h| h.id == id).map(|h| h.volume)
+    }
+
+    /// The volumes' chunks, for diagnostics (trace counts, a pixel's trace).
     pub fn world(&self) -> Option<&ChunkWorld> {
         self.world.as_ref()
     }
@@ -178,6 +199,11 @@ impl ChunkPass {
     /// Whether nothing is left to generate for the current eye.
     pub fn settled(&self) -> bool {
         self.world.as_ref().is_some_and(ChunkWorld::settled)
+    }
+
+    /// What the sun's occlusion pages did last frame (`ChunkWorld::sun_page_stats`).
+    pub fn sun_page_stats(&self) -> Option<super::SunPageStats> {
+        self.world.as_ref().and_then(ChunkWorld::sun_page_stats)
     }
 
     /// The last frame's residency.
@@ -201,13 +227,17 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
+            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} chunk_slots={} leaf_pages={} leaf_page_capacity={} grow_ms={:.2} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
             self.settled(),
             self.kept_loaded,
             s.kept_chunks,
             s.kept_bytes,
             s.detail_pages.0,
             s.detail_pages.1,
+            s.chunk_slots,
+            s.leaf_pages.0,
+            s.leaf_pages.1,
+            s.grow_ms,
             s.out_of_details,
             s.drawn_nodes,
             s.drawn_chunks,
@@ -267,6 +297,7 @@ const WRITES: &[&str] = &[
     "tsr_stochastic",
     helio_pass_gi::GI_HITS,
     helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
+    helio_pass_shadow_matrix::SUN_OCCLUSION_PAGES,
     helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
 ];
 
@@ -293,9 +324,8 @@ impl RenderPass for ChunkPass {
         if let Some(world) = &mut self.world {
             world.set_debug_mode(self.debug_mode);
         }
-        self.built_for = previous.built_for.take();
+        self.held = std::mem::take(&mut previous.held);
         self.shown = previous.shown.take();
-        self.exporting = previous.exporting;
         self.kept_loaded = previous.kept_loaded.take();
         // A graph rebuild must not revert the host's art settings.
         self.appearance = previous.appearance;
@@ -342,10 +372,17 @@ impl RenderPass for ChunkPass {
         if let Some(buffer) = self.world.as_ref().and_then(ChunkWorld::local_visibility) {
             frame.write_buffer_binding("local_visibility", buffer, self.name());
         }
-        if let Some((maps, sun_frame)) = self.world.as_ref().and_then(ChunkWorld::sun_occlusion) {
+        if let Some((maps, pages, sun_frame)) =
+            self.world.as_ref().and_then(ChunkWorld::sun_occlusion)
+        {
             frame.write_texture_binding(
                 helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
                 maps,
+                self.name(),
+            );
+            frame.write_buffer_binding(
+                helio_pass_shadow_matrix::SUN_OCCLUSION_PAGES,
+                pages,
                 self.name(),
             );
             frame.write_buffer_binding(
@@ -436,54 +473,93 @@ impl ChunkPass {
                 helio_core::Error::InvalidPassConfig("planet frame source poisoned".into())
             })?
             .clone();
-        // No planet: its chunks and storage go.
+        // No frame: the chunks and storage go.
         let Some(frame) = frame else {
             self.shown = None;
             self.world = None;
-            self.built_for = None;
+            self.held.clear();
             return Ok(());
         };
-        // Foliage tiles the planet this pass draws (a rebuilt graph's new pass too).
-        self.planet_ground.set_grid(*frame.planet.grid());
-        let recipe = frame.planet.recipe_fingerprint();
-        // Edits follow the planet; another recipe or history, a new world.
-        if self.built_for != Some(recipe)
-            || self
-                .world
-                .as_mut()
-                .is_some_and(|w| !w.sync_edits(&frame.planet))
-        {
-            let mut world = ChunkWorld::new(ctx.device, ctx.queue, &frame.planet);
+        let world = self.world.get_or_insert_with(|| {
+            let mut world = ChunkWorld::new(ctx.device, ctx.queue);
             world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);
             world.set_debug_mode(self.debug_mode);
-            if let Some(appearance) = &self.appearance {
-                world.set_appearance(appearance);
+            world
+        });
+        // The frame's volumes: each followed by its edits (any history, in
+        // place), placed by its transform; another recipe, the volume added
+        // again.
+        let mut held = Vec::with_capacity(frame.volumes.len());
+        for v in &frame.volumes {
+            let planet = &v.volume.planet;
+            let recipe = planet.recipe_fingerprint();
+            let at = self.held.iter().position(|h| h.id == v.volume.id);
+            let synced = at
+                .filter(|&n| self.held[n].recipe == recipe)
+                .and_then(|n| world.sync_edits(self.held[n].volume, planet));
+            if let Some(sync) = synced {
+                let h = self.held.swap_remove(at.unwrap());
+                world.set_transform(h.volume, v.volume.transform);
+                // Another history (a level loaded): its saved chunks too.
+                if sync == EditSync::Resynced {
+                    self.kept_loaded = v
+                        .kept
+                        .as_ref()
+                        .map(|kept| world.load_kept(h.volume, planet, kept));
+                }
+                held.push(h);
+                continue;
             }
-            self.kept_loaded = frame
+            if let Some(n) = at {
+                world.remove_volume(self.held.swap_remove(n).volume);
+            }
+            let volume = world.add_volume(v.volume.id, planet, v.volume.transform);
+            if let Some(appearance) = &self.appearance {
+                world.set_appearance(volume, appearance);
+            }
+            self.kept_loaded = v
                 .kept
                 .as_ref()
-                .map(|kept| world.load_kept(&frame.planet, kept));
-            self.world = Some(world);
-            self.built_for = Some(recipe);
+                .map(|kept| world.load_kept(volume, planet, kept));
             self.last_eye = [None; 2];
-            self.exporting = false;
+            held.push(HeldVolume {
+                id: v.volume.id,
+                volume,
+                recipe,
+                exporting: false,
+            });
         }
-        // A save's export: the resident edited chunks packed (over the
-        // next updates), then all kept chunks answered for this planet.
-        if let (Some(world), Some(export)) = (&mut self.world, &frame.export) {
+        // Volumes the frame no longer shows go.
+        for gone in std::mem::replace(&mut self.held, held) {
+            world.remove_volume(gone.volume);
+        }
+        if let (Some(primary), Some(first)) = (self.held.first(), frame.volumes.first()) {
+            world.set_primary(primary.volume);
+            // Foliage tiles the primary volume this pass draws (a rebuilt
+            // graph's new pass too).
+            self.planet_ground
+                .set_volume(*first.volume.planet.grid(), first.volume.transform);
+        }
+        // A save's export: a volume's resident edited chunks packed (over
+        // the next updates), then its kept chunks answered for its world.
+        for (h, v) in self.held.iter_mut().zip(&frame.volumes) {
+            let Some(export) = &v.export else { continue };
             let mut export = export.lock().map_err(|_| {
                 helio_core::Error::InvalidPassConfig("kept chunk export poisoned".into())
             })?;
             if !export.wanted {
-                self.exporting = false;
-            } else if !self.exporting {
+                h.exporting = false;
+            } else if !h.exporting {
                 world.keep_resident();
-                self.exporting = true;
+                h.exporting = true;
             } else if world.keeping() == 0 {
-                export.answer = Some((frame.planet.clone(), world.kept_chunks(&frame.planet)));
+                export.answer = Some((
+                    v.volume.planet.clone(),
+                    world.kept_chunks(h.volume, &v.volume.planet),
+                ));
                 export.wanted = false;
-                self.exporting = false;
+                h.exporting = false;
             }
         }
         self.shown = Some(frame);
@@ -633,8 +709,8 @@ impl ChunkPass {
                 .map(|b| (*b).clone()),
         );
         // The sun's occlusion by the terrain, for what else the sun lights
-        // (the GI probes' hits in this draw, volumetric fog): a level of its
-        // clipmap a frame.
+        // (fine cells and meshes in this draw, the GI probes' hits,
+        // volumetric fog): the pages its readers asked for and lack.
         world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
         world.draw_for_eye(
             encoder,
@@ -668,21 +744,23 @@ impl ChunkPass {
             eye_index,
         );
         // Foliage's ground: where the drawn terrain changed, and this frame's
-        // questions (`chunks::ground`) answered against the cut just drawn.
+        // questions (`chunks::ground`) answered against the cut just drawn
+        // (the primary volume's).
         self.foliage_ground
             .push_changes(world.take_ground_changes());
         if let Some(question) = self.foliage_ground.take_question() {
             let exchange = (
                 binding(helio_pass_foliage_place::GROUND_QUERIES),
                 binding(helio_pass_foliage_place::GROUND_HITS),
+                frame.planet(),
             );
-            if let (Some(queries), Some(hits)) = exchange {
+            if let (Some(queries), Some(hits), Some(planet)) = exchange {
                 world.probe_ground(
                     encoder,
                     &queries,
                     &hits,
                     &question.tiles,
-                    &frame.planet,
+                    planet,
                     trace_eye,
                     at,
                 );

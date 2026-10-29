@@ -12,40 +12,21 @@
 //! are omitted: coarse levels are band-limited point samples of the same
 //! field rather than an independent smooth replacement.
 use crate::grid::Grid;
-use crate::layers::{Caves, Overhangs};
+use crate::planet_maps::{self, MapView, PlanetMaps, MAP_HEADER};
 use crate::noise::{
     fade, hash3, lerp, mul16, mul_fine, mul_shr, mul_shr_signed, noise, noise_fine,
     noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE, Q30,
 };
-use crate::terrain::{
-    heightfield_density, Column, TerrainAppearance, TerrainField, TerrainProgram, DENSITY_ONE,
-    HEIGHT_ONE,
-};
+use crate::terrain::{Column, TerrainAppearance, TerrainField, TerrainProgram, HEIGHT_ONE};
+use crate::volumes::VolumeLayer;
 use bytemuck::{Pod, Zeroable};
 use glam::IVec3;
 use std::borrow::Cow;
+use std::sync::Arc;
 
 /// Program key: one WGSL source for every stack; generation compiles the
 /// ridge-envelope display variant of it.
 pub(crate) const DISPLAY_PROGRAM: &str = "helio.terrain/1-stack-ridge-envelope";
-
-/// Volumetric terms of `landform.wgsl` (`TerrainConstants::volume`).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
-pub struct LandformVolume {
-    /// flags (1 caves, 2 overhangs), region shift, region threshold (Q16), depth (mm).
-    pub caves: [i32; 4],
-    /// tunnel shift, tunnel half width (Q16), cavern shift, cavern threshold (Q16).
-    pub shapes: [i32; 4],
-    /// overhang amplitude (mm), lean shift (base cells), region shift, region
-    /// threshold (Q16).
-    pub overhangs: [i32; 4],
-    /// tunnel radius (mm), cavern size (mm), cover (mm), layer (mm).
-    pub sizes: [i32; 4],
-    /// entrance shift, entrance threshold (Q16), tunnel taper (mm), cavern
-    /// taper (mm).
-    pub entrances: [i32; 4],
-}
 
 /// Quantile of [`noise`] (in units of [`ONE`]), from 400k samples: symmetric,
 /// standard deviation 0.27, slightly lighter tails than a Gaussian
@@ -68,360 +49,6 @@ pub(crate) fn noise_quantile(p: f64) -> f64 {
         }
     }
     sign * value
-}
-
-const SEED_CAVE_REGION: u32 = 0xA511_E9B3;
-const SEED_TUNNEL_A: u32 = 0x63D8_3595;
-const SEED_TUNNEL_B: u32 = 0x2B1F_4C7A;
-const SEED_CAVERN: u32 = 0x9E37_79B1;
-const SEED_LEAN_U: u32 = 0x7F4A_7C15;
-const SEED_LEAN_V: u32 = 0x3C6E_F372;
-/// The lean varies `2^LEAN_STRETCH` times more slowly across the ground than
-/// with height: its horizontal stretch stays far below one (a continuous
-/// deformation of the heightfield), while it bends steep ground over.
-const LEAN_STRETCH: u32 = 3;
-const SEED_OVERHANG_REGION: u32 = 0x4CF5_AD43;
-const SEED_CAVE_ENTRANCE: u32 = 0x1B87_3593;
-
-/// `x / span` in Q16 for `x` clamped to `[0, span]` (mm), exact to the bit
-/// on the GPU (`landform_ramp`): 32-bit, with `span` cut to 15 bits.
-pub(crate) fn ramp_q16(x: i32, span: i32) -> i32 {
-    if span <= 0 {
-        return if x >= 0 { ONE } else { 0 };
-    }
-    let x = x.clamp(0, span);
-    let s = (32 - span.leading_zeros() as i32 - 15).max(0) as u32;
-    ((x >> s) << 16) / (span >> s).max(1)
-}
-
-/// A noise's ramp from 0 at `threshold` to one unit a quarter unit above it.
-fn noise_ramp(n: i32, threshold: i32) -> i32 {
-    (n.wrapping_sub(threshold).wrapping_mul(4)).clamp(0, ONE)
-}
-
-impl LandformVolume {
-    pub fn new(grid: &Grid, caves: &Caves, overhangs: &Overhangs) -> Self {
-        let shift = |metres: f64| {
-            ((metres / crate::grid::DOMAIN_UNIT)
-                .log2()
-                .round()
-                .clamp(1.0, 30.0)) as i32
-        };
-        let mm = |metres: f64| {
-            (metres.max(0.0) * 1000.0)
-                .round()
-                .min(f64::from(i32::MAX / 4)) as i32
-        };
-        // Threshold above which `share` of the noise lies.
-        let threshold = |share: f64| {
-            (noise_quantile(1.0 - share.clamp(0.0, 1.0)) * f64::from(ONE)).round() as i32
-        };
-        let layer = grid.layer_mm() as i32;
-        // Caves may reach any depth: chunks are generated through a tile's
-        // whole volume where rays reach under its surface (`chunks`).
-        let depth = mm(caves.depth_m);
-        let mut flags = 0;
-        if caves.enabled && depth > 0 && caves.tunnel_radius_m.max(caves.cavern_wavelength_m) > 0.0
-        {
-            flags |= 1;
-        }
-        let overhang = if overhangs.enabled {
-            mm(overhangs.height_m).min(200 * layer)
-        } else {
-            0
-        };
-        // Lean wavelength in base cells (its noise is evaluated on cell indices).
-        let lean_shift = ((overhangs.wavelength_m * 1000.0 / f64::from(layer))
-            .log2()
-            .round()
-            .clamp(1.0, 30.0)) as i32;
-        if overhang > 0 {
-            flags |= 2;
-        }
-        // Tunnels are where two noises are both near zero; their radius is
-        // about the half width over the noise slope (~2 per wavelength).
-        let width = (2.0 * caves.tunnel_radius_m / caves.tunnel_wavelength_m.max(1e-3)
-            * f64::from(ONE))
-        .round() as i32;
-        // Tunnels narrow to nothing over two radii towards the cover and
-        // the cave depth, caverns over a quarter of their size.
-        Self {
-            caves: [
-                flags,
-                shift(caves.region_km * 1000.0),
-                threshold(caves.share),
-                depth,
-            ],
-            shapes: [
-                shift(caves.tunnel_wavelength_m),
-                width.clamp(0, ONE),
-                shift(caves.cavern_wavelength_m),
-                threshold(caves.cavern_share),
-            ],
-            overhangs: [
-                overhang,
-                lean_shift,
-                shift(overhangs.region_km * 1000.0),
-                threshold(overhangs.share),
-            ],
-            sizes: [
-                mm(caves.tunnel_radius_m),
-                mm(caves.cavern_wavelength_m / 4.0),
-                mm(caves.cover_m),
-                layer,
-            ],
-            entrances: [
-                shift(caves.entrance_spacing_m),
-                threshold(caves.entrance_share),
-                mm(2.0 * caves.tunnel_radius_m),
-                mm(caves.cavern_wavelength_m / 4.0),
-            ],
-        }
-    }
-
-    fn seed(&self, seed: u32, salt: u32) -> u32 {
-        seed ^ salt
-    }
-
-    /// Whether tunnels and caverns are resolved at `level` (their size is at
-    /// least one level cell). Caverns under a rock cover also need a cell
-    /// within that cover: coarser cells could not show them from outside,
-    /// and their columns keep the heightfield's relief and filtering.
-    fn caves_at(&self, level: u32) -> (bool, bool) {
-        if self.caves[0] & 1 == 0 {
-            return (false, false);
-        }
-        let layer = self.sizes[3];
-        let cavern = if self.sizes[2] > 0 {
-            self.sizes[1].min(self.sizes[2])
-        } else {
-            self.sizes[1]
-        };
-        (
-            (self.sizes[0] >> level) >= layer,
-            (cavern >> level) >= layer,
-        )
-    }
-
-    /// Q16 ramps of a column's cave region and cave entrance (see
-    /// [`Self::density`]), for the cave statistics tests.
-    #[cfg(test)]
-    fn cave_gates(&self, p: IVec3, seed: u32) -> (i32, i32) {
-        (
-            noise_ramp(
-                noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)),
-                self.caves[2],
-            ),
-            noise_ramp(
-                noise(
-                    p,
-                    self.entrances[0] as u32,
-                    self.seed(seed, SEED_CAVE_ENTRANCE),
-                ),
-                self.entrances[1],
-            ),
-        )
-    }
-
-    fn cave_region(&self, p: IVec3, seed: u32) -> bool {
-        noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)) > self.caves[2]
-    }
-
-    /// Overhang amplitude (mm) of the column at `p`, less two level cells
-    /// (overhangs smaller than that are not resolved at `level`). It grows
-    /// from 0 at the edge of an overhang region: a jump there left a step
-    /// seam along every region border.
-    fn overhang_amplitude(&self, p: IVec3, level: u32, seed: u32) -> i32 {
-        if self.caves[0] & 2 == 0 {
-            return 0;
-        }
-        let n = noise(
-            p,
-            self.overhangs[2] as u32,
-            self.seed(seed, SEED_OVERHANG_REGION),
-        );
-        let ramp = (n.wrapping_sub(self.overhangs[3]).wrapping_mul(4)).clamp(0, ONE);
-        let a = scale(ramp, self.overhangs[0]);
-        if (a >> level) <= 2 * self.sizes[3] {
-            0
-        } else {
-            a - ((2 * self.sizes[3]) << level)
-        }
-    }
-
-    /// Lean lattice of `level` (`TerrainField::lean`): the reach covers the
-    /// largest offset (the overhang height in level cells) and two more.
-    pub fn lean(&self, level: u32) -> (i32, i32) {
-        if self.caves[0] & 2 == 0 || (self.overhangs[0] >> level) <= 2 * self.sizes[3] {
-            return (0, 0);
-        }
-        let reach = self.overhangs[0] / self.sizes[3].wrapping_shl(level) + 2;
-        (reach, (7 + 2 * reach) / 6 + 1)
-    }
-
-    /// Horizontal offset (Q8 level cells) of the heightfield under cell
-    /// `(i, j, k)` (`TerrainField::lean_offset`): two noises of the cell's
-    /// base-cell position, stretched across the ground, scaled by the
-    /// column's overhang amplitude.
-    pub fn lean_offset(
-        &self,
-        p: IVec3,
-        i: i32,
-        j: i32,
-        k: i32,
-        level: u32,
-        seed: u32,
-    ) -> (i32, i32) {
-        let a = self.overhang_amplitude(p, level, seed);
-        if a == 0 {
-            return (0, 0);
-        }
-        let half = (1i32 << level) >> 1;
-        let input = IVec3::new(
-            i.wrapping_shl(level).wrapping_add(half) >> LEAN_STRETCH,
-            j.wrapping_shl(level).wrapping_add(half) >> LEAN_STRETCH,
-            k.wrapping_shl(level).wrapping_add(half),
-        );
-        let amplitude = a.wrapping_mul(256) / self.sizes[3].wrapping_shl(level);
-        let shift = self.overhangs[1] as u32;
-        (
-            scale(noise(input, shift, self.seed(seed, SEED_LEAN_U)), amplitude),
-            scale(noise(input, shift, self.seed(seed, SEED_LEAN_V)), amplitude),
-        )
-    }
-
-    /// Level cells below and above the heightfield top that may differ.
-    pub fn extent(&self, p: IVec3, level: u32, seed: u32) -> (i32, i32) {
-        let layer = self.sizes[3];
-        let (tunnels, caverns) = self.caves_at(level);
-        let mut below = 0;
-        if (tunnels || caverns) && self.cave_region(p, seed) {
-            below = (self.caves[3] / layer >> level) + 2;
-        }
-        let a = self.overhang_amplitude(p, level, seed);
-        let mut above = 0;
-        if a > 0 {
-            above = (a / layer >> level) + 2;
-            below = below.max(above);
-        }
-        (below, above)
-    }
-
-    /// Density of layer `k` of the column at `p` (heightfield top `top`,
-    /// field height `height` mm, which the overhangs fold exactly),
-    /// with 3D domain point `q` ([`TerrainField::density`]), as constructive
-    /// solid geometry on distances (intersection: minimum, union: maximum):
-    /// the surface, folded by overhangs, minus the caves, which carve where
-    /// the column is in a cave region, the cell between the heightfield top
-    /// and the cave depth, and in a tunnel or (under the cover) a cavern.
-    /// Noise distances are the noise's excess over its threshold divided by
-    /// its slope (about 2 per wavelength). The sign is exactly the solid
-    /// test's.
-    #[allow(clippy::too_many_arguments)]
-    pub fn density(
-        &self,
-        p: IVec3,
-        q: IVec3,
-        level: u32,
-        top: i32,
-        height: i32,
-        lean_height: i32,
-        k: i32,
-        seed: u32,
-    ) -> i32 {
-        let a = self.overhang_amplitude(p, level, seed);
-        let (tunnels, caverns) = self.caves_at(level);
-        if a == 0 && !tunnels && !caverns {
-            return heightfield_density(top, k);
-        }
-        let layer = self.sizes[3];
-        let cell = layer.wrapping_shl(level);
-        // Height of the cell centre over the surface (mm): the field height
-        // itself, not the floor of this level's cell (coarse levels drew
-        // cave and overhang regions as terraces of whole cells).
-        let d = k
-            .wrapping_mul(cell)
-            .wrapping_add(cell / 2)
-            .wrapping_sub(height);
-        let mut solid = k < top;
-        let mut f = d.wrapping_neg();
-        if a > 0 {
-            // The leaning heightfield (steep ground bends over), within the
-            // overhang height of the surface.
-            let lean = lean_height.clamp(height.wrapping_sub(a), height.wrapping_add(a));
-            let dl = k
-                .wrapping_mul(cell)
-                .wrapping_add(cell / 2)
-                .wrapping_sub(lean);
-            solid = dl < 0;
-            f = dl.wrapping_neg();
-        }
-        if tunnels || caverns {
-            // mm per noise unit at lattice shift s: 2^s * 12.5 mm / 2^17.
-            let mm = |excess: i32, shift: i32| mul_shr_signed(excess, 25 << shift, 18);
-            let depth = d.wrapping_neg();
-            // Caves fade in over a region's edge, and close towards the rock
-            // cover and the cave depth instead of ending in walls; at an
-            // entrance the cover is gone and tunnels open to the surface.
-            let region = noise_ramp(
-                noise(p, self.caves[1] as u32, self.seed(seed, SEED_CAVE_REGION)),
-                self.caves[2],
-            );
-            let entrance = noise_ramp(
-                noise(
-                    p,
-                    self.entrances[0] as u32,
-                    self.seed(seed, SEED_CAVE_ENTRANCE),
-                ),
-                self.entrances[1],
-            );
-            let cover = self.sizes[2];
-            let mut walls = i32::MAX;
-            let mut carved = false;
-            if tunnels {
-                let taper = self.entrances[2];
-                let open = ramp_q16(depth.wrapping_sub(cover), taper).max(entrance);
-                let open = open
-                    .min(region)
-                    .min(ramp_q16(self.caves[3].wrapping_sub(depth), taper));
-                let w = scale(open, self.shapes[1]);
-                let na = noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_A)).abs();
-                let nb = noise(q, self.shapes[0] as u32, self.seed(seed, SEED_TUNNEL_B)).abs();
-                walls = walls.min(mm(na.max(nb) - w, self.shapes[0]));
-                carved |= na < w && nb < w;
-            }
-            if caverns {
-                let taper = self.entrances[3];
-                let open = region
-                    .min(ramp_q16(depth.wrapping_sub(cover), taper))
-                    .min(ramp_q16(self.caves[3].wrapping_sub(depth), taper));
-                // The threshold rises to the noise's top as the cavern closes.
-                let threshold = self.shapes[3] + scale(ONE - open, ONE - self.shapes[3]);
-                let n = noise(q, self.shapes[2] as u32, self.seed(seed, SEED_CAVERN));
-                walls = walls.min(mm(threshold - n, self.shapes[2]));
-                carved |= n > threshold;
-            }
-            f = f.min(walls);
-            if solid && carved {
-                solid = false;
-            }
-        }
-        let f = f.clamp(-(1 << 22), 1 << 22) * DENSITY_ONE / cell.max(1);
-        if solid {
-            f.max(1)
-        } else {
-            f.min(0)
-        }
-    }
-
-    /// Extra level cells a finer column's top may rise over a coarse one.
-    fn rise_cells(&self, level: u32) -> i32 {
-        if self.caves[0] & 2 == 0 {
-            0
-        } else {
-            (self.overhangs[0] / self.sizes[3] >> level) + 2
-        }
-    }
 }
 
 /// Octave table size, warp included.
@@ -482,6 +109,10 @@ impl Octave {
 /// | basins | depth (height units) | mask threshold (Q24) |
 /// | plateau | height (height units, whole layers) | |
 /// | cliffs (riser share in 1/1024 in kind bits 16..) | step (height units, whole layers) | mask threshold (Q24) |
+/// | rivers | | |
+///
+/// Rivers carve what lies below them in the stack along the planet maps'
+/// river segments (`planet_maps::carve`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct StackLayer {
@@ -503,6 +134,7 @@ impl StackLayer {
     pub const BASINS: u32 = 8;
     pub const PLATEAU: u32 = 9;
     pub const CLIFFS: u32 = 10;
+    pub const RIVERS: u32 = 11;
 
     /// The kind without its parameter bits.
     pub fn base_kind(&self) -> u32 {
@@ -546,6 +178,9 @@ pub struct PackedRule {
     /// erosion range (the signed surface byte), strata band period (mm, 0:
     /// none) and parity.
     pub surface_bands: [i32; 4],
+    /// temperature range (1/128 °C at the cell), river beds (0 any, 1 only
+    /// on them, 2 never), pad.
+    pub climate: [i32; 4],
 }
 
 /// `TerrainConstants` of `landform.wgsl` (uniform layout).
@@ -555,8 +190,8 @@ pub struct LandformConstants {
     /// octave count (warp slots included), layer thickness (mm), soil
     /// depth (cells), seed.
     pub header: [i32; 4],
-    /// moisture shift, continents layer + 1 (0: none, all land), snowline,
-    /// low-basin height (mm).
+    /// pad, continents layer + 1 (0: none, all land), pad, low-basin height
+    /// (mm).
     pub levels: [i32; 4],
     /// ridge display layer + 1 (0: none), steep slope (cells/cell), ridge
     /// display flag, vertical axis (0 radial, 1 the plane's +Y).
@@ -570,6 +205,9 @@ pub struct LandformConstants {
     /// octave's shift (-1: none: erosion is resolved up to its level less
     /// `RESOLVED_SHIFT`), pad.
     pub materials: [i32; 4],
+    /// The planet maps' header (`planet_maps::MAP_HEADER`): climate and
+    /// river lookups, uniform climate without maps.
+    pub maps: [[i32; 4]; MAP_HEADER],
     pub layers: [StackLayer; LAYERS],
     pub octaves: [Octave; OCTAVES],
     pub rules: [PackedRule; RULES],
@@ -611,7 +249,10 @@ impl LandformConstants {
         for (l, layer) in self.stack_layers().iter().enumerate() {
             m[l] += match layer.kind {
                 StackLayer::CONTINENTS => f64::from(layer.a).abs() + f64::from(layer.b).abs(),
-                StackLayer::BASINS | StackLayer::PLATEAU => f64::from(layer.a).abs(),
+                // Rivers cut at most this far under the terrain's lowest.
+                StackLayer::BASINS | StackLayer::PLATEAU | StackLayer::RIVERS => {
+                    f64::from(layer.a).abs()
+                }
                 // A terrace moves a height by less than a step.
                 _ if layer.base_kind() == StackLayer::CLIFFS => f64::from(layer.a).abs(),
                 _ => 0.0,
@@ -709,8 +350,16 @@ impl LandformConstants {
                 .filter(|l| l.base_kind() == StackLayer::CLIFFS)
                 .map(|l| 2.0 * f64::from(l.a))
                 .sum();
-            let excess_mm =
-                dropped + terraces + (lipschitz * (1.0 + warp) + unwarped) * half_diagonal;
+            // River valleys: their walls, beds and channels slope at most
+            // `b / 256` height units per domain unit (unwarped).
+            let valleys: f64 = layers
+                .iter()
+                .filter(|l| l.kind == StackLayer::RIVERS)
+                .map(|l| f64::from(l.b) / 256.0)
+                .sum();
+            let excess_mm = dropped
+                + terraces
+                + (lipschitz * (1.0 + warp) + unwarped + valleys) * half_diagonal;
             let cell_mm = f64::from(self.header[1]) * 2f64.powi(level as i32);
             out[level as usize] =
                 ((excess_mm / cell_mm).ceil() as i64 + 2).clamp(2, 1 << 20) as i32;
@@ -758,6 +407,23 @@ pub const RESOLVED_SHIFT: u32 = 5;
 #[inline]
 fn resolved(o: &Octave, level: u32) -> bool {
     matches!(o.class(), CONTINENT | REGION | BASIN) || o.shift >= level + RESOLVED_SHIFT
+}
+
+/// Largest relief (height units) of the octaves `level` omits: what finer
+/// levels may add to its heights (the planet maps' bound on the terrain a
+/// map texel does not resolve).
+pub fn unresolved_relief(k: &LandformConstants, level: u32) -> f64 {
+    k.table()
+        .iter()
+        .filter(|o| !resolved(o, level))
+        .map(|o| {
+            let a = f64::from(o.amplitude).abs();
+            match o.class() {
+                CRATER => 2.0 * a * (1.0 + f64::from(k.layers[o.layer()].a) / 65_536.0),
+                _ => a,
+            }
+        })
+        .sum()
 }
 
 /// Gradients are in height units per `2^GRAD_SHIFT` domain units (3.3 km):
@@ -983,7 +649,7 @@ fn steering(k: &LandformConstants, s: &Accumulators) -> IVec3 {
 /// `2^60 / d` for `d` in `[2^29, 2^30)`: Newton from a linear guess, four
 /// fixed steps on exact 64-bit products.
 #[inline]
-fn recip_q30(d: u32) -> u32 {
+pub(crate) fn recip_q30(d: u32) -> u32 {
     let mut y = 3_031_741_621u32 - mul_shr(d, 2_021_161_080, 30);
     for _ in 0..4 {
         y = mul_shr(y, 2 * Q30 - mul_shr(d, y, 30), 30);
@@ -1000,7 +666,7 @@ fn squared_ratio(r2: u32, rad2: u32) -> u32 {
 
 /// Polynomial smooth minimum of `a` and `b` over a width `k` (mm).
 #[inline]
-fn smooth_min(a: i32, b: i32, k: i32) -> i32 {
+pub(crate) fn smooth_min(a: i32, b: i32, k: i32) -> i32 {
     let m = a.min(b);
     let gap = (a - b).abs();
     if k <= 0 || gap >= k {
@@ -1113,17 +779,33 @@ fn crater_octave(
 }
 
 /// Surface height (height units above the datum) of the column centred at
-/// domain point `p` with a `2^level` reference cell footprint.
-pub fn height(k: &LandformConstants, p: IVec3, level: u32) -> i32 {
-    height_parts(k, p, level).0
+/// domain point `p` with a `2^level` reference cell footprint (single
+/// rate: every octave at `p`).
+pub fn height(k: &LandformConstants, maps: Option<MapView>, p: IVec3, level: u32) -> i32 {
+    height_parts(k, maps, p, level).0
 }
 
-/// Surface word of a column (`terrain_surface`), by material style.
-/// Earthlike: the erosion term as a signed byte of the erosion amplitude
-/// sum (negative: gully floors, positive: the ribs between them). Lunar:
-/// the freshest ejecta (bits 0..6) and the basin flag (bit 7).
-pub fn surface(k: &LandformConstants, p: IVec3, level: u32) -> u32 {
-    height_parts(k, p, level).1
+/// Surface word of a column (`terrain_column_nodes(..).y`), by material style.
+/// Earthlike and rules: the erosion term as a signed byte of the erosion
+/// amplitude sum (negative: gully floors, positive: the ribs between
+/// them), [`RIVER_BED`] in a river's channel, [`ALLUVIUM`] on the planet
+/// maps' sediment. Lunar: the freshest ejecta
+/// (bits 0..6) and the basin flag (bit 7).
+pub fn surface(k: &LandformConstants, maps: Option<MapView>, p: IVec3, level: u32) -> u32 {
+    height_parts(k, maps, p, level).1
+}
+
+/// The surface word of a column in a river's channel (Earthlike and rules
+/// styles; erosion bytes stop at -126).
+pub const RIVER_BED: u32 = 0x80;
+/// The surface word of a column on sediment (buried by the planet maps'
+/// erosion at least [`ALLUVIUM_DEPTH`]).
+pub const ALLUVIUM: u32 = 0x81;
+pub const ALLUVIUM_DEPTH: i32 = 1_000;
+
+/// `max(a, b)`, rounded over `k` like [`smooth_min`].
+pub(crate) fn smooth_max(a: i32, b: i32, k: i32) -> i32 {
+    -smooth_min(-a, -b, k)
 }
 
 /// Two-rate evaluation (`docs/two-rate-field.md`): octaves at least this
@@ -1486,6 +1168,7 @@ fn macro_at(k: &LandformConstants, grid: &Grid, column: Column, level: u32, eros
 /// terrain's definition, mirrored by `landform.wgsl`).
 pub fn column_parts(
     k: &LandformConstants,
+    maps: Option<MapView>,
     plan: &LandformPlan,
     grid: &Grid,
     column: Column,
@@ -1496,13 +1179,14 @@ pub fn column_parts(
         let erosion = k.materials[2] >= (level + RESOLVED_SHIFT) as i32;
         parts(
             k,
+            maps,
             p,
             level,
             Some(&macro_at(k, grid, column, level, erosion)),
             plan.ops(level),
         )
     } else {
-        parts(k, p, level, None, plan.ops(level))
+        parts(k, maps, p, level, None, plan.ops(level))
     }
 }
 
@@ -1523,15 +1207,46 @@ fn ridge_step(s: &mut Accumulators, l: usize, o: &Octave, n: i32, d: IVec3, eros
 }
 
 /// [`height`] and [`surface`] of the point `p` with every octave evaluated
-/// there (the single-rate field; a column's is [`column_parts`]).
-pub fn height_parts(k: &LandformConstants, p: IVec3, level: u32) -> (i32, u32) {
-    parts(k, p, level, None, level_ops(k, level, false).into_iter())
+/// there (the single-rate field; a column's is [`column_parts`]). Without
+/// `maps` rivers carve nothing (the terrain the maps are baked from).
+pub fn height_parts(
+    k: &LandformConstants,
+    maps: Option<MapView>,
+    p: IVec3,
+    level: u32,
+) -> (i32, u32) {
+    parts(k, maps, p, level, None, level_ops(k, level, false).into_iter())
+}
+
+/// [`height_parts`] of many points of one level without maps (the planet
+/// maps' bake): the level's single-rate ops compiled once.
+pub(crate) struct SingleRate {
+    ops: Vec<u16>,
+    level: u32,
+}
+
+impl SingleRate {
+    pub(crate) fn new(k: &LandformConstants, level: u32) -> Self {
+        Self {
+            ops: level_ops(k, level, false),
+            level,
+        }
+    }
+    pub(crate) fn height(&self, k: &LandformConstants, p: IVec3) -> i32 {
+        parts(k, None, p, self.level, None, self.ops.iter().copied()).0
+    }
+    /// [`Self::height`] with `maps` (the streams' routing: worn, not
+    /// carved).
+    pub(crate) fn height_in(&self, k: &LandformConstants, maps: Option<MapView>, p: IVec3) -> i32 {
+        parts(k, maps, p, self.level, None, self.ops.iter().copied()).0
+    }
 }
 
 /// The octaves of `ops` at `p` (reference level `level`), the macro ones
 /// from `m` when given (interpolated: [`macro_at`]).
 fn parts(
     k: &LandformConstants,
+    maps: Option<MapView>,
     p: IVec3,
     level: u32,
     m: Option<&Node>,
@@ -1659,8 +1374,33 @@ fn parts(
     let (land, wet) = land_masks(c);
     let mut h = 0i32;
     let mut basin = 0i32;
+    let mut river_bed = false;
+    let mut alluvium = false;
     for (l, layer) in k.stack_layers().iter().enumerate() {
         let x = match layer.kind {
+            StackLayer::RIVERS => {
+                // The worn terrain (cut down, buried under sediment), then
+                // valleys and channels along the river segments, cut into
+                // what lies below them in the stack.
+                if let Some(m) = maps {
+                    if m.header[0][0] & planet_maps::FLAG_EROSION != 0 {
+                        let (cut, fill) = planet_maps::erosion(m, p);
+                        let worn = h.wrapping_add(cut);
+                        h = smooth_max(worn, fill, m.header[4][2]);
+                        alluvium = fill > worn.wrapping_add(ALLUVIUM_DEPTH);
+                    }
+                    let (carved, bed) = planet_maps::carve(m, p, level, h);
+                    h = carved;
+                    river_bed |= bed;
+                    // The streams below the maps' texels.
+                    if let Some(s) = m.streams {
+                        let (carved, bed) = s.carve(m, p, level, h);
+                        h = carved;
+                        river_bed |= bed;
+                    }
+                }
+                continue;
+            }
             StackLayer::CONTINENTS => continent_base(c, layer.a, layer.b),
             StackLayer::MOUNTAINS => mul_fine(s.value[l], region_weight(s.region[l], layer.a)),
             StackLayer::BASINS => {
@@ -1701,8 +1441,10 @@ fn parts(
         h = h.wrapping_add(masked(layer.mask, x, land, wet));
     }
     let surface = match k.style[0] {
+        STYLE_EARTHLIKE | STYLE_RULES if river_bed => RIVER_BED,
+        STYLE_EARTHLIKE | STYLE_RULES if alluvium => ALLUVIUM,
         STYLE_EARTHLIKE | STYLE_RULES => {
-            ((eroded * 127 / k.stack[1].max(1)).clamp(-127, 127) as u32) & 0xff
+            ((eroded * 126 / k.stack[1].max(1)).clamp(-126, 126) as u32) & 0xff
         }
         STYLE_LUNAR => (ejecta >> 1) | (u32::from(basin >= FINE_ONE / 2) << 7),
         _ => 0,
@@ -1710,16 +1452,20 @@ fn parts(
     (h, surface)
 }
 
-/// Moisture in Q24 [0, FINE_ONE] from very low-frequency noise at `p`
-/// (fine, so dry-land edges follow smooth curves).
-pub fn moisture(k: &LandformConstants, p: IVec3) -> i32 {
-    (noise_fine(
-        p,
-        k.levels[0].max(1) as u32,
-        (k.header[3] as u32) ^ 0x51ED_270B,
-    ) + FINE_ONE)
-        / 2
+/// Snowline (mm) where the sea-level temperature is `t0` (1/128 °C): the
+/// height at which the lapse rate brings it to the snow temperature.
+fn snowline(c: &LandformConstants, t0: i32) -> i32 {
+    let (snow, per) = (c.maps[3][0], c.maps[3][1]);
+    if per == 0 {
+        return if t0 > snow { i32::MAX / 2 } else { i32::MIN / 2 };
+    }
+    (t0 - snow).clamp(-8192, 8192) * per
 }
+
+/// The Earthlike snowline's spread: moisture moves it by up to 375 m,
+/// noise by 500 m over ~1.6 km, and the alpine rock band under it is 500 m.
+const SNOW_WET: i32 = 750_000;
+const SNOW_BAND: i32 = 500_000;
 
 /// Strata altitude (mm): layers undulate +-8 m over ~100 m, so cuts
 /// through them never show flat rings.
@@ -1728,9 +1474,11 @@ fn strata(c: &LandformConstants, p: IVec3, altitude: i32) -> i32 {
 }
 
 /// Earthlike materials: meadows, dry lands, rock outcrops, strata and snow
-/// above the snowline; gravel in erosion gullies.
+/// above the snowline (the climate's: latitude and height); gravel in
+/// erosion gullies and river beds.
 fn earthlike_material(
     c: &LandformConstants,
+    maps: MapView,
     p: IVec3,
     surface: u32,
     top_height: i32,
@@ -1741,10 +1489,15 @@ fn earthlike_material(
     use crate::terrain::material::*;
     let dirt = c.header[2];
     let steep = slope >= c.shape[1];
-    let wet = moisture(c, p);
+    let (t0, wet) = planet_maps::climate(maps, p, 0);
+    let wet = wet << 8;
     // Hash every domain axis: on a face one of them is nearly constant.
     let h = hash3(p.x, p.y, p.z ^ layer.wrapping_mul(0x9e37), 0x2545_F491);
     let altitude = layer.wrapping_mul(c.header[1]);
+    if surface == RIVER_BED && depth < dirt * 2 {
+        // River beds: gravel and sand over silt.
+        return if depth == 0 && h & 3 == 0 { SAND } else if depth < dirt { GRAVEL } else { CLAY };
+    }
     if top_height < c.levels[3] {
         // Low basins: meadow with mud patches of a few metres over silt,
         // gravel and stone. Patches follow position noise, never height
@@ -1764,17 +1517,14 @@ fn earthlike_material(
             STONE
         };
     }
-    // The snowline wanders a sixth of its height over ~1.6 km (a level
-    // snowline drew a ruler-straight edge along every range), and the
-    // alpine rock band below it is a sixth of its height: meadows climb.
-    let wander = scale(
-        noise(p, 17, (c.header[3] as u32) ^ 0x3C6E_F372),
-        c.levels[2] / 6,
-    );
-    let snowline = c.levels[2] + mul_fine(c.levels[2] / 4, wet - FINE_ONE / 2) + wander;
+    // The snowline wanders 500 m over ~1.6 km (a level snowline drew a
+    // ruler-straight edge along every range), and the alpine rock band
+    // below it is 500 m: meadows climb.
+    let wander = scale(noise(p, 17, (c.header[3] as u32) ^ 0x3C6E_F372), SNOW_BAND);
+    let snowline = snowline(c, t0) + mul_fine(SNOW_WET, wet - FINE_ONE / 2) + wander;
     // Alpine weight: 0 below the rockline, ONE at the snowline.
-    let rockline = snowline - c.levels[2] / 6;
-    let band = (snowline - rockline).max(256);
+    let rockline = snowline - SNOW_BAND;
+    let band = SNOW_BAND;
     let alpine = ((top_height - rockline).clamp(0, band) / 256) * ONE / (band / 256);
     // Rock patches (~50 m and ~6 m octaves), also breaking up snow edges.
     // Noise is clamped to +-ONE, so below the rockline on gentler slopes no
@@ -1788,6 +1538,19 @@ fn earthlike_material(
     // Snow does not hold on faces steeper than ~37 degrees: rock streaks the snowfields.
     if top_height > snowline && depth < dirt && slope + outcrop / 8192 < 6 {
         return SNOW;
+    }
+    if surface == ALLUVIUM && !steep && depth < dirt * 3 {
+        // Sediment: dry fans of sand and gravel, wet plains of meadow over
+        // soil and silt.
+        return if wet < FINE_ONE / 10 * 3 {
+            if depth == 0 && h & 3 != 0 { SAND } else { GRAVEL }
+        } else if depth == 0 {
+            GRASS
+        } else if depth < dirt {
+            DIRT
+        } else {
+            CLAY
+        };
     }
     if wet < FINE_ONE / 10 * 3 {
         // Dry lands: sand over banded sandstone and clay.
@@ -1849,6 +1612,7 @@ fn earthlike_material(
 /// of the cell; `p` is the cell's volume point.
 pub fn ground_material(
     c: &LandformConstants,
+    maps: MapView,
     p: IVec3,
     surface: u32,
     top_height: i32,
@@ -1858,7 +1622,7 @@ pub fn ground_material(
 ) -> u32 {
     match c.style[0] {
         STYLE_LUNAR => lunar_material(c, p, surface, depth, slope, layer),
-        STYLE_RULES => rules_material(c, p, surface, top_height, depth, slope, layer),
+        STYLE_RULES => rules_material(c, maps, p, surface, top_height, depth, slope, layer),
         STYLE_LAYERED => {
             (if depth == 0 {
                 c.style[1]
@@ -1868,16 +1632,20 @@ pub fn ground_material(
                 c.style[3]
             }) as u32
         }
-        _ => earthlike_material(c, p, surface, top_height, depth, slope, layer),
+        _ => earthlike_material(c, maps, p, surface, top_height, depth, slope, layer),
     }
 }
 
 /// The first rule whose conditions hold, else the fallback material.
-/// Patches are noise above a threshold (their coverage); strata bands
-/// follow the undulating altitude (`strata`); specks are single cells
-/// flagged [`crate::terrain::material::SPECK`] on the surface.
+/// Moisture and temperature are the climate's at the cell (its altitude);
+/// a river bed counts as the deepest gully. Patches are noise above a
+/// threshold (their coverage); strata bands follow the undulating altitude
+/// (`strata`); specks are single cells flagged
+/// [`crate::terrain::material::SPECK`] on the surface.
+#[allow(clippy::too_many_arguments)]
 fn rules_material(
     c: &LandformConstants,
+    maps: MapView,
     p: IVec3,
     surface: u32,
     top_height: i32,
@@ -1885,9 +1653,11 @@ fn rules_material(
     slope: i32,
     layer: i32,
 ) -> u32 {
-    let wet = moisture(c, p) >> 8;
-    let erosion = i32::from(surface as u8 as i8);
+    let river = surface == RIVER_BED;
+    // Sediment is no gully.
+    let erosion = if surface == ALLUVIUM { 0 } else { i32::from(surface as u8 as i8).max(-126) };
     let altitude = layer.wrapping_mul(c.header[1]);
+    let (temperature, wet) = planet_maps::climate(maps, p, altitude);
     let seed = c.header[3] as u32;
     let count = (c.materials[0].max(0) as usize).min(RULES);
     for (index, r) in c.rules[..count].iter().enumerate() {
@@ -1897,6 +1667,9 @@ fn rules_material(
             || !within(depth, r.depth_moisture[0], r.depth_moisture[1])
             || !within(wet, r.depth_moisture[2], r.depth_moisture[3])
             || !within(erosion, r.surface_bands[0], r.surface_bands[1])
+            || !within(temperature, r.climate[0], r.climate[1])
+            || (r.climate[2] == 1 && !river)
+            || (r.climate[2] == 2 && river)
         {
             continue;
         }
@@ -1973,36 +1746,71 @@ fn lunar_material(
 }
 
 /// The lunar look: the shared material table (lunar ground has its own
-/// ids there) with steps lit as crisp voxels (no atmosphere softens them).
+/// ids there), less patch and pigment contrast, steps lit mostly by the
+/// slope they stand for: lit by their own faces, a crater bowl's 10 cm
+/// terraces drew concentric rings (moiré at distance), their shadows black
+/// without a sky to fill them.
 pub fn lunar_appearance() -> TerrainAppearance {
     TerrainAppearance {
-        detail: [0.2, 0.12, 0.08, 0.0],
+        detail: [0.2, 0.12, 0.08, 0.75],
         ..TerrainAppearance::default()
     }
 }
 
-/// A compiled terrain stack on one grid.
+/// A compiled terrain stack on one grid, with its planet maps.
 pub struct LandformField {
     grid: Grid,
     constants: LandformConstants,
-    volume: LandformVolume,
+    volumes: Option<VolumeLayer>,
     bounds: [i32; 24],
     ridge_suffix: Option<[[i32; 4]; 66]>,
     plan: Box<LandformPlan>,
+    maps: Option<Arc<PlanetMaps>>,
+    streams: Option<Arc<crate::streams::Streams>>,
 }
 
 impl LandformField {
-    pub fn new(grid: &Grid, constants: LandformConstants, volume: LandformVolume) -> Self {
+    /// The field of `constants` (their uniform climate in `maps`' rows
+    /// unless baked `maps` replace them).
+    pub fn new(
+        grid: &Grid,
+        mut constants: LandformConstants,
+        volumes: Option<VolumeLayer>,
+        maps: Option<Arc<PlanetMaps>>,
+    ) -> Self {
+        let streams = maps.as_ref().and_then(|m| {
+            let r = m.rivers()?;
+            constants.maps = m.header;
+            (r.streams > 0).then(|| Arc::new(crate::streams::Streams::new(m.clone(), &constants, r, r.streams)))
+        });
+        if let Some(m) = &maps {
+            constants.maps = m.header;
+            if let Some(s) = &streams {
+                constants.maps[0][0] |= planet_maps::FLAG_STREAMS | (s.levels() as i32) << 8;
+            }
+            let (mut cut, mut slope) = m.valley_bounds();
+            if let Some(s) = &streams {
+                let (a, b) = s.bounds();
+                cut = cut.saturating_add(a);
+                slope = slope.saturating_add(b);
+            }
+            for layer in constants.layers.iter_mut() {
+                if layer.kind == StackLayer::RIVERS {
+                    (layer.a, layer.b) = (cut, slope);
+                }
+            }
+        }
         let mut bounds = constants.bound_margins(grid);
         // Stacks without a supported display layer keep the canonical path.
         // In particular, do not saturate invalid huge amplitudes into new
         // terrain.
         let ridge_suffix = crate::ridge_envelope::bake_ridge_suffix(grid, &constants).ok();
-        // Overhangs raise a finer column's highest solid cell over its
+        // Cliff shapes raise a finer column's highest solid cell over its
         // heightfield top.
-        for level in 0..24u32 {
-            let rise = volume.rise_cells(level);
-            bounds[level as usize] = bounds[level as usize].saturating_add(rise);
+        if let Some(v) = &volumes {
+            for level in 0..24u32 {
+                bounds[level as usize] = bounds[level as usize].saturating_add(v.rise_cells(level));
+            }
         }
         let plan = Box::new(LandformPlan::new(&constants));
         Self {
@@ -2010,24 +1818,52 @@ impl LandformField {
             bounds,
             ridge_suffix,
             constants,
-            volume,
+            volumes,
             plan,
+            maps,
+            streams,
         }
     }
     pub fn constants(&self) -> &LandformConstants {
         &self.constants
     }
-    pub fn volume(&self) -> &LandformVolume {
-        &self.volume
+    /// The baked planet maps, if the stack has any.
+    pub fn maps(&self) -> Option<&Arc<PlanetMaps>> {
+        self.maps.as_ref()
     }
-    fn seed(&self) -> u32 {
-        self.constants.header[3] as u32
+    /// The refined drainage, if the stack's rivers have streams.
+    pub fn streams(&self) -> Option<&crate::streams::Streams> {
+        self.streams.as_deref()
+    }
+    /// What climate and river lookups read.
+    pub fn map_view(&self) -> MapView<'_> {
+        MapView {
+            header: &self.constants.maps,
+            tables: self.maps.as_ref().map_or(&[], |m| &m.tables),
+            streams: self.streams.as_deref(),
+        }
     }
 }
 
 impl TerrainField for LandformField {
     fn height(&self, column: Column) -> i32 {
-        column_parts(&self.constants, &self.plan, &self.grid, column).0
+        column_parts(
+            &self.constants,
+            Some(self.map_view()),
+            &self.plan,
+            &self.grid,
+            column,
+        )
+        .0
+    }
+    /// Streams only cut (and the layers after them keep the order), so the
+    /// field without them bounds it from above.
+    fn height_bound(&self, column: Column) -> i32 {
+        let view = MapView {
+            streams: None,
+            ..self.map_view()
+        };
+        column_parts(&self.constants, Some(view), &self.plan, &self.grid, column).0
     }
     fn ground_material(
         &self,
@@ -2038,10 +1874,35 @@ impl TerrainField for LandformField {
         slope: i32,
         layer: i32,
     ) -> u32 {
-        ground_material(&self.constants, p, surface, top_height, depth, slope, layer)
+        ground_material(
+            &self.constants,
+            self.map_view(),
+            p,
+            surface,
+            top_height,
+            depth,
+            slope,
+            layer,
+        )
     }
     fn surface(&self, column: Column, _height: i32) -> u32 {
-        column_parts(&self.constants, &self.plan, &self.grid, column).1
+        column_parts(
+            &self.constants,
+            Some(self.map_view()),
+            &self.plan,
+            &self.grid,
+            column,
+        )
+        .1
+    }
+    fn climate(&self, p: IVec3, height: i32) -> (i32, i32) {
+        planet_maps::climate(self.map_view(), p, height)
+    }
+    fn erosion(&self, p: IVec3) -> (i32, i32) {
+        planet_maps::erosion(self.map_view(), p)
+    }
+    fn drainage(&self, p: IVec3) -> [i32; 4] {
+        planet_maps::drainage(self.map_view(), p)
     }
     fn height_range(&self) -> (i32, i32) {
         self.constants.height_range()
@@ -2049,42 +1910,8 @@ impl TerrainField for LandformField {
     fn bound_margins(&self) -> [i32; 24] {
         self.bounds
     }
-    fn extent(&self, p: IVec3, level: u32) -> (i32, i32) {
-        self.volume.extent(p, level, self.seed())
-    }
-    fn lean(&self, level: u32) -> (i32, i32) {
-        self.volume.lean(level)
-    }
-    fn lean_offset(&self, p: IVec3, i: i32, j: i32, k: i32, level: u32) -> (i32, i32) {
-        self.volume.lean_offset(p, i, j, k, level, self.seed())
-    }
-    fn density(
-        &self,
-        p: IVec3,
-        q: IVec3,
-        level: u32,
-        top: i32,
-        height: i32,
-        lean_height: i32,
-        k: i32,
-    ) -> i32 {
-        self.volume
-            .density(p, q, level, top, height, lean_height, k, self.seed())
-    }
-    fn volume_bounds(&self) -> (i32, i32) {
-        let flags = self.volume.caves[0];
-        (
-            if flags & 1 != 0 {
-                self.volume.caves[3]
-            } else {
-                0
-            },
-            if flags & 2 != 0 {
-                self.volume.overhangs[0]
-            } else {
-                0
-            },
-        )
+    fn volumes(&self) -> Option<&VolumeLayer> {
+        self.volumes.as_ref()
     }
     fn appearance(&self) -> TerrainAppearance {
         if self.constants.style[0] == STYLE_LUNAR {
@@ -2100,12 +1927,22 @@ impl TerrainField for LandformField {
         constants.extend_from_slice(bytemuck::cast_slice(
             &self.ridge_suffix.unwrap_or([[0; 4]; 66]),
         ));
-        constants.extend_from_slice(bytemuck::bytes_of(&self.volume));
         constants.extend_from_slice(bytemuck::bytes_of(&*self.plan));
         TerrainProgram {
             key: Cow::Borrowed(DISPLAY_PROGRAM),
-            wgsl: Cow::Borrowed(include_str!("../shaders/landform.wgsl")),
+            wgsl: Cow::Borrowed(concat!(
+                include_str!("../shaders/landform.wgsl"),
+                include_str!("../shaders/planet_maps.wgsl")
+            )),
             constants,
+            tables: self
+                .maps
+                .as_ref()
+                .map_or_else(|| Arc::from(Vec::new()), |m| Arc::from(m.tables.as_slice())),
+            regions: self
+                .streams
+                .clone()
+                .map(|s| crate::terrain::Regions(s as Arc<dyn crate::terrain::TerrainRegions>)),
         }
     }
 }
@@ -2121,11 +1958,11 @@ mod tests {
     #[test]
     fn two_rate_field_stays_within_a_fraction_of_a_cell() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = crate::layers::TerrainLayers::earth()
-            .compile(&grid, 75)
-            .unwrap()
-            .0;
-        let plan = LandformPlan::new(&k);
+        let field = crate::layers::TerrainLayers::earth()
+            .field(&grid, 75)
+            .unwrap();
+        let (k, maps) = (field.constants(), Some(field.map_view()));
+        let plan = LandformPlan::new(k);
         let n = f64::from(grid.cells());
         let mut rng = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = || {
@@ -2145,9 +1982,10 @@ mod tests {
                     j: (fj * n) as i32 >> level,
                     level,
                 };
-                let a = column_parts(&k, &plan, &grid, column).0;
+                let a = column_parts(k, maps, &plan, &grid, column).0;
                 let b = height_parts(
-                    &k,
+                    k,
+                    maps,
                     grid.domain_point(column.face, column.i, column.j, column.level),
                     level + grid.level_offset(),
                 )
@@ -2159,401 +1997,17 @@ mod tests {
         }
     }
     use crate::layers::TerrainLayers;
-    use crate::terrain::{generated_kind, top_cells, TerrainField};
 
-    fn earth(grid: &Grid) -> LandformConstants {
-        TerrainLayers::earth().compile(grid, 7).unwrap().0
-    }
-
-    /// Caves and overhangs change cells only inside the declared extent;
-    /// without them the stack is a pure heightfield.
-    #[test]
-    fn caves_and_overhangs_stay_inside_their_extent() {
-        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let volume = TerrainLayers::earth().field(&grid, 7).unwrap();
-        let heightfield = TerrainLayers::earth()
-            .heightfield()
-            .field(&grid, 7)
-            .unwrap();
-        let mut rng = 0x9e37_79b9_7f4a_7c15u64;
-        let mut next = || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let (mut cave, mut overhang, mut volumetric) = (0, 0, 0);
-        for _ in 0..1500 {
-            let face = (next() % 6) as u8;
-            let (i, j) = (
-                (next() % grid.cells() as u64) as i32,
-                (next() % grid.cells() as u64) as i32,
-            );
-            let p = grid.domain_point(face, i, j, 0);
-            let height = volume.height(crate::terrain::Column {
-                face,
-                i,
-                j,
-                level: 0,
-            });
-            let top = top_cells(&grid, height, 0);
-            assert_eq!(heightfield.extent(p, 0), (0, 0));
-            let (below, above) = volume.extent(p, 0);
-            volumetric += usize::from(below + above > 0);
-            for _ in 0..24 {
-                // Inside and around the extent.
-                let k = top - below - 4 + (next() % (below + above + 8) as u64) as i32;
-                let kind = generated_kind(&grid, &volume, face, i, j, k, 0, height);
-                assert_eq!(
-                    generated_kind(&grid, &heightfield, face, i, j, k, 0, height),
-                    u32::from(k < top)
-                );
-                if k < top - below || k >= top + above {
-                    assert_eq!(
-                        kind,
-                        u32::from(k < top),
-                        "outside the extent the heightfield holds"
-                    );
-                }
-                cave += usize::from(kind == 0 && k < top);
-                overhang += usize::from(kind == 1 && k >= top);
-            }
-        }
-        eprintln!(
-            "{volumetric}/1500 volumetric columns, {cave} cave and {overhang} overhang samples"
-        );
-        assert!(volumetric > 100 && cave > 0 && overhang > 0);
-    }
-
-    /// Caves keep their rock cover: no cell within the cover of a column
-    /// is carved, except where the column lies in an entrance zone.
-    #[test]
-    fn caves_open_to_the_surface_only_at_entrances() {
-        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let mut layers = TerrainLayers::earth();
-        layers.overhangs.enabled = false;
-        let field = layers.field(&grid, 7).unwrap();
-        let cover_cells = (layers.caves.cover_m / 0.1).floor() as i32;
-        let mut rng = 0x2545_F491_4F6C_DD1Du64;
-        let mut next = || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let (mut regions, mut entrances, mut openings) = (0, 0, 0);
-        while regions < 4000 {
-            let face = (next() % 6) as u8;
-            let (i, j) = (
-                (next() % grid.cells() as u64) as i32,
-                (next() % grid.cells() as u64) as i32,
-            );
-            let p = grid.domain_point(face, i, j, 0);
-            let (region, entrance) = field.volume().cave_gates(p, field.seed());
-            if region == 0 {
-                continue;
-            }
-            regions += 1;
-            entrances += usize::from(entrance > 0);
-            let height = field.height(crate::terrain::Column {
-                face,
-                i,
-                j,
-                level: 0,
-            });
-            let top = top_cells(&grid, height, 0);
-            for k in top - cover_cells..top {
-                if generated_kind(&grid, &field, face, i, j, k, 0, height) == 0 {
-                    assert!(
-                        entrance > 0,
-                        "carved {} cells under the surface outside an entrance",
-                        top - k
-                    );
-                    openings += 1;
-                }
-            }
-        }
-        eprintln!("{entrances}/{regions} cave-region columns in entrance zones, {openings} cells opened under the surface");
-        assert!(entrances > 0 && entrances < regions / 4);
-    }
-
-    /// Caves leave no floating rock: around a tunnel in an entrance zone,
-    /// every solid cell of a block is connected to its sides or floor.
-    #[test]
-    fn caves_leave_no_floating_rock() {
-        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let mut layers = TerrainLayers::earth();
-        layers.overhangs.enabled = false;
-        let field = layers.field(&grid, 7).unwrap();
-        let mut rng = 0x7A4F_19D3_2C85_E601u64;
-        let mut next = || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        // A column of an entrance zone with a tunnel near the surface.
-        let (face, ci, cj, top) = loop {
-            let face = (next() % 6) as u8;
-            let (i, j) = (
-                (next() % grid.cells() as u64) as i32,
-                (next() % grid.cells() as u64) as i32,
-            );
-            let p = grid.domain_point(face, i, j, 0);
-            let (region, entrance) = field.volume().cave_gates(p, field.seed());
-            if region < ONE / 2 || entrance < ONE / 2 {
-                continue;
-            }
-            let height = field.height(crate::terrain::Column {
-                face,
-                i,
-                j,
-                level: 0,
-            });
-            let top = top_cells(&grid, height, 0);
-            if (top - 30..top).any(|k| generated_kind(&grid, &field, face, i, j, k, 0, height) == 0)
-            {
-                break (face, i, j, top);
-            }
-        };
-        let block = rock_block(&grid, &field, face, ci, cj, top - 60, top + 20);
-        eprintln!("{} carved cells, {} floating", block.carved, block.floating);
-        assert!(block.carved > 100);
-        assert_eq!(block.floating, 0, "rock disconnected from the ground");
-    }
-
-    /// Generated rock of a 40x40 block of base columns centred on `(ci, cj)`,
-    /// layers `k0..k1`.
-    struct RockBlock {
-        /// Air cells under their column's heightfield top.
-        carved: usize,
-        /// Solid cells over their column's heightfield top.
-        raised: usize,
-        /// Solid cells over air in their column (ceilings, overhang lips).
-        ceilings: usize,
-        /// Solid cells the block's floor and sides do not reach through rock.
-        floating: usize,
-    }
-
-    fn rock_block(
-        grid: &Grid,
-        field: &LandformField,
-        face: u8,
-        ci: i32,
-        cj: i32,
-        k0: i32,
-        k1: i32,
-    ) -> RockBlock {
-        const N: i32 = 40;
-        let size = (N * N * (k1 - k0)) as usize;
-        let index = |x: i32, y: i32, z: i32| ((z * N + y) * N + x) as usize;
-        let mut solid = vec![false; size];
-        let (mut carved, mut raised, mut ceilings) = (0, 0, 0);
-        for y in 0..N {
-            for x in 0..N {
-                let (i, j) = (ci - N / 2 + x, cj - N / 2 + y);
-                let height = field.height(crate::terrain::Column {
-                    face: face,
-                    i: i,
-                    j: j,
-                    level: 0,
-                });
-                let column_top = top_cells(grid, height, 0);
-                for z in 0..k1 - k0 {
-                    let k = k0 + z;
-                    let kind = generated_kind(grid, field, face, i, j, k, 0, height);
-                    solid[index(x, y, z)] = kind == 1;
-                    carved += usize::from(kind == 0 && k < column_top);
-                    raised += usize::from(kind == 1 && k >= column_top);
-                    ceilings += usize::from(kind == 1 && z > 0 && !solid[index(x, y, z - 1)]);
-                }
-            }
-        }
-        // Flood the rock reached from the block's floor and sides.
-        let mut reached = vec![false; size];
-        let mut stack = Vec::new();
-        for z in 0..k1 - k0 {
-            for y in 0..N {
-                for x in 0..N {
-                    let edge = z == 0 || x == 0 || y == 0 || x == N - 1 || y == N - 1;
-                    if edge && solid[index(x, y, z)] {
-                        reached[index(x, y, z)] = true;
-                        stack.push((x, y, z));
-                    }
-                }
-            }
-        }
-        while let Some((x, y, z)) = stack.pop() {
-            for (dx, dy, dz) in [
-                (1, 0, 0),
-                (-1, 0, 0),
-                (0, 1, 0),
-                (0, -1, 0),
-                (0, 0, 1),
-                (0, 0, -1),
-            ] {
-                let (nx, ny, nz) = (x + dx, y + dy, z + dz);
-                if nx < 0 || ny < 0 || nz < 0 || nx >= N || ny >= N || nz >= k1 - k0 {
-                    continue;
-                }
-                let n = index(nx, ny, nz);
-                if solid[n] && !reached[n] {
-                    reached[n] = true;
-                    stack.push((nx, ny, nz));
-                }
-            }
-        }
-        let floating = solid
-            .iter()
-            .zip(&reached)
-            .filter(|(s, r)| **s && !**r)
-            .count();
-        RockBlock {
-            carved,
-            raised,
-            ceilings,
-            floating,
-        }
-    }
-
-    /// Overhangs lean steep ground over without tearing it: around steep
-    /// columns of an overhang region the rock forms ceilings over air, and
-    /// every solid cell stays connected to the ground.
-    #[test]
-    fn overhangs_lean_steep_ground_without_floating_rock() {
-        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let mut layers = TerrainLayers::earth();
-        layers.caves.enabled = false;
-        let field = layers.field(&grid, 7).unwrap();
-        let mut rng = 0x1D8E_4E27_C47D_124Fu64;
-        let mut next = || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let (mut blocks, mut ceilings, mut raised) = (0, 0, 0);
-        let mut tries = 0;
-        while blocks < 4 {
-            tries += 1;
-            assert!(tries < 2_000_000, "no steep overhang ground found");
-            let face = (next() % 6) as u8;
-            let (i, j) = (
-                (next() % grid.cells() as u64) as i32,
-                (next() % grid.cells() as u64) as i32,
-            );
-            let p = grid.domain_point(face, i, j, 0);
-            if field.volume().overhang_amplitude(p, 0, field.seed()) < 3000 {
-                continue;
-            }
-            // Steep ground: over 45 degrees across a few metres.
-            let h = |di: i32, dj: i32| {
-                field.height(crate::terrain::Column {
-                    face: face,
-                    i: i + di,
-                    j: j + dj,
-                    level: 0,
-                })
-            };
-            let slope = (h(20, 0) - h(-20, 0))
-                .abs()
-                .max((h(0, 20) - h(0, -20)).abs());
-            if slope < 4000 {
-                continue;
-            }
-            let top = top_cells(&grid, h(0, 0), 0);
-            let block = rock_block(&grid, &field, face, i, j, top - 80, top + 80);
-            eprintln!("block {blocks}: slope {slope} mm over 40 cells, {} ceilings, {} raised, {} floating", block.ceilings, block.raised, block.floating);
-            assert_eq!(
-                block.floating, 0,
-                "leaning rock disconnected from the ground"
-            );
-            ceilings += block.ceilings;
-            raised += block.raised;
-            blocks += 1;
-        }
-        assert!(ceilings > 0 && raised > 0, "steep ground did not lean over");
-    }
-
-    /// Densities are signed distances: positive exactly in solid cells,
-    /// one cell apart down a heightfield column, and small on both sides of
-    /// every surface crossing (caves, overhangs), so a smooth surface can be
-    /// interpolated between cell centres.
-    #[test]
-    fn densities_are_signed_distances_to_the_surface() {
-        use crate::terrain::{heightfield_density, DENSITY_ONE};
-        let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let field = TerrainLayers::earth().field(&grid, 7).unwrap();
-        assert_eq!(
-            heightfield_density(10, 9) - heightfield_density(10, 10),
-            DENSITY_ONE
-        );
-        assert!(heightfield_density(10, 9) > 0 && heightfield_density(10, 10) < 0);
-        let mut rng = 0x5851_F42D_4C95_7F2Du64;
-        let mut next = || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-        let (mut crossings, mut worst) = (0, 0);
-        for _ in 0..3000 {
-            let face = (next() % 6) as u8;
-            let (i, j) = (
-                (next() % grid.cells() as u64) as i32,
-                (next() % grid.cells() as u64) as i32,
-            );
-            let p = grid.domain_point(face, i, j, 0);
-            let (below, above) = field.extent(p, 0);
-            if below + above == 0 {
-                continue;
-            }
-            let height = field.height(crate::terrain::Column {
-                face,
-                i,
-                j,
-                level: 0,
-            });
-            let top = top_cells(&grid, height, 0);
-            let density = |k: i32| {
-                let lean = crate::terrain::lean_height(&grid, &field, face, i, j, k, 0, height);
-                field.density(
-                    p,
-                    grid.volume_point(face, i, j, k, 0),
-                    0,
-                    top,
-                    height,
-                    lean,
-                    k,
-                )
-            };
-            let mut previous = density(top - below);
-            for k in top - below + 1..top + above {
-                let d = density(k);
-                assert_eq!(
-                    u32::from(d > 0),
-                    generated_kind(&grid, &field, face, i, j, k, 0, height)
-                );
-                if (d > 0) != (previous > 0) {
-                    crossings += 1;
-                    worst = worst.max(d.abs() + previous.abs());
-                }
-                previous = d;
-            }
-        }
-        eprintln!(
-            "{crossings} surface crossings, largest |d| sum across one {worst} ({} cells)",
-            f64::from(worst) / f64::from(DENSITY_ONE)
-        );
-        assert!(crossings > 100);
-        assert!(worst <= 6 * DENSITY_ONE, "{worst}");
+    fn earth(grid: &Grid) -> LandformField {
+        TerrainLayers::earth().field(grid, 7).unwrap()
     }
 
     #[test]
     fn climate_bounds_cover_both_signs_of_canonical_height_change() {
         for voxel in [0.1, 0.3, 1.0] {
             let grid = Grid::new(6_371_000.0, voxel).unwrap();
-            let k = earth(&grid);
+            let field = earth(&grid);
+            let (k, maps) = (field.constants(), Some(field.map_view()));
             let bounds = k.bound_margins(&grid);
             let mut rng = 0x2545_F491_4F6C_DD1Du64;
             let mut next = || {
@@ -2569,7 +2023,8 @@ mod tests {
                 let i = (next() % cells) as i32;
                 let j = (next() % cells) as i32;
                 let coarse = height(
-                    &k,
+                    k,
+                    maps,
                     grid.domain_point(face, i, j, level),
                     level + grid.level_offset(),
                 );
@@ -2577,7 +2032,8 @@ mod tests {
                 let fi = (i << level) + (next() % (1u64 << level)) as i32;
                 let fj = (j << level) + (next() % (1u64 << level)) as i32;
                 let canonical = i64::from(height(
-                    &k,
+                    k,
+                    maps,
                     grid.domain_point(face, fi, fj, 0),
                     grid.level_offset(),
                 ));
@@ -2595,7 +2051,8 @@ mod tests {
     #[test]
     fn height_range_is_planetary_and_levels_agree_on_large_scale() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = earth(&grid);
+        let field = earth(&grid);
+        let (k, maps) = (field.constants(), Some(field.map_view()));
         let (range_lo, range_hi) = k.height_range();
         let mut lo = i32::MAX;
         let mut hi = i32::MIN;
@@ -2605,8 +2062,8 @@ mod tests {
             let i = (s * 7919 % 400) * (n / 400);
             let j = (s * 104_729 % 400) * (n / 400);
             let p = grid.domain_point((s % 6) as u8, i, j, 0);
-            let h0 = height(&k, p, offset);
-            let h12 = height(&k, p, 12 + offset);
+            let h0 = height(k, maps, p, offset);
+            let h12 = height(k, maps, p, 12 + offset);
             lo = lo.min(h0);
             hi = hi.max(h0);
             // Band limiting only removes octaves shorter than the level.
@@ -2632,7 +2089,8 @@ mod tests {
     #[test]
     fn the_field_has_no_steps_between_neighbouring_columns() {
         let grid = Grid::new(6_371_000.0, 0.1).unwrap();
-        let k = earth(&grid);
+        let field = earth(&grid);
+        let (k, maps) = (field.constants(), Some(field.map_view()));
         let n = grid.cells() as u64;
         let mut rng = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = || {
@@ -2650,7 +2108,8 @@ mod tests {
             for d in [(1, 0), (0, 1)] {
                 let h = |t: i32| {
                     height(
-                        &k,
+                        k,
+                        maps,
                         grid.domain_point(face, i + d.0 * t, j + d.1 * t, 0),
                         offset,
                     )

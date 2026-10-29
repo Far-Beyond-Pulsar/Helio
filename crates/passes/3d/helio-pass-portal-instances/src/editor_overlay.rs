@@ -356,6 +356,14 @@ impl RenderPass for PortalEditorOverlayPass {
         "PortalEditorOverlay"
     }
 
+    /// A member in editor mode while it has something to draw.
+    fn is_member(&mut self, _scene: &mut helio_core::SceneContent<'_>) -> bool {
+        self.editor_mode
+            && (self.active_portal_count.unwrap_or(0) > 0
+                || !self.debug_texts.is_empty()
+                || self.ghost_vertex_count > 0)
+    }
+
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
         static VIEWS: &[DebugViewDescriptor] = &[DebugViewDescriptor {
             name: "Portal Diagnostics",

@@ -8,70 +8,19 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
-use super::recording_cache::{self, UnitBuffer, UnitCache};
 use super::resource_lifetime::ResourceLifetime;
 use super::scheduling::{compute_parallel_layers, CachedPass, PrePassAction};
 use super::{DebugPassInfo, DebugResourceInfo, FrameDebugData};
-use crate::cmd_ir::{Cmd, Stream};
-use crate::context::RecordedStreams;
 
-/// One command buffer of a frame's submission, in submission order.
-enum FrameBuffer {
-    Once(wgpu::CommandBuffer),
-    /// A unit's cached recording (see `recording_cache`): its first pass,
-    /// the variant, and which of its two streams.
-    Cached {
-        pass: usize,
-        variant: usize,
-        compute: bool,
-    },
-    /// A reusable command buffer encoded this frame but not cached, kept in
-    /// the frame's `frame_reusable` list.
-    Uncached(usize),
-}
-
-/// Reused across successful frames. Drained before returning it to the graph,
-/// so it holds capacity without extending command-buffer/resource lifetimes.
+/// Per-frame vectors reused across successful frames. They are drained before
+/// they go back to the graph, so they keep capacity, never command buffers or
+/// resources; a frame that fails drops its own.
 #[derive(Default)]
 struct FrameScratch {
-    compute: Vec<FrameBuffer>,
-    graphics: Vec<Option<FrameBuffer>>,
-    reusable: Vec<wgpu::ReusableCommandBuffer>,
+    compute: Vec<wgpu::CommandBuffer>,
+    graphics: Vec<Option<wgpu::CommandBuffer>>,
     segment_passes: Vec<&'static str>,
-    unit_ends: Vec<Option<usize>>,
     reflected_groups: Vec<Vec<wgpu::BindGroup>>,
-}
-
-/// A recording-cache unit being recorded this frame (see `recording_cache`).
-struct OpenUnit {
-    /// Its first pass, which keys its cache.
-    first: usize,
-    /// One past its last pass.
-    end: usize,
-    compute: Stream,
-    graphics: Stream,
-    /// Whether its render pass is open on the graphics stream.
-    render_pass_open: bool,
-    /// The fused chain's GPU timing span, closed after its render pass.
-    chain_span: Option<&'static str>,
-}
-
-/// `desc` as the graph opens it: with its store ops and the XR multiview mask.
-fn record_render_pass(
-    stream: &mut Stream,
-    desc: &wgpu::RenderPassDescriptor<'_>,
-    store_ops: &[Option<wgpu::StoreOp>],
-    xr_active: bool,
-) {
-    let captured = stream.begin_render_pass(desc);
-    for (attachment, store) in captured.color.iter_mut().zip(store_ops) {
-        if let (Some(attachment), Some(store)) = (attachment.as_mut(), store) {
-            attachment.ops.store = *store;
-        }
-    }
-    if xr_active {
-        captured.multiview_mask = Some(std::num::NonZeroU32::new(0b11).unwrap());
-    }
 }
 
 /// How long `CommandEncoder::finish` took for one run of passes, recorded
@@ -237,7 +186,21 @@ pub struct PassDeclaration {
 }
 
 pub struct RenderGraph {
+    /// The scheduled passes: the members of the current frame, in build
+    /// order. Everything per pass (pipelines, caches, chains) is indexed by
+    /// position in this list.
     pub(crate) passes: Vec<Box<dyn RenderPass>>,
+    /// Build-order slot of each scheduled pass, so a repartition can merge
+    /// members and dormant passes back into build order.
+    member_slots: Vec<usize>,
+    /// Passes that are not members of the frame (see
+    /// [`RenderPass::is_member`]), with their build-order slots.
+    dormant: Vec<(usize, Box<dyn RenderPass>)>,
+    next_slot: usize,
+    /// Per-frame membership answers, kept to avoid an allocation a frame.
+    membership_scratch: Vec<bool>,
+    /// The readers behind [`SceneContent`](crate::graph::SceneContent).
+    scene_rows: crate::graph::SceneRows,
     pass_index_map: HashMap<TypeId, usize>,
     profiler: Profiler,
     pub(crate) pool: GraphTexturePool,
@@ -294,16 +257,6 @@ pub struct RenderGraph {
     finish_breakdown_enabled: bool,
     /// The last frame's segments while `finish_breakdown_enabled`.
     finish_breakdown: Vec<FinishSegment>,
-    /// Per pass, its recording-cache state (see `recording_cache`). Reset
-    /// whenever the graph is rebuilt.
-    unit_caches: Vec<UnitCache>,
-    recording_cache_enabled: bool,
-    /// Set once the backend turned out unable to resubmit command buffers.
-    recording_cache_unsupported: bool,
-    recording_cache_active: bool,
-    recording_cache_inactive_reason: Option<&'static str>,
-    /// Passes the cache recorded directly last frame, and why.
-    recording_cache_direct: Vec<(&'static str, &'static str)>,
     frame_scratch: FrameScratch,
     chain_membership: Vec<bool>,
     /// Previous frame's chain membership, used to detect which passes changed
@@ -419,6 +372,11 @@ impl RenderGraph {
     pub fn new(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
         Self {
             passes: Vec::new(),
+            member_slots: Vec::new(),
+            dormant: Vec::new(),
+            next_slot: 0,
+            membership_scratch: Vec::new(),
+            scene_rows: Default::default(),
             pass_index_map: HashMap::new(),
             profiler: Profiler::new(device, queue),
             pool: GraphTexturePool::new(),
@@ -450,12 +408,6 @@ impl RenderGraph {
             finish_breakdown_enabled: std::env::var_os(FINISH_BREAKDOWN_ENV)
                 .is_some_and(|value| value != "0"),
             finish_breakdown: Vec::new(),
-            unit_caches: Vec::new(),
-            recording_cache_enabled: recording_cache::enabled_by_env(),
-            recording_cache_unsupported: false,
-            recording_cache_active: false,
-            recording_cache_inactive_reason: None,
-            recording_cache_direct: Vec::new(),
             frame_scratch: FrameScratch::default(),
             chain_membership: Vec::new(),
             prev_chain_membership: Vec::new(),
@@ -518,126 +470,6 @@ impl RenderGraph {
     /// [`Self::set_finish_breakdown`] is on.
     pub fn finish_breakdown(&self) -> &[FinishSegment] {
         &self.finish_breakdown
-    }
-
-    /// Resubmit each cacheable unit's command buffers while it records the
-    /// same commands (see `recording_cache`). On by default; the
-    /// `HELIO_RECORDING_CACHE=0` environment variable switches it off.
-    pub fn set_recording_cache(&mut self, enabled: bool) {
-        self.recording_cache_enabled = enabled;
-        if !enabled {
-            self.reset_recording_cache();
-        }
-    }
-
-    /// Which passes the recording cache hit or missed, and why.
-    pub fn recording_cache_stats(&self) -> recording_cache::RecordingCacheStats {
-        recording_cache::RecordingCacheStats {
-            active: self.recording_cache_active,
-            inactive_reason: self.recording_cache_inactive_reason,
-            direct: self.recording_cache_direct.clone(),
-            units: self
-                .unit_caches
-                .iter()
-                .filter(|unit| {
-                    unit.hits + unit.misses + unit.bypassed > 0 || unit.uncacheable.is_some()
-                })
-                .map(|unit| recording_cache::UnitCacheStats {
-                    pass: unit.label,
-                    hits: unit.hits,
-                    misses: unit.misses,
-                    bypassed: unit.bypassed,
-                    cached_variants: unit.variants.len(),
-                    uncacheable: unit.uncacheable,
-                    last_miss: unit.last_miss.clone(),
-                })
-                .collect(),
-        }
-    }
-
-    fn reset_recording_cache(&mut self) {
-        self.unit_caches = (0..self.passes.len())
-            .map(|_| UnitCache::default())
-            .collect();
-    }
-
-    /// Where this frame's cacheable units start: the end (exclusive) of the
-    /// unit starting at each pass. A unit is a pass outside a fused chain, or
-    /// a whole chain, when every pass in it supports the cache.
-    fn recording_units(&mut self, ends: &mut Vec<Option<usize>>) {
-        let count = self.passes.len();
-        ends.clear();
-        ends.resize(count, None);
-        self.recording_cache_direct.clear();
-        let mut start = 0;
-        while start < count {
-            let chain = self
-                .pass_cache
-                .get(start)
-                .and_then(|cached| cached.as_ref())
-                .map(|cached| cached.chain_range.clone())
-                .filter(|range| !range.is_empty());
-            let range = match chain {
-                Some(range) if range.start == start => range,
-                // A chain member that does not start the chain, or a
-                // chain-transparent pass bridged into one.
-                Some(_) => {
-                    start += 1;
-                    continue;
-                }
-                None if self.chain_membership.get(start).copied().unwrap_or(false) => {
-                    start += 1;
-                    continue;
-                }
-                None => start..start + 1,
-            };
-            let chained = range.len() > 1;
-            let frame = self.frame_count;
-            let direct = if let Some(reason) = self.unit_caches[start].uncacheable {
-                Some(reason)
-            } else if self.unit_caches[start].backing_off(frame) {
-                Some(recording_cache::BACKING_OFF)
-            } else if !range
-                .clone()
-                .all(|index| self.passes[index].supports_recording_cache())
-            {
-                Some("a pass opts out")
-            } else if chained
-                && range
-                    .clone()
-                    .any(|index| self.gpu_render_bundles[index].is_some())
-            {
-                // A bundle opens a render pass of its own.
-                Some("a fused chain with a render bundle")
-            } else {
-                None
-            };
-            match direct {
-                None => ends[start] = Some(range.end),
-                Some(reason) => self.recording_cache_direct.extend(
-                    range
-                        .clone()
-                        .map(|index| (self.passes[index].name(), reason)),
-                ),
-            }
-            start = range.end;
-        }
-    }
-
-    /// Whether this frame can use the recording cache, or why not.
-    fn recording_cache_decision(
-        &self,
-        finish_breakdown: bool,
-    ) -> std::result::Result<(), &'static str> {
-        if !self.recording_cache_enabled {
-            Err("switched off")
-        } else if self.recording_cache_unsupported {
-            Err(recording_cache::BACKEND_UNSUPPORTED)
-        } else if finish_breakdown {
-            Err("the finish breakdown is on")
-        } else {
-            Ok(())
-        }
     }
 
     /// Enables the driver-validated persistent pipeline cache. Must be called
@@ -734,76 +566,81 @@ impl RenderGraph {
             .collect()
     }
 
+    /// [`resize`](Self::resize) to `width` x `height` at both resolutions.
     pub fn set_render_size(&mut self, width: u32, height: u32) {
-        if self.output_w == width && self.output_h == height && self.resources_allocated {
+        self.resize(crate::graph::RenderSize::uniform(width, height));
+    }
+
+    /// Resizes the graph in place: its textures are reallocated at the new
+    /// resolutions and every pass, scheduled or dormant, gets
+    /// [`RenderPass::on_resize`]. Passes, pipelines and the schedule are kept,
+    /// so a resize costs the textures, not a rebuild.
+    pub fn resize(&mut self, size: crate::graph::RenderSize) {
+        if self.render_size() == size && self.resources_allocated {
             return;
         }
-        self.internal_w = width;
-        self.internal_h = height;
-        self.output_w = width;
-        self.output_h = height;
+        let started = std::time::Instant::now();
+        self.set_size(size);
         self.resize_pending = true;
-
         if self.locked {
-            let resize_start = std::time::Instant::now();
-            // A resize changes attachment extents, not graph topology. Keep
-            // the locked graph's reflected pipelines, pass schedule, and
-            // descriptor probes; `lock()` rebuilds all of those and can make
-            // an editor viewport resize take seconds.
-            self.pool.clear();
-            self.reflected_group_cache.clear();
-            self.collect_declarations();
-            self.allocate_textures();
-            self.resources_allocated = true;
-            let allocation_time = resize_start.elapsed();
-
-            let pass_resize_start = std::time::Instant::now();
-            for pass in &mut self.passes {
-                pass.on_resize(&self.device, width, height);
-            }
-            let pass_resize_time = pass_resize_start.elapsed();
-
-            // Bundles may capture resource bindings, so recreate them against
-            // the newly allocated textures while retaining the graph itself.
-            let bundle_start = std::time::Instant::now();
-            self.rebuild_gpu_render_bundles();
-            let bundle_time = bundle_start.elapsed();
-
-            let elapsed = resize_start.elapsed();
-            if elapsed >= std::time::Duration::from_millis(100) {
-                log::warn!(
-                    "RenderGraph resize {}x{} took {:.1}ms (attachments {:.1}ms, pass callbacks {:.1}ms, bundles {:.1}ms)",
-                    width,
-                    height,
-                    elapsed.as_secs_f64() * 1000.0,
-                    allocation_time.as_secs_f64() * 1000.0,
-                    pass_resize_time.as_secs_f64() * 1000.0,
-                    bundle_time.as_secs_f64() * 1000.0,
-                );
-            }
+            self.reallocate_textures();
         } else {
-            self.pool.clear();
-            // Cached reflected groups may bind the textures just dropped.
-            self.reflected_group_cache.clear();
-            self.collect_declarations();
-            let (writes, reads, _) = self.chain_read_write_sets();
-            self.parallel_layers = compute_parallel_layers(&writes, &reads);
-            self.allocate_textures();
-            self.prepare_pipeline_registries();
-            self.detect_subpass_chains();
-            self.resources_allocated = true;
-            for pass in &mut self.passes {
-                pass.on_resize(&self.device, width, height);
-            }
-            self.rebuild_gpu_render_bundles();
+            self.allocate_transients();
+        }
+        let textures = started.elapsed();
+        let device = self.device.clone();
+        for pass in self.all_passes_mut() {
+            pass.on_resize(&device, size);
+        }
+        let passes = started.elapsed() - textures;
+        self.gpu_render_bundles.clear();
+        self.rebuild_gpu_render_bundles();
+        let elapsed = started.elapsed();
+        if elapsed >= std::time::Duration::from_millis(100) {
+            eprintln!(
+                "[RenderGraph] slow resize to {:?} (output {:?}) took {:.1} ms (textures {:.1} ms,                  pass callbacks {:.1} ms, bundles {:.1} ms)",
+                size.internal,
+                size.output,
+                elapsed.as_secs_f64() * 1000.0,
+                textures.as_secs_f64() * 1000.0,
+                passes.as_secs_f64() * 1000.0,
+                (elapsed - textures - passes).as_secs_f64() * 1000.0,
+            );
         }
     }
 
+    fn set_size(&mut self, size: crate::graph::RenderSize) {
+        [self.internal_w, self.internal_h] = size.internal;
+        [self.output_w, self.output_h] = size.output;
+    }
+
+    /// Reallocates the graph textures of a locked graph at its current size,
+    /// keeping its chains and passes (the textures' alias groups depend only
+    /// on the schedule).
+    fn reallocate_textures(&mut self) {
+        self.pool.clear();
+        // Cached reflected groups may bind the textures just dropped.
+        self.reflected_group_cache.clear();
+        self.collect_declarations();
+        for rl in self.resources.values_mut() {
+            rl.chain_local = self
+                .subpass_chains
+                .iter()
+                .any(|c| c.start <= rl.first_write_pass && rl.last_read_pass < c.end);
+        }
+        self.assign_chain_aware_alias_groups();
+        self.allocate_textures();
+        self.resources_allocated = true;
+        // Recorded units bind the textures just replaced.
+    }
+
     pub fn init_transients(&mut self, width: u32, height: u32) {
-        self.internal_w = width;
-        self.internal_h = height;
-        self.output_w = width;
-        self.output_h = height;
+        self.set_size(crate::graph::RenderSize::uniform(width, height));
+        self.allocate_transients();
+    }
+
+    /// Allocates the graph textures of a graph that is not locked.
+    fn allocate_transients(&mut self) {
         self.pool.clear();
         // Cached reflected groups may bind the textures just dropped.
         self.reflected_group_cache.clear();
@@ -838,6 +675,8 @@ impl RenderGraph {
             .entry(type_id)
             .or_insert(self.passes.len());
         self.passes.push(pass);
+        self.member_slots.push(self.next_slot);
+        self.next_slot += 1;
         self.gpu_render_bundles.push(None);
     }
 
@@ -854,40 +693,135 @@ impl RenderGraph {
         self.add_pass(pass);
         self.gpu_render_bundles.clear();
         self.pass_cache.clear();
+        let size = self.render_size();
         if let Some(pass) = self.passes.last_mut() {
-            pass.on_resize(&self.device, self.output_w, self.output_h);
+            pass.on_resize(&self.device, size);
         }
-        self.lock(self.output_w, self.output_h);
+        self.schedule();
         self.resize_pending = true;
     }
 
+    /// The first pass of type `T`, scheduled or dormant (see
+    /// [`RenderPass::is_member`]): configuration reaches a pass whether or not
+    /// the current scene uses it.
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
-        let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
-        self.passes[idx].as_any_mut().downcast_mut::<T>()
+        let slot = self.first_slot_of(TypeId::of::<T>())?;
+        self.pass_at_slot_mut(slot)?
+            .as_any_mut()
+            .downcast_mut::<T>()
     }
 
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
-        let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
-        self.passes[idx].as_any().downcast_ref::<T>()
+        let slot = self.first_slot_of(TypeId::of::<T>())?;
+        self.all_passes()
+            .find(|(s, _)| *s == slot)
+            .and_then(|(_, pass)| pass.as_any().downcast_ref::<T>())
+    }
+
+    /// Build-order slot of the first pass of `type_id`, scheduled or dormant.
+    fn first_slot_of(&self, type_id: TypeId) -> Option<usize> {
+        let member = self
+            .pass_index_map
+            .get(&type_id)
+            .map(|&index| self.member_slots[index]);
+        let dormant = self
+            .dormant
+            .iter()
+            .find(|(_, pass)| pass.as_any().type_id() == type_id)
+            .map(|(slot, _)| *slot);
+        match (member, dormant) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
+
+    fn pass_at_slot_mut(&mut self, slot: usize) -> Option<&mut Box<dyn RenderPass>> {
+        if let Some(index) = self.member_slots.iter().position(|&s| s == slot) {
+            return self.passes.get_mut(index);
+        }
+        self.dormant
+            .iter_mut()
+            .find(|(s, _)| *s == slot)
+            .map(|(_, pass)| pass)
+    }
+
+    /// Every pass with its build-order slot: the scheduled ones, then the
+    /// dormant ones.
+    fn all_passes(&self) -> impl Iterator<Item = (usize, &Box<dyn RenderPass>)> {
+        self.member_slots
+            .iter()
+            .copied()
+            .zip(self.passes.iter())
+            .chain(self.dormant.iter().map(|(slot, pass)| (*slot, pass)))
+    }
+
+    fn all_passes_mut(&mut self) -> impl Iterator<Item = &mut Box<dyn RenderPass>> {
+        self.passes
+            .iter_mut()
+            .chain(self.dormant.iter_mut().map(|(_, pass)| pass))
+    }
+
+    /// Number of passes that are not members of the current frame.
+    pub fn dormant_count(&self) -> usize {
+        self.dormant.len()
+    }
+
+    /// Names of the scheduled passes, in execution order.
+    pub fn member_names(&self) -> Vec<&'static str> {
+        self.passes.iter().map(|pass| pass.name()).collect()
     }
 
     /// Preserve opt-in streaming state when rebuilding a graph on this device.
     /// New pass configuration and graph resources remain authoritative.
+    /// Dormant passes inherit too, from scheduled or dormant predecessors.
     pub fn inherit_persistent_state(&mut self, previous: &mut RenderGraph) {
+        let size = self.render_size();
+        let device = self.device.clone();
         let mut used = std::collections::HashSet::new();
-        for pass in &mut self.passes {
-            for (index, old) in previous.passes.iter_mut().enumerate() {
+        let mut olds: Vec<&mut Box<dyn RenderPass>> = previous.all_passes_mut().collect();
+        for pass in self.all_passes_mut() {
+            for (index, old) in olds.iter_mut().enumerate() {
                 if !used.contains(&index)
                     && pass.name() == old.name()
                     && pass.as_any().type_id() == old.as_any().type_id()
-                    && pass.inherit_persistent_state(old.as_mut())
+                    && pass.inherit_persistent_state(&mut ***old)
                 {
                     used.insert(index);
-                    pass.on_resize(&self.device, self.internal_w, self.internal_h);
+                    pass.on_resize(&device, size);
                     break;
                 }
             }
         }
+        drop(olds);
+
+        // Same scene: start with the members the old graph had, and its row
+        // readers, rather than a readback later.
+        self.scene_rows = std::mem::take(&mut previous.scene_rows);
+        let members: Vec<(TypeId, &'static str)> = previous
+            .passes
+            .iter()
+            .map(|pass| (pass.as_any().type_id(), pass.name()))
+            .collect();
+        let join: Vec<bool> = self
+            .dormant
+            .iter()
+            .map(|(_, pass)| members.contains(&(pass.as_any().type_id(), pass.name())))
+            .collect();
+        if join.contains(&true) {
+            let stay = vec![true; self.passes.len()];
+            self.repartition(&stay, &join, true);
+            if self.locked {
+                self.reschedule_members();
+            }
+        }
+    }
+
+    /// The graph's current resolutions.
+    pub fn render_size(&self) -> crate::graph::RenderSize {
+        crate::graph::RenderSize::new(
+            [self.internal_w, self.internal_h],
+            [self.output_w, self.output_h],
+        )
     }
 
     /// Find the index of the first pass matching type `T`.
@@ -903,7 +837,7 @@ impl RenderGraph {
     /// pass types actually care. See that trait method's docs for why callers
     /// should call this every frame rather than only on the transition.
     pub fn set_editor_mode(&mut self, enabled: bool) {
-        for pass in &mut self.passes {
+        for pass in self.all_passes_mut() {
             pass.set_editor_mode(enabled);
         }
     }
@@ -913,7 +847,7 @@ impl RenderGraph {
     /// Passes interpret only the fields they own; the graph and renderer
     /// facade never downcast into concrete pass implementations.
     pub fn set_frame_inputs(&mut self, inputs: &crate::RenderFrameInputs<'_>) {
-        for pass in &mut self.passes {
+        for pass in self.all_passes_mut() {
             pass.set_frame_inputs(inputs);
         }
     }
@@ -971,14 +905,15 @@ impl RenderGraph {
             // Chain membership alone cannot detect stale dependent bundles.
             self.gpu_render_bundles.clear();
             self.pass_cache.clear();
+            let size = self.render_size();
             if self.locked {
-                self.passes[index].on_resize(&self.device, self.output_w, self.output_h);
+                self.passes[index].on_resize(&self.device, size);
                 self.locked = false;
-                self.lock(self.output_w, self.output_h);
+                self.schedule();
                 self.resize_pending = true;
             } else if self.resources_allocated {
-                self.passes[index].on_resize(&self.device, self.output_w, self.output_h);
-                self.init_transients(self.output_w, self.output_h);
+                self.passes[index].on_resize(&self.device, size);
+                self.allocate_transients();
                 self.resize_pending = true;
             }
         }
@@ -1079,7 +1014,7 @@ impl RenderGraph {
                 .take()
                 .expect("check_swap rejects repeated picks");
             if fresh.inherit_persistent_state(&mut *self.passes[live]) {
-                fresh.on_resize(&self.device, self.internal_w, self.internal_h);
+                fresh.on_resize(&self.device, self.render_size());
             }
             self.pipeline_cache
                 .invalidate_pass(self.passes[live].name());
@@ -1094,23 +1029,23 @@ impl RenderGraph {
         Ok(())
     }
 
+    /// Every pass of type `T`, scheduled or dormant.
     pub fn iter_passes_mut<T: RenderPass + 'static>(&mut self) -> impl Iterator<Item = &mut T> {
-        self.passes
-            .iter_mut()
+        self.all_passes_mut()
             .filter_map(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// The debug views of every pass, dormant ones included: a view joins its
+    /// pass when it is selected.
     pub fn collect_debug_views(&self) -> Vec<crate::DebugViewDescriptor> {
-        self.passes
-            .iter()
-            .flat_map(|p| p.debug_views().iter().copied())
+        self.all_passes()
+            .flat_map(|(_, p)| p.debug_views().iter().copied())
             .collect()
     }
 
     pub fn collect_debug_view_legends(&self) -> Vec<(u32, crate::DebugViewLegend)> {
-        self.passes
-            .iter()
-            .flat_map(|pass| {
+        self.all_passes()
+            .flat_map(|(_, pass)| {
                 pass.debug_views().iter().filter_map(|view| {
                     pass.debug_view_legend(view.debug_mode)
                         .map(|legend| (view.debug_mode, legend))
@@ -1120,9 +1055,8 @@ impl RenderGraph {
     }
 
     pub fn collect_debug_view_categories(&self) -> Vec<(u32, &'static str)> {
-        self.passes
-            .iter()
-            .flat_map(|pass| {
+        self.all_passes()
+            .flat_map(|(_, pass)| {
                 pass.debug_views()
                     .iter()
                     .map(|view| (view.debug_mode, pass.debug_view_category(view.debug_mode)))
@@ -1133,7 +1067,7 @@ impl RenderGraph {
 
     /// Propagate a renderer-wide debug mode change to every pass.
     pub fn set_debug_mode(&mut self, mode: u32) {
-        for pass in &mut self.passes {
+        for pass in self.all_passes_mut() {
             pass.set_debug_mode(mode);
         }
     }
@@ -1484,6 +1418,13 @@ impl RenderGraph {
             self.locked,
             "RenderGraph::execute() requires lock() to be called first"
         );
+        // The frame's members: passes join and leave with the scene's content
+        // before anything of the frame is recorded.
+        if self.update_membership(scene) {
+            #[cfg(not(target_arch = "wasm32"))]
+            profiling::profile_scope!("RenderGraph: reschedule for new members");
+            self.reschedule_members();
+        }
 
         // External device owners drive wgpu polling. Consume callbacks from
         // that host cadence before reserving a bounded readback slot for this
@@ -1578,21 +1519,15 @@ impl RenderGraph {
         let (finish_reply_tx, finish_reply_rx) = mpsc::channel::<FinishReply>();
         #[cfg(not(target_arch = "wasm32"))]
         let mut finishes_in_flight = 0usize;
-        // An early error drops these local owners; no failed-frame command
-        // buffer or finish reply can be reused by a subsequent frame.
+        // `graphics_segments` is indexed by segment; `None` while its finish
+        // is still in flight.
         let FrameScratch {
             compute: mut compute_segments,
             graphics: mut graphics_segments,
-            reusable: mut frame_reusable,
             mut segment_passes,
-            mut unit_ends,
             reflected_groups: _,
         } = std::mem::take(&mut self.frame_scratch);
         let mut segment_recording = std::time::Duration::ZERO;
-        // Whether the compute encoder holds commands (the frame's opening
-        // timestamp, or a directly recorded pass's) that a cached unit's
-        // compute commands must follow.
-        let mut compute_pending = true;
         let new_encoder = |label: &'static str| {
             scene
                 .device()
@@ -1625,10 +1560,10 @@ impl RenderGraph {
                             ))
                         });
                         let start = std::time::Instant::now();
-                        compute_segments.push(FrameBuffer::Once(done_compute.finish()));
+                        compute_segments.push(done_compute.finish());
                         let compute = start.elapsed();
                         let start = std::time::Instant::now();
-                        graphics_segments[index] = Some(FrameBuffer::Once(done_graphics.finish()));
+                        graphics_segments[index] = Some(done_graphics.finish());
                         let graphics = start.elapsed();
                         self.finish_breakdown.push(FinishSegment {
                             passes,
@@ -1646,8 +1581,7 @@ impl RenderGraph {
                         let unsent = Some(done_graphics);
                         match unsent {
                             Some(done_graphics) => {
-                                graphics_segments[index] =
-                                    Some(FrameBuffer::Once(done_graphics.finish()));
+                                graphics_segments[index] = Some(done_graphics.finish());
                             }
                             None => {
                                 #[cfg(not(target_arch = "wasm32"))]
@@ -1668,19 +1602,6 @@ impl RenderGraph {
 
         self.profiler
             .begin_gpu_pass(&mut encoder, "__graph_graphics");
-
-        if self.unit_caches.len() != self.passes.len() {
-            self.reset_recording_cache();
-        }
-        let recording_cache_decision = self.recording_cache_decision(finish_breakdown);
-        let use_recording_cache = recording_cache_decision.is_ok();
-        self.recording_cache_active = use_recording_cache;
-        self.recording_cache_inactive_reason = recording_cache_decision.err();
-        if use_recording_cache {
-            for unit in &mut self.unit_caches {
-                unit.evict_stale(self.frame_count);
-            }
-        }
 
         {
             // Every pass declares the optional resources it will read before
@@ -1726,16 +1647,6 @@ impl RenderGraph {
             // lifetime a plain `self.pre_pass_actions.get(..)` borrow would carry.
             let pre_pass_actions_ptr: *const Vec<Vec<PrePassAction>> = &self.pre_pass_actions;
             let pass_count = self.passes.len();
-            // Recording cache: where each unit starts, and the one being
-            // recorded (see `recording_cache`).
-            if use_recording_cache {
-                self.recording_units(&mut unit_ends);
-            } else {
-                self.recording_cache_direct.clear();
-                unit_ends.clear();
-            }
-            let mut open_unit: Option<OpenUnit> = None;
-            let xr_active = self.xr_active;
 
             // prepare() and the graph-owned outputs it publishes, before
             // execute().
@@ -1790,257 +1701,7 @@ impl RenderGraph {
                     }
                 }};
             }
-            // A GPU timing span on one of the open unit's streams. The
-            // profiler's query indices restart every frame, so a frame of the
-            // same shape records the same timestamps and still hits.
-            macro_rules! unit_span {
-                ($begin:ident, $stream:expr, $label:expr) => {
-                    self.profiler.$begin(
-                        &mut crate::cmd::CommandRecorder::from_stream(std::ptr::NonNull::from(
-                            &mut $stream,
-                        )),
-                        $label,
-                    )
-                };
-            }
-            // End the open unit's render pass, then its chain's timing span,
-            // as `close_chain!` does on the encoder.
-            macro_rules! close_unit_pass {
-                ($unit:expr) => {
-                    if $unit.render_pass_open {
-                        $unit.graphics.push(Cmd::EndRenderPass);
-                        $unit.render_pass_open = false;
-                    }
-                    if let Some(label) = $unit.chain_span.take() {
-                        unit_span!(end_gpu_pass_cmds, $unit.graphics, label);
-                    }
-                };
-            }
-            // execute() into the open unit's streams.
-            macro_rules! record_execute {
-                ($unit:expr, $pass:expr, $pass_index:expr, $transparent:expr, $subpass_index:expr, $subpass_count:expr) => {{
-                    let render_pass_open = $unit.render_pass_open;
-                    let mut ctx = PassContext {
-                        encoder_ptr: std::ptr::null_mut(),
-                        queue: scene.queue(),
-                        compute_encoder_ptr: std::ptr::null_mut(),
-                        target,
-                        depth,
-                        camera: scene.camera(),
-                        camera_data: scene.camera_data(),
-                        camera_generation: scene.camera_generation(),
-                        world_origin: scene.world_origin(),
-                        scene_buffers: scene.scene_buffers(),
-                        profiler: &mut self.profiler,
-                        frame_num: scene.frame_count(),
-                        width: self.internal_w,
-                        height: self.internal_h,
-                        device: scene.device(),
-                        registry: &*registry,
-                        owns_device: self.owns_device,
-                        resource_pool: &self.pool,
-                        subpass_index: $subpass_index,
-                        subpass_count: $subpass_count,
-                        active_render_pass: None,
-                        active_compute_pass: None,
-                        recorded: Some(RecordedStreams {
-                            graphics: std::ptr::NonNull::from(&mut $unit.graphics),
-                            compute: std::ptr::NonNull::from(&mut $unit.compute),
-                            render_pass_open,
-                        }),
-                        pipeline_cache: &self.pipeline_cache,
-                        pipelines: &self.pipeline_registries[$pass_index],
-                        reflected_bind_groups: &reflected_groups[$pass_index],
-                        reflected_pipeline: self.reflected_pipelines[$pass_index].as_ref(),
-                        #[cfg(debug_assertions)]
-                        chain_transparent: $transparent,
-                    };
-                    ctx.apply_reflected_bind_groups();
-                    #[cfg(not(target_arch = "wasm32"))]
-                    profiling::profile_scope!($pass.name());
-                    $pass.execute(&mut ctx)?;
-                }};
-            }
-
             for (pass_index, pass) in self.passes.iter_mut().enumerate() {
-                // Recording cache: a unit's passes record into streams of
-                // their own. When they match a cached recording, its command
-                // buffers are submitted again instead of encoding the unit.
-                if open_unit.is_none() {
-                    if let Some(end) = unit_ends.get(pass_index).copied().flatten() {
-                        // The unit gets command buffers of its own, so what the
-                        // encoders hold is submitted before them. Consecutive
-                        // units leave nothing to cut.
-                        close_chain!();
-                        if segment_passes.is_empty() && graphics_segments.is_empty() {
-                            // Only the frame's opening timestamp; it still has
-                            // to come first.
-                            segment_passes.push("__graph_graphics");
-                        }
-                        cut_segment!();
-                        if compute_pending {
-                            let done_compute = std::mem::replace(
-                                &mut compute_encoder,
-                                new_encoder("Compute Graph"),
-                            );
-                            compute_segments.push(FrameBuffer::Once(done_compute.finish()));
-                            compute_pending = false;
-                        }
-                        let cache = &mut self.unit_caches[pass_index];
-                        cache.label = self
-                            .pass_cache
-                            .get(pass_index)
-                            .and_then(|cached| cached.as_ref())
-                            .filter(|cached| cached.chain_range.len() > 1)
-                            .map_or(pass.name(), |cached| cached.chain_label);
-                        let (compute, graphics) = cache.take_scratch();
-                        open_unit = Some(OpenUnit {
-                            first: pass_index,
-                            end,
-                            compute,
-                            graphics,
-                            render_pass_open: false,
-                            chain_span: None,
-                        });
-                    }
-                }
-                if let Some(unit) = open_unit.as_mut() {
-                    let pass_name = pass.name();
-                    // Timed from after prepare(), as on the direct path.
-                    let mut execute_start = std::time::Instant::now();
-                    if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
-                        // As the direct path: no prepare(), and the bundle
-                        // replayed in the pass's own render pass.
-                        let desc = pass.render_pass_descriptor_with_pool_and_storage(
-                            target,
-                            depth,
-                            &*registry,
-                            &self.pool,
-                            &mut self.frame_storage,
-                        );
-                        unit_span!(begin_gpu_pass_cmds, unit.graphics, pass_name);
-                        unit_span!(begin_gpu_pass_cmds, unit.compute, pass_name);
-                        if let Some(desc) = desc {
-                            unit.graphics.begin_render_pass(&desc);
-                            unit.graphics
-                                .push(Cmd::ExecuteBundles(smallvec::smallvec![bundle.clone()]));
-                            unit.graphics.push(Cmd::EndRenderPass);
-                        } else {
-                            record_execute!(unit, pass, pass_index, false, 0, 0);
-                        }
-                        unit_span!(end_gpu_pass_cmds, unit.compute, pass_name);
-                        unit_span!(end_gpu_pass_cmds, unit.graphics, pass_name);
-                    } else {
-                        prepare_pass!(pass, pass_index);
-                        execute_start = std::time::Instant::now();
-                        let desc = pass.render_pass_descriptor_with_pool_and_storage(
-                            target,
-                            depth,
-                            &*registry,
-                            &self.pool,
-                            &mut self.frame_storage,
-                        );
-                        let cached = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
-                        let chain = cached.filter(|c| !c.chain_range.is_empty());
-                        match (desc, chain) {
-                            (Some(desc), Some(c)) => {
-                                // A fused chain: one render pass, timed as one
-                                // span, as the direct path records it.
-                                if pass_index == c.chain_range.start {
-                                    unit_span!(begin_gpu_pass_cmds, unit.graphics, c.chain_label);
-                                    unit.chain_span = Some(c.chain_label);
-                                    record_render_pass(
-                                        &mut unit.graphics,
-                                        &desc,
-                                        &c.store_ops,
-                                        xr_active,
-                                    );
-                                    unit.render_pass_open = true;
-                                }
-                                record_execute!(
-                                    unit,
-                                    pass,
-                                    pass_index,
-                                    false,
-                                    c.subpass_index,
-                                    c.subpass_count
-                                );
-                                if pass_index + 1 >= c.chain_range.end {
-                                    close_unit_pass!(unit);
-                                }
-                            }
-                            (Some(desc), None) => {
-                                close_unit_pass!(unit);
-                                unit_span!(begin_gpu_pass_cmds, unit.graphics, pass_name);
-                                unit_span!(begin_gpu_pass_cmds, unit.compute, pass_name);
-                                let store_ops = cached.map_or(&[][..], |c| &c.store_ops[..]);
-                                record_render_pass(&mut unit.graphics, &desc, store_ops, xr_active);
-                                unit.render_pass_open = true;
-                                record_execute!(unit, pass, pass_index, false, 0, 0);
-                                close_unit_pass!(unit);
-                                unit_span!(end_gpu_pass_cmds, unit.compute, pass_name);
-                                unit_span!(end_gpu_pass_cmds, unit.graphics, pass_name);
-                            }
-                            (None, _) => {
-                                let bridged = self
-                                    .chain_membership
-                                    .get(pass_index)
-                                    .copied()
-                                    .unwrap_or(false)
-                                    && pass.chain_transparent();
-                                if !bridged {
-                                    close_unit_pass!(unit);
-                                    unit_span!(begin_gpu_pass_cmds, unit.graphics, pass_name);
-                                }
-                                unit_span!(begin_gpu_pass_cmds, unit.compute, pass_name);
-                                record_execute!(unit, pass, pass_index, bridged, 0, 0);
-                                unit_span!(end_gpu_pass_cmds, unit.compute, pass_name);
-                                if !bridged {
-                                    unit_span!(end_gpu_pass_cmds, unit.graphics, pass_name);
-                                }
-                            }
-                        }
-                    }
-                    if pass_index + 1 >= unit.end {
-                        close_unit_pass!(unit);
-                        let unit = open_unit.take().expect("the unit is open");
-                        let resolved = self.unit_caches[unit.first].resolve(
-                            scene.device(),
-                            unit.compute,
-                            unit.graphics,
-                            self.frame_count,
-                        );
-                        if resolved.backend_unsupported {
-                            self.recording_cache_unsupported = true;
-                        }
-                        let mut frame_buffer = |buffer: UnitBuffer, compute: bool| match buffer {
-                            UnitBuffer::Cached(variant) => FrameBuffer::Cached {
-                                pass: unit.first,
-                                variant,
-                                compute,
-                            },
-                            UnitBuffer::Once(buffer) => FrameBuffer::Once(buffer),
-                            UnitBuffer::Uncached(buffer) => {
-                                frame_reusable.push(buffer);
-                                FrameBuffer::Uncached(frame_reusable.len() - 1)
-                            }
-                        };
-                        if let Some(buffer) = resolved.compute {
-                            compute_segments.push(frame_buffer(buffer, true));
-                        }
-                        if let Some(buffer) = resolved.graphics {
-                            graphics_segments.push(Some(frame_buffer(buffer, false)));
-                        }
-                    }
-                    pass.publish(registry);
-                    self.profiler
-                        .record_external_cpu_timing(pass_name, execute_start.elapsed());
-                    continue;
-                }
-                // Recorded directly from here on: the encoders hold commands
-                // a later unit's must follow.
-                compute_pending = true;
-
                 // A chain's passes share one render pass on the encoder, so
                 // they stay in one segment until it closes. The final pass
                 // always starts a segment of its own: the render thread
@@ -2097,7 +1758,6 @@ impl RenderGraph {
                             subpass_count: 0,
                             active_render_pass: None,
                             active_compute_pass: None,
-                            recorded: None,
                             pipeline_cache: &self.pipeline_cache,
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
@@ -2220,7 +1880,6 @@ impl RenderGraph {
                                 .as_mut()
                                 .map(|rp| &mut **rp as *mut _ as *mut _),
                             active_compute_pass: None,
-                            recorded: None,
                             pipeline_cache: &self.pipeline_cache,
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
@@ -2294,7 +1953,6 @@ impl RenderGraph {
                                 subpass_count: 0,
                                 active_render_pass: Some(&mut rp as *mut _ as *mut _),
                                 active_compute_pass: None,
-                                recorded: None,
                                 pipeline_cache: &self.pipeline_cache,
                                 pipelines: &self.pipeline_registries[pass_index],
                                 reflected_bind_groups: &reflected_groups[pass_index],
@@ -2354,7 +2012,6 @@ impl RenderGraph {
                         subpass_count: 0,
                         active_render_pass: None,
                         active_compute_pass: None,
-                        recorded: None,
                         pipeline_cache: &self.pipeline_cache,
                         pipelines: &self.pipeline_registries[pass_index],
                         reflected_bind_groups: &reflected_groups[pass_index],
@@ -2384,10 +2041,6 @@ impl RenderGraph {
                 self.profiler
                     .record_external_cpu_timing(pass_name, recorded);
             }
-            debug_assert!(
-                open_unit.is_none(),
-                "a recording-cache unit ends at its last pass"
-            );
         }
 
         close_chain!();
@@ -2437,9 +2090,7 @@ impl RenderGraph {
                 for _ in 0..finishes_in_flight {
                     match finish_reply_rx.recv() {
                         Ok((COMPUTE_SEGMENT, Ok(buffer))) => compute_last = Some(buffer),
-                        Ok((index, Ok(buffer))) => {
-                            graphics_segments[index] = Some(FrameBuffer::Once(buffer))
-                        }
+                        Ok((index, Ok(buffer))) => graphics_segments[index] = Some(buffer),
                         Ok((_, Err(payload))) => {
                             first_panic.get_or_insert(payload);
                         }
@@ -2451,40 +2102,21 @@ impl RenderGraph {
                 }
             }
             let mut command_buffers = compute_segments;
-            command_buffers.extend(compute_last.map(FrameBuffer::Once));
+            command_buffers.extend(compute_last);
             command_buffers.extend(
                 graphics_segments.drain(..).map(|segment| {
                     segment.expect("every graphics segment is finished before submit")
                 }),
             );
-            command_buffers.push(FrameBuffer::Once(graphics_last));
+            command_buffers.push(graphics_last);
             command_buffers
         };
         let mut command_buffers = command_buffers;
         let submission_index = {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: queue.submit (graph)");
-            let unit_caches = &self.unit_caches;
-            let items = command_buffers.drain(..).map(|buffer| match buffer {
-                FrameBuffer::Once(buffer) => wgpu::SubmitItem::Once(buffer),
-                FrameBuffer::Cached {
-                    pass,
-                    variant,
-                    compute,
-                } => {
-                    let recording = &unit_caches[pass].variants[variant];
-                    let buffer = if compute {
-                        &recording.compute
-                    } else {
-                        &recording.graphics
-                    };
-                    wgpu::SubmitItem::Reusable(buffer.as_ref().expect("cached stream is not empty"))
-                }
-                FrameBuffer::Uncached(index) => wgpu::SubmitItem::Reusable(&frame_reusable[index]),
-            });
-            scene.queue().submit_mixed(items)
+            scene.queue().submit(command_buffers.drain(..))
         };
-        frame_reusable.clear();
         segment_passes.clear();
         for groups in &mut reflected_groups {
             groups.clear();
@@ -2492,9 +2124,7 @@ impl RenderGraph {
         self.frame_scratch = FrameScratch {
             compute: command_buffers,
             graphics: graphics_segments,
-            reusable: frame_reusable,
             segment_passes,
-            unit_ends,
             reflected_groups,
         };
         {
@@ -2579,13 +2209,146 @@ impl RenderGraph {
         registry
     }
 
-    /// Finalize the graph after all passes have been added.
+    /// [`lock_sized`](Self::lock_sized) with both resolutions `width` x `height`.
     pub fn lock(&mut self, width: u32, height: u32) {
+        self.lock_sized(crate::graph::RenderSize::uniform(width, height));
+    }
+
+    /// Finishes the graph after every pass has been added: decides the first
+    /// members (with no scene yet, so passes that need scene content start
+    /// dormant; see [`RenderPass::is_member`]), then schedules them and
+    /// allocates their textures at `size`.
+    pub fn lock_sized(&mut self, size: crate::graph::RenderSize) {
         assert!(!self.locked, "RenderGraph::lock() called twice");
-        self.internal_w = width;
-        self.internal_h = height;
-        self.output_w = width;
-        self.output_h = height;
+        self.set_size(size);
+        let mut content = self.scene_rows.content(None, None, None, self.frame_count);
+        let stay: Vec<bool> = self
+            .passes
+            .iter_mut()
+            .map(|pass| pass.is_member(&mut content))
+            .collect();
+        let join: Vec<bool> = self
+            .dormant
+            .iter_mut()
+            .map(|(_, pass)| pass.is_member(&mut content))
+            .collect();
+        // Nothing has run yet, so nothing leaves.
+        self.repartition(&stay, &join, false);
+        self.schedule();
+    }
+
+    /// Schedules the graph's new members, keeping every graph texture whose
+    /// resource is unchanged (same views, so bind groups built over them stay
+    /// valid). If one had to change, every pass is told as on a resize.
+    fn reschedule_members(&mut self) {
+        let started = std::time::Instant::now();
+        let before = self.pool.views();
+        self.pool.retire();
+        self.locked = false;
+        self.schedule_reporting(false);
+        let changed = before
+            .iter()
+            .any(|(name, view)| self.pool.get_view(name).is_some_and(|now| now != view));
+        if changed {
+            let size = self.render_size();
+            let device = self.device.clone();
+            for pass in self.all_passes_mut() {
+                pass.on_resize(&device, size);
+            }
+            self.resize_pending = true;
+        }
+        eprintln!(
+            "[RenderGraph] {} scheduled, {} dormant ({:.2} ms{}): {}",
+            self.passes.len(),
+            self.dormant.len(),
+            started.elapsed().as_secs_f64() * 1000.0,
+            if changed { ", textures moved" } else { "" },
+            self.member_names().join(", ")
+        );
+    }
+
+    /// [`schedule_reporting`](Self::schedule_reporting), printing the schedule.
+    fn schedule(&mut self) {
+        self.schedule_reporting(true);
+    }
+
+    /// Asks every pass whether it is a member of this frame and moves those
+    /// that changed. True when the members changed (the graph must be
+    /// scheduled again).
+    fn update_membership(&mut self, scene: &dyn SceneInput) -> bool {
+        let mut content = self.scene_rows.content(
+            Some(scene.device().as_ref()),
+            Some(scene.queue().as_ref()),
+            Some(scene.scene_buffers()),
+            self.frame_count,
+        );
+        let mut changed = false;
+        self.membership_scratch.clear();
+        for pass in self.passes.iter_mut() {
+            let stays = pass.is_member(&mut content);
+            changed |= !stays;
+            self.membership_scratch.push(stays);
+        }
+        let members = self.passes.len();
+        for (_, pass) in self.dormant.iter_mut() {
+            let joins = pass.is_member(&mut content);
+            changed |= joins;
+            self.membership_scratch.push(joins);
+        }
+        if !changed {
+            return false;
+        }
+        let scratch = std::mem::take(&mut self.membership_scratch);
+        self.repartition(&scratch[..members], &scratch[members..], true);
+        self.membership_scratch = scratch;
+        true
+    }
+
+    /// Moves passes between the schedule and the dormant list: scheduled pass
+    /// `i` stays when `stay[i]`, dormant pass `j` joins when `join[j]`. The
+    /// schedule keeps build order. With `leave`, passes that leave get
+    /// [`RenderPass::on_leave`]. The caller schedules the graph again.
+    fn repartition(&mut self, stay: &[bool], join: &[bool], leave: bool) {
+        let members = std::mem::take(&mut self.passes);
+        let slots = std::mem::take(&mut self.member_slots);
+        let dormant = std::mem::take(&mut self.dormant);
+        let mut all: Vec<(usize, Box<dyn RenderPass>, bool)> =
+            Vec::with_capacity(members.len() + dormant.len());
+        for ((slot, mut pass), &stays) in slots.into_iter().zip(members).zip(stay) {
+            if leave && !stays {
+                pass.on_leave(&self.device);
+            }
+            all.push((slot, pass, stays));
+        }
+        for ((slot, pass), &joins) in dormant.into_iter().zip(join) {
+            all.push((slot, pass, joins));
+        }
+        all.sort_by_key(|(slot, _, _)| *slot);
+        self.pass_index_map.clear();
+        for (slot, pass, member) in all {
+            if member {
+                self.pass_index_map
+                    .entry(pass.as_any().type_id())
+                    .or_insert(self.passes.len());
+                self.passes.push(pass);
+                self.member_slots.push(slot);
+            } else {
+                self.dormant.push((slot, pass));
+            }
+        }
+        // Everything per pass is rebuilt by the next schedule.
+        self.gpu_render_bundles = (0..self.passes.len()).map(|_| None).collect();
+        self.pass_cache.clear();
+        self.chain_membership.clear();
+        self.prev_chain_membership.clear();
+        self.last_bundle_chain_gen.clear();
+    }
+
+    /// Schedules the current members: their declared resources, chains,
+    /// pipelines and textures. Sizes are the graph's current ones. `report`
+    /// prints the schedule.
+    fn schedule_reporting(&mut self, report: bool) {
+        assert!(!self.locked, "RenderGraph::lock() called twice");
         self.pool.clear();
         // Cached reflected groups may bind the textures just dropped.
         self.reflected_group_cache.clear();
@@ -2785,11 +2548,11 @@ impl RenderGraph {
                 })
             })
             .collect();
-        self.reset_recording_cache();
 
         self.rebuild_gpu_render_bundles_incremental();
+        self.pool.drop_retired();
 
-        {
+        if report {
             let mut w_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
             let mut r_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
             for p in self.passes.iter() {

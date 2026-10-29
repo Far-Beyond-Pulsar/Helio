@@ -1135,7 +1135,7 @@ impl RenderPass for CloudTracePass {
         frame.write_texture_binding(SUN_VISIBILITY, &targets.sun_visibility, "CloudTrace");
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+    fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {
         self.history = false;
     }
 }

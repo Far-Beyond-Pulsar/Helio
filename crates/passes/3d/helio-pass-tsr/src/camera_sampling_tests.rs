@@ -182,7 +182,7 @@ fn resolved_view_publication_follows_resize() {
     let old = pass.output_view.clone();
     for size in [None, Some((96, 48))] {
         if let Some((width, height)) = size {
-            pass.on_resize(&device, width, height);
+            pass.on_resize(&device, helio_core::RenderSize::uniform(width, height));
         }
         let mut frame = helio_core::ResourceRegistry::empty();
         pass.publish(&mut frame);
