@@ -112,6 +112,9 @@ pub(super) struct Volume {
     /// Height over the datum above which nothing is solid (terrain,
     /// overhangs, edits), with a margin: rays rising past it end.
     pub ceiling: f64,
+    /// Height over the datum below which nothing is seen (caves, digs),
+    /// less a margin: where the sun's occlusion views end.
+    pub floor: f64,
     /// What Solid and Buried nodes not added by a brush show where a ray
     /// meets them (`Planet::rock_material`).
     pub rock: u8,
@@ -409,6 +412,8 @@ impl DrawLayouts {
                     uniform(62, c),
                     sun_occlusion_maps_entry(63),
                     storage_texture(64, wgpu::TextureFormat::Rgba8Unorm),
+                    read(65),
+                    write(66),
                 ],
             }),
             sky_sample: device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -517,6 +522,7 @@ impl DrawLayouts {
                     read(39),
                     uniform(62, c),
                     sun_occlusion_maps_entry(63),
+                    read(65),
                 ],
             }),
             // Foliage ground probes: the probe frame, queries, hits, the
@@ -609,6 +615,8 @@ pub(super) struct DrawPipelines {
     pub ground_probe: wgpu::ComputePipeline,
     pub feedback: wgpu::ComputePipeline,
     pub publish: wgpu::RenderPipeline,
+    /// Opens rects of an orthographic view's exits (`trace_view`'s `open`).
+    pub exits_open: wgpu::RenderPipeline,
     /// The publish with the host's scene materials (devices with texture
     /// binding arrays: `SceneState`'s layout).
     pub publish_scene: Option<wgpu::RenderPipeline>,
@@ -752,6 +760,38 @@ impl DrawPipelines {
                 cache: None,
             },
         );
+        let exits_open = helio_core::shader::create_render_pipeline(
+            device,
+            wgpu::RenderPipelineDescriptor {
+                label: Some("chunk exits open"),
+                layout: Some(&device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: None,
+                    bind_group_layouts: &[],
+                    immediate_size: 0,
+                })),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("resolve_vertex"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("exits_open"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R32Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            },
+        );
         // The publish again, textured by the host's scene materials, where
         // the device has texture binding arrays.
         let publish_scene = scene.map(|(textures, capacity)| {
@@ -868,6 +908,7 @@ impl DrawPipelines {
             ),
             feedback: tiled("chunk feedback", &layout(&layouts.feedback), "feedback"),
             publish,
+            exits_open,
             publish_scene,
         }
     }
@@ -1030,6 +1071,7 @@ impl ChunkWorld {
             face_cells: grid.cells() as u32,
             exact_level: exact_level(&grid),
             ceiling: planet.outer_radius() - grid.radius() + CEILING_MARGIN,
+            floor: planet.inner_radius() - grid.radius() - CEILING_MARGIN,
             rock: planet.rock_material() as u8,
             height_layers,
             fingerprint,

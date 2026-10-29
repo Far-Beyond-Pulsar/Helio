@@ -15,7 +15,8 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
 use helio_pass_shadow_matrix::{
-    SUN_OCCLUSION_FRAME, SUN_OCCLUSION_FRAME_BYTES, SUN_OCCLUSION_MAPS, SUN_OCCLUSION_SNIPPET,
+    SUN_OCCLUSION_FRAME, SUN_OCCLUSION_FRAME_BYTES, SUN_OCCLUSION_MAPS, SUN_OCCLUSION_PAGES,
+    SUN_OCCLUSION_SNIPPET,
 };
 use helio_pass_sky::clouds::{
     CLOUD_SHADOW_FRAME, CLOUD_SHADOW_FRAME_BYTES, CLOUD_SHADOW_MAP, CLOUD_SHADOW_SNIPPET,
@@ -63,8 +64,8 @@ pub struct GiMeshTracePass {
     gather: wgpu::ComputePipeline,
     trace: wgpu::Buffer,
     local_lights: wgpu::Buffer,
-    /// No terrain: its occlusion frame says no levels.
-    no_occlusion: (wgpu::Buffer, wgpu::TextureView),
+    /// No terrain: its occlusion frame says none (a page table of none).
+    no_occlusion: (wgpu::Buffer, wgpu::TextureView, wgpu::Buffer),
     /// No clouds: a 1x1 map and a zeroed frame.
     no_clouds: (wgpu::TextureView, wgpu::Buffer),
     no_lights: wgpu::Buffer,
@@ -109,7 +110,7 @@ impl GiMeshTracePass {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
@@ -128,6 +129,7 @@ impl GiMeshTracePass {
                     count: None,
                 },
                 uniform(17, CLOUD_SHADOW_FRAME_BYTES),
+                storage(18, true),
             ],
         });
         let gather_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -196,10 +198,7 @@ impl GiMeshTracePass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let maps = maps.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
+        let maps = maps.create_view(&Default::default());
         let uniform_usage = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
         // No material table: rows shorter than one material (each row reads
         // as no row: opaque) and a white texture in every slot.
@@ -269,6 +268,12 @@ impl GiMeshTracePass {
                     uniform_usage,
                 ),
                 maps,
+                buffer(
+                    device,
+                    "GI no sun occlusion pages",
+                    16,
+                    wgpu::BufferUsages::STORAGE,
+                ),
             ),
             no_lights: buffer(
                 device,
@@ -318,8 +323,8 @@ impl GiMeshTracePass {
     /// (`helio_core::RayProxies`), if any; `materials` the material table
     /// cut-outs are tested against ([`Self::materials`]), if any; `lights`
     /// the scene's (its first `count` rows);
-    /// `occlusion` the sun's occlusion maps, if published; `clouds` the
-    /// clouds' shadow map and its frame, if published.
+    /// `occlusion` the sun's occlusion (frame, atlas, pages), if published;
+    /// `clouds` the clouds' shadow map and its frame, if published.
     #[allow(clippy::too_many_arguments)]
     pub fn record(
         &self,
@@ -333,15 +338,18 @@ impl GiMeshTracePass {
         proxies: Option<(&wgpu::Buffer, &wgpu::Buffer)>,
         materials: Option<&wgpu::BindGroup>,
         lights: Option<(&wgpu::Buffer, u32)>,
-        occlusion: Option<(&wgpu::Buffer, &wgpu::TextureView)>,
+        occlusion: Option<(&wgpu::Buffer, &wgpu::TextureView, &wgpu::Buffer)>,
         clouds: Option<(&wgpu::TextureView, &wgpu::Buffer)>,
         seed: u32,
     ) {
         let (cloud_map, cloud_frame) = clouds.unwrap_or((&self.no_clouds.0, &self.no_clouds.1));
         let (lights, count) = lights.unwrap_or((&self.no_lights, 0));
         let count = count.min((lights.size() / 128) as u32);
-        let (occlusion_frame, occlusion_maps) =
-            occlusion.unwrap_or((&self.no_occlusion.0, &self.no_occlusion.1));
+        let (occlusion_frame, occlusion_maps, occlusion_pages) = occlusion.unwrap_or((
+            &self.no_occlusion.0,
+            &self.no_occlusion.1,
+            &self.no_occlusion.2,
+        ));
         let (proxy_vertices, proxy_indices) =
             proxies.unwrap_or((&self.no_proxies, &self.no_proxies));
         let materials = materials.unwrap_or(&self.no_materials);
@@ -386,6 +394,7 @@ impl GiMeshTracePass {
                     resource: wgpu::BindingResource::TextureView(cloud_map),
                 },
                 entry(17, cloud_frame),
+                entry(18, occlusion_pages),
             ],
         });
         let gather = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -429,6 +438,7 @@ impl RenderPass for GiMeshTracePass {
             helio_core::RAY_PROXY_VERTICES,
             helio_core::RAY_PROXY_INDICES,
             SUN_OCCLUSION_MAPS,
+            SUN_OCCLUSION_PAGES,
             SUN_OCCLUSION_FRAME,
             CLOUD_SHADOW_MAP,
             CLOUD_SHADOW_FRAME,
@@ -516,8 +526,9 @@ impl RenderPass for GiMeshTracePass {
         let occlusion = match (
             binding(SUN_OCCLUSION_FRAME),
             ctx.registry.texture_binding(SUN_OCCLUSION_MAPS),
+            binding(SUN_OCCLUSION_PAGES),
         ) {
-            (Some(frame), Some(maps)) => Some((frame, maps)),
+            (Some(frame), Some(maps), Some(pages)) => Some((frame, maps, pages)),
             _ => None,
         };
         let clouds = ctx

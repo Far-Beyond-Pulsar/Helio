@@ -1482,7 +1482,9 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     let draw: Vec<f64> = timings.iter().map(|t| t.draw).collect();
     let shadow: Vec<f64> = timings.iter().map(|t| t.shadow).collect();
     let denoise: Vec<f64> = timings.iter().map(|t| t.denoise).collect();
-    eprintln!("CHUNKENGINE {view} n={} chunk draw p50 {:.3} p95 {:.3}; shadows p50 {:.3}, their denoiser p50 {:.3}", draw.len(), percentile(&draw, 0.5), percentile(&draw, 0.95), percentile(&shadow, 0.5), percentile(&denoise, 0.5));
+    let occlusion: Vec<f64> = timings.iter().map(|t| t.occlusion).collect();
+    let fallbacks: Vec<f64> = timings.iter().map(|t| t.fallbacks).collect();
+    eprintln!("CHUNKENGINE {view} n={} chunk draw p50 {:.3} p95 {:.3}; shadows p50 {:.3} (walks {:.3}), their denoiser p50 {:.3}; sun occlusion p50 {:.3} p95 {:.3} max {:.3}", draw.len(), percentile(&draw, 0.5), percentile(&draw, 0.95), percentile(&shadow, 0.5), percentile(&fallbacks, 0.5), percentile(&denoise, 0.5), percentile(&occlusion, 0.5), percentile(&occlusion, 0.95), percentile(&occlusion, 1.0));
     let mut by_pass: Vec<(&str, f64)> = passes
         .iter()
         .map(|(name, (sum, n))| (*name, sum / f64::from((*n).max(1))))
@@ -1757,6 +1759,13 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let (mut intervals, mut coarse, mut worst, mut switch_px) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let (mut draw_ms, mut generate_ms) = (Vec::new(), Vec::new());
+    // The sun's occlusion pages traced and the hits' own sun walks, a frame.
+    let (mut occlusion_ms, mut walks_ms) = (Vec::new(), Vec::new());
+    // The chunk stages' GPU (draw, shadows, denoiser, generation), a frame.
+    let mut stage_gpu: Vec<[f64; 4]> = Vec::new();
+    // The sun pages' planning and recording CPU, a frame.
+    let mut pages_cpu_ms = Vec::new();
+    let mut pages_cpu_parts = [0.0f64; 6];
     let mut worst_wanted = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
@@ -1911,9 +1920,18 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         let pass = flight.renderer.find_pass_mut::<ChunkPass>().unwrap();
         let s = *pass.stats();
         let pass_cpu = pass.cpu_ms();
+        if let Some(p) = pass.sun_page_stats() {
+            pages_cpu_ms.push(p.cpu_ms);
+            for (sum, ms) in pages_cpu_parts.iter_mut().zip(p.cpu_parts) {
+                *sum += ms;
+            }
+        }
         for timing in pass.take_timings() {
             draw_ms.push(timing.draw);
             generate_ms.push(timing.generate);
+            occlusion_ms.push(timing.occlusion);
+            walks_ms.push(timing.fallbacks);
+            stage_gpu.push([timing.draw, timing.shadow, timing.denoise, timing.generate]);
             for (total, ms) in stage_ms.iter_mut().zip(timing.stages) {
                 *total += ms;
             }
@@ -2080,6 +2098,32 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     // GPU generation per tile over the flight (its timings lag a few frames).
     let generation: f64 = generate_ms.iter().sum();
     let per_chunk = |ms: f64| ms * 1e3 / generated_chunks.max(1) as f64;
+    eprintln!(
+        "CHUNKSTRESS {mode}: sun occlusion p50 {:.3} p95 {:.3} max {:.3} ms, sun walks p50 {:.3} p95 {:.3} max {:.3} ms, sun pages cpu p50 {:.3} p95 {:.3} max {:.3} ms",
+        percentile(&occlusion_ms, 0.5),
+        percentile(&occlusion_ms, 0.95),
+        percentile(&occlusion_ms, 1.0),
+        percentile(&walks_ms, 0.5),
+        percentile(&walks_ms, 0.95),
+        percentile(&walks_ms, 1.0),
+        percentile(&pages_cpu_ms, 0.5),
+        percentile(&pages_cpu_ms, 0.95),
+        percentile(&pages_cpu_ms, 1.0)
+    );
+    {
+        let n = pages_cpu_ms.len().max(1) as f64;
+        let mean = |i: usize| stage_gpu.iter().map(|s| s[i]).sum::<f64>() / stage_gpu.len().max(1) as f64;
+        eprintln!(
+            "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages cpu mean by part (occluders, readback, invalidate, plan, record, upload) {}",
+            mean(0),
+            mean(1),
+            mean(2),
+            mean(3),
+            occlusion_ms.iter().sum::<f64>() / occlusion_ms.len().max(1) as f64,
+            walks_ms.iter().sum::<f64>() / walks_ms.len().max(1) as f64,
+            pages_cpu_parts.map(|v| format!("{:.3}", v / n)).join(" ")
+        );
+    }
     eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {emptied_chunks} held nothing, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
     eprintln!(
         "CHUNKSTRESS {mode}: worst over its motion allowance p50 {:.2} p95 {:.2} max {:.2}",

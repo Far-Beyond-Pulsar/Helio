@@ -201,6 +201,11 @@ impl ChunkPass {
         self.world.as_ref().is_some_and(ChunkWorld::settled)
     }
 
+    /// What the sun's occlusion pages did last frame (`ChunkWorld::sun_page_stats`).
+    pub fn sun_page_stats(&self) -> Option<super::SunPageStats> {
+        self.world.as_ref().and_then(ChunkWorld::sun_page_stats)
+    }
+
     /// The last frame's residency.
     pub fn stats(&self) -> &UpdateStats {
         &self.stats
@@ -292,6 +297,7 @@ const WRITES: &[&str] = &[
     "tsr_stochastic",
     helio_pass_gi::GI_HITS,
     helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
+    helio_pass_shadow_matrix::SUN_OCCLUSION_PAGES,
     helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
 ];
 
@@ -366,10 +372,17 @@ impl RenderPass for ChunkPass {
         if let Some(buffer) = self.world.as_ref().and_then(ChunkWorld::local_visibility) {
             frame.write_buffer_binding("local_visibility", buffer, self.name());
         }
-        if let Some((maps, sun_frame)) = self.world.as_ref().and_then(ChunkWorld::sun_occlusion) {
+        if let Some((maps, pages, sun_frame)) =
+            self.world.as_ref().and_then(ChunkWorld::sun_occlusion)
+        {
             frame.write_texture_binding(
                 helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
                 maps,
+                self.name(),
+            );
+            frame.write_buffer_binding(
+                helio_pass_shadow_matrix::SUN_OCCLUSION_PAGES,
+                pages,
                 self.name(),
             );
             frame.write_buffer_binding(
@@ -696,8 +709,8 @@ impl ChunkPass {
                 .map(|b| (*b).clone()),
         );
         // The sun's occlusion by the terrain, for what else the sun lights
-        // (the GI probes' hits in this draw, volumetric fog): a level of its
-        // clipmap a frame.
+        // (fine cells and meshes in this draw, the GI probes' hits,
+        // volumetric fog): the pages its readers asked for and lack.
         world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
         world.draw_for_eye(
             encoder,

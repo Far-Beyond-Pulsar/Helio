@@ -1856,6 +1856,13 @@ fn resolve_vertex(@builtin(vertex_index) v: u32) -> @builtin(position) vec4<f32>
     return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
 }
 
+// An orthographic view's rays to trace (`trace_view`'s open rects, the
+// rest resolved): unresolved.
+@fragment
+fn exits_open() -> @location(0) f32 {
+    return 0.0;
+}
+
 @group(1) @binding(7) var hit_visibility: texture_2d<u32>;
 @group(1) @binding(14) var hit_normal: texture_2d<f32>;
 // The sky's visibility, denoised (`filter_last`).
@@ -2915,6 +2922,50 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
 // the sun and larger cells: none.
 @group(1) @binding(64) var out_stochastic: texture_storage_2d<rgba8unorm, write>;
 
+// The sun's occlusion pages this frame's pixels read (a bit a page of each
+// level's window: `ChunkWorld::draw_sun_occlusion` reads them back and
+// traces those missing).
+@group(1) @binding(66) var<storage, read_write> sun_requests: array<atomic<u32>>;
+
+// Asks for the pages camera-relative `p` reads at `footprint` (m): its
+// level's (`sun_occlusion_level`) under its filter's taps, in the current
+// epoch.
+fn ask_sun_pages(p: vec3<f32>, footprint: f32) {
+    if sun_occlusion_frame.epochs[0].right.w == 0.0 { return; }
+    let level = sun_occlusion_level(footprint);
+    let at = sun_occlusion_texel(p, 0u, level);
+    let base = at.texel + select(vec2<i32>(0), vec2<i32>(-1), at.frac < vec2<f32>(0.5));
+    let eye = sun_occlusion_frame.epochs[0].levels[level].texel >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT);
+    let side = 1 << SUN_OCCLUSION_WINDOW_SHIFT;
+    let lo = (base >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT)) - eye + side / 2;
+    let hi = ((base + 1) >> vec2<u32>(SUN_OCCLUSION_PAGE_SHIFT)) - eye + side / 2;
+    for (var y = lo.y; y <= hi.y; y++) {
+        for (var x = lo.x; x <= hi.x; x++) {
+            if x < 0 || y < 0 || x >= side || y >= side { continue; }
+            let bit = (level * u32(side) + u32(y)) * u32(side) + u32(x);
+            let mask = 1u << (bit & 31u);
+            if (atomicLoad(&sun_requests[bit >> 5u]) & mask) == 0u {
+                atomicOr(&sun_requests[bit >> 5u], mask);
+            }
+        }
+    }
+}
+
+// The sun at camera-relative `p` (receiver normal `n`) by its occlusion
+// pages, for pixel `q` `footprint` m wide, asked for (by one pixel of each
+// 2x2 block a frame, turning: a page spans dozens of pixels): the share
+// from the first level resident from the footprint's up to `coarser`
+// levels coarser (no further looked at), or -1 where none is (the pixel
+// walks).
+fn sun_by_pages(p: vec3<f32>, n: vec3<f32>, footprint: f32, q: vec2<u32>, coarser: u32) -> f32 {
+    let turn = params.table.w & 3u;
+    if all((q & vec2<u32>(1u)) == vec2<u32>(turn & 1u, turn >> 1u)) {
+        ask_sun_pages(p, footprint);
+    }
+    let seen = sun_occlusion_at(p, n, footprint, coarser);
+    return select(-1.0, seen.x, seen.y > 0.0);
+}
+
 fn stochastic_share(p: vec2<i32>, size: vec2<u32>, v: vec2<u32>, mesh: vec4<f32>) -> f32 {
     if v.x == NONE || steady_shadows() { return 0.0; }
     let t = textureLoad(hit_distance, p, 0).r;
@@ -2937,16 +2988,18 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
     let v = textureLoad(hit_visibility, p, 0).xy;
     if !pass_pixel(v.x) { return; }
     textureStore(out_stochastic, p, vec4<f32>(stochastic_share(p, size, v, mesh_point(id.xy, size)), 0.0, 0.0, 0.0));
-    // A mesh in front of the hit (or the sky): near the eye, the sun's
-    // occlusion maps' finest level (a texture read where a walk cost a
-    // pixel's own, and steady from frame to frame: shared walks flicker
-    // across grass); farther, its own walk, listed.
+    // A mesh in front of the hit (or the sky): the sun's occlusion pages
+    // at its pixel's footprint (a texture read where a walk cost a pixel's
+    // own, and steady from frame to frame: shared walks flicker across
+    // grass); where they are not there yet, its own walk, listed.
     let mesh = mesh_point(id.xy, size);
     if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < textureLoad(hit_distance, p, 0).r) {
         textureStore(out_normal, p, vec4<f32>(0.0));
-        let seen = sun_occlusion_levels(to_world(mesh.xyz), 1u);
-        if seen.y > 0.0 && !steady_shadows() {
-            store_walked(p, size, seen.x, 1.0, 0.0);
+        // Meshes take a level at most one coarser (grass near the eye walks
+        // rather than read texels four times its pixels).
+        let seen = sun_by_pages(to_world(mesh.xyz), vec3<f32>(0.0), pixel_width(id.xy, size, length(mesh.xyz)), id.xy, 1u);
+        if seen >= 0.0 && !steady_shadows() {
+            store_walked(p, size, seen, 1.0, 0.0);
             return;
         }
         let n = atomicAdd(&fallbacks.count, 1u);
@@ -2989,32 +3042,43 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Lit in the world (the denoiser's and lighting's frame).
     textureStore(out_normal, p, vec4<f32>(to_world(f.shading), sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
+    var walks = false;
+    let footprint = pixel_width(id.xy, size, t);
     if dot(f.shading, sun) <= 0.0 {
         own = 1.0;
         // A material that lets light through, its back to the sun: the
         // light through it (its share) where the sun reaches its far side,
-        // by the sun's occlusion maps (as GI's hits: a texture read, steady
-        // from frame to frame).
+        // by the sun's occlusion pages (as GI's hits: a texture read,
+        // steady from frame to frame).
         let through = materials.m[min((v.y >> 21u) & 31u, 31u)].light.x;
         if dot(f.normal, sun) < 0.0 && through > 0.0 {
-            lit = clamp(through, 0.0, 1.0) * sun_occlusion(to_world(at_hit - f.normal * (1.5 * f.cell)));
+            let back = to_world(at_hit - f.normal * (1.5 * f.cell));
+            ask_sun_pages(back, footprint);
+            lit = clamp(through, 0.0, 1.0) * sun_occlusion(back, vec3<f32>(0.0), footprint);
         }
     } else if sub_pixel(f, id.xy, size, t) && !steady {
         // Cells under a pixel and a half: their own sun is aliasing (each
         // frame's jitter and samples land on other cells), so the sun's
-        // occlusion maps', steady from frame to frame and no finer than
-        // the pixel sees.
-        lit = sun_occlusion(to_world(at_hit + f.normal * (0.5 * f.cell)));
+        // occlusion pages', steady from frame to frame, their texels about
+        // the pixel's footprint; against the slope's plane, so the steps
+        // across a texel do not shade it, and from as far up the sun as a
+        // walk starts (past the steps it stands among). Not there yet: its
+        // own walk.
+        let lifted = to_world(at_hit + f.normal * (0.5 * f.cell) + sun * skip_along(f, sun));
+        // Any level resident: while a page comes the pixel reads a coarser
+        // one (as virtual shadow maps fall back) rather than walk.
+        lit = sun_by_pages(lifted, to_world(f.shading), footprint, id.xy, 32u);
         own = 1.0;
+        walks = lit < 0.0;
     } else {
-        let found = sampled != 0u;
         lit = f32(sampled & 1u);
-        if !found {
-            let n = atomicAdd(&fallbacks.count, 1u);
-            fallbacks.pixels[n] = id.x | (id.y << 16u);
-            atomicMax(&fallback_groups[0], n / 64u + 1u);
-            return;
-        }
+        walks = sampled == 0u;
+    }
+    if walks {
+        let n = atomicAdd(&fallbacks.count, 1u);
+        fallbacks.pixels[n] = id.x | (id.y << 16u);
+        atomicMax(&fallback_groups[0], n / 64u + 1u);
+        return;
     }
     store_walked(p, size, lit, own, 1.0);
 }
@@ -4238,7 +4302,8 @@ fn feedback(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invoca
 @group(1) @binding(38) var<storage, read> gi_cells: array<vec4<i32>>;
 @group(1) @binding(39) var<storage, read> gi_sun: array<vec4<f32>, 2>;
 @group(1) @binding(62) var<uniform> sun_occlusion_frame: SunOcclusionFrame;
-@group(1) @binding(63) var sun_occlusion_maps: texture_2d_array<f32>;
+@group(1) @binding(63) var sun_occlusion_maps: texture_2d<f32>;
+@group(1) @binding(65) var<storage, read> sun_occlusion_pages: array<u32>;
 
 // Where a walk from eye-relative point `org` in base cell `c` starts: its
 // chunk, rock, or the air box it is in, crossed in the frame of a drawn
@@ -4319,9 +4384,9 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     var sun = 0.0;
     var back = 0.0;
     if towards > 0.0 {
-        sun = sun_occlusion(hit + n * (0.5 * cell));
+        sun = sun_occlusion(hit + n * (0.5 * cell), n, cell);
     } else if through > 0.0 && towards < 0.0 {
-        back = sun_occlusion(hit - n * (1.5 * cell));
+        back = sun_occlusion(hit - n * (1.5 * cell), vec3<f32>(0.0), cell);
     }
     let glow = u32(clamp(materials.m[min(material, 31u)].light.y, 0.0, 15.9375) * 16.0 + 0.5);
     let light = 1u | (u32(through * 255.0 + 0.5) << 8u) | (u32(back * 255.0 + 0.5) << 16u) | (glow << 24u);
