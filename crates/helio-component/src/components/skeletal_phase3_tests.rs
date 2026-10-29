@@ -666,3 +666,123 @@ fn the_blueprint_nodes_are_registered_validate_their_input_and_command_the_anima
     assert!(!flag(call(&mut world, instance, "anim_is_montage_playing", vec![Box::new(handle)])), "stopped with no blend-out ends at once");
     assert!(message(call(&mut world, instance, "anim_play_montage", vec![Box::new("no-such-montage".to_string()), Box::new(1.0f32), Box::new(String::new())])).contains("project"), "a name is resolved through the open project");
 }
+
+/// Serialises the tests that point the process at a temporary project.
+static PROJECT: Mutex<()> = Mutex::new(());
+
+/// A project on disk: skeleton, Walk sequence, a graph playing it through a Slot and a
+/// Montage on that Slot, all registered in the file index by stable id.
+struct Project {
+    _dir: tempfile::TempDir,
+    root: std::path::PathBuf,
+    sequence_path: std::path::PathBuf,
+    graph_id: String,
+    graph_path: std::path::PathBuf,
+}
+
+fn write_project(rig: &Rig, montage: &AnimationMontageAsset) -> Project {
+    use pulsar_reflection::{AnimationGraphAssetKind, AnimationMontageAssetKind, AnimationSequenceAssetKind, SkeletonAssetKind};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let index = engine_fs::open_project_file_index(&root).unwrap().expect("local index");
+    let write = |name: &str, text: String| {
+        let path = root.join(name);
+        std::fs::write(&path, text).unwrap();
+        index.refresh_path(&path).unwrap();
+        path
+    };
+    let skeleton_path = write("body.skeleton", rig.skeleton.to_text());
+    index.record_typed_asset_id(SkeletonAssetKind::KIND, rig.skeleton.id.as_str(), &skeleton_path).unwrap();
+    let sequence = rig.source.sequences[&rig.walk_id].clone();
+    let sequence_path = write("walk.animseq", sequence.to_text());
+    index.record_typed_asset_id(AnimationSequenceAssetKind::KIND, &rig.walk_id, &sequence_path).unwrap();
+    let mut asset = AnimationGraphAsset::default();
+    asset.skeleton = Some(skeletal_assets::ids::SkeletonId::parse(rig.skeleton.id.as_str()).unwrap().to_ref());
+    let mut b = GraphBuilder::new("main", &[]);
+    b.node("out", "anim.output_pose", &[]);
+    b.node("p", "anim.sequence_player", &[("sequence", json!(rig.walk_id))]);
+    b.node("slot", "anim.slot", &[("slot", json!("Body"))]);
+    b.wire("p", "slot", "source").wire("slot", "out", "pose");
+    asset.main = b.into_graph();
+    let graph_id = asset.id.as_str().to_string();
+    let graph_path = write("locomotion.animgraph", asset.to_text().unwrap());
+    index.record_typed_asset_id(AnimationGraphAssetKind::KIND, &graph_id, &graph_path).unwrap();
+    let montage_path = write("swing.montage", montage.to_text().unwrap());
+    index.record_typed_asset_id(AnimationMontageAssetKind::KIND, montage.id.as_str(), &montage_path).unwrap();
+    Project { _dir: dir, root, sequence_path, graph_id, graph_path }
+}
+
+#[test]
+fn blueprint_discovery_offers_what_the_montages_of_the_graph_own_and_nothing_stale() {
+    let _guard = PROJECT.lock().unwrap_or_else(|e| e.into_inner());
+    let rig = rig();
+    let mut montage = montage_asset(&rig, skeletal_assets::montage::MontageRootMotion::Graph);
+    montage.name = "Swing".into();
+    let project = write_project(&rig, &montage);
+    let ids: std::collections::HashSet<String> = [project.graph_id.clone()].into();
+    let catalog = component_animation_notify_events(&project.root, &ids);
+    assert!(catalog.diagnostics.is_empty(), "{:?}", catalog.diagnostics.iter().map(|d| &d.error).collect::<Vec<_>>());
+    let names: Vec<(String, String)> = catalog.events.iter().map(|(_, d)| (d.namespace.clone().unwrap_or_default(), d.name.clone())).collect();
+    let has = |namespace: &str, name: String| names.contains(&(namespace.to_owned(), name));
+    // the clip's notify and state, canonical by asset id
+    assert!(has("animseq", format!("{}.step", rig.walk_id)));
+    assert!(has("animseq", format!("{}.swing", rig.walk_id)), "notify states are offered too");
+    // the Montage's own notify and state, and its lifecycle events
+    let id = montage.id.as_str();
+    assert!(has("montage", format!("{id}.mn")) && has("montage", format!("{id}.ms")));
+    for kind in MONTAGE_LIFECYCLE_KINDS {
+        assert!(has("montage", format!("{id}.lifecycle_{kind}")), "{kind}");
+    }
+    // a label rename never changes the identity, and editing the file shows up at once
+    let mut renamed = montage.clone();
+    renamed.notifies[0].name = "Renamed".into();
+    renamed.notifies.push(AnimationNotify { id: "extra".into(), name: "Extra".into(), time: 0.9, target: NotifyTarget::Self_, fields: vec![], schema: None });
+    std::fs::write(project.root.join("swing.montage"), renamed.to_text().unwrap()).unwrap();
+    let again = component_animation_notify_events(&project.root, &ids);
+    let names: Vec<_> = again.events.iter().map(|(_, d)| d.name.clone()).collect();
+    assert!(names.contains(&format!("{id}.mn")) && names.contains(&format!("{id}.extra")), "no stale per-open cache: {names:?}");
+}
+
+#[test]
+fn editing_a_sequence_on_disk_recompiles_the_running_graph_in_place() {
+    let _guard = PROJECT.lock().unwrap_or_else(|e| e.into_inner());
+    let rig = rig();
+    let montage = montage_asset(&rig, skeletal_assets::montage::MontageRootMotion::Graph);
+    let project = write_project(&rig, &montage);
+    let files = ProjectAnimSource::at(project.root.clone());
+    let source = animation_source_for_file(&project.graph_path);
+    let loaded = compile_graph_file(&source, &files).expect("the graph reads");
+    let graph = loaded.graph.expect("and compiles");
+    let dependencies = dependency_paths_in(&project.root, &graph);
+    assert!(dependencies.contains(&animation_source_for_file(&project.sequence_path)), "{dependencies:?}");
+
+    let hub = registered_hub();
+    let mut world = World::new();
+    let owner = world.spawn();
+    let mut c = component(&rig, &graph);
+    c.graph_source_path = Some(source);
+    c.graph_dependency_paths = dependencies;
+    let instance = pulsar_world_registry::attach_value(&mut world, owner, c).unwrap();
+    let (sink, _subs) = listen(&hub, instance, owner, &[]);
+    let mut state = ComponentRuntimeState::default();
+    for _ in 0..12 {
+        frame(&mut world, &hub, 0.1, &mut state); // 1.2 s: inside "swing" (1.0..1.5)
+    }
+    let x = |world: &World| world.get::<SkeletalMeshComponent>(instance).unwrap().animation().unwrap().pose().bones[1].translation.x;
+    assert!((x(&world) - 2.4).abs() < 1e-3, "4 m over 2 s at 1.2 s");
+
+    // the artist moves the slide to 8 m in the sequence file and saves
+    let mut edited = rig.source.sequences[&rig.walk_id].as_ref().clone();
+    edited.clip.tracks[1] = track("b1", [8.0, 0.0, 0.0], 2.0);
+    std::fs::write(&project.sequence_path, edited.to_text()).unwrap();
+    assert_eq!(reload_dependants(&mut world, &project.sequence_path, |c| c.recompile_graph_in(&ProjectAnimSource::at(project.root.clone()))), 1);
+    for _ in 0..2 {
+        frame(&mut world, &hub, 0.1, &mut state);
+    }
+    // the clock carried on from 1.2 s (the first frame waited for the reload ends to be delivered)
+    assert!((x(&world) - 8.0 * 1.3 / 2.0).abs() < 1e-2, "same clock (1.3 s), new 8 m motion: {}", x(&world));
+    let ends: Vec<_> = sink.lock().unwrap().notifies.iter().filter(|e| e.notify_id == "swing" && e.notify_phase == "end").map(|e| e.end_reason.clone()).collect();
+    assert_eq!(ends, ["reload"], "the state that was active ended once, for the reload");
+    // a file the graph does not name changes nothing
+    assert_eq!(reload_dependants(&mut world, &project.graph_path.with_file_name("other.animseq"), |c| c.recompile_graph_in(&files)), 0);
+}

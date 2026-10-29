@@ -1037,22 +1037,26 @@ fn load_animation_sequence(source: &str) -> Result<AssetPayload, String> {
 
 /// Compile the graph with everything it names, in the project the engine has open.
 /// A graph that does not compile still loads: the payload carries the diagnostics.
-fn compile_graph_file(source: &str) -> Result<LoadedAnimationGraph, String> {
+fn compile_graph_file(source: &str, project: &ProjectAnimSource) -> Result<LoadedAnimationGraph, String> {
     let text = skeletal_assets::assets::read_text(Path::new(source)).map_err(|e| format!("could not read animation graph '{source}': {e}"))?;
     let asset = skeletal_assets::anim_graph::AnimationGraphAsset::parse(&text).map_err(|e| format!("could not decode animation graph '{source}': {e}"))?;
-    let project = ProjectAnimSource::open().ok_or("no project is open to resolve the graph's assets")?;
-    let out = compile_graph(&asset, &project);
+    let out = compile_graph(&asset, project);
     Ok(LoadedAnimationGraph { graph: out.graph, diagnostics: out.diagnostics })
 }
 
 fn load_animation_graph(source: &str) -> Result<AssetPayload, String> {
-    compile_graph_file(source).map(|loaded| Arc::new(loaded) as AssetPayload)
+    let project = ProjectAnimSource::open().ok_or("no project is open to resolve the graph's assets")?;
+    compile_graph_file(source, &project).map(|loaded| Arc::new(loaded) as AssetPayload)
 }
 
 /// Canonical source paths of the assets a compiled graph depends on.
 fn dependency_paths(graph: &CompiledGraph) -> Vec<String> {
     let Some(root) = engine_state::get_project_path().map(PathBuf::from) else { return Vec::new() };
-    let Some(index) = engine_fs::open_project_file_index(&root).ok().flatten() else { return Vec::new() };
+    dependency_paths_in(&root, graph)
+}
+
+fn dependency_paths_in(root: &Path, graph: &CompiledGraph) -> Vec<String> {
+    let Some(index) = engine_fs::open_project_file_index(root).ok().flatten() else { return Vec::new() };
     let mut paths: Vec<String> = graph
         .dependencies
         .iter()
@@ -1098,13 +1102,21 @@ impl SkeletalMeshComponent {
     /// there is no graph file to read or it does not compile (the running graph
     /// then stays as it was, and the diagnostics say why).
     pub(crate) fn recompile_graph(&mut self) -> bool {
+        match ProjectAnimSource::open() {
+            Some(project) => self.recompile_graph_in(&project),
+            None => false,
+        }
+    }
+
+    /// [`Self::recompile_graph`] against a given project.
+    pub(crate) fn recompile_graph_in(&mut self, project: &ProjectAnimSource) -> bool {
         let Some(source) = self.graph_source_path.clone() else { return false };
-        match compile_graph_file(&source) {
+        match compile_graph_file(&source, project) {
             Ok(loaded) => {
                 let compiled = loaded.graph.is_some();
                 self.graph_diagnostics = loaded.diagnostics;
                 if compiled {
-                    self.graph_dependency_paths = loaded.graph.as_deref().map(dependency_paths).unwrap_or_default();
+                    self.graph_dependency_paths = loaded.graph.as_deref().map(|g| dependency_paths_in(project.root(), g)).unwrap_or_default();
                     self.loaded_graph = loaded.graph;
                     // swaps the graph into the running instance and ends notify states as `reload`
                     self.refresh_pose();
