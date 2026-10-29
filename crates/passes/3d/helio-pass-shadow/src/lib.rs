@@ -719,7 +719,7 @@ impl RenderPass for ShadowPass {
                     (target - self.face_strength[face]).clamp(-fade_step, fade_step);
                 let written = (self.face_strength[face], data.per_caster_dirty_gen[slot]);
                 if self.face_strength_written[face] != written {
-                    ctx.queue.write_buffer(
+                    ctx.write_buffer(
                         data.shadow_matrices,
                         face as u64 * 96 + 76,
                         bytemuck::bytes_of(&self.face_strength[face]),
@@ -967,7 +967,7 @@ impl RenderPass for ShadowPass {
             // The "ready" marker only changes when the face was (re)assigned:
             // a rebuild of its static layer, or its first service.
             if static_dirty || self.face_last_update[face] == 0 {
-                ctx.queue.write_buffer(
+                ctx.write_buffer(
                     data.shadow_matrices,
                     face as u64 * 96 + 92,
                     bytemuck::bytes_of(&2u32),

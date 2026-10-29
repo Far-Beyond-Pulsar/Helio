@@ -306,9 +306,19 @@ pub struct PassContext<'a> {
     /// available to passes that use the reflected bind groups to construct a
     /// pipeline without duplicating layout or fixed-function declarations.
     pub reflected_pipeline: Option<&'a crate::shader::ReflectedPipeline>,
+
+    /// The graph's uploads ([`Self::write_buffer`]).
+    pub(crate) uploads: &'a crate::upload::FrameUploads,
 }
 
 impl<'a> PassContext<'a> {
+    /// Upload bytes into a GPU buffer, as `Queue::write_buffer` (before the
+    /// frame's work): with the frame's other writes, in one upload
+    /// (`FrameUploads::defer`).
+    pub fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+        self.uploads.defer(buffer, offset, data);
+    }
+
     /// The graph's GPU milliseconds in the last frame measured (a few
     /// frames back), when the profiler times it: a pass streaming work in
     /// can size it to what the frame leaves.
@@ -743,12 +753,21 @@ pub struct PrepareContext<'a> {
     /// wgpu maintains the device on every `Queue::submit`, which already
     /// delivers map callbacks.
     pub owns_device: bool,
+
+    /// The graph's uploads ([`Self::write_buffer`]); none outside a graph
+    /// (writes then go to the queue).
+    pub uploads: Option<&'a crate::upload::FrameUploads>,
 }
 
 impl<'a> PrepareContext<'a> {
-    /// Upload bytes into a GPU buffer while participating in Helio's debug upload accounting.
+    /// Upload bytes into a GPU buffer, as `Queue::write_buffer` (before the
+    /// frame's work): with the frame's other writes, in one upload
+    /// (`FrameUploads::defer`).
     pub fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
-        crate::upload::write_buffer(self.queue, buffer, offset, data);
+        match self.uploads {
+            Some(uploads) => uploads.defer(buffer, offset, data),
+            None => crate::upload::write_buffer(self.queue, buffer, offset, data),
+        }
     }
 
     /// Upload bytes into a GPU texture while participating in Helio's debug upload accounting.

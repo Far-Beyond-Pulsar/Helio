@@ -459,8 +459,8 @@ impl ChunkPass {
     fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The last frame was submitted: its results can be mapped.
         if let Some(world) = &mut self.world {
-            world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);
+            helio_core::cpu_scope!("VoxelChunks: submitted");
             world.submitted();
             self.timings.extend(world.take_timings());
             let excess = self.timings.len().saturating_sub(KEEP_TIMINGS);
@@ -482,7 +482,6 @@ impl ChunkPass {
         };
         let world = self.world.get_or_insert_with(|| {
             let mut world = ChunkWorld::new(ctx.device, ctx.queue);
-            world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);
             world.set_debug_mode(self.debug_mode);
             world
@@ -690,14 +689,17 @@ impl ChunkPass {
             self.budget_ms = Some(budget);
             config.generate_ms = Some(budget);
         }
-        self.stats = world.update(
-            encoder,
-            residency_eye,
-            velocity,
-            Some(view),
-            ctx.frame_num,
-            &config,
-        );
+        self.stats = {
+            helio_core::cpu_scope!("VoxelChunks: update");
+            world.update(
+                encoder,
+                residency_eye,
+                velocity,
+                Some(view),
+                ctx.frame_num,
+                &config,
+            )
+        };
         if let Some((map, _)) = &self.scene {
             world.set_material_map(map);
         }
@@ -711,7 +713,11 @@ impl ChunkPass {
         // The sun's occlusion by the terrain, for what else the sun lights
         // (fine cells and meshes in this draw, the GI probes' hits,
         // volumetric fog): the pages its readers asked for and lack.
-        world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
+        {
+            helio_core::cpu_scope!("VoxelChunks: sun occlusion");
+            world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
+        }
+        helio_core::cpu_scope!("VoxelChunks: draw");
         world.draw_for_eye(
             encoder,
             ctx.frame_num,

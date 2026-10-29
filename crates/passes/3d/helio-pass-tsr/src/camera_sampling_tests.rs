@@ -113,6 +113,7 @@ fn prepare_uploads_the_actual_camera_sample_and_previous_view() {
             time_delta: 0.0,
             world_origin: glam::DVec3::ZERO,
             owns_device: true,
+            uploads: None,
         })
         .unwrap();
         let mut encoder = device.create_command_encoder(&Default::default());

@@ -552,12 +552,12 @@ impl RenderPass for ShadowMatrixPass {
             if old != r.strength {
                 for f in 0..6 {
                     let offset = (s * 6 + f) as u64 * 96 + 76;
-                    ctx.queue.write_buffer(
+                    ctx.write_buffer(
                         &self.shadow_matrix_buf,
                         offset,
                         bytemuck::bytes_of(&r.strength),
                     );
-                    ctx.queue.write_buffer(
+                    ctx.write_buffer(
                         &self.desired_matrices,
                         offset,
                         bytemuck::bytes_of(&r.strength),
@@ -605,7 +605,7 @@ impl RenderPass for ShadowMatrixPass {
         };
         ctx.queue
             .write_buffer(&self.caster_params_buf, 0, bytemuck::bytes_of(&params));
-        ctx.queue.write_buffer(
+        ctx.write_buffer(
             &self.uniform_buf,
             0,
             bytemuck::bytes_of(&ShadowMatrixUniforms {

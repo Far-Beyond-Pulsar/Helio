@@ -1416,7 +1416,7 @@ impl RenderPass for TsrPass {
         let motion_bound = motion.is_some();
         let motion_view = motion.unwrap_or(&self.motion_fallback_view);
         // Queue writes land before this frame's commands run.
-        ctx.queue.write_buffer(
+        ctx.write_buffer(
             &self.uniform_buf,
             std::mem::offset_of!(TsrUniform, flags) as u64,
             bytemuck::bytes_of(&(self.flags | (u32::from(motion_bound) << 2))),

@@ -1025,6 +1025,14 @@ impl Planner {
             Event::Reached(k) => {
                 self.nodes.entry(k).or_default().reached = true;
             }
+            Event::Reports(keys) => {
+                for &k in keys.iter() {
+                    let key = NodeKey::from_table_key(k);
+                    if key.volume == self.volume {
+                        self.apply(Event::Seen(key), frame);
+                    }
+                }
+            }
         }
     }
 
@@ -1099,6 +1107,11 @@ pub enum Event {
     Measured(Footprint, [Option<Ranges>; 4]),
     /// A ray met it or a node under it.
     Seen(NodeKey),
+    /// A frame's ray reports as read back: the table keys of the nodes rays
+    /// met (any volume's, repeats among them), each of this volume's
+    /// [`Event::Seen`]. Decoded here, on the planner's thread: the render
+    /// thread hands the frame's words over as they came (one copy).
+    Reports(Arc<[[i32; 4]]>),
     /// A ray met this Buried node: generate it.
     Reached(NodeKey),
     /// Edits changed what the nodes of `face` in these boxes hold: those
@@ -1151,7 +1164,7 @@ impl Event {
     /// reports of nodes met, which come every frame (a plan that wants
     /// nothing and switches nothing is settled whatever rays report).
     pub fn structural(&self) -> bool {
-        !matches!(self, Event::Seen(_))
+        !matches!(self, Event::Seen(_) | Event::Reports(_))
     }
 }
 

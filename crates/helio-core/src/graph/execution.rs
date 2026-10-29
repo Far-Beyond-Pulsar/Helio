@@ -292,6 +292,10 @@ pub struct RenderGraph {
     /// Executor-owned transient descriptor storage. Passes that build dynamic
     /// attachment slices can retain them here for the duration of a frame.
     pub(crate) frame_storage: RenderFrameStorage,
+    /// The frame's buffer writes through the pass contexts
+    /// (`PrepareContext::write_buffer`), one upload copied ahead of the
+    /// frame's work (`FrameUploads::defer`).
+    pub(crate) uploads: crate::upload::FrameUploads,
 }
 
 /// Everything about a pass that the locked schedule was computed from. Two
@@ -423,6 +427,7 @@ impl RenderGraph {
             swap_policy: None,
             external_inputs: std::collections::HashSet::new(),
             frame_storage: RenderFrameStorage::new(),
+            uploads: crate::upload::FrameUploads::new(device, queue, "graph uploads"),
         }
     }
 
@@ -1626,6 +1631,7 @@ impl RenderGraph {
                     time: self.frame_time,
                     time_delta: self.frame_time_delta,
                     owns_device: self.owns_device,
+                    uploads: Some(&self.uploads),
                 };
                 pass.declare_frame_demands(&plan_ctx, &mut self.frame_demands);
             }
@@ -1670,6 +1676,7 @@ impl RenderGraph {
                         time: self.frame_time,
                         time_delta: self.frame_time_delta,
                         owns_device: self.owns_device,
+                        uploads: Some(&self.uploads),
                     };
                     #[cfg(not(target_arch = "wasm32"))]
                     let _prepare_scope = profiling::is_profiling_enabled().then(|| {
@@ -1762,6 +1769,7 @@ impl RenderGraph {
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
                             reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                            uploads: &self.uploads,
                             #[cfg(debug_assertions)]
                             chain_transparent: false,
                         };
@@ -1884,6 +1892,7 @@ impl RenderGraph {
                             pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
                             reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                            uploads: &self.uploads,
                             #[cfg(debug_assertions)]
                             chain_transparent: false,
                         };
@@ -1957,6 +1966,7 @@ impl RenderGraph {
                                 pipelines: &self.pipeline_registries[pass_index],
                                 reflected_bind_groups: &reflected_groups[pass_index],
                                 reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                                uploads: &self.uploads,
                                 #[cfg(debug_assertions)]
                                 chain_transparent: false,
                             };
@@ -2016,6 +2026,7 @@ impl RenderGraph {
                         pipelines: &self.pipeline_registries[pass_index],
                         reflected_bind_groups: &reflected_groups[pass_index],
                         reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
+                        uploads: &self.uploads,
                         #[cfg(debug_assertions)]
                         chain_transparent: bridged,
                     };
@@ -2112,6 +2123,10 @@ impl RenderGraph {
             command_buffers
         };
         let mut command_buffers = command_buffers;
+        // The passes' writes, copied ahead of everything (as queue writes).
+        if let Some(uploads) = self.uploads.record_deferred(scene.device()) {
+            command_buffers.insert(0, uploads);
+        }
         let submission_index = {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: queue.submit (graph)");
@@ -2131,6 +2146,7 @@ impl RenderGraph {
             #[cfg(not(target_arch = "wasm32"))]
             profiling::profile_scope!("RenderGraph: upload::finish_frame");
             crate::upload::finish_frame();
+            self.uploads.end_frame();
         }
 
         #[cfg(not(target_arch = "wasm32"))]

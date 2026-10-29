@@ -472,7 +472,7 @@ impl RenderPass for PortalEditorOverlayPass {
                 self.bind_group = None;
                 self.bind_group_key = None;
             }
-            ctx.queue.write_buffer(&self.glyph_buffer, 0, bytes);
+            ctx.write_buffer(&self.glyph_buffer, 0, bytes);
         }
         if self.ghost_geometry_dirty || self.ghost_world_origin != Some(origin) {
             let gpu_vertices: Vec<[f32; 4]> = self
@@ -500,7 +500,7 @@ impl RenderPass for PortalEditorOverlayPass {
                 self.bind_group_key = None;
             }
             if !bytes.is_empty() {
-                ctx.queue.write_buffer(&self.ghost_buffer, 0, bytes);
+                ctx.write_buffer(&self.ghost_buffer, 0, bytes);
             }
             self.ghost_geometry_dirty = false;
             self.ghost_world_origin = Some(origin);

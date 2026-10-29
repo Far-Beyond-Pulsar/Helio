@@ -1765,7 +1765,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut stage_gpu: Vec<[f64; 4]> = Vec::new();
     // The sun pages' planning and recording CPU, a frame.
     let mut pages_cpu_ms = Vec::new();
-    let mut pages_cpu_parts = [0.0f64; 6];
+    let mut pages_cpu_parts = [0.0f64; 5];
+    let mut planner_ms = 0.0;
+    // The render thread's CPU a frame (recording: `Renderer::render`).
+    let mut record_all = Vec::new();
     let mut worst_wanted = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
@@ -1802,6 +1805,21 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         .is_some()
         .then(|| 1.0 / fps.unwrap_or(60.0));
     let mut stepped = 0u32;
+    // `HELIO_VOXEL_STRESS_SCOPES`: the render thread's CPU scopes
+    // (`cpu_scope!`) every frame: their mean over the flight by depth under
+    // `render`, and each slow frame's (recording over
+    // `HELIO_VOXEL_STRESS_SLOW_MS`, 30) as a tree with what no scope covers.
+    let scopes = std::env::var_os("HELIO_VOXEL_STRESS_SCOPES").is_some();
+    let slow_ms: f64 = std::env::var("HELIO_VOXEL_STRESS_SLOW_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30.0);
+    if scopes {
+        profiling::enable_profiling();
+        profiling::clear_events();
+    }
+    let mut scope_sums: std::collections::BTreeMap<(u32, String), f64> = Default::default();
+    let mut scope_frames = 0u32;
     let mut frame_start = Instant::now();
     loop {
         if let Some(pace) = pace {
@@ -1880,6 +1898,55 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             );
         }
         let (record_ms, wait_ms) = flight.draw(eye, forward);
+        if scopes {
+            let events = profiling::collect_events();
+            profiling::clear_events();
+            if let Some(render) = events
+                .iter()
+                .filter(|e| e.name == "Helio::Renderer::render")
+                .max_by_key(|e| e.duration_ns)
+            {
+                let (from, to) = (render.start_ns, render.start_ns + render.duration_ns);
+                let mut tree: Vec<&profiling::ProfileEvent> = events
+                    .iter()
+                    .filter(|e| {
+                        e.thread_id == render.thread_id
+                            && e.start_ns >= from
+                            && e.start_ns + e.duration_ns <= to
+                    })
+                    .collect();
+                tree.sort_by_key(|e| (e.start_ns, std::cmp::Reverse(e.duration_ns)));
+                let ms = |ns: u64| ns as f64 * 1e-6;
+                scope_frames += 1;
+                for e in &tree {
+                    *scope_sums
+                        .entry((e.depth.saturating_sub(render.depth), e.name.clone()))
+                        .or_default() += ms(e.duration_ns);
+                }
+                if record_ms > slow_ms {
+                    // What the scopes right under render leave uncovered.
+                    let covered: u64 = tree
+                        .iter()
+                        .filter(|e| e.depth == render.depth + 1)
+                        .map(|e| e.duration_ns)
+                        .sum();
+                    eprintln!(
+                        "CHUNKSCOPES {mode}: slow frame at t {t:.2} s: render {:.2} ms, under no scope {:.2} ms",
+                        ms(render.duration_ns),
+                        ms(render.duration_ns.saturating_sub(covered))
+                    );
+                    for e in tree.iter().filter(|e| e.duration_ns >= 200_000) {
+                        eprintln!(
+                            "CHUNKSCOPES {mode}:   +{:7.2} {}{} {:.2} ms",
+                            ms(e.start_ns - from),
+                            "  ".repeat(e.depth.saturating_sub(render.depth) as usize),
+                            e.name,
+                            ms(e.duration_ns)
+                        );
+                    }
+                }
+            }
+        }
         let now = Instant::now();
         let interval = (now - last).as_secs_f64() * 1e3;
         last = now;
@@ -1925,6 +1992,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             for (sum, ms) in pages_cpu_parts.iter_mut().zip(p.cpu_parts) {
                 *sum += ms;
             }
+            planner_ms += p.planner_ms;
         }
         for timing in pass.take_timings() {
             draw_ms.push(timing.draw);
@@ -1947,6 +2015,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         // A frame after a capture waited for its readback.
         if !captured {
             intervals.push(interval);
+            record_all.push(record_ms);
             slow.push((interval, t, altitude));
         }
         // Counting builds: each frame's rays that left the cut or the box
@@ -2114,14 +2183,23 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         let n = pages_cpu_ms.len().max(1) as f64;
         let mean = |i: usize| stage_gpu.iter().map(|s| s[i]).sum::<f64>() / stage_gpu.len().max(1) as f64;
         eprintln!(
-            "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages cpu mean by part (occluders, readback, invalidate, plan, record, upload) {}",
+            "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages render-thread cpu mean by part (occluders, readback, wait, record, upload) {}, planner thread {:.3}",
             mean(0),
             mean(1),
             mean(2),
             mean(3),
             occlusion_ms.iter().sum::<f64>() / occlusion_ms.len().max(1) as f64,
             walks_ms.iter().sum::<f64>() / walks_ms.len().max(1) as f64,
-            pages_cpu_parts.map(|v| format!("{:.3}", v / n)).join(" ")
+            pages_cpu_parts.map(|v| format!("{:.3}", v / n)).join(" "),
+            planner_ms / n
+        );
+        eprintln!(
+            "CHUNKSTRESS {mode}: render thread cpu (recording) mean {:.2} p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms",
+            record_all.iter().sum::<f64>() / record_all.len().max(1) as f64,
+            percentile(&record_all, 0.5),
+            percentile(&record_all, 0.95),
+            percentile(&record_all, 0.99),
+            max(&record_all)
         );
     }
     eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {emptied_chunks} held nothing, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
@@ -2153,6 +2231,17 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    if scope_frames > 0 {
+        let mut means: Vec<(&(u32, String), f64)> = scope_sums
+            .iter()
+            .map(|(k, sum)| (k, sum / f64::from(scope_frames)))
+            .filter(|(_, ms)| *ms >= 0.02)
+            .collect();
+        means.sort_by(|a, b| a.0 .0.cmp(&b.0 .0).then(b.1.total_cmp(&a.1)));
+        for ((depth, name), ms) in means {
+            eprintln!("CHUNKSCOPES {mode}: mean {}{name} {ms:.3} ms", "  ".repeat(*depth as usize));
+        }
     }
     for (interval, t, altitude) in slow.iter().take(5) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");

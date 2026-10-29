@@ -75,6 +75,9 @@ struct PassTimings {
     generation: [f64; 7],
     /// Tiles and chunks generated over the window.
     generated: [usize; 2],
+    /// The render thread's CPU a frame over the window (`Renderer::render`'s
+    /// scope, without the surface's acquire), ms.
+    cpu: Vec<f64>,
     /// The voxel pass's residency over the window: chunks generated,
     /// evicted, evicted never drawn, level switches; the last frame's.
     residency: [usize; 4],
@@ -91,6 +94,14 @@ impl PassTimings {
         stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>,
         size: [u32; 2],
     ) {
+        if let Some(render) = profiling::collect_events()
+            .iter()
+            .filter(|e| e.name == "Helio::Renderer::render")
+            .max_by_key(|e| e.duration_ns)
+        {
+            self.cpu.push(render.duration_ns as f64 * 1e-6);
+        }
+        profiling::clear_events();
         if let Some(s) = stats {
             for (sum, n) in self.residency.iter_mut().zip([
                 s.generated_chunks,
@@ -191,6 +202,19 @@ impl PassTimings {
                 s.resident_chunks,
                 s.drawn_chunks,
                 s.fading_nodes
+            );
+        }
+        if !self.cpu.is_empty() {
+            let mut cpu = std::mem::take(&mut self.cpu);
+            cpu.sort_by(f64::total_cmp);
+            let at = |p: f64| cpu[((cpu.len() - 1) as f64 * p).round() as usize];
+            log::info!(
+                "[timings] render cpu over {} frames: mean {:.3} p50 {:.3} p95 {:.3} max {:.3} ms",
+                cpu.len(),
+                cpu.iter().sum::<f64>() / cpu.len() as f64,
+                at(0.5),
+                at(0.95),
+                at(1.0)
             );
         }
         self.residency = [0; 4];
@@ -408,6 +432,9 @@ impl Gfx {
         {
             renderer.set_debug_mode(mode);
         }
+        if std::env::var_os("VOXEL_CRAFT_TIMINGS").is_some() {
+            profiling::enable_profiling();
+        }
         let timings = std::env::var("VOXEL_CRAFT_TIMINGS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -418,6 +445,7 @@ impl Gfx {
                 total: 0.0,
                 passes: Default::default(),
                 voxel: (0, [0.0; 12]),
+                cpu: Vec::new(),
                 residency: [0; 4],
                 last_stats: None,
                 generation: [0.0; 7],
