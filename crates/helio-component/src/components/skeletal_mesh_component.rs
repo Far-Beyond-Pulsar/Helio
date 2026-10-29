@@ -194,9 +194,11 @@ impl From<RootMotionRotationSetting> for RootRotation {
 )]
 #[scene_store(collect_handles = crate::components::collect_skeletal_assets)]
 pub struct SkeletalMeshComponent {
+    #[property]
     pub mesh: Option<AssetRef<SkeletalMeshAssetKind>>,
     /// The Animation Graph this component runs. The one authored animation source.
     #[serde(default)]
+    #[property]
     pub animation_graph: Option<AssetRef<AnimationGraphAssetKind>>,
     /// Compatibility, one release: scenes saved before the graph runtime named a
     /// single sequence here. It decodes into the component's internal
@@ -209,18 +211,23 @@ pub struct SkeletalMeshComponent {
     legacy_looping: bool,
     /// Play or pause the whole animation instance (graph, Montages, internal player).
     #[serde(default)]
+    #[property]
     pub playing: bool,
     #[serde(default = "default_playback_rate")]
+    #[property]
     pub playback_rate: f32,
     /// Which root motion moves the owner: none (stay put), everything, or Montages only.
     #[serde(default)]
+    #[property]
     pub root_motion_mode: RootMotionModeSetting,
     /// How much of the root motion's rotation turns the owner.
     #[serde(default)]
+    #[property]
     pub root_motion_rotation: RootMotionRotationSetting,
     /// Also apply the vertical (up) part of root motion. Off by default: height
     /// belongs to gravity and ground contact, not to the clip.
     #[serde(default)]
+    #[property]
     pub root_motion_vertical: bool,
 
     #[serde(skip)]
