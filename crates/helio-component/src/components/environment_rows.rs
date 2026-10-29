@@ -615,7 +615,7 @@ mod tests {
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_sky::AtmosphereComponent>(),
-            44 * 4
+            60 * 4
         );
         assert_eq!(
             std::mem::size_of::<helio_pass_foliage_place::components::FoliageTypeComponent>(),
