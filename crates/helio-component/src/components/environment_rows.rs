@@ -596,7 +596,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<CameraPostProcessSourceRow>(), 136 * 4);
         assert_eq!(std::mem::size_of::<WaterVolumeSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<FoliageSourceRow>(), 48 * 4);
-        assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 44 * 4);
+        assert_eq!(std::mem::size_of::<AtmosphereSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<DecalSourceRow>(), 36 * 4);
         assert_eq!(std::mem::size_of::<CoronaEmitterSourceRow>(), 60 * 4);
         assert_eq!(std::mem::size_of::<GlobalWindSourceRow>(), 12 * 4);
