@@ -126,6 +126,7 @@ pub struct VgRayProxies {
     /// Keys the last build used: kept pinned in the cache.
     live: Vec<u64>,
     pool: Option<Pool>,
+    compact_pool: bool,
     frame: u64,
 }
 
@@ -139,6 +140,7 @@ impl VgRayProxies {
             proxies: HashMap::new(),
             live: Vec::new(),
             pool: None,
+            compact_pool: false,
             frame: 0,
         }
     }
@@ -176,6 +178,11 @@ impl VgRayProxies {
             self.upload(device, queue, ready);
             changed = true;
         }
+        if self.compact_pool && self.pool_is_sparse() {
+            self.grow(device, queue, 0, 0);
+            changed = true;
+        }
+        self.compact_pool = false;
         changed
     }
 
@@ -203,10 +210,24 @@ impl VgRayProxies {
             .filter(|k| !used.contains(k))
             .copied()
             .collect();
+        let had_unused = !unused.is_empty();
         for key in unused {
             self.proxies.remove(&key);
             self.cache.forget(key);
         }
+        self.compact_pool |= had_unused;
+    }
+
+    fn pool_is_sparse(&self) -> bool {
+        let Some(pool) = &self.pool else {
+            return false;
+        };
+        let live_vertices: u32 = self.proxies.values().map(|p| p.range.vertex_count).sum();
+        let live_indices: u32 = self.proxies.values().map(|p| p.range.index_count).sum();
+        let target_vertices = live_vertices.max(1024).next_power_of_two().saturating_mul(2);
+        let target_indices = live_indices.max(4096).next_power_of_two().saturating_mul(2);
+        pool.vertex_capacity > target_vertices.saturating_mul(4)
+            || pool.index_capacity > target_indices.saturating_mul(4)
     }
 
     /// The pool's vertices and indices (after the first upload).

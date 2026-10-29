@@ -19,6 +19,7 @@ pub(crate) struct CachedPass {
 /// A process-lifetime label for a chain of pass names. Interned so rebuilding
 /// the graph reuses the same string instead of leaking a new one each time.
 pub(crate) fn chain_label(names: &[&'static str]) -> &'static str {
+    const MAX_INTERNED_LABELS: usize = 256;
     static LABELS: std::sync::LazyLock<
         std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
     > = std::sync::LazyLock::new(Default::default);
@@ -26,6 +27,12 @@ pub(crate) fn chain_label(names: &[&'static str]) -> &'static str {
     let mut labels = LABELS.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(label) = labels.get(&joined) {
         return label;
+    }
+    // Profiling APIs currently require static labels. Bound the process-wide
+    // intern table so graph hot reloads or generated pass combinations cannot
+    // leak a new label forever.
+    if labels.len() >= MAX_INTERNED_LABELS {
+        return "RenderPassChain";
     }
     let label: &'static str = Box::leak(joined.clone().into_boxed_str());
     labels.insert(joined, label);

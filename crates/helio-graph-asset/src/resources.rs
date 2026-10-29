@@ -5,7 +5,7 @@
 //! published by name through the reflected-binding contract, so a pass (a
 //! shader node) binds one by declaring a variable of that name.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
@@ -25,7 +25,12 @@ pub fn intern(name: &str) -> &'static str {
 }
 
 fn single(name: &'static str) -> &'static [&'static str] {
-    Box::leak(Box::new([name]))
+    static SINGLES: OnceLock<Mutex<HashMap<&'static str, &'static [&'static str]>>> =
+        OnceLock::new();
+    let mut singles = SINGLES.get_or_init(Default::default).lock().unwrap();
+    *singles
+        .entry(name)
+        .or_insert_with(|| Box::leak(Box::new([name])))
 }
 
 /// A colour or depth texture the graph allocates and recycles, declared by

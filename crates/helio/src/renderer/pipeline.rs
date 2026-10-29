@@ -8,8 +8,9 @@
 //! any of them. [`RenderPipelineRegistry`] names them so a host can offer the
 //! set as a choice (the level editor's World Settings pipeline picker).
 //!
-//! A graph is rebuilt on resize and on shader reload. An implementation owns
-//! that: it installs a [`GraphRebuilder`](super::GraphRebuilder) with
+//! A graph is rebuilt when graph-level configuration changes and on shader
+//! reload. An implementation owns that: it installs a
+//! [`GraphRebuilder`](super::GraphRebuilder) with
 //! `RenderGraph::set_graph_data`, as the built-in builders do.
 
 use std::collections::BTreeMap;
@@ -21,8 +22,9 @@ use super::PassBuildContext;
 
 /// A render pipeline that can produce its [`RenderGraph`].
 ///
-/// Consumed once per construction; a pipeline that must build again (resize)
-/// keeps what it needs in the rebuilder it installs on the graph.
+/// Consumed once per construction; a pipeline that must build again after a
+/// graph-level configuration change keeps what it needs in the rebuilder it
+/// installs on the graph.
 pub trait IntoGraph {
     fn into_graph(self: Box<Self>, ctx: PassBuildContext<'_>) -> RenderGraph;
 }

@@ -235,6 +235,7 @@ pub fn mesh_asset_residency(asset: AssetId) -> Option<Residency<LoadedMesh>> {
         return None;
     }
 
+    const MAX_MESH_RESIDENCIES: usize = 4096;
     static CACHE: OnceLock<Mutex<HashMap<(AssetId, u128), Residency<LoadedMesh>>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
@@ -244,6 +245,16 @@ pub fn mesh_asset_residency(asset: AssetId) -> Option<Residency<LoadedMesh>> {
     // cooked mesh while unchanged content still shares one resident value.
     let content_id =
         crate::mesh_cache::content_id_for_path(std::path::Path::new(source.as_ref())).unwrap_or(0);
+    // Reimports replace this asset's previous cache identity. Residency
+    // handles already returned to active views remain valid after removal.
+    cache.retain(|(cached_asset, cached_content), _| {
+        *cached_asset != asset || *cached_content == content_id
+    });
+    if cache.len() >= MAX_MESH_RESIDENCIES && !cache.contains_key(&(asset, content_id)) {
+        if let Some(victim) = cache.keys().next().copied() {
+            cache.remove(&victim);
+        }
+    }
     Some(
         cache
             .entry((asset, content_id))

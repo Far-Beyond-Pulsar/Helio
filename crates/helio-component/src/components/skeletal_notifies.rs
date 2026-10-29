@@ -1,0 +1,1325 @@
+//! runtime crossings belong to the live player, not its sampled pose.
+
+use std::{collections::VecDeque, sync::Arc};
+
+use engine_class_derive::{component_events, engine_class};
+use skeletal_assets::{
+    assets::AnimSeqAsset,
+    notifies::{NotifyIndex, NotifyTarget, PlaybackInterval},
+};
+
+use super::SkeletalMeshComponent;
+use pulsar_events::{
+    EventCategory, EventHub, entity_channel,
+    gamma::{DynEvent, DynValue, EventDescriptor, FieldType},
+};
+use pulsar_scenedb::{Entity, World};
+use skeletal_assets::notifies::{AnimationNotify, NotifyValue};
+
+pub(super) fn load_sequence_for_events(path: &std::path::Path) -> Result<AnimSeqAsset, String> {
+    let text = skeletal_assets::assets::read_text(path).map_err(|e| e.to_string())?;
+    let sequence = AnimSeqAsset::parse(&text)?;
+    if !sequence.features.notifies.is_empty() && AnimSeqAsset::peek_id(&text).is_none() {
+        return Err(format!(
+            "Save {} once to give its notifies a stable sequence identity",
+            path.display()
+        ));
+    }
+    Ok(sequence)
+}
+
+/// asset sources use the same canonical path as the skeletal asset ledger.
+pub fn animation_source_for_file(path: &std::path::Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// register newly bound assets before returning from the session's asset pump.
+pub fn register_loaded_animation_notifies(world: &mut World, hub: &EventHub) {
+    for (_, player) in world.query::<&mut SkeletalMeshComponent>() {
+        if let Err(error) = player.register_notify_events(hub) {
+            tracing::warn!(%error, "animation notify schema conflicts with the running session");
+        }
+    }
+}
+
+/// canonical binding keys use asset identities; labels are free to change.
+pub fn animation_notify_descriptor(
+    sequence: &AnimSeqAsset,
+    notify: &AnimationNotify,
+) -> EventDescriptor {
+    let mut fields = vec![
+        ("entity".to_owned(), FieldType::U64),
+        ("source".into(), FieldType::U64),
+        ("sequence_id".into(), FieldType::Str),
+        ("notify_id".into(), FieldType::Str),
+        ("notify_name".into(), FieldType::Str),
+        ("clip_time".into(), FieldType::F64),
+        ("playback_time".into(), FieldType::F64),
+        ("cycle".into(), FieldType::I64),
+        ("generation".into(), FieldType::I64),
+    ];
+    fields.extend(notify.fields.iter().map(|f| {
+        (
+            f.name.clone(),
+            match f.value {
+                NotifyValue::Bool(_) => FieldType::Bool,
+                NotifyValue::Int(_) => FieldType::I64,
+                NotifyValue::Float(_) => FieldType::F64,
+                NotifyValue::String(_) => FieldType::Str,
+            },
+        )
+    }));
+    EventDescriptor::dynamic_in("animseq", format!("{}.{}", sequence.id, notify.id), fields)
+        .expect("animseq is a valid namespace")
+}
+
+pub fn register_animation_notifies(sequence: &AnimSeqAsset, hub: &EventHub) -> Result<(), String> {
+    sequence.features.validate(sequence.clip.duration)?;
+    for notify in &sequence.features.notifies {
+        hub.register(
+            animation_notify_descriptor(sequence, notify),
+            EventCategory::Custom("Animation".into()),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Saved events that can be offered independently of broken project assets.
+#[derive(Debug, Default)]
+pub struct AnimationNotifyCatalog {
+    pub events: Vec<(String, EventDescriptor)>,
+    pub diagnostics: Vec<AnimationNotifyDiagnostic>,
+}
+
+#[derive(Debug)]
+pub struct AnimationNotifyDiagnostic {
+    pub path: std::path::PathBuf,
+    pub error: String,
+}
+
+/// Refresh from saved assets when the palette or compiler requests its catalog.
+/// Failures are local to a file/directory or a conflicting canonical identity.
+/// No session handle or gameplay publication is kept on the process host bus.
+pub fn project_animation_notify_events(root: &std::path::Path) -> AnimationNotifyCatalog {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut catalog = AnimationNotifyCatalog::default();
+    let mut paths = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0)];
+    while let Some((dir, depth)) = stack.pop() {
+        let entries = match engine_fs::virtual_fs::list_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                catalog.diagnostics.push(AnimationNotifyDiagnostic {
+                    path: dir,
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        for entry in entries {
+            let path = dir.join(&entry.name);
+            if entry.is_dir && depth < 16 {
+                if !entry.name.starts_with('.')
+                    && !matches!(
+                        entry.name.as_str(),
+                        "target" | "node_modules" | "build" | "dist"
+                    )
+                {
+                    stack.push((path, depth + 1));
+                }
+            } else if !entry.is_dir
+                && path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("animseq"))
+            {
+                paths.push(path);
+            }
+        }
+    }
+    paths.sort();
+    let hub = EventHub::new();
+    let mut events = BTreeMap::new();
+    let mut origins: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    let mut conflicts: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+    let key = |d: &EventDescriptor| (d.namespace.clone(), d.name.clone());
+    for path in paths {
+        let sequence = match load_sequence_for_events(&path) {
+            Ok(sequence) => sequence,
+            Err(error) => {
+                catalog
+                    .diagnostics
+                    .push(AnimationNotifyDiagnostic { path, error });
+                continue;
+            }
+        };
+        for notify in &sequence.features.notifies {
+            let descriptor = animation_notify_descriptor(&sequence, notify);
+            let identity = key(&descriptor);
+            origins
+                .entry(identity.clone())
+                .or_default()
+                .push(path.clone());
+            // Gamma detects canonical-name/schema and numeric-ID conflicts.
+            // Record both claimants before filtering: a later matching copy
+            // must never restore an identity already found to be ambiguous.
+            if let Err(error) = hub.register(
+                descriptor.clone(),
+                EventCategory::Custom("Animation".into()),
+            ) {
+                let error = error.to_string();
+                conflicts
+                    .entry(identity.clone())
+                    .or_default()
+                    .insert(error.clone());
+                if let Some(existing) = hub.descriptor(descriptor.id) {
+                    conflicts.entry(key(&existing)).or_default().insert(error);
+                }
+            }
+            events.entry(identity).or_insert((
+                format!(
+                    "{}.{} [{}]",
+                    sequence.clip.name,
+                    notify.name,
+                    notify.id.chars().take(8).collect::<String>()
+                ),
+                descriptor,
+            ));
+        }
+    }
+    // Filter only after the complete scan, so filesystem ordering cannot pick
+    // a winning schema. Keep other notifies even in the same sequence.
+    for (identity, errors) in conflicts {
+        events.remove(&identity);
+        let files = &origins[&identity];
+        let error = format!(
+            "Quarantined {}::{}: {}; claimed by {}",
+            identity.0.as_deref().unwrap_or("main"),
+            identity.1,
+            errors.into_iter().collect::<Vec<_>>().join("; "),
+            files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        for path in files {
+            catalog.diagnostics.push(AnimationNotifyDiagnostic {
+                path: path.clone(),
+                error: error.clone(),
+            });
+        }
+    }
+    catalog.events = events.into_values().collect();
+    catalog.events.sort_by_key(|(_, descriptor)| descriptor.id);
+    catalog
+        .diagnostics
+        .sort_by(|a, b| a.path.cmp(&b.path).then(a.error.cmp(&b.error)));
+    catalog
+}
+
+#[derive(Debug)]
+struct PendingNotify {
+    event: AnimationNotifyEvent,
+    authored: DynEvent,
+    target: NotifyTarget,
+    generic_accepted: bool,
+}
+
+impl PendingNotify {
+    fn new(
+        sequence: &AnimSeqAsset,
+        hit: skeletal_assets::notifies::CrossedNotify<'_>,
+        generation: i64,
+    ) -> Self {
+        let descriptor = animation_notify_descriptor(sequence, hit.notify);
+        let mut fields = vec![
+            DynValue::U64(0),
+            DynValue::U64(0),
+            DynValue::Str(sequence.id.to_string()),
+            DynValue::Str(hit.notify.id.clone()),
+            DynValue::Str(hit.notify.name.clone()),
+            DynValue::F64(hit.notify.time as f64),
+            DynValue::F64(hit.playback_time),
+            DynValue::I64(hit.cycle),
+            DynValue::I64(generation),
+        ];
+        fields.extend(hit.notify.fields.iter().map(|field| match &field.value {
+            NotifyValue::Bool(v) => DynValue::Bool(*v),
+            NotifyValue::Int(v) => DynValue::I64(*v),
+            NotifyValue::Float(v) => DynValue::F64(*v),
+            NotifyValue::String(v) => DynValue::Str(v.clone()),
+        }));
+        Self {
+            authored: DynEvent::new(descriptor.id, fields),
+            target: hit.notify.target.clone(),
+            generic_accepted: false,
+            event: AnimationNotifyEvent {
+                sequence_id: sequence.id.to_string(),
+                notify_id: hit.notify.id.clone(),
+                notify_name: hit.notify.name.clone(),
+                clip_time: hit.notify.time as f64,
+                playback_time: hit.playback_time,
+                cycle: hit.cycle,
+                generation,
+            },
+        }
+    }
+}
+
+/// called after scripts release World, immediately before the AfterScripts flush.
+/// object references are resolved from the source owner's current script instance.
+pub fn flush_animation_notifies(
+    world: &mut World,
+    hub: &EventHub,
+    resolve: impl Fn(Entity, &str) -> Option<Entity>,
+) {
+    let players: Vec<_> = world
+        .query::<&SkeletalMeshComponent>()
+        .map(|(entity, _)| entity)
+        .collect();
+    for instance in players {
+        let Some(link) =
+            world.get::<pulsar_world_registry::pulsar_scene_model::ComponentOwner>(instance)
+        else {
+            continue;
+        };
+        let owner = link.entity();
+        if !link.is_enabled() || !world.is_alive(owner) {
+            world
+                .get_mut::<SkeletalMeshComponent>(instance)
+                .unwrap()
+                .notify_playback
+                .pending
+                .clear();
+            continue;
+        }
+        world
+            .get_mut::<SkeletalMeshComponent>(instance)
+            .unwrap()
+            .reconcile_notify_playback();
+        let target_names: Vec<_> = world
+            .get::<SkeletalMeshComponent>(instance)
+            .unwrap()
+            .notify_playback
+            .pending
+            .iter()
+            .map(|pending| pending.target.clone())
+            .collect();
+        let targets: Vec<_> = target_names
+            .iter()
+            .map(|target| {
+                let target = match target {
+                    NotifyTarget::Self_ => Some(owner),
+                    NotifyTarget::ClassVariable(name) => resolve(owner, name),
+                };
+                target.filter(|&target| world.is_alive(target))
+            })
+            .collect();
+        let context = pulsar_world_registry::ComponentContext::for_instance(instance, owner, hub);
+        let mut player = world.get_mut::<SkeletalMeshComponent>(instance).unwrap();
+        if let Err(error) = player.publish_directed_notifies(&context.events, hub, owner, &targets)
+        {
+            tracing::warn!(%error, "could not queue animation notify; retaining it");
+        }
+    }
+}
+
+/// an owned occurrence, transported with the existing versioned event codec.
+#[engine_class(no_register)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AnimationNotifyEvent {
+    #[property]
+    pub sequence_id: String,
+    #[property]
+    pub notify_id: String,
+    #[property]
+    pub notify_name: String,
+    #[property]
+    pub clip_time: f64,
+    #[property]
+    pub playback_time: f64,
+    #[property]
+    pub cycle: i64,
+    #[property]
+    pub generation: i64,
+}
+
+#[component_events(class = "SkeletalMeshComponent")]
+pub trait SkeletalAnimationEvents {
+    #[bp_event]
+    fn animation_notify() -> AnimationNotifyEvent {}
+}
+
+#[derive(Debug, Default)]
+pub(super) struct NotifyPlayback {
+    sequence: Option<Arc<AnimSeqAsset>>,
+    seconds: f64,
+    phase: f32,
+    generation: i64,
+    looping: bool,
+    pending: VecDeque<PendingNotify>,
+    index: Option<NotifyIndex>,
+    registered_descriptor: Option<Arc<EventDescriptor>>,
+    registered_sequence: Option<Arc<AnimSeqAsset>>,
+}
+
+impl NotifyPlayback {
+    pub(super) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+}
+
+impl Clone for NotifyPlayback {
+    fn clone(&self) -> Self {
+        // a duplicated component must not inherit another instance's outbox.
+        Self::default()
+    }
+}
+
+impl SkeletalMeshComponent {
+    pub(super) fn begin_notify_playback(&mut self) {
+        self.reconcile_notify_playback();
+        self.notify_playback.pending.clear();
+        self.notify_playback.generation = self.notify_playback.generation.wrapping_add(1);
+    }
+
+    pub(super) fn reconcile_notify_playback(&mut self) {
+        let same_sequence = match (&self.notify_playback.sequence, &self.loaded_animation) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same_sequence
+            || self.elapsed_seconds != self.notify_playback.phase
+            || self.looping != self.notify_playback.looping
+        {
+            if !same_sequence && self.notify_playback.sequence.is_some() {
+                self.elapsed_seconds = 0.0;
+            }
+            // direct phase edits are seeks; replacement starts a fresh playback.
+            let _ = self.seek_animation(self.elapsed_seconds as f64);
+        }
+    }
+
+    /// seek without crossings, discarding occurrences not yet accepted by Gamma.
+    /// already queued engine events keep their original sequence and generation.
+    pub fn seek_animation(&mut self, seconds: f64) -> Result<(), String> {
+        if !seconds.is_finite() || seconds < 0.0 || seconds > f32::MAX as f64 {
+            return Err("Animation seek time must be finite and nonnegative".into());
+        }
+        let duration = self
+            .loaded_animation
+            .as_ref()
+            .map(|a| a.clip.duration as f64);
+        let phase = match duration {
+            Some(duration) if !duration.is_finite() || duration < 0.0 => {
+                return Err("Clip duration must be finite and nonnegative".into());
+            }
+            Some(duration) if self.looping && duration > 0.0 => seconds % duration,
+            Some(duration) => seconds.min(duration),
+            None => seconds,
+        } as f32;
+        if let Some(sequence) = &self.loaded_animation {
+            sequence.features.validate(sequence.clip.duration)?;
+            if self
+                .notify_playback
+                .sequence
+                .as_ref()
+                .is_none_or(|old| !Arc::ptr_eq(old, sequence))
+            {
+                self.notify_playback.index = Some(NotifyIndex::new(
+                    &sequence.features.notifies,
+                    sequence.clip.duration,
+                )?);
+            }
+        } else {
+            self.notify_playback.index = None;
+        }
+        self.notify_playback.sequence = self.loaded_animation.clone();
+        self.notify_playback.seconds = if self.looping { seconds } else { phase as f64 };
+        self.notify_playback.phase = phase;
+        self.notify_playback.looping = self.looping;
+        self.notify_playback.generation = self.notify_playback.generation.wrapping_add(1);
+        self.notify_playback.pending.clear();
+        self.elapsed_seconds = phase;
+        if !self.physics_pose_active {
+            self.refresh_pose();
+        }
+        Ok(())
+    }
+
+    pub fn restart_animation(&mut self) -> Result<(), String> {
+        self.seek_animation(0.0)?;
+        self.playing = true;
+        Ok(())
+    }
+
+    pub fn stop_animation(&mut self) {
+        self.playing = false;
+        let _ = self.seek_animation(0.0);
+    }
+
+    pub(super) fn advance_notifies(&mut self, delta_seconds: f32) -> Result<(), String> {
+        self.reconcile_notify_playback();
+        if self.physics_pose_active || !self.playing || delta_seconds <= 0.0 {
+            return Ok(());
+        }
+        if !delta_seconds.is_finite() || !self.playback_rate.is_finite() {
+            return Err("Animation delta and playback rate must be finite".into());
+        }
+        // the existing player supports forward playback only.
+        let from = self.notify_playback.seconds;
+        let mut to = from + delta_seconds as f64 * self.playback_rate.max(0.0) as f64;
+        if !to.is_finite() || to > f32::MAX as f64 {
+            return Err("Animation playback time overflowed".into());
+        }
+        let mut phase = to;
+        if let Some(sequence) = &self.loaded_animation {
+            let duration = sequence.clip.duration as f64;
+            if !duration.is_finite() || duration < 0.0 {
+                return Err("Clip duration must be finite and nonnegative".into());
+            }
+            if !self.looping || duration == 0.0 {
+                to = to.min(duration);
+            }
+            let crossed = self
+                .notify_playback
+                .index
+                .as_ref()
+                .ok_or("Notify index is missing")?
+                .collect(PlaybackInterval::Advance {
+                    from,
+                    to,
+                    looping: self.looping,
+                })?;
+            let generation = self.notify_playback.generation;
+            self.notify_playback.pending.extend(
+                crossed
+                    .into_iter()
+                    .map(|hit| PendingNotify::new(sequence, hit, generation)),
+            );
+            phase = if self.looping && duration > 0.0 {
+                to % duration
+            } else {
+                to
+            };
+            if (!self.looping || duration == 0.0) && to >= duration {
+                self.playing = false;
+            }
+        }
+        // sampling never advances this cursor, including repeated pose refreshes.
+        self.notify_playback.seconds = to;
+        self.notify_playback.phase = phase as f32;
+        self.elapsed_seconds = phase as f32;
+        self.refresh_pose();
+        Ok(())
+    }
+
+    pub(super) fn register_notify_events(&mut self, hub: &EventHub) -> Result<(), String> {
+        let Some(sequence) = &self.loaded_animation else {
+            return Ok(());
+        };
+        if self
+            .notify_playback
+            .registered_descriptor
+            .as_ref()
+            .is_some_and(|old| {
+                hub.descriptor(old.id)
+                    .is_some_and(|current| Arc::ptr_eq(old, &current))
+            })
+            && self
+                .notify_playback
+                .registered_sequence
+                .as_ref()
+                .is_some_and(|old| Arc::ptr_eq(old, sequence))
+        {
+            return Ok(());
+        }
+        register_animation_notifies(sequence, hub)?;
+        // a descriptor identifies this registration without retaining the session bus.
+        self.notify_playback.registered_descriptor =
+            sequence.features.notifies.first().and_then(|notify| {
+                hub.descriptor(animation_notify_descriptor(sequence, notify).id)
+            });
+        self.notify_playback.registered_sequence = Some(sequence.clone());
+        Ok(())
+    }
+
+    fn publish_directed_notifies(
+        &mut self,
+        events: &pulsar_world_registry::ComponentEventWriter<'_>,
+        hub: &EventHub,
+        owner: Entity,
+        targets: &[Option<Entity>],
+    ) -> Result<(), String> {
+        for target in targets {
+            let Some(pending) = self.notify_playback.pending.front_mut() else {
+                break;
+            };
+            // the generic bridge keeps its established owner/component compatibility.
+            if !pending.generic_accepted {
+                events.animation_notify(pending.event.clone())?;
+                pending.generic_accepted = true;
+            }
+            if let Some(target) = target {
+                pending.authored.fields[0] = DynValue::U64(target.bits());
+                pending.authored.fields[1] = DynValue::U64(owner.bits());
+                hub.publish_dyn(entity_channel(target.bits()), pending.authored.clone())
+                    .map_err(|e| e.to_string())?;
+            }
+            self.notify_playback.pending.pop_front();
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pulsar_events::{
+        EventHub, FlushPoint,
+        gamma::{Channel, DynValue, SubscribeOptions},
+    };
+    use pulsar_scenedb::{Entity, World};
+    use pulsar_world_registry::{ComponentContext, ComponentRuntimeState};
+    use std::sync::Mutex;
+
+    const EVENT: &str = "SkeletalMeshComponent.animation_notify";
+
+    fn player() -> SkeletalMeshComponent {
+        let sequence = serde_json::from_value(serde_json::json!({
+            "version": 2, "name": "Walk", "duration": 1.0, "fps": 30.0, "tracks": [],
+            "notifies": [
+                {"id": "zero", "name": "Zero", "time": 0.0},
+                {"id": "a", "name": "Step", "time": 0.5},
+                {"id": "b", "name": "Step", "time": 0.5},
+                {"id": "end", "name": "End", "time": 1.0}
+            ]
+        }))
+        .unwrap();
+        let mut player = SkeletalMeshComponent::default();
+        player.loaded_animation = Some(Arc::new(sequence));
+        player.looping = true;
+        player.playing = true;
+        player.playback_rate = 1.0;
+        player
+    }
+
+    fn listen(
+        hub: &EventHub,
+        entity: Entity,
+    ) -> (
+        Arc<Mutex<Vec<AnimationNotifyEvent>>>,
+        pulsar_events::gamma::SyncSubscription,
+    ) {
+        let got = Arc::new(Mutex::new(Vec::new()));
+        let output = got.clone();
+        let id = hub.descriptor_by_name(EVENT).unwrap().id;
+        let subscription = hub.bus().subscribe_dyn(
+            id,
+            SubscribeOptions::channel(Channel::Entity(entity.bits())),
+            move |event| {
+                let DynValue::Bytes(bytes) = &event.fields[0] else {
+                    panic!("payload must use the event codec")
+                };
+                let value = pulsar_world_registry::pulsar_script_vm::TypeRegistry::global()
+                    .decode_event_value("AnimationNotifyEvent", bytes)
+                    .unwrap();
+                output.lock().unwrap().push(
+                    value
+                        .downcast_ref::<AnimationNotifyEvent>()
+                        .unwrap()
+                        .clone(),
+                );
+            },
+        );
+        (got, subscription)
+    }
+
+    fn step(
+        p: &mut SkeletalMeshComponent,
+        context: &mut ComponentContext,
+        dt: f32,
+        hub: &EventHub,
+        owner: Entity,
+    ) {
+        p.tick(context, dt);
+        let targets = vec![Some(owner); p.notify_playback.pending.len()];
+        let _ = p.publish_directed_notifies(&context.events, hub, owner, &targets);
+    }
+
+    fn registered_hub() -> EventHub {
+        let hub = EventHub::new();
+        pulsar_world_registry::register_component_events(&hub).unwrap();
+        hub
+    }
+
+    #[test]
+    fn live_tick_publishes_distinct_crossings_before_wrapping_and_sampling_is_silent() {
+        let hub = registered_hub();
+        let mut world = World::new();
+        let owner = world.spawn();
+        let instance = pulsar_world_registry::attach_value(&mut world, owner, player()).unwrap();
+        let (got, _subscription) = listen(&hub, instance);
+        let (owner_got, _owner_subscription) = listen(&hub, owner);
+        let mut state = ComponentRuntimeState::default();
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 2.25, 1, &mut state);
+        assert!(got.lock().unwrap().is_empty());
+        assert_eq!(
+            world
+                .get::<SkeletalMeshComponent>(instance)
+                .unwrap()
+                .elapsed_seconds,
+            0.25
+        );
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        let occurrences = got.lock().unwrap().clone();
+        let ids: Vec<_> = occurrences
+            .iter()
+            .map(|e| (e.notify_id.as_str(), e.cycle, e.playback_time))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                ("a", 0, 0.5),
+                ("b", 0, 0.5),
+                ("end", 0, 1.0),
+                ("zero", 1, 1.0),
+                ("a", 1, 1.5),
+                ("b", 1, 1.5),
+                ("end", 1, 2.0),
+                ("zero", 2, 2.0)
+            ]
+        );
+        assert_eq!(*owner_got.lock().unwrap(), occurrences);
+        for _ in 0..3 {
+            world
+                .get_mut::<SkeletalMeshComponent>(instance)
+                .unwrap()
+                .refresh_pose();
+            pulsar_world_registry::tick_live_components(&mut world, &hub, 0.0, 1, &mut state);
+            flush_animation_notifies(&mut world, &hub, |_, _| None);
+            hub.flush(FlushPoint::AfterScripts);
+        }
+        assert_eq!(got.lock().unwrap().len(), 8);
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(got.lock().unwrap()[8].cycle, 2);
+        assert_eq!(got.lock().unwrap()[8].playback_time, 2.5);
+        drop(_subscription);
+        assert_eq!(
+            hub.subscriber_count(
+                hub.descriptor_by_name(EVENT).unwrap().id,
+                Channel::Entity(instance.bits())
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn pause_seek_speed_restart_stop_and_replacement_keep_one_cursor() {
+        let hub = registered_hub();
+        let mut world = World::new();
+        let entity = world.spawn();
+        let (got, _subscription) = listen(&hub, entity);
+        let mut context = ComponentContext::new(entity, &hub);
+        let mut p = player();
+        step(&mut p, &mut context, 0.5, &hub, entity);
+        p.playing = false;
+        step(&mut p, &mut context, 4.0, &hub, entity);
+        p.seek_animation(20.25).unwrap();
+        step(&mut p, &mut context, 4.0, &hub, entity);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(got.lock().unwrap().len(), 2);
+        p.playing = true;
+        p.playback_rate = 2.0;
+        step(&mut p, &mut context, 0.125, &hub, entity);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(got.lock().unwrap()[2].playback_time, 20.5);
+        assert_eq!(got.lock().unwrap()[2].cycle, 20);
+        p.playback_rate = -1.0;
+        step(&mut p, &mut context, 10.0, &hub, entity);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(got.lock().unwrap().len(), 4);
+        p.restart_animation().unwrap();
+        p.playback_rate = 1.0;
+        step(&mut p, &mut context, 0.5, &hub, entity);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(got.lock().unwrap()[4].playback_time, 0.5);
+        {
+            let events = got.lock().unwrap();
+            assert_ne!(events[4].generation, events[2].generation);
+        }
+        p.stop_animation();
+        step(&mut p, &mut context, 1.0, &hub, entity);
+        assert_eq!(p.elapsed_seconds, 0.0);
+        let old_id = got.lock().unwrap()[0].sequence_id.clone();
+        p.loaded_animation = player().loaded_animation;
+        p.restart_animation().unwrap();
+        step(&mut p, &mut context, 0.5, &hub, entity);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_ne!(got.lock().unwrap()[6].sequence_id, old_id);
+        assert_eq!(got.lock().unwrap().len(), 8);
+    }
+
+    #[test]
+    fn publication_failure_retries_without_repeating_accepted_crossings() {
+        let hub = EventHub::new();
+        let mut world = World::new();
+        let entity = world.spawn();
+        let mut context = ComponentContext::new(entity, &hub);
+        let mut p = player();
+        step(&mut p, &mut context, 0.5, &hub, entity);
+        assert_eq!(p.elapsed_seconds, 0.5);
+        assert_eq!(p.notify_playback.pending.len(), 2);
+        step(&mut p, &mut context, 0.5, &hub, entity);
+        assert_eq!(
+            p.elapsed_seconds, 0.5,
+            "retry failure cannot advance beyond the retained events"
+        );
+        assert_eq!(hub.queued_len(), 0);
+        pulsar_world_registry::register_component_events(&hub).unwrap();
+        let (got, _subscription) = listen(&hub, entity);
+        step(&mut p, &mut context, 0.5, &hub, entity);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        step(&mut p, &mut context, 0.5, &hub, entity);
+        hub.flush(FlushPoint::AfterScripts);
+        let ids: Vec<_> = got
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.notify_id.clone())
+            .collect();
+        assert_eq!(ids, ["a", "b", "end", "zero"]);
+        assert!(p.notify_playback.pending.is_empty());
+        step(&mut p, &mut context, 0.0, &hub, entity);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(got.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn shared_sequence_instances_are_independent_and_queued_payloads_outlive_the_emitter() {
+        let hub = registered_hub();
+        let mut world = World::new();
+        let owner = world.spawn();
+        let a = player();
+        let mut b = a.clone();
+        b.playback_rate = 2.0;
+        assert!(Arc::ptr_eq(
+            a.loaded_animation.as_ref().unwrap(),
+            b.loaded_animation.as_ref().unwrap()
+        ));
+        let a = pulsar_world_registry::attach_value(&mut world, owner, a).unwrap();
+        let b = pulsar_world_registry::attach_value(&mut world, owner, b).unwrap();
+        let (got_a, sub_a) = listen(&hub, a);
+        let (got_b, _sub_b) = listen(&hub, b);
+        let mut state = ComponentRuntimeState::default();
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        world.despawn(b);
+        pulsar_world_registry::process_component_removals(&world, &hub, &mut state);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert!(got_a.lock().unwrap().is_empty());
+        assert_eq!(
+            got_b.lock().unwrap().len(),
+            2,
+            "Gamma owns accepted payloads until delivery"
+        );
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(got_a.lock().unwrap().len(), 2);
+        assert_eq!(got_b.lock().unwrap().len(), 2);
+        drop(sub_a);
+        world.despawn(a);
+        state.end_all(&hub);
+    }
+
+    #[test]
+    fn unaccepted_events_are_discarded_on_seek_replacement_and_clone() {
+        let mut p = player();
+        p.advance(0.5);
+        assert_eq!(p.notify_playback.pending.len(), 2);
+        assert!(p.clone().notify_playback.pending.is_empty());
+        p.seek_animation(0.25).unwrap();
+        assert!(p.notify_playback.pending.is_empty());
+        p.advance(0.25);
+        p.loaded_animation = player().loaded_animation;
+        p.reconcile_notify_playback();
+        assert!(p.notify_playback.pending.is_empty());
+        p.looping = false;
+        p.restart_animation().unwrap();
+        p.advance(3.0);
+        assert!(!p.playing);
+        assert_eq!(p.elapsed_seconds, 1.0);
+        let ids: Vec<_> = p
+            .notify_playback
+            .pending
+            .iter()
+            .map(|e| e.event.notify_id.as_str())
+            .collect();
+        assert_eq!(ids, ["a", "b", "end"]);
+    }
+    #[test]
+    fn dispatch_uses_gamma_priority_order_and_queues_reentrant_publications() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let hub = registered_hub();
+        let mut world = World::new();
+        let entity = world.spawn();
+        let id = hub.descriptor_by_name(EVENT).unwrap().id;
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let once = Arc::new(AtomicBool::new(false));
+        let (received, _received) = listen(&hub, entity);
+        let high_log = log.clone();
+        let _high = hub.bus().subscribe_dyn(
+            id,
+            SubscribeOptions::channel(Channel::Entity(entity.bits())).priority(10),
+            move |_| high_log.lock().unwrap().push("high"),
+        );
+        let low_log = log.clone();
+        let reentrant_hub = hub.clone();
+        let _low = hub.bus().subscribe_dyn(
+            id,
+            SubscribeOptions::channel(Channel::Entity(entity.bits())),
+            move |event| {
+                low_log.lock().unwrap().push("low");
+                if !once.swap(true, Ordering::Relaxed) {
+                    reentrant_hub
+                        .publish_dyn(Channel::Entity(entity.bits()), event.clone())
+                        .unwrap();
+                }
+            },
+        );
+        let mut p = player();
+        step(
+            &mut p,
+            &mut ComponentContext::new(entity, &hub),
+            0.5,
+            &hub,
+            entity,
+        );
+        assert!(log.lock().unwrap().is_empty());
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        let report = hub.flush(FlushPoint::AfterScripts);
+        assert!(!report.hit_round_limit);
+        assert_eq!(
+            *log.lock().unwrap(),
+            ["high", "low", "high", "low", "high", "low"]
+        );
+        let events = received.lock().unwrap();
+        let ids: Vec<_> = events.iter().map(|e| e.notify_id.as_str()).collect();
+        assert_eq!(ids, ["a", "b", "a"]);
+    }
+
+    #[test]
+    fn runtime_clock_keeps_large_cycle_offsets_and_zero_duration_is_silent() {
+        let mut p = player();
+        p.seek_animation(1_099_511_627_776.25).unwrap();
+        let hub = registered_hub();
+        let mut world = World::new();
+        p.begin_play(&mut ComponentContext::new(world.spawn(), &hub));
+        p.advance(0.25);
+        assert_eq!(p.notify_playback.pending.len(), 2);
+        assert_eq!(p.notify_playback.pending[0].event.cycle, 1_099_511_627_776);
+        assert_eq!(
+            p.notify_playback.pending[0].event.playback_time,
+            1_099_511_627_776.5
+        );
+        assert_eq!(p.elapsed_seconds, 0.5);
+        assert!(p.seek_animation(f64::NAN).is_err());
+        assert_eq!(p.notify_playback.pending.len(), 2);
+        p.stop_animation();
+        assert!(p.notify_playback.pending.is_empty());
+        let sequence = Arc::make_mut(p.loaded_animation.as_mut().unwrap());
+        sequence.clip.duration = 0.0;
+        sequence.features.notifies.retain(|n| n.time == 0.0);
+        p.restart_animation().unwrap();
+        p.advance(10.0);
+        assert!(!p.playing);
+        assert!(p.notify_playback.pending.is_empty());
+        let saved = serde_json::to_value(&p).unwrap();
+        assert!(saved.get("notify_playback").is_none());
+        assert!(saved.get("elapsed_seconds").is_none());
+    }
+    #[test]
+    fn seeking_and_playback_preserve_an_active_physics_pose() {
+        let mut p = player();
+        p.physics_pose_active = true;
+        let pose = vec![[[3.0; 4]; 4]];
+        p.bone_world_pose = pose.clone();
+        p.seek_animation(0.25).unwrap();
+        p.advance(0.5);
+        assert_eq!(p.elapsed_seconds, 0.25);
+        assert_eq!(p.bone_world_pose, pose);
+        assert!(p.notify_playback.pending.is_empty());
+    }
+    #[test]
+    fn descriptors_keep_identity_across_labels_and_refuse_live_schema_conflicts() {
+        let hub = registered_hub();
+        let p = player();
+        let sequence = p.loaded_animation.as_ref().unwrap();
+        register_animation_notifies(sequence, &hub).unwrap();
+        register_animation_notifies(sequence, &hub).unwrap();
+        let a = animation_notify_descriptor(sequence, &sequence.features.notifies[1]);
+        let b = animation_notify_descriptor(sequence, &sequence.features.notifies[2]);
+        assert_ne!(a.id, b.id, "equal notify labels must not share a binding");
+        let mut renamed = (**sequence).clone();
+        renamed.clip.name = "Renamed clip".into();
+        renamed.features.notifies[1].name = "Renamed notify".into();
+        let renamed_descriptor =
+            animation_notify_descriptor(&renamed, &renamed.features.notifies[1]);
+        assert_eq!(a, renamed_descriptor);
+        register_animation_notifies(&renamed, &hub).unwrap();
+        renamed.features.notifies[1]
+            .fields
+            .push(skeletal_assets::notifies::NotifyField {
+                name: "strength".into(),
+                value: NotifyValue::Float(1.0),
+            });
+        assert!(register_animation_notifies(&renamed, &hub).is_err());
+        assert_eq!(*hub.descriptor(a.id).unwrap(), a);
+        let new_session = registered_hub();
+        register_animation_notifies(&renamed, &new_session).unwrap();
+    }
+
+    #[test]
+    fn authored_notifies_are_directed_once_and_foreign_subscriptions_drop_cleanly() {
+        use pulsar_events::gamma::{SubscribeOptions, ffi::ForeignBus};
+        let hub = registered_hub();
+        let mut world = World::new();
+        let owner = world.spawn();
+        let target = world.spawn();
+        let unrelated = world.spawn();
+        let mut p = player();
+        let sequence = Arc::make_mut(p.loaded_animation.as_mut().unwrap());
+        sequence.features.notifies.truncate(2);
+        sequence.features.notifies[1].target = NotifyTarget::ClassVariable("target".into());
+        sequence.features.notifies[1]
+            .fields
+            .push(skeletal_assets::notifies::NotifyField {
+                name: "strength".into(),
+                value: NotifyValue::Float(2.5),
+            });
+        let descriptor = animation_notify_descriptor(sequence, &sequence.features.notifies[1]);
+        let instance = pulsar_world_registry::attach_value(&mut world, owner, p).unwrap();
+        let mut state = ComponentRuntimeState::default();
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.5, 1, &mut state);
+        let foreign = unsafe { ForeignBus::from_raw(hub.export_raw()) }.unwrap();
+        foreign.register_descriptor(&descriptor).unwrap();
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let got = received.clone();
+        let sub = foreign.subscribe_dyn(
+            descriptor.id,
+            SubscribeOptions::channel(entity_channel(target.bits())),
+            move |event| got.lock().unwrap().push(event.clone()),
+        );
+        let wrong = Arc::new(Mutex::new(0));
+        let mut unrelated_subs = Vec::new();
+        for channel in [
+            entity_channel(owner.bits()),
+            entity_channel(instance.bits()),
+            entity_channel(unrelated.bits()),
+            Channel::Global,
+        ] {
+            let wrong = wrong.clone();
+            unrelated_subs.push(hub.bus().subscribe_dyn(
+                descriptor.id,
+                SubscribeOptions::channel(channel),
+                move |_| *wrong.lock().unwrap() += 1,
+            ));
+        }
+        hub.flush(FlushPoint::AfterPhysics);
+        assert!(received.lock().unwrap().is_empty());
+        flush_animation_notifies(&mut world, &hub, |source, variable| {
+            assert_eq!(source, owner);
+            assert_eq!(variable, "target");
+            Some(target)
+        });
+        assert!(received.lock().unwrap().is_empty());
+        hub.flush(FlushPoint::AfterScripts);
+        let events = received.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].fields[0], DynValue::U64(target.bits()));
+        assert_eq!(events[0].fields[1], DynValue::U64(owner.bits()));
+        assert_eq!(events[0].fields.last(), Some(&DynValue::F64(2.5)));
+        drop(events);
+        assert_eq!(*wrong.lock().unwrap(), 0);
+
+        // an old reference cannot address a recycled slot's listener.
+        world.despawn(target);
+        let recycled = world.spawn();
+        assert_eq!(target.index(), recycled.index());
+        assert_ne!(target.generation(), recycled.generation());
+        let stale = wrong.clone();
+        let _recycled = hub.bus().subscribe_dyn(
+            descriptor.id,
+            SubscribeOptions::channel(entity_channel(recycled.bits())),
+            move |_| *stale.lock().unwrap() += 1,
+        );
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 1.0, 1, &mut state);
+        flush_animation_notifies(&mut world, &hub, |_, _| Some(target));
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(received.lock().unwrap().len(), 1);
+        assert_eq!(*wrong.lock().unwrap(), 0);
+        // a live target with no listener, or an unresolved variable, is harmless.
+        drop(sub);
+        let no_listener = world.spawn();
+        for resolved in [Some(no_listener), None] {
+            pulsar_world_registry::tick_live_components(&mut world, &hub, 1.0, 1, &mut state);
+            flush_animation_notifies(&mut world, &hub, |_, _| resolved);
+            hub.flush(FlushPoint::AfterScripts);
+        }
+        assert_eq!(
+            hub.subscriber_count(descriptor.id, entity_channel(target.bits())),
+            0
+        );
+        drop(unrelated_subs);
+        drop(_recycled);
+        drop(foreign);
+        state.end_all(&hub);
+        hub.drain_queued();
+    }
+
+    #[test]
+    fn project_catalog_retains_valid_events_beside_invalid_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = player();
+        let sequence = p.loaded_animation.as_ref().unwrap();
+        std::fs::write(dir.join("valid.animseq"), sequence.to_text()).unwrap();
+        std::fs::write(dir.join("broken.animseq"), "{broken").unwrap();
+        std::fs::write(dir.join("unreadable.animseq"), [0xff, 0xfe]).unwrap();
+        let mut record = serde_json::to_value(&**sequence).unwrap();
+        record["version"] = serde_json::json!(999);
+        std::fs::write(dir.join("future.animseq"), record.to_string()).unwrap();
+        record = serde_json::to_value(&**sequence).unwrap();
+        record.as_object_mut().unwrap().remove("id");
+        std::fs::write(dir.join("idless.animseq"), record.to_string()).unwrap();
+        let catalog = project_animation_notify_events(&dir);
+        let events = catalog.events;
+        assert_eq!(events.len(), 4);
+        assert_eq!(catalog.diagnostics.len(), 4);
+        for file in [
+            "broken.animseq",
+            "unreadable.animseq",
+            "future.animseq",
+            "idless.animseq",
+        ] {
+            let diagnostic = catalog
+                .diagnostics
+                .iter()
+                .find(|d| d.path == dir.join(file))
+                .unwrap();
+            assert!(!diagnostic.error.is_empty());
+        }
+        let hub = EventHub::new();
+        for (_, descriptor) in events {
+            hub.register(descriptor, EventCategory::Custom("Animation".into()))
+                .unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn project_catalog_quarantines_conflicts_but_keeps_unrelated_identities() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = player();
+        let mut sequence = (**p.loaded_animation.as_ref().unwrap()).clone();
+        std::fs::write(dir.join("a.animseq"), sequence.to_text()).unwrap();
+        sequence.features.notifies[0]
+            .fields
+            .push(skeletal_assets::notifies::NotifyField {
+                name: "strength".into(),
+                value: NotifyValue::Float(1.0),
+            });
+        let conflicting = animation_notify_descriptor(&sequence, &sequence.features.notifies[0]);
+        std::fs::write(dir.join("b.animseq"), sequence.to_text()).unwrap();
+        // A third claimant matches the first: it must not restore the quarantined identity.
+        sequence.features.notifies[0].fields.clear();
+        std::fs::write(dir.join("c.animseq"), sequence.to_text()).unwrap();
+        let original = animation_notify_descriptor(&sequence, &sequence.features.notifies[0]);
+        let catalog = project_animation_notify_events(&dir);
+        let events = catalog.events;
+        assert_eq!(events.len(), 3);
+        assert_eq!(catalog.diagnostics.len(), 3);
+        for file in ["a.animseq", "b.animseq", "c.animseq"] {
+            let diagnostic = catalog
+                .diagnostics
+                .iter()
+                .find(|d| d.path == dir.join(file))
+                .unwrap();
+            assert!(diagnostic.error.contains("Quarantined animseq::"));
+            assert!(
+                diagnostic.error.contains("a.animseq") && diagnostic.error.contains("b.animseq")
+            );
+        }
+        assert!(
+            events
+                .iter()
+                .all(|(_, d)| d.id != original.id && d.id != conflicting.id)
+        );
+        let hub = EventHub::new();
+        for (_, descriptor) in events {
+            hub.register(descriptor, EventCategory::Custom("Animation".into()))
+                .unwrap();
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn project_catalog_reports_an_unreadable_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing");
+        let catalog = project_animation_notify_events(&path);
+        assert!(catalog.events.is_empty());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(catalog.diagnostics[0].path, path);
+        assert!(!catalog.diagnostics[0].error.is_empty());
+    }
+
+    #[test]
+    fn project_catalog_refreshes_saved_labels_schema_and_removals() {
+        let dir = std::env::temp_dir().join(format!(
+            "animation-catalog-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("walk.animseq");
+        let p = player();
+        let mut sequence = (**p.loaded_animation.as_ref().unwrap()).clone();
+        skeletal_assets::assets::save_animseq_asset(&file, &sequence).unwrap();
+        let original = project_animation_notify_events(&dir).events;
+        assert_eq!(original.len(), 4);
+        sequence.clip.name = "Renamed".into();
+        sequence.features.notifies[0].name = "New zero".into();
+        skeletal_assets::assets::save_animseq_asset(&file, &sequence).unwrap();
+        let renamed = project_animation_notify_events(&dir).events;
+        assert_eq!(
+            original.iter().map(|(_, d)| d.id).collect::<Vec<_>>(),
+            renamed.iter().map(|(_, d)| d.id).collect::<Vec<_>>()
+        );
+        assert_ne!(
+            original.iter().map(|(label, _)| label).collect::<Vec<_>>(),
+            renamed.iter().map(|(label, _)| label).collect::<Vec<_>>()
+        );
+        std::fs::remove_file(file).unwrap();
+        assert!(project_animation_notify_events(&dir).events.is_empty());
+        // legacy sequences remain readable, but event bindings need a saved asset id.
+        let idless = dir.join("idless.animseq");
+        let mut record = serde_json::to_value(&sequence).unwrap();
+        record.as_object_mut().unwrap().remove("id");
+        std::fs::write(&idless, record.to_string()).unwrap();
+        let catalog = project_animation_notify_events(&dir);
+        assert!(catalog.events.is_empty());
+        assert_eq!(catalog.diagnostics.len(), 1);
+        assert_eq!(catalog.diagnostics[0].path, idless);
+        assert!(
+            catalog.diagnostics[0]
+                .error
+                .contains("stable sequence identity")
+        );
+        std::fs::remove_file(idless).unwrap();
+
+        std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn authored_self_events_keep_shared_clip_instances_independent() {
+        let hub = registered_hub();
+        let mut world = World::new();
+        let owner_a = world.spawn();
+        let owner_b = world.spawn();
+        let a = player();
+        let mut b = a.clone();
+        b.playback_rate = 2.0;
+        let sequence = a.loaded_animation.as_ref().unwrap();
+        let descriptor = animation_notify_descriptor(sequence, &sequence.features.notifies[1]);
+        let a_count = Arc::new(Mutex::new(0));
+        let b_count = Arc::new(Mutex::new(0));
+        let mut subscriptions = Vec::new();
+        for (owner, count) in [(owner_a, a_count.clone()), (owner_b, b_count.clone())] {
+            subscriptions.push(hub.bus().subscribe_dyn(
+                descriptor.id,
+                SubscribeOptions::channel(entity_channel(owner.bits())),
+                move |_| *count.lock().unwrap() += 1,
+            ));
+        }
+        pulsar_world_registry::attach_value(&mut world, owner_a, a).unwrap();
+        pulsar_world_registry::attach_value(&mut world, owner_b, b).unwrap();
+        let mut state = ComponentRuntimeState::default();
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!((*a_count.lock().unwrap(), *b_count.lock().unwrap()), (0, 1));
+        pulsar_world_registry::tick_live_components(&mut world, &hub, 0.25, 1, &mut state);
+        flush_animation_notifies(&mut world, &hub, |_, _| None);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!((*a_count.lock().unwrap(), *b_count.lock().unwrap()), (1, 1));
+        state.end_all(&hub);
+    }
+
+    #[test]
+    fn an_authored_publication_failure_keeps_only_the_unaccepted_suffix() {
+        let hub = registered_hub();
+        let mut world = World::new();
+        let owner = world.spawn();
+        let mut p = player();
+        let sequence = p.loaded_animation.as_ref().unwrap();
+        let a = animation_notify_descriptor(sequence, &sequence.features.notifies[1]);
+        let b = animation_notify_descriptor(sequence, &sequence.features.notifies[2]);
+        hub.register(a.clone(), EventCategory::Gameplay).unwrap();
+        let (generic, _generic) = listen(&hub, owner);
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let mut subscriptions = Vec::new();
+        for descriptor in [&a, &b] {
+            let got = delivered.clone();
+            let id = descriptor.id;
+            subscriptions.push(hub.bus().subscribe_dyn(
+                id,
+                SubscribeOptions::channel(entity_channel(owner.bits())),
+                move |_| got.lock().unwrap().push(id),
+            ));
+        }
+        p.advance(0.5);
+        let writer = pulsar_world_registry::ComponentEventWriter::new(owner, &hub);
+        assert!(
+            p.publish_directed_notifies(&writer, &hub, owner, &[Some(owner), Some(owner)])
+                .is_err()
+        );
+        assert_eq!(p.notify_playback.pending.len(), 1);
+        assert!(p.notify_playback.pending[0].generic_accepted);
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(*delivered.lock().unwrap(), [a.id]);
+        assert_eq!(generic.lock().unwrap().len(), 2);
+        register_animation_notifies(p.loaded_animation.as_ref().unwrap(), &hub).unwrap();
+        p.publish_directed_notifies(&writer, &hub, owner, &[Some(owner)])
+            .unwrap();
+        hub.flush(FlushPoint::AfterScripts);
+        assert_eq!(*delivered.lock().unwrap(), [a.id, b.id]);
+        assert_eq!(
+            generic.lock().unwrap().len(),
+            2,
+            "retry must not duplicate the accepted generic bridge"
+        );
+        assert!(p.notify_playback.pending.is_empty());
+    }
+}
