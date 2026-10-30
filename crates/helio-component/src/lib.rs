@@ -3,6 +3,7 @@
 //! This crate provides rendering-related components that integrate with the
 //! engine's reflection system for automatic UI generation.
 
+pub mod anim_source;
 pub mod asset_component;
 pub mod components;
 pub mod cooked_texture;
