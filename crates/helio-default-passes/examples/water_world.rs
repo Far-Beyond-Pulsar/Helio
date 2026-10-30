@@ -312,10 +312,7 @@ impl Showcase {
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
         post.tonemap_operator = helio::TonemapOperator::AgxPunchy;
-        // Metered like Ultra-Water's auto-exposure, so a dark sea under a bright
-        // sunset sky is exposed as a whole instead of by a fixed multiplier.
-        post.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
-        post.tonemap_exposure = 1.0;
+        post.tonemap_exposure = 2.0;
         post.color_contrast = [1.06; 3];
         let camera = scene.world.spawn();
         scene.world.insert(
