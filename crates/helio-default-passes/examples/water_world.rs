@@ -132,8 +132,9 @@ impl Showcase {
         device: Arc<wgpu::Device>,
         queue: Arc<wgpu::Queue>,
         format: wgpu::TextureFormat,
+        size: [u32; 2],
     ) -> Self {
-        let size = [1600, 900];
+        let size = [size[0].max(1), size[1].max(1)];
         let planet = Arc::new(terrain(SEED));
         let context = EngineGpuContext::new(device.clone(), queue.clone());
         let mut store = SceneGpuStore::new(
@@ -509,6 +510,32 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         let _ = self.device.poll(wgpu::PollType::Poll);
     }
 
+    fn resize_target(&mut self, width: u32, height: u32) {
+        let size = [width.max(1), height.max(1)];
+        if self.size == size {
+            return;
+        }
+
+        self.size = size;
+        self.target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("water world showcase output"),
+            size: wgpu::Extent3d {
+                width: size[0],
+                height: size[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.target_view = self.target.create_view(&Default::default());
+    }
+
     fn present(&self, view: &wgpu::TextureView) {
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("water world present bind group"),
@@ -616,9 +643,7 @@ struct App {
 
 struct AppState {
     window: Arc<Window>,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
-    device: Arc<wgpu::Device>,
+    graphics: helio::HelioGraphicsContext<'static>,
     showcase: Showcase,
     preset: String,
     capture_requested: bool,
@@ -634,6 +659,12 @@ struct AppState {
 }
 
 impl AppState {
+    fn resize(&mut self, width: u32, height: u32) {
+        self.graphics
+            .resize(&mut self.showcase.renderer, width, height);
+        self.showcase.resize_target(width, height);
+    }
+
     fn set_preset(&mut self, preset: &str) {
         self.preset = preset.to_owned();
         let (eye, forward) = preset_view(preset);
@@ -677,11 +708,13 @@ impl AppState {
                 self.capture_countdown = Some(frames_left - 1);
             }
         }
-        let frame = match self.surface.get_current_texture() {
+        let frame = match self.graphics.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Lost | wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.surface_config);
+                self.graphics
+                    .surface
+                    .configure(&self.graphics.device, &self.graphics.surface_config);
                 self.capture_requested |= capture_now;
                 return false;
             }
@@ -861,16 +894,16 @@ impl ApplicationHandler for App {
             },
         ))
         .expect("create Helio graphics context");
-        let device = graphics.device.clone();
-        let queue = graphics.queue.clone();
-        let surface_config = graphics.surface_config.clone();
-        let surface = graphics.surface;
-        let showcase = Showcase::new(device.clone(), queue, surface_config.format);
+        let surface_size = [graphics.surface_config.width, graphics.surface_config.height];
+        let showcase = Showcase::new(
+            graphics.device.clone(),
+            graphics.queue.clone(),
+            graphics.surface_config.format,
+            surface_size,
+        );
         let mut state = AppState {
             window,
-            surface,
-            surface_config,
-            device,
+            graphics,
             showcase,
             preset: "coast".to_owned(),
             capture_requested: false,
@@ -909,11 +942,7 @@ impl ApplicationHandler for App {
                 state.skip_mouse_delta = true;
             }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
-                state.surface_config.width = size.width;
-                state.surface_config.height = size.height;
-                state
-                    .surface
-                    .configure(&state.device, &state.surface_config);
+                state.resize(size.width, size.height);
             }
             WindowEvent::KeyboardInput {
                 event:
