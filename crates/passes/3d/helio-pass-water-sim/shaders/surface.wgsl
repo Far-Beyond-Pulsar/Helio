@@ -868,10 +868,13 @@ fn fs_above(in: VertexOutput) -> vec4f {
     var refracted = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
 
     // Caustics land on the submerged surface being looked at through the water,
-    // so they are added before absorption attenuates the whole lot.
+    // so they are added before absorption attenuates the whole lot. Kept at
+    // half strength: the field is a direct-light multiplier in Ultra-Water
+    // (mean 1), and added on top of the already fully lit seabed it reads as a
+    // bright web far harder than the reference does.
     if !helio_is_sky(scene_depth) {
         let scene_pos = helio_world_from_depth(cameras[0].view_proj_inv, refract_uv, scene_depth);
-        refracted += water_caustics(scene_pos, vol, refract_uv, vi);
+        refracted += water_caustics(scene_pos, vol, refract_uv, vi) * 0.5;
     }
 
     // ── Medium ───────────────────────────────────────────────────────────────

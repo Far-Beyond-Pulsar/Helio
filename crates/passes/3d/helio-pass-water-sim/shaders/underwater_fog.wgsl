@@ -146,26 +146,27 @@ fn water_distortion(uv: vec2f, t: f32) -> vec2f {
 }
 
 /// Four-tap depth-guided reconstruction of the half-resolution shaft buffer.
-fn upsample_shafts(uv: vec2f, full_depth: f32, linear_depth: f32) -> f32 {
+fn upsample_shafts(uv: vec2f, linear_depth: f32) -> vec3f {
+    // Ultra-Water's weighting: the 4 nearest by bilinear weight, divided by
+    // how far their distance disagrees with this pixel's, so shafts in front
+    // of an object don't bleed onto it. rgb in-scatter, a distance.
     let dims = vec2i(textureDimensions(shafts_tex));
     let half_pos = uv * vec2f(dims) - vec2f(0.5);
     let base = vec2i(floor(half_pos));
     let f = fract(half_pos);
-    let tolerance = max(0.35, linear_depth * 0.025);
-    var sum = 0.0;
-    var total = 0.0;
+    var sum = vec3f(0.0);
+    var total = 1e-5;
     for (var y = 0; y < 2; y++) {
         for (var x = 0; x < 2; x++) {
             let coord = clamp(base + vec2i(x, y), vec2i(0), dims - vec2i(1));
-            let sample = textureLoad(shafts_tex, coord, 0);
+            let t = textureLoad(shafts_tex, coord, 0);
             let bilinear = select(1.0 - f.x, f.x, x == 1) * select(1.0 - f.y, f.y, y == 1);
-            let depth_weight = exp(-abs(sample.g - linear_depth) / tolerance);
-            let weight = bilinear * depth_weight;
-            sum += sample.r * weight;
-            total += weight;
+            let w = bilinear / (1e-3 + abs(t.a - linear_depth) / max(linear_depth, 0.5));
+            sum += t.rgb * w;
+            total += w;
         }
     }
-    return select(0.0, sum / max(total, 1e-5), total > 1e-5) * select(1.0, 0.0, helio_is_sky(full_depth));
+    return sum / total;
 }
 
 // ── Fragment ─────────────────────────────────────────────────────────────────
@@ -229,6 +230,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var dist: f32;
     var ray_dir: vec3f;
     var lit = scene;
+    // The distance the shafts pass stored for this pixel (before `dist` is
+    // clipped at the surface below); sky pixels store its far clamp.
+    var shaft_dist = 1000.0;
     if helio_is_sky(depth) {
         // Nothing there: the ray runs until the medium has fully absorbed it.
         ray_dir = normalize(helio_world_from_depth(cameras[0].view_proj_inv, uv_g, 0.5) - cam_pos);
@@ -237,6 +241,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         let world_pos = helio_world_from_depth(cameras[0].view_proj_inv, uv_g, depth);
         ray_dir = normalize(world_pos - cam_pos);
         dist    = distance(world_pos, cam_pos);
+        shaft_dist = min(dist, 1000.0);
 
         // The old caustics map was projected into a legacy volume footprint.
         // The surface path now evaluates a continuous FFT area ratio; a
@@ -299,8 +304,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var color = lit * transmit + inscatter * (1.0 - transmit);
 
     // ── God rays ─────────────────────────────────────────────────────────────
-    // col += sunColor * shafts * (scattering * shaftStrength), strength 2.
-    color += sun_rad * upsample_shafts(uv_g, depth, dist) * (UNDER_SCATTERING * 2.0);
+    // col += sunColor * shafts * (scattering * shaftStrength): the JS default
+    // strength is 2, here 2 x the volume's god-ray intensity (1.0 by default).
+    // The shafts buffer holds the in-scattered sun for the distance the
+    // shafts pass saw; sky pixels use the same far distance it clamps to.
+    color += sun_rad * upsample_shafts(uv_g, shaft_dist)
+        * (UNDER_SCATTERING * 2.0 * vol.fog_params.y);
 
     // Ramp the whole effect in across the waterline.
     return vec4f(mix(scene_raw.rgb, color, submersion), 1.0);

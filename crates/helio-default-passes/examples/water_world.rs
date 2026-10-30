@@ -188,14 +188,18 @@ impl Showcase {
                 .expect("Earth showcase atmosphere")
                 .around_planet([0.0, -world_radius as f32, 0.0], world_radius),
         );
-        let haze = scene.world.spawn();
-        scene.world.insert(
-            haze,
-            worlds::Preset::Earth
-                .haze(world_radius)
-                .expect("Earth showcase haze")
-                .around_planet([0.0, -world_radius as f32, 0.0], world_radius),
-        );
+        // `WATER_WORLD_NO_HAZE=1` drops the global haze (diagnostics): it is
+        // composited after the water, so it also veils the underwater far field.
+        if std::env::var_os("WATER_WORLD_NO_HAZE").is_none() {
+            let haze = scene.world.spawn();
+            scene.world.insert(
+                haze,
+                worlds::Preset::Earth
+                    .haze(world_radius)
+                    .expect("Earth showcase haze")
+                    .around_planet([0.0, -world_radius as f32, 0.0], world_radius),
+            );
+        }
 
         // Match the reference scene's directional sun. The same light drives
         // the terrain and Earth's atmospheric scattering; its angle changes
@@ -460,16 +464,22 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
     fn draw(&mut self, eye: DVec3, forward: Vec3, preset: &str) {
         if self.sun_preset != preset {
             let (azimuth, elevation) = preset_sun(preset);
-            self.scene.world.insert(
-                self.sun_entity,
-                helio_pass_forward_lit::LightComponent::from(directional_sun(azimuth, elevation)),
-            );
+            // Edited in place: re-inserting a row drops and re-adds it, and the
+            // render graph joins passes by live content, so the water pass
+            // (and the sea with it) would restart for a few frames.
+            *self
+                .scene
+                .world
+                .get_mut::<helio_pass_forward_lit::LightComponent>(self.sun_entity)
+                .expect("sun light component") =
+                helio_pass_forward_lit::LightComponent::from(directional_sun(azimuth, elevation));
             let sun = sun_direction(azimuth, elevation);
             self.water_row.sun_direction = [sun.x, sun.y, sun.z, 1.0];
-            self.scene.world.insert(
-                self.water_entity,
-                WaterVolumeComponent::from(self.water_row),
-            );
+            *self
+                .scene
+                .world
+                .get_mut::<WaterVolumeComponent>(self.water_entity)
+                .expect("water volume component") = WaterVolumeComponent::from(self.water_row);
             self.scene.world.flush_gpu_mirror(&self.queue);
             self.sun_preset = preset.to_owned();
         }
@@ -768,12 +778,21 @@ fn preset_view(preset: &str) -> (DVec3, Vec3) {
             DVec3::new(-229.4, 3.2, -286.0),
             Vec3::new(-0.317, -0.041, 0.948),
         ),
-        // Shallow underwater reef shot, looking up the nearby island slope.
+        // Ultra-Water's Underwater view, 5 m down over ~8 m of water (a wave trough
+        // can reach 3 m, so 3.2 m would sometimes surface), looking along the sun's
+        // bearing and slightly up into it (shafts).
         "underwater" => (
-            DVec3::new(-318.2, -3.2, -318.2),
-            Vec3::new(0.68, 0.22, 0.71),
+            DVec3::new(-353.6, -5.0, -353.6),
+            Vec3::new(-0.42, 0.056, -0.91),
         ),
-        other => panic!("unknown preset {other}; use coast, shoreline, or underwater"),
+        // Underwater with the sun behind the camera, on the shore's slope (the
+        // terrain is a -42 m floor with a spherical cap whose coast is at ~360 m):
+        // 4 m down at ~385 m, looking up the slope at its seabed and caustics.
+        "reef" => (
+            DVec3::new(-272.2, -4.0, -272.2),
+            Vec3::new(0.70, -0.12, 0.70),
+        ),
+        other => panic!("unknown preset {other}; use coast, shoreline, underwater or reef"),
     }
 }
 
@@ -783,6 +802,8 @@ fn preset_view(preset: &str) -> (DVec3, Vec3) {
 fn preset_sun(preset: &str) -> (f32, f32) {
     match preset {
         "coast" => (45.0, 3.5),
+        // Ultra-Water's Underwater view: a 48 degree sun, looked into from below.
+        "underwater" | "reef" => (205.0, 48.0),
         _ => (205.0, 22.0),
     }
 }
