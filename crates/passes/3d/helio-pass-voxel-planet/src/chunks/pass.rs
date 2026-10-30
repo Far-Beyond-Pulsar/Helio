@@ -534,12 +534,11 @@ impl ChunkPass {
         for gone in std::mem::replace(&mut self.held, held) {
             world.remove_volume(gone.volume);
         }
-        if let (Some(primary), Some(first)) = (self.held.first(), frame.volumes.first()) {
-            world.set_primary(primary.volume);
-            // Foliage tiles the primary volume this pass draws (a rebuilt
-            // graph's new pass too).
+        // Foliage tiles the volume the world follows the eye on (its
+        // primary; a rebuilt graph's new pass too).
+        if let Some(v) = primary_volume(world, &self.held, &frame) {
             self.planet_ground
-                .set_volume(*first.volume.planet.grid(), first.volume.transform);
+                .set_volume(*v.volume.planet.grid(), v.volume.transform);
         }
         // A save's export: a volume's resident edited chunks packed (over
         // the next updates), then its kept chunks answered for its world.
@@ -752,14 +751,14 @@ impl ChunkPass {
         );
         // Foliage's ground: where the drawn terrain changed, and this frame's
         // questions (`chunks::ground`) answered against the cut just drawn
-        // (the primary volume's).
+        // (the primary volume's, and the others' near the eye).
         self.foliage_ground
             .push_changes(world.take_ground_changes());
         if let Some(question) = self.foliage_ground.take_question() {
             let exchange = (
                 binding(helio_pass_foliage_place::GROUND_QUERIES),
                 binding(helio_pass_foliage_place::GROUND_HITS),
-                frame.planet(),
+                primary_volume(world, &self.held, &frame).map(|v| &v.volume.planet),
             );
             if let (Some(queries), Some(hits), Some(planet)) = exchange {
                 world.probe_ground(
@@ -781,6 +780,18 @@ impl ChunkPass {
         }
         Ok(())
     }
+}
+
+/// The frame's volume the world takes as its primary (`ChunkWorld::primary`:
+/// the one the eye is nearest the surface of), `held` in the frame's order.
+fn primary_volume<'a>(
+    world: &ChunkWorld,
+    held: &[HeldVolume],
+    frame: &'a PlanetFrame,
+) -> Option<&'a crate::engine::VolumeFrame> {
+    let primary = world.primary()?;
+    let at = held.iter().position(|h| h.volume == primary)?;
+    frame.volumes.get(at)
 }
 
 /// The voxel shader unprojects a direction from zero (`pixel_ray`), unlike

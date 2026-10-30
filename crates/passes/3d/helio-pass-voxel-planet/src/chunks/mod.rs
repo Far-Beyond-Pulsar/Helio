@@ -346,13 +346,16 @@ struct DrawParams {
     /// centre (w); a plane's up is +y.
     up: [f32; 4],
     /// x: the eye's squared radius less the ceiling's (a plane: its height
-    /// over the ceiling), from f64.
+    /// over the ceiling), from f64; z: a plane's eye height over its band's
+    /// bottom (its world's lowest solid).
     ceiling: [f32; 4],
     /// The planet's radius and voxel (m), its first exact level
     /// ([`exact_level`]), the eye's squared radius less the planet's (from
     /// f64).
     planet: [f32; 4],
-    /// x: the octree's coarsest level; y: nodes fading.
+    /// x: the octree's coarsest level; y: nodes fading; z: the chunk an
+    /// eye under the ground walks from; w: the volume's anchor
+    /// (`ChunkWorld::place_anchors`).
     cut: [u32; 4],
     /// The eye in the scene lights' coordinates; w 1 with lights bound.
     light_eye: [f32; 4],
@@ -434,6 +437,69 @@ fn screen_rect(v: &ViewInput, vol: &volumes::Volume) -> [u32; 4] {
     let x1 = clamp(x[1] + 2.0, v.size[0]).max(x0);
     let y1 = clamp(y[1] + 2.0, v.size[1]).max(y0);
     [x0, y0, x1, y1]
+}
+
+/// The pixels volume `vol`'s sun shadow can fall on in view `v`: its
+/// bounds' rectangle (`screen_rect`) stretched the way the shadow runs from
+/// it, to its vanishing point (where the direction away from the sun
+/// projects) when that is ahead of the eye (the infinite cylinder of the
+/// shadow projects into the hull of the bounds' disk and that point), else
+/// to the view's edges it heads for (it comes towards the eye). The whole
+/// view where the bounds reach behind the eye.
+fn shadow_rect(v: &ViewInput, vol: &volumes::Volume) -> [u32; 4] {
+    let whole = [0, 0, v.size[0], v.size[1]];
+    let rect = screen_rect(v, vol);
+    if vol.bounds.is_none() || rect == whole {
+        return whole;
+    }
+    let size = Vec2::new(v.size[0] as f32, v.size[1] as f32);
+    let (mut lo, mut hi) = (
+        Vec2::new(rect[0] as f32, rect[1] as f32),
+        Vec2::new(rect[2] as f32, rect[3] as f32),
+    );
+    let away = v.view_proj * (-v.sun).extend(0.0);
+    if away.w > 1e-6 {
+        // NDC y up, pixels y down.
+        let ndc = away.truncate().truncate() / away.w;
+        let p = Vec2::new((ndc.x * 0.5 + 0.5) * size.x, (0.5 - ndc.y * 0.5) * size.y);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    } else {
+        // The way its centre's projection moves along the shadow (the sign
+        // of d/ds of (c + s a).xy / (c + s a).w).
+        let c = v.view_proj * (vol.transform.position - v.eye).as_vec3().extend(1.0);
+        let d = away.truncate().truncate() * c.w - c.truncate().truncate() * away.w;
+        if d.x > 0.0 {
+            hi.x = size.x;
+        } else if d.x < 0.0 {
+            lo.x = 0.0;
+        }
+        if d.y > 0.0 {
+            lo.y = 0.0;
+        } else if d.y < 0.0 {
+            hi.y = size.y;
+        }
+    }
+    let clamp = |p: f32, most: u32| (p.max(0.0) as u32).min(most);
+    let x0 = clamp(lo.x, v.size[0]) / RECT_ALIGN * RECT_ALIGN;
+    let y0 = clamp(lo.y, v.size[1]) / RECT_ALIGN * RECT_ALIGN;
+    [
+        x0,
+        y0,
+        clamp(hi.x + 1.0, v.size[0]).max(x0),
+        clamp(hi.y + 1.0, v.size[1]).max(y0),
+    ]
+}
+
+/// Whether volume `caster`'s sun shadow (its bounds' cylinder away from the
+/// sun, `sun` towards it) reaches `receiver`'s bounds.
+fn shadow_reaches(caster: &volumes::Volume, receiver: &volumes::Volume, sun: DVec3) -> bool {
+    let (Some(rc), Some(rr)) = (caster.bounds, receiver.bounds) else {
+        return true;
+    };
+    let d = receiver.transform.position - caster.transform.position;
+    let along = -d.dot(sun);
+    along > -(rc + rr) && (d + sun * along).length() < rc + rr
 }
 
 /// A view of the volumes in the world frame (`ChunkWorld::draw_params`):
@@ -2237,6 +2303,11 @@ pub struct ChunkWorld {
     /// removed ones still drawn.
     volumes: Vec<Option<volumes::Volume>>,
     primary: Option<u16>,
+    /// Each volume's anchor this draw (`place_anchors`), by index.
+    anchors: Vec<u32>,
+    /// Where each volume but the primary was at the last update (foliage's
+    /// ground changes where one near the eye moves).
+    ground_placed: FxHashMap<u16, crate::volume::VolumeTransform>,
     unplanned: Vec<u16>,
     removed_drawn: Vec<NodeKey>,
     /// Every volume's planner, on its thread.
@@ -2285,11 +2356,31 @@ pub struct ChunkWorld {
 }
 
 /// A draw's bind groups (`ChunkWorld::last_groups`): each traced volume's,
-/// nearest first, with its index.
+/// nearest first, with its index; the volumes foliage's probes walk past
+/// the primary (`probe_ground`), their groups for it.
 #[derive(Clone)]
 struct DrawGroups {
     volumes: Vec<(u16, wgpu::BindGroup, [u32; 4])>,
+    ground: Vec<(u16, wgpu::BindGroup)>,
 }
+
+/// A volume that lights the other volumes' points in a draw
+/// (`ChunkWorld::cross_volumes`): its bind group (the camera's view, over
+/// `shadow`'s rectangle), the rectangle its sun shadow can fall on another
+/// volume's hits in (none: it falls on none), whether the GI probes' rays
+/// reach it and foliage's probes may meet it.
+struct CrossVolume {
+    index: u16,
+    group: wgpu::BindGroup,
+    shadow: Option<[u32; 4]>,
+    gi: bool,
+    ground: bool,
+}
+
+/// How far from the eye (m) foliage's probes may meet a volume besides the
+/// primary: its bands' reach (`helio_pass_foliage_place`, 320 m) and a
+/// largest tile.
+const FOLIAGE_REACH: f64 = 512.0;
 
 /// What generation costs on the GPU: milliseconds of a tile's columns and
 /// of a chunk's columns and tree on average, chunks a tile, and the lines
@@ -3479,6 +3570,8 @@ impl ChunkWorld {
             free_pages_seen: leaf_capacity / LEAF_PAGE,
             volumes: Vec::new(),
             primary: None,
+            anchors: Vec::new(),
+            ground_placed: FxHashMap::default(),
             unplanned: Vec::new(),
             removed_drawn: Vec::new(),
             worker: residency::Worker::spawn(),
@@ -4498,6 +4591,34 @@ impl ChunkWorld {
         self.claim_timing(frame);
         self.frame_now = frame;
         let mut stats = UpdateStats::default();
+        // The primary volume follows the eye (`follow_eye`): in a new one,
+        // foliage near the eye and every GI probe are placed again.
+        let before = self.primary;
+        self.follow_eye(eye);
+        if before.is_some() && self.primary != before {
+            let near = DVec3::splat(FOLIAGE_REACH);
+            self.ground_changes.push([eye - near, eye + near]);
+            self.gi_clipmap = None;
+        }
+        // The other volumes near the eye that moved change foliage's ground
+        // where they were and are (`ground_probe_cross`).
+        for vol in self.volumes.iter().flatten() {
+            if Some(vol.index) == self.primary {
+                continue;
+            }
+            let last = self.ground_placed.insert(vol.index, vol.transform);
+            let Some(last) = last.filter(|t| *t != vol.transform) else {
+                continue;
+            };
+            if let Some(r) = vol.bounds {
+                if (vol.transform.position - eye).length() - r < FOLIAGE_REACH {
+                    for t in [last, vol.transform] {
+                        self.ground_changes
+                            .push([t.position - DVec3::splat(r), t.position + DVec3::splat(r)]);
+                    }
+                }
+            }
+        }
         // Volumes the planner does not know yet, with this update's settings.
         for index in std::mem::take(&mut self.unplanned) {
             if let Some(vol) = self.volumes[usize::from(index)].as_mut() {
@@ -5467,8 +5588,9 @@ impl ChunkWorld {
         // the fade ends (while it lasts the probe may meet either level). A node drawn
         // coarser in place of finer ones, or no longer drawn, does not change it: the
         // finer ground placed the foliage there, and placing it again against the coarser
-        // would only make it flicker as a still view's cut breathes. Foliage grows on the
-        // primary volume only.
+        // would only make it flicker as a still view's cut breathes. Foliage is tiled on
+        // the primary volume (the others near the eye change its ground where they move:
+        // `update`).
         if let Some(primary) = self.primary.and_then(|p| self.volumes[usize::from(p)].as_ref()) {
             let (grid, transform, volume) = (primary.grid, primary.transform, primary.index);
             let levels = grid.levels();
@@ -6305,7 +6427,13 @@ impl ChunkWorld {
                 _ => [0.0, 1.0, 0.0, 0.0],
             },
             ceiling: match grid {
-                Some(g) if g.grid.is_plane() => [(eye.y - g.ceiling) as f32, 0.0, 0.0, 0.0],
+                Some(g) if g.grid.is_plane() => {
+                    // Its band's bottom, the world's lowest solid (the
+                    // nodes under it are rock no ray from the camera
+                    // reaches: a plane's underside is no world's).
+                    let bottom = g.floor + CEILING_MARGIN;
+                    [(eye.y - g.ceiling) as f32, 0.0, (eye.y - bottom) as f32, 0.0]
+                }
                 Some(g) => {
                     let c = g.grid.radius() + g.ceiling;
                     [(eye.length_squared() - c * c) as f32, 0.0, 0.0, 0.0]
@@ -6327,7 +6455,9 @@ impl ChunkWorld {
                     Some(g) if v.ortho.is_none() => self.eye_chunk(g, eye),
                     _ => u32::MAX,
                 },
-                0,
+                grid.and_then(|g| self.anchors.get(usize::from(g.index)))
+                    .copied()
+                    .unwrap_or(u32::MAX),
             ],
             light_eye: v.light_eye.map_or([0.0; 4], |e| e.extend(1.0).to_array()),
             // Two of the finest probes' spacings: the probes' visibility
@@ -6441,6 +6571,16 @@ impl ChunkWorld {
         self.pipelines[usize::from(plane)].as_ref().unwrap()
     }
 
+    /// The passes of volume `index`'s form lighting other volumes' points
+    /// (built when the second volume came: `cross_volumes` lists none
+    /// before).
+    fn cross_pipelines(&self, index: u16) -> &volumes::CrossPipelines {
+        self.pipelines_of(index)
+            .cross
+            .as_ref()
+            .expect("a world of more than one volume has its cross pipelines")
+    }
+
     /// The volumes with chunks in the drawn cut.
     fn volumes_drawn(&self) -> FxHashSet<u16> {
         let mut out = FxHashSet::default();
@@ -6450,6 +6590,138 @@ impl ChunkWorld {
         }
         for c in &self.drawn_set.list {
             out.insert((self.slot_keys[c.slot as usize][0] >> 16) as u16);
+        }
+        out
+    }
+
+    /// Each volume's anchor for the walks that enter it from elsewhere
+    /// (`enter_volume`), for an eye at `eye` (world): the finest drawn chunk
+    /// finer than its exact levels over the eye's column (a sphere's frames
+    /// hold near their chunks), else a plane's coarsest drawn chunk (its
+    /// frames are one affine map); none with a single volume.
+    fn place_anchors(&mut self, eye: DVec3) {
+        self.anchors.clear();
+        self.anchors.resize(self.volumes.len(), u32::MAX);
+        if self.volumes.iter().flatten().count() < 2 {
+            return;
+        }
+        // Each volume's eye column (face, i, j), exact level and form; its
+        // best chunk: over the column, its level, slot.
+        type Column = ((u8, i32, i32), u32, bool);
+        let columns: Vec<Option<Column>> = self
+            .volumes
+            .iter()
+            .map(|v| {
+                v.as_ref().map(|v| {
+                    let (cell, _) = v.grid.locate(v.transform.to_local(eye));
+                    ((cell.face, cell.i, cell.j), v.exact_level, v.grid.is_plane())
+                })
+            })
+            .collect();
+        let mut best: Vec<Option<(bool, u32, u32)>> = vec![None; self.volumes.len()];
+        for c in &self.drawn_set.list {
+            let key = self.slot_keys[c.slot as usize];
+            let index = (key[0] >> 16) as usize;
+            let Some(Some(((face, i, j), exact, plane))) = columns.get(index) else {
+                continue;
+            };
+            let level = ((key[0] >> 8) & 0xff) as u32;
+            if !plane && level >= *exact {
+                continue;
+            }
+            let over = (key[0] & 0xff) as u8 == *face
+                && (i >> level).div_euclid(CHUNK) == key[1]
+                && (j >> level).div_euclid(CHUNK) == key[2];
+            if !over && !plane {
+                continue;
+            }
+            let better = best[index].is_none_or(|(o, l, _)| {
+                (over && !o) || (over == o && if over { level < l } else { level > l })
+            });
+            if better {
+                best[index] = Some((over, level, c.slot));
+            }
+        }
+        for (anchor, best) in self.anchors.iter_mut().zip(best) {
+            if let Some((_, _, slot)) = best {
+                *anchor = slot;
+            }
+        }
+    }
+
+    /// The volumes that light the other volumes' points in view `v` (those
+    /// with drawn chunks, `drawn_in`, when more than one is held): those
+    /// whose sun shadow can fall on another traced volume (`order`,
+    /// `shadow_reaches`), over the rectangle it can fall in (`shadow_rect`);
+    /// those the GI probes' rays reach (`gi`: they trace this view) and
+    /// foliage's probes may meet, but the primary (whose own passes walk
+    /// them); with their parameters for it (the camera's, placed by `prev`
+    /// a frame ago, over the shadow's rectangle) and bind group.
+    fn cross_volumes(
+        &self,
+        v: &ViewInput,
+        order: &[u16],
+        drawn_in: &FxHashSet<u16>,
+        gi: bool,
+        prev: &[(u16, crate::volume::VolumeTransform)],
+    ) -> Vec<CrossVolume> {
+        let mut out = Vec::new();
+        if self.volumes.iter().flatten().count() < 2 {
+            return out;
+        }
+        let sun = v.sun.as_dvec3().normalize_or_zero();
+        // The GI clipmap's coarsest level's side from the eye: its probes
+        // and their rays.
+        let gi_reach = self
+            .gi_clipmap
+            .filter(|_| gi)
+            .map(|c| c.spacing(helio_pass_gi::LEVELS - 1) * helio_pass_gi::SIDE as f64);
+        for vol in self
+            .volumes
+            .iter()
+            .flatten()
+            .filter(|w| drawn_in.contains(&w.index))
+        {
+            let within = |reach: f64| {
+                vol.bounds
+                    .is_none_or(|b| (vol.transform.position - v.eye).length() - b < reach)
+            };
+            let casts = sun != DVec3::ZERO
+                && order.iter().any(|&r| {
+                    r != vol.index
+                        && self.volumes[usize::from(r)]
+                            .as_ref()
+                            .is_some_and(|rv| shadow_reaches(vol, rv, sun))
+                });
+            let others = Some(vol.index) != self.primary;
+            let gi = others && gi_reach.is_some_and(within);
+            let ground = others && within(FOLIAGE_REACH);
+            if !(casts || gi || ground) {
+                continue;
+            }
+            // Its pass in the view (past the traced where it is not one).
+            let pass = order
+                .iter()
+                .position(|&i| i == vol.index)
+                .unwrap_or(order.len());
+            let traced = (order.len() + usize::from(pass == order.len())).max(2);
+            let last = prev
+                .iter()
+                .find(|(i, _)| *i == vol.index)
+                .map_or(vol.transform, |(_, t)| *t);
+            let mut params = self.draw_params(v, Some((vol, last)), pass as u32, traced as u32, 0);
+            if casts {
+                params.rect = shadow_rect(v, vol);
+            }
+            self.queue
+                .write_buffer(&vol.views.cross, 0, bytemuck::bytes_of(&params));
+            out.push(CrossVolume {
+                index: vol.index,
+                group: self.draw_group(&vol.views.cross, vol, self.camera_view(vol)),
+                shadow: casts.then_some(params.rect),
+                gi,
+                ground,
+            });
         }
         out
     }
@@ -7387,6 +7659,7 @@ impl ChunkWorld {
             gi: gi.is_some(),
             ortho: None,
         };
+        self.place_anchors(eye);
         let (moved, prev) = self.volume_motions(&input, eye_index);
         let timing = self
             .queries
@@ -7447,6 +7720,7 @@ impl ChunkWorld {
             );
             groups.push((index, group, params.rect));
         }
+        let cross = self.cross_volumes(&input, &order, &drawn_in, gi.is_some(), &prev);
         let targets = self.targets.as_ref().unwrap();
         {
             // 4. Sun shadows: samples, then every hit, and meshes before
@@ -7580,6 +7854,15 @@ impl ChunkWorld {
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
             }
+            // 4b. Each volume's shadow on the others' hits and the meshes,
+            // over the rectangle it can fall in, once all have their own.
+            for c in &cross {
+                let Some(rect) = c.shadow else { continue };
+                pass.set_pipeline(&self.cross_pipelines(c.index).shadow);
+                pass.set_bind_group(0, &c.group, &[]);
+                let (x, y) = rect_groups(rect, 8);
+                pass.dispatch_workgroups(x, y, 1);
+            }
             drop(pass);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk local shadows"),
@@ -7626,7 +7909,8 @@ impl ChunkWorld {
                 timestamp_writes: end(7),
             });
             // 6. The GI probes' rays (a thread a ray, past the frame's
-            // count none), through the primary volume.
+            // count none), through the primary volume, then each other
+            // volume they reach (the nearer hit kept).
             if let (Some(gi), true, Some(occlusion), Some((_, group, _))) = (
                 gi,
                 self.gi_clipmap.is_some(),
@@ -7652,6 +7936,11 @@ impl ChunkWorld {
                 pass.set_bind_group(1, &gi_group, &[]);
                 pass.set_pipeline(&self.pipelines_of(primary).gi_trace);
                 pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
+                for c in cross.iter().filter(|c| c.gi) {
+                    pass.set_bind_group(0, &c.group, &[]);
+                    pass.set_pipeline(&self.cross_pipelines(c.index).gi_trace);
+                    pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
+                }
             }
             drop(pass);
             self.denoise(
@@ -7745,7 +8034,14 @@ impl ChunkWorld {
             slot.frame = Some((frame, self.last_generated.0, self.last_generated.1));
             self.timing_now = None;
         }
-        self.last_groups = Some(DrawGroups { volumes: groups });
+        self.last_groups = Some(DrawGroups {
+            volumes: groups,
+            ground: cross
+                .into_iter()
+                .filter(|c| c.ground)
+                .map(|c| (c.index, c.group))
+                .collect(),
+        });
     }
 
     /// The traces' counts since the last call (with
@@ -7850,7 +8146,7 @@ impl ChunkWorld {
         eye: DVec3,
         camera: Vec3,
     ) {
-        // Foliage grows on the primary volume: its walks in its frame.
+        // Foliage is tiled on the primary volume: its walks in its frame.
         let Some(primary) = self.primary else { return };
         let Some((_, group, _)) = self
             .last_groups
@@ -7925,6 +8221,13 @@ impl ChunkWorld {
         pass.set_bind_group(1, &probe_group, &[]);
         pass.set_pipeline(&self.pipelines[usize::from(plane)].as_ref().unwrap().ground_probe);
         pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+        // The other volumes near the eye, where they stand on that ground or
+        // hold it (`ground_probe_cross`).
+        for (index, group) in self.last_groups.iter().flat_map(|g| &g.ground) {
+            pass.set_bind_group(0, group, &[]);
+            pass.set_pipeline(&self.cross_pipelines(*index).ground_probe);
+            pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+        }
     }
 
     pub fn follow_gi(&mut self, clipmap: helio_pass_gi::Clipmap, world_eye: DVec3, eye: DVec3) {

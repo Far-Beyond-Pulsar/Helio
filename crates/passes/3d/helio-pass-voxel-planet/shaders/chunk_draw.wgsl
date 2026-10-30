@@ -40,7 +40,8 @@ struct DrawParams {
     // Up at the eye (xyz; a plane's +y) and the eye's radius (w).
     up: vec4<f32>,
     // x: the eye's squared radius less the ceiling's, over which nothing
-    // is solid (a plane: the eye's height over it).
+    // is solid (a plane: the eye's height over it); z: a plane's eye height
+    // over its band's bottom, under which nothing is its world's.
     ceiling: vec4<f32>,
     // The planet's radius and voxel (m), the first level walked in the
     // grid's own cells (`exact_level`), the eye's squared radius less the
@@ -48,7 +49,9 @@ struct DrawParams {
     planet: vec4<f32>,
     // x: the octree's coarsest level; y: nodes fading (none: no switch to
     // look past); z: the chunk an eye under the ground walks from (NONE:
-    // rays start at their seed boxes).
+    // rays start at their seed boxes); w: the volume's anchor, the drawn
+    // chunk walks entering it from elsewhere are placed by
+    // (`enter_volume`; NONE: none).
     cut: vec4<u32>,
     // The eye in the scene lights' coordinates (xyz); w 1 when the scene's
     // lights are bound (`local_shadow`).
@@ -2289,13 +2292,19 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
 @group(1) @binding(8) var out_sun: texture_storage_2d<rgba16float, write>;
 // Each pixel's sun as its walk (or its block's) found it, 0 or 1; 1 where
 // it is its own (its walk, or none needed), 0 where a neighbour's; 1 where
-// a terrain hit is shown (`sun_raw`, `walked_sun`): bytes of a word a
-// pixel, rows of the frame. (The denoiser's own data are buffers: an
-// image load is bounds-checked by two size queries.)
+// a terrain hit is shown (`sun_raw`, `walked_sun`); 1 where the sun's
+// occlusion pages gave it (every volume is traced into them: no other
+// volume's walk is wanted, `shadow_cross`): bytes of a word a pixel, rows
+// of the frame. (The denoiser's own data are buffers: an image load is
+// bounds-checked by two size queries.)
 @group(1) @binding(41) var<storage, read_write> out_sun_raw: array<u32>;
 
+fn store_sun(p: vec2<i32>, size: vec2<u32>, lit: f32, own: f32, terrain: f32, paged: bool) {
+    out_sun_raw[u32(p.y) * size.x + u32(p.x)] = pack4x8unorm(vec4<f32>(lit, own, terrain, select(0.0, 1.0, paged)));
+}
+
 fn store_walked(p: vec2<i32>, size: vec2<u32>, lit: f32, own: f32, terrain: f32) {
-    out_sun_raw[u32(p.y) * size.x + u32(p.x)] = pack4x8unorm(vec4<f32>(lit, own, terrain, 0.0));
+    store_sun(p, size, lit, own, terrain, false);
 }
 // The normal each hit is lit with (`Face::shading`) and its sky sample
 // (zero where a mesh is in front of the hit, or the sky).
@@ -2913,6 +2922,103 @@ fn point_walk(q: vec2<u32>, org: vec3<f32>, v: vec2<u32>, dir: vec3<f32>, range:
     return walk(start.walk, org, dir, t0, range, r, 96u, counted, q);
 }
 
+// ---- Walks into the volume from anywhere ----
+// Points of other volumes (their hits and meshes in shadow passes, GI
+// probes, foliage queries) see this pass's volume by walking it from where
+// their ray enters it: a sphere's ceiling ball, a plane's edges between its
+// band's bottom and its ceiling (`params.ceiling`). The walk starts there as a point's
+// does (`point_start`): placed by the anchor's frame (`params.cut.w`: a
+// drawn chunk of the volume, near the eye on a sphere; NONE without one),
+// a plane's anywhere (its frames are one affine map), a sphere's within
+// ANCHOR_REACH of its cells (its frames stray from the sphere farther out);
+// else by a sphere's exact levels.
+struct Entry {
+    walk: Walk,
+    t: f32,
+    // 0: a walk from t; 1: in rock or a Buried node at t; 2: the ray
+    // misses the volume (or nothing is drawn where it enters).
+    kind: u32,
+}
+
+const ANCHOR_REACH: f32 = 512.0;
+
+fn enter_volume(org: vec3<f32>, dir: vec3<f32>, t_end: f32, r: i32) -> Entry {
+    var out = Entry(Walk(0u, vec4<i32>(0), vec3<i32>(0), vec3<i32>(0), false), 0.0, 2u);
+    let anchor = params.cut.w;
+    var t0 = 0.0;
+    var t1 = t_end;
+    if PLANE_WORLD {
+        if anchor == NONE { return out; }
+        // Between the band's bottom and the ceiling (eye-relative).
+        let bottom_y = -params.ceiling.z;
+        let ceiling_y = -params.ceiling.x;
+        if dir.y != 0.0 {
+            let ta = (bottom_y - org.y) / dir.y;
+            let tb = (ceiling_y - org.y) / dir.y;
+            t0 = max(t0, min(ta, tb));
+            t1 = min(t1, max(ta, tb));
+        } else if org.y < bottom_y || org.y > ceiling_y {
+            return out;
+        }
+        // Within its edges, in the anchor's cells.
+        let f = chunk_frame(anchor);
+        let key = chunk_keys[anchor];
+        let o = vec3<f32>(f.i0.w, f.i1.w, f.i2.w) + vec3<f32>(dot(f.i0.xyz, org), dot(f.i1.xyz, org), dot(f.i2.xyz, org));
+        let d = vec3<f32>(dot(f.i0.xyz, dir), dot(f.i1.xyz, dir), dot(f.i2.xyz, dir));
+        let lo = -vec2<f32>(key.yz * 64);
+        let hi = lo + f32(params.table.y >> u32(key_level(key.x)));
+        var entered_by = 3u;
+        for (var a = 0u; a < 2u; a++) {
+            if d[a] != 0.0 {
+                let ta = (lo[a] - o[a]) / d[a];
+                let tb = (hi[a] - o[a]) / d[a];
+                if min(ta, tb) > t0 {
+                    t0 = min(ta, tb);
+                    entered_by = a;
+                }
+                t1 = min(t1, max(ta, tb));
+            } else if o[a] < lo[a] || o[a] >= hi[a] {
+                return out;
+            }
+        }
+        // Into the cells it enters entered_by (rounding would place it beside).
+        if entered_by < 2u { t0 += 1e-3 / abs(d[entered_by]); }
+    } else {
+        // In the ceiling's ball: |c|^2 less its squared radius from the
+        // eye's (`params.ceiling.x`, from f64), as `exact_ray`'s.
+        let e = params.up.xyz * params.up.w;
+        let b = dot(e, dir) + dot(org, dir);
+        let c = params.ceiling.x + 2.0 * dot(e, org) + dot(org, org);
+        let disc = b * b - c;
+        if disc < 0.0 { return out; }
+        let s = sqrt(disc);
+        t0 = max(t0, -b - s);
+        t1 = min(t1, -b + s);
+    }
+    if t1 <= t0 { return out; }
+    let p = org + dir * t0;
+    var placed = anchor;
+    if !PLANE_WORLD && anchor != NONE {
+        let f = chunk_frame(anchor);
+        let o = vec3<f32>(f.i0.w, f.i1.w, f.i2.w) + vec3<f32>(dot(f.i0.xyz, p), dot(f.i1.xyz, p), dot(f.i2.xyz, p));
+        if any(abs(o - 32.0) > vec3<f32>(ANCHOR_REACH)) { placed = NONE; }
+    }
+    let start = point_start(p, placed, r);
+    out.walk = start.walk;
+    out.t = t0;
+    out.kind = start.kind;
+    return out;
+}
+
+// Whether a point `org` (eye-relative) sees along `dir` past this pass's
+// volume (`enter_volume`), for a pixel `q` of dither `r`.
+fn sees_past(org: vec3<f32>, dir: vec3<f32>, r: i32, q: vec2<u32>) -> f32 {
+    let e = enter_volume(org, dir, 1e30, r);
+    if e.kind == 2u { return 1.0; }
+    if e.kind == 1u { return 0.0; }
+    return select(1.0, 0.0, walk(e.walk, org, dir, e.t, 1e30, r, 96u, false, q).hit);
+}
+
 // The share of each pixel's light its sun samples give stochastically
 // (helio-pass-tsr's STOCHASTIC_MASK: TSR integrates it rather than reject
 // history): a terrain hit facing the sun whose cells are one and a half to
@@ -2999,7 +3105,7 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         // rather than read texels four times its pixels).
         let seen = sun_by_pages(to_world(mesh.xyz), vec3<f32>(0.0), pixel_width(id.xy, size, length(mesh.xyz)), id.xy, 1u);
         if seen >= 0.0 && !steady_shadows() {
-            store_walked(p, size, seen, 1.0, 0.0);
+            store_sun(p, size, seen, 1.0, 0.0, true);
             return;
         }
         let n = atomicAdd(&fallbacks.count, 1u);
@@ -3043,6 +3149,7 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
     textureStore(out_normal, p, vec4<f32>(to_world(f.shading), sky_at(p, at_hit, reach, size)));
     var lit = 0.0;
     var walks = false;
+    var paged = false;
     let footprint = pixel_width(id.xy, size, t);
     if dot(f.shading, sun) <= 0.0 {
         own = 1.0;
@@ -3055,6 +3162,7 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
             let back = to_world(at_hit - f.normal * (1.5 * f.cell));
             ask_sun_pages(back, footprint);
             lit = clamp(through, 0.0, 1.0) * sun_occlusion(back, vec3<f32>(0.0), footprint);
+            paged = true;
         }
     } else if sub_pixel(f, id.xy, size, t) && !steady {
         // Cells under a pixel and a half: their own sun is aliasing (each
@@ -3070,6 +3178,7 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         lit = sun_by_pages(lifted, to_world(f.shading), footprint, id.xy, 32u);
         own = 1.0;
         walks = lit < 0.0;
+        paged = !walks;
     } else {
         lit = f32(sampled & 1u);
         walks = sampled == 0u;
@@ -3080,7 +3189,7 @@ fn shadow(@builtin(global_invocation_id) gid: vec3<u32>) {
         atomicMax(&fallback_groups[0], n / 64u + 1u);
         return;
     }
-    store_walked(p, size, lit, own, 1.0);
+    store_sun(p, size, lit, own, 1.0, paged);
 }
 
 // The listed hits' and meshes' own walks: dispatched indirectly, 64 a
@@ -3110,6 +3219,47 @@ fn shadow_fallback(@builtin(global_invocation_id) id: vec3<u32>) {
         lit = hit_walk(q, size, v.x, t, f, sun_ray(sun_point(q)), 1e30, false);
     }
     store_walked(vec2<i32>(q), size, lit, 1.0, 1.0);
+}
+
+// Shadows across volumes: once every hit has its own volume's sun, each
+// volume that can shade another's (`ChunkWorld::draw`: a pass a caster,
+// over the screen rectangle its shadow can fall on) walks from every other
+// volume's lit hit, and from the meshes the first pass did not walk,
+// towards the sun (the same ray as their own walk: the disk's points with
+// steady shadows) from where the ray enters it (`enter_volume`); a hit
+// shades the pixel. Pixels the sun's occlusion pages lit are left: every
+// volume is traced into them.
+@compute @workgroup_size(8, 8)
+fn shadow_cross(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let id = rect_id(gid, 1u);
+    let size = textureDimensions(hit_distance);
+    if id.x >= size.x || id.y >= size.y { return; }
+    let p = vec2<i32>(id.xy);
+    let at = u32(p.y) * size.x + u32(p.x);
+    let word = unpack4x8unorm(out_sun_raw[at]);
+    if word.x == 0.0 || word.w > 0.5 { return; }
+    let v = textureLoad(hit_visibility, p, 0).xy;
+    var org = vec3<f32>(0.0);
+    let mesh = mesh_point(id.xy, size);
+    if mesh.w > 0.0 && (v.x == NONE || length(mesh.xyz) < textureLoad(hit_distance, p, 0).r) {
+        if params.volume.y == 0u { return; }
+        org = mesh.xyz;
+    } else {
+        if v.x == NONE || ours(v.x) { return; }
+        org = pixel_ray(id.xy, size) * textureLoad(hit_distance, p, 0).r;
+    }
+    let r = fade_dither(id.xy);
+    // One walk in the kernel (each call site of a walk is a long compile).
+    let steady = steady_shadows();
+    let rays = select(1u, SUN_DISK_RAYS, steady);
+    var lit = 0.0;
+    for (var i = 0u; i < rays; i++) {
+        let u = select(sun_point(id.xy), sun_disk_point(i), steady);
+        lit += sees_past(org, sun_ray(u), r, id.xy);
+    }
+    lit /= f32(rays);
+    if lit >= 1.0 { return; }
+    out_sun_raw[at] = pack4x8unorm(vec4<f32>(word.x * lit, 1.0, word.z, 0.0));
 }
 
 // ---- 4b. Local lights' terrain shadows ----
@@ -4371,6 +4521,39 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     if !start.ok { return; }
     let end = walk(start.walk, org, to_local(ray.dir), 0.0, ray.origin.w, r, 96u, false, q);
     if !end.hit { return; }
+    gi_shade(id.x, ray, end);
+}
+
+// The other volumes' parts in the probes' rays (`ChunkWorld::draw`: a pass
+// each volume whose bounds the clipmap's rays reach): a ray walks this
+// volume from where it enters it (`enter_volume`), up to the nearer of its
+// reach and the hit already there (each tracer's contract: the hit kept is
+// the nearest); from its rock, a back face at once, as a probe's.
+@compute @workgroup_size(64)
+fn gi_trace_cross(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= frame_gi.counts.x * GI_RAYS { return; }
+    let ray = gi_rays[id.x];
+    let q = vec2<u32>(id.x & 63u, id.x >> 6u);
+    let r = fade_dither(q);
+    let org = to_local(ray.origin.xyz);
+    let dir = to_local(ray.dir);
+    var reach = ray.origin.w;
+    let before = gi_hits[id.x].t;
+    if before > 0.0 { reach = min(reach, before); }
+    let e = enter_volume(org, dir, reach, r);
+    if e.kind == 2u { return; }
+    if e.kind == 1u {
+        gi_hits[id.x] = GiHit(max(e.t, 1e-3), gi_pack_unit(ray.dir), 0u, 1u);
+        return;
+    }
+    let end = walk(e.walk, org, dir, e.t, reach, r, 96u, false, q);
+    if !end.hit || end.t >= reach { return; }
+    gi_shade(id.x, ray, end);
+}
+
+// Ray `index`'s hit `end` (`ray` from its origin): its face, material and
+// light, and the sun's share there (`gi_trace`).
+fn gi_shade(index: u32, ray: GiRay, end: WalkEnd) {
     let c = cell_frame(end.slot, end.cell);
     let axis = select(select(c.m2.xyz, c.m1.xyz, end.axis == 1u), c.m0.xyz, end.axis == 0u);
     let n = to_world(normalize(axis) * select(-1.0, 1.0, end.sign == 1u));
@@ -4390,7 +4573,7 @@ fn gi_trace(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let glow = u32(clamp(materials.m[min(material, 31u)].light.y, 0.0, 15.9375) * 16.0 + 0.5);
     let light = 1u | (u32(through * 255.0 + 0.5) << 8u) | (u32(back * 255.0 + 0.5) << 16u) | (glow << 24u);
-    gi_hits[id.x] = GiHit(end.t, gi_pack_unit(n), pack4x8unorm(vec4<f32>(clamp(palette(material).rgb, vec3<f32>(0.0), vec3<f32>(1.0)), sun)), light);
+    gi_hits[index] = GiHit(end.t, gi_pack_unit(n), pack4x8unorm(vec4<f32>(clamp(palette(material).rgb, vec3<f32>(0.0), vec3<f32>(1.0)), sun)), light);
 }
 
 // ---- 7. Foliage ground probes ----
@@ -4481,21 +4664,68 @@ fn ground_probe(@builtin(global_invocation_id) id: vec3<u32>) {
     if start.ok {
         let end = walk(start.walk, org, -up, 0.0, query.length - drop, 0, 96u, false, vec2<u32>(id.x & 63u, id.x >> 6u));
         if end.hit && end.slot != NONE && end.t >= 0.0 && end.t + drop <= query.length {
-            let f = cell_frame(end.slot, end.cell);
-            let axis = select(select(f.m2.xyz, f.m1.xyz, end.axis == 1u), f.m0.xyz, end.axis == 0u);
-            let n = normalize(axis) * select(-1.0, 1.0, end.sign == 1u);
-            if dot(n, up) > 0.5 {
-                let m = shown_material(end.material, end.slot, end.cell, true);
-                // The turf's colour there as the draw shows it from a few metres: the
-                // material's patches and clumps, without each cube's pigment. Grass of
-                // ground-coloured types takes it, so past the last blades the ground
-                // already reads as the meadow.
-                let at = org - up * (end.t + 0.01 * length(f.m0.xyz));
-                let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + at / DOMAIN_UNIT));
-                let colour = material_albedo(min(m, 31u), p, 0.0, 0.4, 0.0);
-                hit = GroundHit(bitcast<u32>(end.t + drop), pack_unit(to_world(n)), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
-            }
+            hit = ground_answer(end, org, up, drop);
         }
+    }
+    ground_hits[id.x] = hit;
+}
+
+// The ground at walk end `end` down `up` from `org` (`along` past the
+// query's start): a top face's distance from the start, normal and
+// material, else none (`ground_probe`).
+fn ground_answer(end: WalkEnd, org: vec3<f32>, up: vec3<f32>, along: f32) -> GroundHit {
+    var hit = GroundHit(bitcast<u32>(-1.0), 0u, 0xffffffffu, 0u);
+    let f = cell_frame(end.slot, end.cell);
+    let axis = select(select(f.m2.xyz, f.m1.xyz, end.axis == 1u), f.m0.xyz, end.axis == 0u);
+    let n = normalize(axis) * select(-1.0, 1.0, end.sign == 1u);
+    if dot(n, up) > 0.5 {
+        let m = shown_material(end.material, end.slot, end.cell, true);
+        // The turf's colour there as the draw shows it from a few metres: the
+        // material's patches and clumps, without each cube's pigment. Grass of
+        // ground-coloured types takes it, so past the last blades the ground
+        // already reads as the meadow.
+        let at = org - up * (end.t + 0.01 * length(f.m0.xyz));
+        let p = params.eye_domain.xyz + vec3<i32>(floor(params.eye_domain_frac.xyz + at / DOMAIN_UNIT));
+        let colour = material_albedo(min(m, 31u), p, 0.0, 0.4, 0.0);
+        hit = GroundHit(bitcast<u32>(end.t + along), pack_unit(to_world(n)), min(m, 31u), pack4x8unorm(vec4<f32>(colour, 1.0)));
+    }
+    return hit;
+}
+
+// Foliage's ground across volumes: after the ground volume's probes
+// (`ground_probe`), each other volume near the eye (`ChunkWorld::
+// probe_ground`) takes the queries whose columns cross it. Where it holds
+// solid within FOLIAGE_CLEARANCE over the ground found (it stands or lies
+// on it, or sinks into it), its surface there is the ground (a top face;
+// else none); with no ground found, its top. A volume floating higher
+// leaves the ground under it its foliage: grass grows on a block set on a
+// meadow, never inside or under it.
+const FOLIAGE_CLEARANCE: f32 = 2.0;
+
+@compute @workgroup_size(64)
+fn ground_probe_cross(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= probe_frame.counts.x || id.x >= arrayLength(&ground_queries) || id.x >= arrayLength(&ground_hits) { return; }
+    let query = ground_queries[id.x];
+    let up = to_local(normalize(query.up));
+    let ground = bitcast<f32>(ground_hits[id.x].distance);
+    // From the clearance over the ground found (to a little into it), else
+    // the whole segment.
+    var band_top = 0.0;
+    var band_end = query.length;
+    if ground >= 0.0 {
+        band_top = max(ground - FOLIAGE_CLEARANCE, 0.0);
+        band_end = ground + 0.05;
+    }
+    let org = to_local(query.start - probe_frame.eye.xyz) - up * band_top;
+    let q = vec2<u32>(id.x & 63u, id.x >> 6u);
+    let e = enter_volume(org, -up, band_end - band_top, 0);
+    if e.kind == 2u { return; }
+    var hit = GroundHit(bitcast<u32>(-1.0), 0u, 0xffffffffu, 0u);
+    if e.kind == 0u {
+        let end = walk(e.walk, org, -up, e.t, band_end - band_top, 0, 96u, false, q);
+        if !end.hit { return; }
+        // Solid where the band starts reaches over it: no ground.
+        if end.slot != NONE && end.t > 0.0 { hit = ground_answer(end, org, up, band_top); }
     }
     ground_hits[id.x] = hit;
 }
