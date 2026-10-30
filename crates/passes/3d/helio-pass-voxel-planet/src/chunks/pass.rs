@@ -227,7 +227,7 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} chunk_slots={} leaf_pages={} leaf_page_capacity={} grow_ms={:.2} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
+            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} chunk_slots={} leaf_pages={} leaf_page_capacity={} grow_ms={:.2} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} reports={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
             self.settled(),
             self.kept_loaded,
             s.kept_chunks,
@@ -248,6 +248,7 @@ impl ChunkPass {
             s.requests,
             s.generated_footprints,
             s.generated_chunks,
+            s.reports,
             s.seen,
             s.reached,
             s.budget,
@@ -459,8 +460,8 @@ impl ChunkPass {
     fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The last frame was submitted: its results can be mapped.
         if let Some(world) = &mut self.world {
-            world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);
+            helio_core::cpu_scope!("VoxelChunks: submitted");
             world.submitted();
             self.timings.extend(world.take_timings());
             let excess = self.timings.len().saturating_sub(KEEP_TIMINGS);
@@ -482,7 +483,6 @@ impl ChunkPass {
         };
         let world = self.world.get_or_insert_with(|| {
             let mut world = ChunkWorld::new(ctx.device, ctx.queue);
-            world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);
             world.set_debug_mode(self.debug_mode);
             world
@@ -690,14 +690,17 @@ impl ChunkPass {
             self.budget_ms = Some(budget);
             config.generate_ms = Some(budget);
         }
-        self.stats = world.update(
-            encoder,
-            residency_eye,
-            velocity,
-            Some(view),
-            ctx.frame_num,
-            &config,
-        );
+        self.stats = {
+            helio_core::cpu_scope!("VoxelChunks: update");
+            world.update(
+                encoder,
+                residency_eye,
+                velocity,
+                Some(view),
+                ctx.frame_num,
+                &config,
+            )
+        };
         if let Some((map, _)) = &self.scene {
             world.set_material_map(map);
         }
@@ -711,7 +714,11 @@ impl ChunkPass {
         // The sun's occlusion by the terrain, for what else the sun lights
         // (fine cells and meshes in this draw, the GI probes' hits,
         // volumetric fog): the pages its readers asked for and lack.
-        world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
+        {
+            helio_core::cpu_scope!("VoxelChunks: sun occlusion");
+            world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
+        }
+        helio_core::cpu_scope!("VoxelChunks: draw");
         world.draw_for_eye(
             encoder,
             ctx.frame_num,

@@ -733,7 +733,7 @@ impl RenderPass for GBufferPass {
             let previous = self.last_coordinate_words.as_deref().unwrap_or(&words);
             ctx.queue
                 .write_buffer(&self.coordinate_spaces, 0, bytemuck::cast_slice(&words));
-            ctx.queue.write_buffer(
+            ctx.write_buffer(
                 &self.coordinate_spaces_prev,
                 0,
                 bytemuck::cast_slice(previous),
@@ -744,7 +744,7 @@ impl RenderPass for GBufferPass {
             // The table held still since the last upload: a space that stopped
             // moving has no motion, so the history catches up.
             if let Some(words) = self.last_coordinate_words.as_ref() {
-                ctx.queue.write_buffer(
+                ctx.write_buffer(
                     &self.coordinate_spaces_prev,
                     0,
                     bytemuck::cast_slice(words),

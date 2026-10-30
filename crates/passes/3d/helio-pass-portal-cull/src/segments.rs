@@ -208,7 +208,7 @@ impl PortalCompaction {
             return;
         }
         self.size_to(ctx.device, culled, batch.group_capacity, slots);
-        ctx.queue.write_buffer(
+        ctx.write_buffer(
             &self.params,
             0,
             bytemuck::bytes_of(&Params {

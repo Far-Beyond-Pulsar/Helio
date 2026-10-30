@@ -1494,7 +1494,7 @@ impl PostProcessPass {
             ctx.delta_time.max(0.0),
             if self.exposure_history { 1.0 } else { 0.0 },
         ];
-        ctx.queue.write_buffer(
+        ctx.write_buffer(
             &self.avg_luminance_buf,
             8,
             bytemuck::cast_slice(&adaptation),
@@ -1521,7 +1521,7 @@ impl PostProcessPass {
 
         // Upload custom params
         if !self.custom_params.is_empty() {
-            ctx.queue.write_buffer(
+            ctx.write_buffer(
                 &self.custom_params_buf,
                 0,
                 bytemuck::cast_slice(&self.custom_params),

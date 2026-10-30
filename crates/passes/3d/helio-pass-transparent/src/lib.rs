@@ -493,7 +493,7 @@ impl RenderPass for TransparentPass {
         let scene_lights = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
         let use_direct_index = scene_lights.is_some();
         let light_count = scene_lights.map_or(0, |lights| lights.row_capacity());
-        ctx.queue.write_buffer(
+        ctx.write_buffer(
             &self.globals_buf,
             0,
             bytemuck::bytes_of(&TransparentGlobals {

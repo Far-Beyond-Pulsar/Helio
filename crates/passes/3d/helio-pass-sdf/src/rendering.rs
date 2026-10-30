@@ -707,14 +707,14 @@ impl RenderPass for SdfPass {
                 });
                 self.bindings_dirty = true;
             }
-            ctx.queue.write_buffer(&self.bvh_nodes_buffer, 0, bvh_bytes);
+            ctx.write_buffer(&self.bvh_nodes_buffer, 0, bvh_bytes);
 
             let terrain_gpu = self
                 .terrain_config
                 .as_ref()
                 .map(|c| c.build_gpu_params())
                 .unwrap_or_else(GpuTerrainParams::disabled);
-            ctx.queue.write_buffer(
+            ctx.write_buffer(
                 &self.terrain_params_buffer,
                 0,
                 bytemuck::bytes_of(&terrain_gpu),
@@ -727,7 +727,7 @@ impl RenderPass for SdfPass {
 
             for level in 0..self.level_count {
                 let params = self.build_level_params(level, edit_count);
-                ctx.queue.write_buffer(
+                ctx.write_buffer(
                     &self.level_params_buffers[level as usize],
                     0,
                     bytemuck::bytes_of(&params),
@@ -736,7 +736,7 @@ impl RenderPass for SdfPass {
 
             self.edit_generation = self.edit_generation.wrapping_add(1);
             let edit_gen_offset: u64 = 128;
-            ctx.queue.write_buffer(
+            ctx.write_buffer(
                 &self.scroll_state_buffer,
                 edit_gen_offset,
                 bytemuck::bytes_of(&self.edit_generation),
