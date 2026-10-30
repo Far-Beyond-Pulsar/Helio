@@ -1,4 +1,5 @@
 mod atmosphere_component;
+mod camera_component;
 mod camera_lens_component;
 mod camera_post_process_component;
 mod decal_component;
@@ -31,6 +32,7 @@ mod water_volume_component;
 mod wind_component;
 
 pub use atmosphere_component::*;
+pub use camera_component::*;
 pub use camera_lens_component::*;
 pub use camera_post_process_component::*;
 pub use decal_component::*;
