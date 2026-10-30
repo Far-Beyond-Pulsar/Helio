@@ -668,19 +668,24 @@ fn the_blueprint_nodes_are_registered_validate_their_input_and_command_the_anima
 }
 
 /// Serialises the tests that point the process at a temporary project.
-static PROJECT: Mutex<()> = Mutex::new(());
+pub(super) static PROJECT: Mutex<()> = Mutex::new(());
 
 /// A project on disk: skeleton, Walk sequence, a graph playing it through a Slot and a
 /// Montage on that Slot, all registered in the file index by stable id.
-struct Project {
-    _dir: tempfile::TempDir,
-    root: std::path::PathBuf,
-    sequence_path: std::path::PathBuf,
-    graph_id: String,
-    graph_path: std::path::PathBuf,
+pub(super) struct Project {
+    pub(super) _dir: tempfile::TempDir,
+    pub(super) root: std::path::PathBuf,
+    pub(super) sequence_path: std::path::PathBuf,
+    pub(super) graph_id: String,
+    pub(super) graph_path: std::path::PathBuf,
 }
 
-fn write_project(rig: &Rig, montage: &AnimationMontageAsset) -> Project {
+pub(super) fn write_project(rig: &Rig, montage: &AnimationMontageAsset) -> Project {
+    write_project_with(rig, montage, None)
+}
+
+/// [`write_project`] with `graph` as the project's Animation Graph instead of the Slot graph.
+pub(super) fn write_project_with(rig: &Rig, montage: &AnimationMontageAsset, graph: Option<AnimationGraphAsset>) -> Project {
     use pulsar_reflection::{AnimationGraphAssetKind, AnimationMontageAssetKind, AnimationSequenceAssetKind, SkeletonAssetKind};
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
@@ -696,6 +701,7 @@ fn write_project(rig: &Rig, montage: &AnimationMontageAsset) -> Project {
     let sequence = rig.source.sequences[&rig.walk_id].clone();
     let sequence_path = write("walk.animseq", sequence.to_text());
     index.record_typed_asset_id(AnimationSequenceAssetKind::KIND, &rig.walk_id, &sequence_path).unwrap();
+    let asset = graph.unwrap_or_else(|| {
     let mut asset = AnimationGraphAsset::default();
     asset.skeleton = Some(skeletal_assets::ids::SkeletonId::parse(rig.skeleton.id.as_str()).unwrap().to_ref());
     let mut b = GraphBuilder::new("main", &[]);
@@ -704,6 +710,8 @@ fn write_project(rig: &Rig, montage: &AnimationMontageAsset) -> Project {
     b.node("slot", "anim.slot", &[("slot", json!("Body"))]);
     b.wire("p", "slot", "source").wire("slot", "out", "pose");
     asset.main = b.into_graph();
+    asset
+    });
     let graph_id = asset.id.as_str().to_string();
     let graph_path = write("locomotion.animgraph", asset.to_text().unwrap());
     index.record_typed_asset_id(AnimationGraphAssetKind::KIND, &graph_id, &graph_path).unwrap();

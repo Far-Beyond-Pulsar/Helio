@@ -85,7 +85,7 @@ fn the_character_flow_runs_end_to_end_on_the_real_component_runtime() {
     rig.source.sequences.insert(swing.id.as_str().to_string(), swing.clone());
     let mut asset = montage_asset(&rig, MontageRootMotion::Graph);
     asset.tracks[0].segments[0].sequence = AssetRef::parse(swing.id.as_str());
-    asset.tracks[0].mask = Some(BoneMaskSpec { branches: vec![MaskBranch { bone: "b1".into(), depth: None, weight: 1.0 }], default_weight: 0.0 });
+    asset.tracks[0].mask = Some(BoneMaskSpec { branches: vec![MaskBranch { bone: "b1".into(), depth: None, weight: 1.0 }], default_weight: 0.0, ..Default::default() });
     let montage = compile_montage_asset(&rig, &asset);
 
     let hub = registered_hub();

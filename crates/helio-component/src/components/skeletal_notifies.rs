@@ -8,6 +8,7 @@ use skeletal_assets::{
     notify_schema::AnimationNotifyState,
     runtime::{
         anim_instance::{TimeStep, UpdateMode},
+        graph::{StateEvent, StateEventKind},
         montage::{CompiledMontage, MontageEvent, MontageEventKind, MontageResult},
         playback::{EndReason, NotifyItem, NotifyOccurrence, NotifyOwner, NotifyTracker},
     },
@@ -133,6 +134,25 @@ pub fn montage_lifecycle_descriptor(montage_id: &str, kind: &str) -> EventDescri
     ];
     EventDescriptor::dynamic_in("montage", format!("{montage_id}.lifecycle_{kind}"), fields)
         .expect("montage is a valid namespace")
+}
+
+/// Canonical descriptor of one state machine event of one Animation Graph asset
+/// (`animgraph::<graph id>.state_<kind>`). Events of machines in linked graphs carry the id of
+/// the graph the component plays; `machine` names the machine. Also raised as the generic
+/// component events `SkeletalMeshComponent.anim_state_entered` and friends. Never global.
+pub fn anim_state_descriptor(graph_id: &str, kind: StateEventKind) -> EventDescriptor {
+    let fields = vec![
+        ("entity".to_owned(), FieldType::U64),
+        ("source".into(), FieldType::U64),
+        ("graph_id".into(), FieldType::Str),
+        ("machine".into(), FieldType::Str),
+        ("state".into(), FieldType::Str),
+        ("from_state".into(), FieldType::Str),
+        ("to_state".into(), FieldType::Str),
+        ("transition".into(), FieldType::Str),
+        ("generation".into(), FieldType::I64),
+    ];
+    EventDescriptor::dynamic_in("animgraph", format!("{graph_id}.state_{}", kind.name()), fields).expect("animgraph is a valid namespace")
 }
 
 pub fn register_animation_notifies(sequence: &AnimSeqAsset, hub: &EventHub) -> Result<(), String> {
@@ -454,6 +474,20 @@ pub fn component_animation_notify_events(
             catalog.events.push((format!("{name} {}", kind.replace('_', " ")), montage_lifecycle_descriptor(id, kind)));
         }
     }
+    // the state machine events of every graph the component plays
+    for id in &graphs_seen {
+        if !assets.contains(id) {
+            continue;
+        }
+        let Some(graph) = source.graph(id) else { continue };
+        if !graph.graphs().any(|(_, kind, _)| kind == skeletal_assets::anim_graph::catalogue::GraphKind::StateMachine) {
+            continue;
+        }
+        let name = if graph.name.is_empty() { id.chars().take(8).collect::<String>() } else { graph.name.clone() };
+        for kind in StateEventKind::ALL {
+            catalog.events.push((format!("{name} state {}", kind.name().replace('_', " ")), anim_state_descriptor(id, kind)));
+        }
+    }
     catalog.events.sort_by_key(|(_, descriptor)| descriptor.id);
     catalog
 }
@@ -465,6 +499,8 @@ enum Bridge {
     Notify,
     /// `SkeletalMeshComponent.montage_<kind>`.
     Montage { kind: &'static str, event: MontageLifecycleEvent },
+    /// `SkeletalMeshComponent.anim_state_entered` and the other three state machine events.
+    State { kind: StateEventKind, event: AnimStateEvent },
 }
 
 /// One occurrence waiting for delivery through the component's event channel.
@@ -587,6 +623,37 @@ impl PendingNotify {
             target: NotifyTarget::Self_,
             generic_accepted: false,
         }
+    }
+}
+
+impl PendingNotify {
+    /// A state machine event of the component's graph.
+    fn state(event: &StateEvent, graph_id: &str, generation: i64) -> Self {
+        let data = AnimStateEvent {
+            graph_id: graph_id.to_owned(),
+            machine: event.machine.clone(),
+            state: event.state.clone(),
+            from_state: event.from_state.clone(),
+            to_state: event.to_state.clone(),
+            transition: event.transition.clone(),
+            generation,
+        };
+        let descriptor = anim_state_descriptor(graph_id, event.kind);
+        let authored = DynEvent::new(
+            descriptor.id,
+            vec![
+                DynValue::U64(0),
+                DynValue::U64(0),
+                DynValue::Str(data.graph_id.clone()),
+                DynValue::Str(data.machine.clone()),
+                DynValue::Str(data.state.clone()),
+                DynValue::Str(data.from_state.clone()),
+                DynValue::Str(data.to_state.clone()),
+                DynValue::Str(data.transition.clone()),
+                DynValue::I64(generation),
+            ],
+        );
+        Self { event: AnimationNotifyEvent::default(), bridge: Bridge::State { kind: event.kind, event: data }, authored, descriptor, target: NotifyTarget::Self_, generic_accepted: false }
     }
 }
 
@@ -771,6 +838,28 @@ pub struct MontageLifecycleEvent {
     pub generation: i64,
 }
 
+/// A state machine event of the Animation Graph this component plays.
+#[engine_class(no_register)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AnimStateEvent {
+    #[property]
+    pub graph_id: String,
+    #[property]
+    pub machine: String,
+    /// The state entered or exited; for transitions, the state transitioned from.
+    #[property]
+    pub state: String,
+    #[property]
+    pub from_state: String,
+    #[property]
+    pub to_state: String,
+    /// Id of the transition, blank when the machine starts.
+    #[property]
+    pub transition: String,
+    #[property]
+    pub generation: i64,
+}
+
 #[component_events(class = "SkeletalMeshComponent")]
 pub trait SkeletalAnimationEvents {
     #[bp_event]
@@ -787,6 +876,14 @@ pub trait SkeletalAnimationEvents {
     fn montage_ended() -> MontageLifecycleEvent {}
     #[bp_event]
     fn montage_interrupted() -> MontageLifecycleEvent {}
+    #[bp_event]
+    fn anim_state_entered() -> AnimStateEvent {}
+    #[bp_event]
+    fn anim_state_exited() -> AnimStateEvent {}
+    #[bp_event]
+    fn anim_transition_started() -> AnimStateEvent {}
+    #[bp_event]
+    fn anim_transition_completed() -> AnimStateEvent {}
 }
 
 /// Notify bookkeeping of one component. It owns no clock: the component's
@@ -820,8 +917,9 @@ impl NotifyPlayback {
     /// that precede the playback (started, blended in, section changed), the
     /// notifies and notify-state phases in playback order per playback, then the
     /// ones that follow it (blending out, ended).
-    fn collect_report(&mut self, report: &skeletal_assets::runtime::anim_instance::UpdateReport, montage_events: &[MontageEvent]) -> Result<(), String> {
+    fn collect_report(&mut self, report: &skeletal_assets::runtime::anim_instance::UpdateReport, montage_events: &[MontageEvent], graph_id: &str) -> Result<(), String> {
         let generation = self.generation;
+        self.pending.extend(report.state_events.iter().map(|e| PendingNotify::state(e, graph_id, generation)));
         let mut occurrences = Vec::new();
         let result = self.tracker.observe_report(report, &mut occurrences);
         self.push_lifecycle(montage_events.iter().filter(|e| is_early(&e.kind)), generation);
@@ -974,7 +1072,7 @@ impl SkeletalMeshComponent {
         }
         let events = std::mem::take(&mut instance.report.montage_events);
         self.anim.montage_events.extend(events.iter().cloned());
-        let collected = self.notify_playback.collect_report(&instance.report, &events);
+        let collected = self.notify_playback.collect_report(&instance.report, &events, self.loaded_graph.as_ref().map_or("", |g| g.id.as_str()));
         self.pending_root_motion = Some(policy.delta(&instance.report.root_motion, &instance.report.montage_root_motion));
         if let (Some(position), Some(sequence)) = (position, self.loaded_animation.as_ref()) {
             let duration = sequence.clip.duration as f64;
@@ -1062,6 +1160,15 @@ impl SkeletalMeshComponent {
             if !pending.generic_accepted {
                 match &pending.bridge {
                     Bridge::Notify => events.animation_notify(pending.event.clone())?,
+                    Bridge::State { kind, event } => {
+                        let event = event.clone();
+                        match kind {
+                            StateEventKind::Entered => events.anim_state_entered(event)?,
+                            StateEventKind::Exited => events.anim_state_exited(event)?,
+                            StateEventKind::TransitionStarted => events.anim_transition_started(event)?,
+                            StateEventKind::TransitionCompleted => events.anim_transition_completed(event)?,
+                        }
+                    }
                     Bridge::Montage { kind, event } => {
                         let event = event.clone();
                         match *kind {

@@ -55,7 +55,7 @@ use crate::mesh_cache::MeshSection;
 mod notifies;
 pub use notifies::{
     AnimationNotifyCatalog, AnimationNotifyDiagnostic, AnimationNotifyEvent, MONTAGE_LIFECYCLE_KINDS,
-    MontageLifecycleEvent, SkeletalAnimationEvents, SkeletalAnimationEventsEventWriterExt,
+    AnimStateEvent, MontageLifecycleEvent, SkeletalAnimationEvents, anim_state_descriptor, SkeletalAnimationEventsEventWriterExt,
     animation_notify_descriptor, animation_notify_state_descriptor, montage_lifecycle_descriptor,
     montage_notify_descriptor, montage_notify_state_descriptor, register_montage_events,
     animation_source_for_file, flush_animation_notifies, project_animation_notify_events,
@@ -1724,6 +1724,7 @@ mod animation_runtime_tests {
         track.mask = Some(skeletal_assets::bone_mask::BoneMaskSpec {
             branches: vec![skeletal_assets::bone_mask::MaskBranch { bone: "b2".into(), depth: None, weight: 1.0 }],
             default_weight: 0.0,
+            ..Default::default()
         });
         montage.tracks.push(track);
         montage.blend_in.duration = 0.0;
@@ -1763,3 +1764,7 @@ mod phase3_tests;
 #[cfg(test)]
 #[path = "skeletal_phase5_tests.rs"]
 mod phase5_tests;
+
+#[cfg(test)]
+#[path = "skeletal_state_event_tests.rs"]
+mod state_event_tests;
