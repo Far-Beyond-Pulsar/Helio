@@ -222,9 +222,11 @@ pub struct SunPageStats {
     pub epochs: usize,
     pub out_of_pages: bool,
     /// Render-thread CPU time of the frame's sun occlusion (ms), and by
-    /// part: the update's occluder boxes, the requests' readback, waiting
-    /// for the plan, the views' recording, uploads; and the planner's own
-    /// time on its thread (requests, invalidation, planning: off the frame).
+    /// part: the update's occluder boxes, the requests' readback, handing
+    /// the inputs over and taking the plan (never waiting for it), the
+    /// views' recording, uploads; and the planner's own time on its thread
+    /// for the last plan taken (requests, invalidation, planning: off the
+    /// frame).
     pub cpu_ms: f64,
     pub cpu_parts: [f64; 5],
     pub planner_ms: f64,
@@ -865,20 +867,25 @@ pub(super) struct Planned {
 
 /// The sun pages' planner on its own thread, a frame ahead: after frame N
 /// records, the frame's requests and changed boxes go to it
-/// ([`Self::submit`]) and frame N+1 takes the plan they made
-/// ([`Self::take`]), so the frame waits for nothing it cannot overlap (the
-/// plan takes ~1 ms, the rest of a frame ~10). A plan is the same function
-/// of its inputs as on the render thread; it sees each frame's requests a
-/// frame later, which the requests' own latency (read back a frame or two
-/// late) already covers. The render thread keeps what only it knows: each
-/// physical page's near plane, set where it records the trace
-/// ([`Self::traced`]).
+/// ([`Self::queue`]) and frame N+1 takes the plan they made when it is done
+/// ([`Self::try_take`]; the plan takes ~1 ms, the rest of a frame ~10). The
+/// frame never waits for it: a plan not done yet is taken by a later frame,
+/// and the inputs of the frames in between go to the next plan together
+/// (a woken thread on a busy machine can wait a scheduling quantum for a
+/// core). A plan is the same function of its inputs as on the render
+/// thread, its table rows uploaded with the traces that fill them whichever
+/// frame takes it; it sees each frame's requests a frame (or more) later,
+/// which the requests' own latency (read back a frame or two late) already
+/// covers. The render thread keeps what only it knows: each physical page's
+/// near plane, set where it records the trace ([`Self::traced`]).
 pub(super) struct SunPlanner {
     pub finest: f64,
     jobs: std::sync::mpsc::Sender<PlanJob>,
     plans: std::sync::Mutex<std::sync::mpsc::Receiver<Planned>>,
-    /// Whether a job is on the thread (its plan not taken yet).
+    /// Whether a job is on the thread (its plan not taken yet), and the
+    /// inputs gathered for the next one while it is.
     in_flight: bool,
+    next: Option<PlanJob>,
     /// The epochs of the plan taken last (current first).
     pub epochs: Vec<EpochGrid>,
     /// Each physical page's epoch and near plane, as last traced.
@@ -930,6 +937,7 @@ impl SunPlanner {
             jobs,
             plans: std::sync::Mutex::new(plans),
             in_flight: false,
+            next: None,
             epochs: Vec::new(),
             nears: vec![(u64::MAX, 0.0); SUN_OCCLUSION_PHYSICAL as usize],
             stats: SunPageStats::default(),
@@ -937,33 +945,59 @@ impl SunPlanner {
         }
     }
 
-    /// Whether a plan is on its way.
-    pub fn in_flight(&self) -> bool {
-        self.in_flight
+    /// A frame's inputs for the next plan: on the planner's thread at once
+    /// when it is free, else with the frames' after it when it is (their
+    /// requests and boxes together, the latest frame's eye, sun and
+    /// settling).
+    pub fn queue(&mut self, job: PlanJob) {
+        let next = match self.next.take() {
+            Some(mut next) => {
+                next.asked.extend(job.asked);
+                next.changes.extend(job.changes);
+                next.refined.extend(job.refined);
+                PlanJob {
+                    asked: next.asked,
+                    changes: next.changes,
+                    refined: next.refined,
+                    ..job
+                }
+            }
+            None => job,
+        };
+        if self.in_flight {
+            self.next = Some(next);
+        } else {
+            self.jobs.send(next).expect("the sun pages planner runs");
+            self.in_flight = true;
+        }
     }
 
-    /// Plans `job` on the planner's thread.
-    pub fn submit(&mut self, job: PlanJob) {
-        assert!(!self.in_flight, "one sun pages plan at a time");
-        self.jobs.send(job).expect("the sun pages planner runs");
-        self.in_flight = true;
-    }
-
-    /// The plan of the last job submitted (waits for it): its epochs and
-    /// stats kept.
-    pub fn take(&mut self) -> Planned {
-        assert!(self.in_flight, "a sun pages plan was submitted");
-        let mut planned = self
+    /// The plan on its way, if it is done (never waits): its epochs and
+    /// stats kept; the inputs gathered since go to the planner.
+    pub fn try_take(&mut self) -> Option<Planned> {
+        if !self.in_flight {
+            return None;
+        }
+        let mut planned = match self
             .plans
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .recv()
-            .expect("the sun pages planner runs");
+            .try_recv()
+        {
+            Ok(planned) => planned,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("the sun pages planner stopped")
+            }
+        };
         self.in_flight = false;
         self.epochs.clone_from(&planned.epochs);
         self.stats = planned.stats;
         self.spare.append(&mut planned.spent);
-        planned
+        if let Some(next) = self.next.take() {
+            self.queue(next);
+        }
+        Some(planned)
     }
 
     /// The current epoch of the plan taken last.
@@ -1145,8 +1179,13 @@ mod tests {
             local.begin(j.frame, j.eye, j.sun);
             let windows = local.plan(j.frame, j.settled);
             let rows = local.take_rows();
-            thread.submit(j);
-            let planned = thread.take();
+            thread.queue(j);
+            let planned = loop {
+                if let Some(planned) = thread.try_take() {
+                    break planned;
+                }
+                std::thread::yield_now();
+            };
             assert_eq!(planned.windows.len(), windows.len(), "frame {frame}");
             for (a, b) in planned.windows.iter().zip(&windows) {
                 assert_eq!((a.level, a.origin, &a.pages), (b.level, b.origin, &b.pages));

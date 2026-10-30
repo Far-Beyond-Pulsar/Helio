@@ -6553,40 +6553,32 @@ impl ChunkWorld {
         let mut laps = [self.occluder_ms, clock.elapsed().as_secs_f64() * 1e3, 0.0, 0.0, 0.0];
         o.drawn_frame = frame;
         o.settled_since = settled.then(|| o.settled_since.unwrap_or(frame));
-        // This frame's plan, made on the planner's thread from the last
-        // frame's requests and changes while the last frame recorded (the
-        // first frame plans now). This frame's go to the next plan.
-        if !o.pages.in_flight() {
-            o.pages.submit(job);
-            job = sun_pages::PlanJob {
-                frame,
-                eye,
-                sun: toward,
-                settled,
-                asked: Vec::new(),
-                changes: Vec::new(),
-                refined: Vec::new(),
-            };
-        }
-        let planned = o.pages.take();
+        // This frame's inputs go to the planner's thread for the next frame
+        // (at once when it is free, else with the next frames'); the plan it
+        // made from earlier frames' is traced if it is done (made while the
+        // last frame recorded: the frame never waits for it).
         job.frame = frame + 1;
-        o.pages.submit(job);
+        o.pages.queue(job);
+        let (windows, rows, parts) = o
+            .pages
+            .try_take()
+            .map_or_else(Default::default, |p| (p.windows, p.rows, Some(p.parts)));
         laps[2] = clock.elapsed().as_secs_f64() * 1e3;
-        let current = o.pages.current().unwrap();
-        o.asking = Some(sun_pages::Asking {
+        // (No epoch before the first plan: nothing is read against one.)
+        o.asking = o.pages.current().map(|current| sun_pages::Asking {
             epoch: current.id,
             frame,
             eye_pages: o.pages.eye_pages(eye),
         });
         // Room in the ring for every view's every volume.
-        let passes = (planned.windows.len() * self.volumes.iter().flatten().count()) as u64;
+        let passes = (windows.len() * self.volumes.iter().flatten().count()) as u64;
         if passes > o.ring_passes {
             o.ring_passes = passes.next_power_of_two();
             o.params_ring = params_ring(&self.device, o.ring_passes);
         }
         let drawn_in = self.volumes_drawn();
         let mut at = 0;
-        for window in &planned.windows {
+        for window in &windows {
             let near = self.trace_occlusion_view(encoder, frame, eye, window, &drawn_in, &mut at);
             self.sun_occlusion.as_mut().unwrap().pages.traced(window, near);
         }
@@ -6594,7 +6586,7 @@ impl ChunkWorld {
         // The tables' changed rows (runs of them a write), the near
         // planes, the frame; this frame's requests cleared.
         let o = self.sun_occlusion.as_mut().unwrap();
-        for (from, words) in &planned.rows {
+        for (from, words) in &rows {
             self.uploads
                 .write(encoder, &o.pages_buffer, *from as u64 * 4, bytemuck::cast_slice(words));
         }
@@ -6609,7 +6601,8 @@ impl ChunkWorld {
         encoder.clear_buffer(&o.requests, 0, None);
         self.uploads.flush();
         // The render thread's CPU time, by part (the update's occluder
-        // boxes; readback; waiting for the plan; recording; uploads), and
+        // boxes; readback; handing over and taking plans; recording;
+        // uploads), and
         // the planner's on its thread; with HELIO_SUN_PAGES_LOG, the frames
         // that traced pages.
         laps[4] = clock.elapsed().as_secs_f64() * 1e3;
@@ -6622,9 +6615,11 @@ impl ChunkWorld {
             laps[3] - laps[2],
             laps[4] - laps[3],
         ];
-        stats.planner_ms = planned.parts.iter().sum();
-        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() && stats.traced > 0 {
-            eprintln!("SUNPAGES frame {frame}: {stats:?}, planner parts {:?}", planned.parts);
+        if let Some(parts) = parts {
+            stats.planner_ms = parts.iter().sum();
+        }
+        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() && parts.is_some() && stats.traced > 0 {
+            eprintln!("SUNPAGES frame {frame}: {stats:?}, planner parts {parts:?}");
         }
         stamp(self, encoder, 17);
     }

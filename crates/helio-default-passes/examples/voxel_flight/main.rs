@@ -2211,7 +2211,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         let n = pages_cpu_ms.len().max(1) as f64;
         let mean = |i: usize| stage_gpu.iter().map(|s| s[i]).sum::<f64>() / stage_gpu.len().max(1) as f64;
         eprintln!(
-            "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages render-thread cpu mean by part (occluders, readback, wait, record, upload) {}, planner thread {:.3}",
+            "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages render-thread cpu mean by part (occluders, readback, hand-over, record, upload) {}, planner thread {:.3}",
             mean(0),
             mean(1),
             mean(2),
