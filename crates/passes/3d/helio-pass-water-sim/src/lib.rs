@@ -1,3 +1,4 @@
+pub(crate) mod fft;
 pub mod pipeline;
 pub mod simulation;
 
@@ -222,7 +223,7 @@ fn make_caustics_grid(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32
 /// Static top-face grid in normalized [-1,1] space.
 /// The vertex shader maps these to world XZ via water_sim_uv_to_world_xz.
 fn make_top_grid(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
-    const DETAIL: u32 = 128;
+    const DETAIL: u32 = 256;
     let n = DETAIL + 1;
     let mut verts: Vec<[f32; 4]> = Vec::with_capacity((n * n) as usize);
     let mut indices: Vec<u32> = Vec::with_capacity((DETAIL * DETAIL * 6) as usize);
@@ -373,6 +374,12 @@ pub struct WaterSimPass {
     pub(crate) update_pipeline: wgpu::RenderPipeline,
     pub(crate) normal_pipeline: wgpu::RenderPipeline,
     pub(crate) hitbox_pipeline: wgpu::RenderPipeline,
+
+    /// The FFT ocean that carries the open sea (see [`fft`]).
+    pub(crate) fft: fft::FftOcean,
+    /// This frame advances the FFT ocean (its clock moved, or it has not run yet).
+    pub(crate) fft_run: bool,
+    pub(crate) fft_started: bool,
 
     pub(crate) sim_tex_a: wgpu::Texture,
     pub(crate) sim_tex_b: wgpu::Texture,
@@ -591,6 +598,8 @@ impl WaterSimPass {
             .iter_mut()
             .for_each(|front| *front = true);
         self.sim_live = false;
+        self.fft.set_allocated(device, allocated);
+        self.fft_started = false;
         self.content_allocated = allocated;
         self.resize_internal(device, self.internal_width, self.internal_height);
     }
@@ -767,6 +776,17 @@ impl RenderPass for WaterSimPass {
             (self.step_clock - steps as f32 * SIM_STEP_SECONDS).clamp(0.0, SIM_STEP_SECONDS);
         self.sim_time += self.steps_this_frame as f32 * SIM_STEP_SECONDS;
         let step_dt = SIM_STEP_SECONDS;
+
+        // The FFT sea advances with the same clock: not at all while it is frozen.
+        self.fft_run = self.steps_this_frame > 0 || !self.fft_started;
+        if self.fft_run {
+            self.fft.write_uniforms(
+                ctx,
+                self.sim_time,
+                self.steps_this_frame as f32 * SIM_STEP_SECONDS,
+            );
+        }
+
         for ci in 0..CASCADE_COUNT {
             let delta = simulation::DeltaUniform {
                 delta: [1.0 / SIM_SIZE as f32, 1.0 / SIM_SIZE as f32],
@@ -1163,6 +1183,12 @@ impl RenderPass for WaterSimPass {
             }
         }
 
+        // ---- FFT ocean ----------------------------------------------------
+        if let (Some(vols_buf), true) = (water_volumes_buf, self.fft_run) {
+            self.fft.execute(ctx, vols_buf);
+            self.fft_started = true;
+        }
+
         // ---- Consolidate: copy any layers still on tex_b to tex_a --------
         // After simulation, ensure all layers are on tex_a for rendering.
         let mut encoder = ctx.graphics_cmds();
@@ -1343,6 +1369,12 @@ impl RenderPass for WaterSimPass {
                     }
                 };
 
+                let (fft_disp_view, fft_slope_view) = self.fft.output_views().ok_or_else(|| {
+                    helio_core::Error::InvalidPassConfig(
+                        "WaterSim surface ran before the FFT ocean was allocated".to_string(),
+                    )
+                })?;
+
                 // Rebuilt whenever anything it binds changes.
                 let render_bg = self
                     .render_bg
@@ -1412,6 +1444,18 @@ impl RenderPass for WaterSimPass {
                                 wgpu::BindGroupEntry {
                                     binding: 11,
                                     resource: wgpu::BindingResource::TextureView(&hiz_nearest_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 12,
+                                    resource: wgpu::BindingResource::TextureView(fft_disp_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 13,
+                                    resource: wgpu::BindingResource::TextureView(fft_slope_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 14,
+                                    resource: wgpu::BindingResource::Sampler(&self.fft.sampler),
                                 },
                             ],
                         },

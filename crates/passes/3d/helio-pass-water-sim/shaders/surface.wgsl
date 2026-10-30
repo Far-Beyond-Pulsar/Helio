@@ -57,8 +57,20 @@ struct WaterVolume {
 @group(0) @binding(9) var depth_sampler:  sampler;
 @group(0) @binding(10) var gbuffer_normal: texture_2d<f32>;
 @group(0) @binding(11) var hiz_nearest:    texture_2d<f32>;
+// FFT ocean (fft.rs): layer = cascade, mipped. disp = (Dx, Dy, Dz, turbulence),
+// slope = (sx, sz, sx^2, sz^2).
+@group(0) @binding(12) var fft_disp:       texture_2d_array<f32>;
+@group(0) @binding(13) var fft_slope:      texture_2d_array<f32>;
+@group(0) @binding(14) var fft_samp:       sampler;
 
 const IOR_AIR: f32 = 1.0;
+
+/// Sun radiance used for the medium's lighting and the specular lobe; matches
+/// the disc `sky_color` paints so the glint sits under the visible sun.
+const SUN_RADIANCE: vec3f = vec3f(3.0, 2.6, 2.1);
+
+/// Base surface roughness (Ultra-Water `uOptics.x`) before slope variance.
+const BASE_ROUGHNESS: f32 = 0.02;
 
 const CASCADE_PATCH_SIZES: array<f32, 3> = array(30.0, 90.0, 270.0);
 const CASCADE_AMPLITUDE_WEIGHTS: array<f32, 3> = array(0.6, 0.3, 0.1);
@@ -74,6 +86,8 @@ struct VertexOutput {
     @location(1)       sim_uv:    vec2f,
     @location(2)       face_type: f32,
     @location(3) @interpolate(flat) vol_index: u32,
+    /// The undisplaced position the FFT textures are read at.
+    @location(4)       base_xz:   vec2f,
 }
 
 // ── Volume geometry ──────────────────────────────────────────────────────────
@@ -118,6 +132,80 @@ fn water_tiling_xz(world_xz: vec2f, vol_index: u32) -> vec2f {
     return world_xz + volumes[vol_index].world_phase.xy;
 }
 
+// ── FFT ocean ────────────────────────────────────────────────────────────────
+
+/// Tile length of each FFT cascade in metres (`fft.rs`'s FFT_LENGTHS); the last
+/// is the gravity-capillary layer, which only carries slopes.
+const FFT_LENGTHS: array<f32, 4> = array(270.0, 45.0, 9.0, 2.0);
+const FFT_TEXELS: f32 = 256.0;
+const FFT_MAX_LOD: f32 = 8.0;
+/// Vertices per side of the top grid (`make_top_grid`).
+const GRID_DETAIL: f32 = 256.0;
+
+/// Mip level at which one texel of cascade `c` is about `footprint` metres.
+/// The +1 bias hides box-filtered mips leaking a little past Nyquist.
+fn fft_lod(footprint: f32, c: u32) -> f32 {
+    return clamp(log2(max(footprint, 1e-4) * FFT_TEXELS / FFT_LENGTHS[c]) + 1.0, 0.0, FFT_MAX_LOD);
+}
+
+/// World size of one pixel at `world_pos`, stretched for grazing views (a pixel
+/// covers a long strip of water there; derivatives are not available under the
+/// shader's non-uniform control flow).
+fn pixel_footprint(world_pos: vec3f, view_dir: vec3f) -> f32 {
+    let dist  = distance(world_pos, cameras[0].position_near.xyz);
+    let pixel = 2.0 * dist / (cameras[0].proj[1][1] * max(viewport.y, 1.0));
+    return pixel / sqrt(clamp(abs(view_dir.y), 0.1, 1.0));
+}
+
+/// FFT displacement (x, y, z) at an undisplaced world XZ, band-limited to
+/// `footprint` metres by the mip chain. Cascades 0-2; the fourth is slopes only.
+fn fft_displacement(world_xz: vec2f, footprint: f32, vol_index: u32) -> vec3f {
+    let tiling_xz = water_tiling_xz(world_xz, vol_index);
+    var d = vec3f(0.0);
+    for (var c = 0u; c < 3u; c++) {
+        let uv = fract(tiling_xz / FFT_LENGTHS[c]);
+        d += textureSampleLevel(fft_disp, fft_samp, uv, c, fft_lod(footprint, c)).xyz;
+    }
+    return d;
+}
+
+struct FftSurface {
+    /// dh/dx, dh/dz
+    slope:      vec2f,
+    /// Slope variance the mips average away: sub-pixel roughness.
+    variance:   f32,
+    /// Roughness the textures cannot carry at all (Cox-Munk mean square slope
+    /// for this wind, minus what the cascades hold).
+    unresolved: f32,
+    /// Jacobian of the horizontal displacement; below 1 the surface is pinching.
+    jacobian:   f32,
+}
+
+fn fft_surface(base_xz: vec2f, footprint: f32, vol: WaterVolume, vol_index: u32) -> FftSurface {
+    let tiling_xz = water_tiling_xz(base_xz, vol_index);
+    var o: FftSurface;
+    o.slope = vec2f(0.0);
+    o.variance = 0.0;
+    o.jacobian = -2.0;
+    var resolved = 0.0;
+    for (var c = 0u; c < 4u; c++) {
+        let uv = fract(tiling_xz / FFT_LENGTHS[c]);
+        let lod = fft_lod(footprint, c);
+        let s = textureSampleLevel(fft_slope, fft_samp, uv, c, lod);
+        o.slope += s.xy;
+        o.variance += max(s.z - s.x * s.x, 0.0) + max(s.w - s.y * s.y, 0.0);
+        let m = textureSampleLevel(fft_slope, fft_samp, vec2f(0.5), c, FFT_MAX_LOD);
+        resolved += m.z + m.w;
+        if c < 3u {
+            o.jacobian += textureSampleLevel(fft_disp, fft_samp, uv, c, lod).w;
+        }
+    }
+    // same wind mapping as fft_init.wgsl
+    let wind_speed = 4.0 + 2.0 * max(vol.wind_params.z, 0.0);
+    o.unresolved = max(0.003 + 0.00512 * wind_speed - resolved, 0.0);
+    return o;
+}
+
 /// Weighted sum of all cascade heights at a world XZ position.
 /// Each cascade tiles: uv = fract(world_xz / patch_size).
 fn water_cascade_height_sum(world_xz: vec2f, vol_index: u32) -> f32 {
@@ -133,9 +221,10 @@ fn water_cascade_height_sum(world_xz: vec2f, vol_index: u32) -> f32 {
 /// World-space surface normal from all cascades, computed by summing
 /// per-cascade slopes (reconstructed from the stored normal) weighted by
 /// each cascade's amplitude fraction, then normalizing.
-fn water_total_normal(world_xz: vec2f, vol: WaterVolume, vol_index: u32) -> vec3f {
+fn water_total_normal(world_xz: vec2f, fft_slope_sum: vec2f, vol: WaterVolume, vol_index: u32) -> vec3f {
     let tiling_xz = water_tiling_xz(world_xz, vol_index);
-    var total_slope = vec2f(0.0);
+    // the FFT sea's slope; the height field adds what disturbs it
+    var total_slope = -fft_slope_sum;
     for (var i = 0u; i < 3u; i++) {
         let uv = fract(tiling_xz / CASCADE_PATCH_SIZES[i]);
         let ba = sample_cascade_normal_ba(i, uv, vol_index);
@@ -216,7 +305,8 @@ fn water_surface_at(world_xz: vec2f, vol: WaterVolume, vol_index: u32) -> f32 {
         return vol.bounds_max.w;
     }
     let h_sum = water_cascade_height_sum(world_xz, vol_index);
-    return water_surface_height(h_sum, vol);
+    // the sea's height at a metre-scale footprint (this is a depth estimate)
+    return water_surface_height(h_sum, vol) + fft_displacement(world_xz, 1.0, vol_index).y;
 }
 
 /// Caustic light landing on a submerged point.
@@ -271,7 +361,29 @@ fn water_fresnel(normal: vec3f, view_dir: vec3f, vol: WaterVolume) -> f32 {
 /// medium read as lit rather than as a flat tint.
 fn water_inscatter(view_dir: vec3f, sun_dir: vec3f, vol: WaterVolume) -> vec3f {
     let phase = helio_hg_phase(dot(view_dir, sun_dir), 0.35) * 4.0 * HELIO_PI;
-    return vol.water_color.rgb * clamp(phase, 0.4, 2.0);
+    // The medium colour is an albedo, not an emitter: it is lit by the sky
+    // overhead plus the sun, so the water darkens with the light at dusk.
+    let ambient = sky_color(vec3f(0.0, 1.0, 0.0), sun_dir);
+    let sun     = SUN_RADIANCE * max(sun_dir.y, 0.0);
+    return vol.water_color.rgb * (ambient + sun) * clamp(phase, 0.6, 1.6);
+}
+
+/// GGX sun lobe on the water surface. `alpha` is the surface roughness
+/// (sub-pixel slope variance); floored so the sun reads as a small area light
+/// rather than an aliased point.
+fn water_sun_specular(normal: vec3f, view_to_eye: vec3f, sun_dir: vec3f, alpha: f32) -> vec3f {
+    let a   = max(alpha, 0.015);
+    let a2  = a * a;
+    let nov = max(dot(normal, view_to_eye), 1e-4);
+    let nl  = max(dot(normal, sun_dir), 0.0);
+    let h   = normalize(sun_dir + view_to_eye);
+    let noh = max(dot(normal, h), 0.0);
+    let dd  = noh * noh * (a2 - 1.0) + 1.0;
+    let d   = a2 / (HELIO_PI * dd * dd);
+    let vis = 0.5 / (nl * sqrt(nov * nov * (1.0 - a2) + a2)
+                   + nov * sqrt(nl * nl * (1.0 - a2) + a2) + 1e-5);
+    let fs  = 0.02 + 0.98 * pow(1.0 - max(dot(view_to_eye, h), 0.0), 5.0);
+    return SUN_RADIANCE * (HELIO_PI * d * vis * fs * nl);
 }
 
 // ── Foam ─────────────────────────────────────────────────────────────────────
@@ -308,7 +420,7 @@ fn water_shore_factor(path: f32, vol: WaterVolume) -> f32 {
 
 /// Foam coverage in [0,1] from two sources, driven by `foam_threshold`
 /// (`water_color.w`) and scaled by `foam_amount` (`extinction.w`).
-fn water_foam(path: f32, world_xz: vec2f, normal: vec3f, vol: WaterVolume) -> f32 {
+fn water_foam(path: f32, world_xz: vec2f, jacobian: f32, vol: WaterVolume) -> f32 {
     let amp = max(water_wave_amplitude(vol), 1e-3);
     let t   = cameras[0].jitter_frame.z * 0.016;
 
@@ -325,14 +437,21 @@ fn water_foam(path: f32, world_xz: vec2f, normal: vec3f, vol: WaterVolume) -> f3
     let shore      = 1.0 - smoothstep(0.0, band, path);
     let shore_foam = smoothstep(0.25, 0.85, shore * (0.55 + n * 0.75));
 
-    // Crest foam, from the horizontal slope magnitude. Note this stays subtle
-    // until the sim gains resolution (#148): at 0.78 m per texel the steepest
-    // representable slope is well below the default `foam_threshold`.
-    let threshold  = max(vol.water_color.w, 1e-3);
-    let steepness  = length(normal.xz) / max(normal.y, 1e-3);
-    let crest_foam = smoothstep(threshold, threshold * 1.6, steepness) * (0.5 + n * 0.5);
+    // Whitecaps: where the FFT surface pinches (Jacobian below 1) the turbulence
+    // channel drops and slowly recovers, leaving foam behind the crest. Density
+    // follows the pinch; the pattern erodes it into lace as it thins.
+    // foam_threshold 0.8 -> bias 0.05, foam_amount 0.6 -> scale 1.3 (Ultra-Water).
+    let bias    = vol.water_color.w * 0.0625;
+    let density = clamp((bias - jacobian) * 2.17 * vol.extinction.w, 0.0, 1.0);
+    var crest_foam = 0.0;
+    if density > 0.0 {
+        let pat = value_noise(tiling_xz * 0.9) * 0.5
+                + value_noise(tiling_xz * 2.3 + 5.0) * 0.3
+                + value_noise(tiling_xz * 6.1 + 11.0) * 0.2;
+        crest_foam = smoothstep(1.05 - density, 1.3 - density, pat) * sqrt(density);
+    }
 
-    return clamp(max(shore_foam, crest_foam) * vol.extinction.w, 0.0, 1.0);
+    return clamp(max(shore_foam * vol.extinction.w, crest_foam), 0.0, 1.0);
 }
 
 // ── Screen-space reflection ──────────────────────────────────────────────────
@@ -462,15 +581,32 @@ fn vs_main(@location(0) position: vec4f, @builtin(instance_index) instance_idx: 
     out.face_type = face_type;
     out.vol_index = instance_idx;
 
+    // Unused rows are zeroed: collapse them before any texture work.
+    let extent = vol.bounds_max.xz - vol.bounds_min.xz;
+    if extent.x <= 1e-3 || extent.y <= 1e-3 {
+        out.position  = vec4f(0.0, 0.0, 2.0, 1.0);
+        out.world_pos = vec3f(0.0);
+        out.sim_uv    = vec2f(0.0);
+        out.base_xz   = vec2f(0.0);
+        return out;
+    }
+    // World size of one grid cell: the sea is band-limited to it, so the mesh
+    // never aliases the waves it cannot resolve.
+    let cell = max(extent.x, extent.y) / GRID_DETAIL;
+
     if face_type < 0.5 {
         // Top face — static grid in normalized [-1,1], mapped to world XZ
         let uv  = position.xy * 0.5 + 0.5;
         let xz  = water_sim_uv_to_world_xz(uv, vol);
         let h_sum = water_cascade_height_sum(xz, instance_idx);
-        let world = vec3f(xz.x, water_surface_height(h_sum, vol), xz.y);
+        // FFT sea (choppy: crests also move sideways) over the height field's
+        // disturbances
+        let fd = fft_displacement(xz, cell, instance_idx);
+        let world = vec3f(xz.x + fd.x, water_surface_height(h_sum, vol) + fd.y, xz.y + fd.z);
         out.position  = cameras[0].view_proj * vec4f(world, 1.0);
         out.world_pos = world;
         out.sim_uv    = uv;
+        out.base_xz   = xz;
     } else {
         // Side face — vertical wall from volume floor up to the displaced
         // water surface.  Using bounds_max.y as the cap would poke above
@@ -479,12 +615,15 @@ fn vs_main(@location(0) position: vec4f, @builtin(instance_index) instance_idx: 
         let uv = position.xyz * 0.5 + 0.5;
         let xz = mix(vol.bounds_min.xz, vol.bounds_max.xz, uv.xz);
         let h_sum = water_cascade_height_sum(xz, instance_idx);
-        let surface_y = water_surface_height(h_sum, vol);
+        let fd = fft_displacement(xz, cell, instance_idx);
+        let surface_y = water_surface_height(h_sum, vol) + fd.y;
         let world_y = mix(vol.bounds_min.y, surface_y, uv.y);
-        let world = vec3f(xz.x, world_y, xz.y);
+        // the wall follows the surface's sideways motion so the two stay joined
+        let world = vec3f(xz.x + fd.x * uv.y, world_y, xz.y + fd.z * uv.y);
         out.position  = cameras[0].view_proj * vec4f(world, 1.0);
         out.world_pos = world;
         out.sim_uv    = vec2f(0.0);
+        out.base_xz   = xz;
     }
     return out;
 }
@@ -495,9 +634,10 @@ fn fs_above(in: VertexOutput) -> vec4f {
     let vol       = volumes[in.vol_index];
     let light_dir = normalize(vol.sun_direction.xyz);
 
-    let normal    = water_total_normal(in.world_pos.xz, vol, in.vol_index);
     let view_dir  = normalize(in.world_pos - cameras[0].position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
+    let surf      = fft_surface(in.base_xz, pixel_footprint(in.world_pos, view_dir), vol, in.vol_index);
+    let normal    = water_total_normal(in.world_pos.xz, surf.slope, vol, in.vol_index);
 
     // Path through the medium straight down the view ray, before refraction.
     // Used to size the refraction offset; the offset then changes which pixel
@@ -566,12 +706,29 @@ fn fs_above(in: VertexOutput) -> vec4f {
 
     // Fade the reflection into the shoreline, otherwise the contact with
     // geometry reads as a hard analytic line.
-    let fresnel = water_fresnel(normal, view_dir, vol) * water_shore_factor(path, vol);
+    // Roughness: base, plus the slope variance the mips average away, plus what
+    // no texture holds (Cox-Munk for this wind). It narrows F90 so the rough far
+    // field doesn't go white, and widens the sun lobe.
+    let alpha = sqrt(BASE_ROUGHNESS * BASE_ROUGHNESS + surf.variance + surf.unresolved);
+
+    let nov     = max(dot(normal, -view_dir), 1e-4);
+    let f0      = vol.sim_params.z;
+    let f90     = max(1.0 - 0.7 * sqrt(alpha), f0);
+    let power   = max(vol.reflection_refraction.z, 1.0);
+    let fresnel = (f0 + (f90 - f0) * pow(1.0 - nov, power)) * water_shore_factor(path, vol);
     var color   = mix(through_water, reflected, fresnel);
 
+    // Sun glint, killed by foam below.
+    let sun_spec = water_sun_specular(normal, -view_dir, light_dir, alpha)
+                 * water_shore_factor(path, vol);
+    color += sun_spec;
+
     // ── Foam ─────────────────────────────────────────────────────────────────
-    let foam = water_foam(path, in.world_pos.xz, normal, vol);
-    color = mix(color, vec3f(0.92, 0.96, 1.00), foam);
+    let foam = water_foam(path, in.base_xz, surf.jacobian, vol);
+    // lit from the sun side, never fully dark; thin foam shows the water through it
+    let foam_light = 0.6 + 0.4 * clamp(dot(normal, light_dir), 0.0, 1.0);
+    let foam_color = mix(vec3f(0.80, 0.90, 0.95), vec3f(0.96), foam) * foam_light;
+    color = mix(color, foam_color, foam);
 
     return vec4f(color, 1.0);
 }
@@ -586,9 +743,10 @@ fn fs_under(in: VertexOutput) -> vec4f {
     let light_dir = normalize(vol.sun_direction.xyz);
     let ior_water = max(vol.sim_params.x, 1.0);
 
-    let normal    = -water_total_normal(in.world_pos.xz, vol, in.vol_index);
     let view_dir  = normalize(in.world_pos - cameras[0].position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
+    let surf      = fft_surface(in.base_xz, pixel_footprint(in.world_pos, view_dir), vol, in.vol_index);
+    let normal    = -water_total_normal(in.world_pos.xz, surf.slope, vol, in.vol_index);
 
     let fresnel = water_fresnel(normal, view_dir, vol);
 

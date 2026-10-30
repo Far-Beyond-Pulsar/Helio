@@ -78,7 +78,7 @@ struct Dynamics {
 }
 
 fn volume_dynamics(volume: u32) -> Dynamics {
-    var d = Dynamics(u.spring, u.damping, u.wind_dir, u.wind_strength, u.wave_scale, u.wave_speed);
+    var d = Dynamics(u.spring, u.damping, u.wind_dir, 0.0, u.wave_scale, u.wave_speed);
     if volume >= arrayLength(&volumes) {
         return d;
     }
@@ -94,6 +94,9 @@ fn volume_dynamics(volume: u32) -> Dynamics {
     d.wind_dir = select(vec2<f32>(0.0), dir / len, len > 1e-6);
     d.wind_strength = max(row.wind_params.z, 0.0);
     d.wave_speed = max(row.wave_params.z, 0.0);
+    // The open sea is the FFT ocean's (`fft.rs`); this field now carries only
+    // what disturbs it (objects, drops), so it injects no wind waves of its own.
+    d.wind_strength = 0.0;
     return d;
 }
 

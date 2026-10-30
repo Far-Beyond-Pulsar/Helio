@@ -105,13 +105,13 @@ impl GpuWaterVolume {
             bounds_max: [100.0, 50.0, 100.0, 0.0],
             wave_params: [0.5, 0.3, 1.5, 0.5],
             wave_direction: [1.0, 0.0, 0.0, 0.0],
-            water_color: [0.0, 0.2, 0.4, 0.8],
-            extinction: [0.1, 0.05, 0.02, 0.6],
+            water_color: [0.0, 0.05, 0.08, 0.8],
+            extinction: [0.42, 0.075, 0.048, 0.6],
             reflection_refraction: [0.8, 0.2, 5.0, 0.0],
             caustics_params: [1.0, 1.5, 5.0, 0.5],
             fog_params: [0.03, 1.0, 0.0, 0.0],
-            // ior=1.333, caustic_intensity=1.5, fresnel_min=0.1, density=0.03
-            sim_params: [1.333, 1.5, 0.1, 0.03],
+            // ior=1.333, caustic_intensity=1.5, fresnel_min=0.02 (water's F0), density=0.03
+            sim_params: [1.333, 1.5, 0.02, 0.03],
             // rim=1.0, hitbox_shadow=0.0, ao=1.0
             shadow_params: [1.0, 0.0, 1.0, 0.0],
             // normalized sun direction
