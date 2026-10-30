@@ -1681,6 +1681,7 @@ dependencies = [
  "helio-pass-sky",
  "helio-pass-volumetric-fog",
  "helio-pass-voxel-planet",
+ "helio-pass-water-sim",
  "log",
  "naga",
  "notify",

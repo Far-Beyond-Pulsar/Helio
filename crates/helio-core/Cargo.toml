@@ -35,6 +35,7 @@ helio-pass-sky = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
 helio-default-passes = { workspace = true }
 helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
+helio-pass-water-sim = { workspace = true }
 
 [features]
 default = ["profiling", "shader-hot-reload"]

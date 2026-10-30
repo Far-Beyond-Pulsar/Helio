@@ -9,6 +9,11 @@ use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
 
+/// The surface query kernel (`water_query.wgsl`), composed into the surface
+/// shader (`//!use water_query`).
+pub const WATER_QUERY_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!("//!use water_query", "../shaders/water_query.wgsl");
+
 pub const MAX_WATER_SURFACE_QUERIES: usize = 256;
 const STAGING_GENERATIONS: usize = 3;
 const QUERY_INPUT_BYTES: u64 = 32;
@@ -159,7 +164,7 @@ impl WaterSurfaceQueries {
                 crate::pipeline::WATER_SHORE_SNIPPET,
                 helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
                 crate::pipeline::WATER_SKY_SNIPPET,
-                helio_core::wgsl_snippet!("//!use water_query", "../shaders/water_query.wgsl"),
+                WATER_QUERY_SNIPPET,
             ],
         );
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

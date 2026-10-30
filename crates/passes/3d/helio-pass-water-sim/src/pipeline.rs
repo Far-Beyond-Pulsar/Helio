@@ -6,14 +6,14 @@ use crate::{
 use bytemuck::Zeroable;
 use wgpu::util::DeviceExt;
 
-pub(crate) const WATER_SHORE_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
+pub const WATER_SHORE_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
     "//!use water_shore_surface",
     "../shaders/water_surface_shared.wgsl"
 );
 
 /// The sky as the water sees it (`water_sky.wgsl`): one colour for the surface
 /// underside and the underwater medium.
-pub(crate) const WATER_SKY_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
+pub const WATER_SKY_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
     "//!use water_sky",
     "../shaders/water_sky.wgsl"
 );
