@@ -1870,3 +1870,7 @@ mod state_event_tests;
 #[cfg(test)]
 #[path = "skeletal_net_tests.rs"]
 mod net_tests;
+
+#[cfg(test)]
+#[path = "skeletal_unified_tests.rs"]
+mod unified_tests;
