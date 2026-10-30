@@ -18,8 +18,9 @@
 //! pose. Parameters and Montage commands written by gameplay or scripts later in
 //! the frame take effect in the next frame's animation phase. While the physics
 //! rig owns the pose ([`SkeletalMeshComponent::apply_physics_pose`]) the
-//! animation clock is held; clearing physics ownership resumes from the pose the
-//! animation had.
+//! animation keeps running (clock, notifies, Montages, root motion) and the drawn
+//! pose blends toward the physics pose by the physics blend weight; clearing
+//! physics ownership shows the animation again, which never stopped.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -290,8 +291,12 @@ pub struct SkeletalMeshComponent {
     /// intended for runtime consumers such as articulated physics bodies.
     #[serde(skip)]
     pub bone_world_pose: Vec<[[f32; 4]; 4]>,
+    /// Whole-skeleton physics ownership: the rig's mesh-space pose and how much of the drawn
+    /// pose it replaces (Unreal's physics blend weight). The animation keeps running either way.
     #[serde(skip)]
-    physics_pose_active: bool,
+    physics_pose: Option<Vec<glam::Mat4>>,
+    #[serde(skip)]
+    physics_blend_weight: Option<f32>,
     #[serde(skip)]
     pub bounds_local: [f32; 4],
     #[serde(skip)]
@@ -409,6 +414,8 @@ impl SkeletalMeshComponent {
         self.notify_playback.push_lifecycle_events(&cancelled);
         self.pending_root_motion = None;
         self.physics_bone_overrides.clear();
+        self.physics_pose = None;
+        self.physics_blend_weight = None;
         // a re-enabled component rebuilds its instance
         self.anim.instance = None;
         self.anim.key = None;
@@ -619,6 +626,10 @@ impl SkeletalMeshComponent {
             let owned: Vec<(usize, glam::Mat4)> = self.physics_bone_overrides.iter().map(|(bone, m)| (*bone, glam::Mat4::from_cols_array_2d(m))).collect();
             runtime.to_mesh_space_with_overrides(&pose.bones, &owned)
         };
+        let drawn = match (&self.physics_pose, self.physics_blend_weight.unwrap_or(1.0)) {
+            (Some(physics), weight) if physics.len() == drawn.len() && weight > 0.0 => drawn.iter().zip(physics).map(|(animated, owned)| blend_mesh_space(animated, owned, weight)).collect(),
+            _ => drawn,
+        };
         let world: HashMap<_, _> = runtime
             .ids
             .iter()
@@ -677,37 +688,51 @@ impl SkeletalMeshComponent {
     /// the pose has the wrong number of bones, or any matrix is non-finite.
     /// While active, animation playback will not overwrite the physics pose.
     pub fn apply_physics_pose(&mut self, pose: Vec<[[f32; 4]; 4]>) -> bool {
-        let (Some(mesh), Some(skeleton)) = (&self.loaded_mesh, &self.loaded_skeleton) else {
+        let (Some(_), Some(skeleton)) = (&self.loaded_mesh, &self.loaded_skeleton) else {
             return false;
         };
-        if pose.len() != skeleton.bones.len()
-            || pose
-                .iter()
-                .flatten()
-                .flatten()
-                .any(|value| !value.is_finite())
-        {
+        if pose.len() != skeleton.bones.len() || pose.iter().flatten().flatten().any(|value| !value.is_finite()) {
             return false;
         }
+        self.physics_pose = Some(pose.iter().map(glam::Mat4::from_cols_array_2d).collect());
+        if self.anim.instance.is_some() {
+            self.refresh_pose();
+        } else {
+            self.publish_physics_only();
+        }
+        true
+    }
+
+    /// The physics pose is the whole drawn pose when there is no animation instance to blend with.
+    fn publish_physics_only(&mut self) {
+        let (Some(mesh), Some(skeleton), Some(pose)) = (&self.loaded_mesh, &self.loaded_skeleton, &self.physics_pose) else { return };
         let world: HashMap<_, _> = skeleton
             .bones
             .iter()
-            .zip(&pose)
-            .map(|(bone, matrix)| {
-                let flat = std::array::from_fn(|index| matrix[index / 4][index % 4]);
-                (bone.id.clone(), skeletal_assets::math::Mat4(flat))
-            })
+            .zip(pose)
+            .map(|(bone, matrix)| (bone.id.clone(), skeletal_assets::math::Mat4(matrix.to_cols_array())))
             .collect();
         let palette = skeletal_assets::skinning::joint_matrices(mesh, &world);
-        self.bone_world_pose = pose;
-        self.set_palette(
-            palette
-                .iter()
-                .map(|m| glam::Mat4::from_cols_array(&m.0).to_cols_array_2d())
-                .collect(),
-        );
-        self.physics_pose_active = true;
+        self.bone_world_pose = pose.iter().map(|m| m.to_cols_array_2d()).collect();
+        self.set_palette(palette.iter().map(|m| glam::Mat4::from_cols_array(&m.0).to_cols_array_2d()).collect());
+    }
+
+    /// How much of the drawn pose the whole-skeleton physics pose replaces, 0 (none) to 1
+    /// (all, the default once a pose is applied). The animation advances at every weight, so
+    /// handing the pose back is a blend, not a restart. False for a non-finite weight.
+    pub fn set_physics_blend_weight(&mut self, weight: f32) -> bool {
+        if !weight.is_finite() {
+            return false;
+        }
+        self.physics_blend_weight = Some(weight.clamp(0.0, 1.0));
+        if self.physics_pose.is_some() && self.anim.instance.is_some() {
+            self.refresh_pose();
+        }
         true
+    }
+
+    pub fn physics_blend_weight(&self) -> f32 {
+        if self.physics_pose.is_some() { self.physics_blend_weight.unwrap_or(1.0) } else { 0.0 }
     }
 
     fn set_palette(&mut self, current: Vec<[[f32; 4]; 4]>) {
@@ -754,8 +779,6 @@ impl SkeletalMeshComponent {
         if bones.iter().any(|(bone, m)| *bone >= runtime.len() || m.iter().flatten().any(|v| !v.is_finite())) {
             return false;
         }
-        // partial ownership never freezes the animation clock
-        self.physics_pose_active = false;
         self.physics_bone_overrides = bones;
         self.refresh_pose();
         true
@@ -769,7 +792,8 @@ impl SkeletalMeshComponent {
     /// Return pose ownership to the animation player and refresh its current
     /// frame immediately.
     pub fn clear_physics_pose(&mut self) {
-        self.physics_pose_active = false;
+        self.physics_pose = None;
+        self.physics_blend_weight = None;
         self.physics_bone_overrides.clear();
         self.refresh_pose();
     }
@@ -1510,6 +1534,16 @@ mod authority_tests {
     }
 }
 
+/// A mesh-space matrix between `animated` and `owned`: translation and scale lerp, rotation slerp.
+fn blend_mesh_space(animated: &glam::Mat4, owned: &glam::Mat4, weight: f32) -> glam::Mat4 {
+    if weight >= 1.0 - 1e-6 {
+        return *owned;
+    }
+    let (sa, ra, ta) = animated.to_scale_rotation_translation();
+    let (so, ro, to) = owned.to_scale_rotation_translation();
+    glam::Mat4::from_scale_rotation_translation(sa.lerp(so, weight), ra.slerp(ro, weight), ta.lerp(to, weight))
+}
+
 #[cfg(test)]
 mod animation_runtime_tests {
     use super::*;
@@ -1653,18 +1687,16 @@ mod animation_runtime_tests {
         let events = got.lock().unwrap().clone();
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!((events[0].notify_id.as_str(), events[0].sequence_id.as_str()), ("step", walk_id.as_str()));
-        // pause holds the pose; the physics rig owning the pose holds the clock
+        // pause holds the pose; the physics rig owning the pose does not
         world.get_mut::<SkeletalMeshComponent>(instance).unwrap().playing = false;
         let held = x1(&world, instance);
         frame(&mut world, &hub, 1.0, &mut state);
         assert_eq!(x1(&world, instance), held);
         world.get_mut::<SkeletalMeshComponent>(instance).unwrap().playing = true;
-        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().physics_pose_active = true;
-        frame(&mut world, &hub, 1.0, &mut state);
-        assert_eq!(x1(&world, instance), held, "physics owns the pose: animation does not advance");
-        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().physics_pose_active = false;
+        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().physics_pose = Some(vec![glam::Mat4::IDENTITY]);
         frame(&mut world, &hub, 0.125, &mut state);
-        assert!(x1(&world, instance) != held, "ownership returned and the clock moves again");
+        assert!(x1(&world, instance) != held, "physics owns the whole pose and the clock still moves");
+        world.get_mut::<SkeletalMeshComponent>(instance).unwrap().clear_physics_pose();
     }
 
     #[test]

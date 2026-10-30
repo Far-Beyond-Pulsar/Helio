@@ -494,7 +494,7 @@ fn physics_owns_configured_bones_while_the_animation_keeps_running() {
     let owned = glam::Mat4::from_translation(glam::Vec3::new(0.0, 9.0, 0.0)).to_cols_array_2d();
     assert!(c.apply_physics_bones(vec![(1, owned)]));
     assert_eq!(c.physics_owned_bones(), 1);
-    assert!(!c.physics_pose_active, "owning some bones never freezes the clock");
+    assert!(c.physics_pose.is_none(), "owning some bones is not whole-pose ownership");
     c.advance(0.5);
     let after = c.animation().unwrap().pose().bones[1].translation.x;
     assert!(after > before, "the animation kept advancing: {before} -> {after}");
@@ -513,11 +513,47 @@ fn physics_owns_configured_bones_while_the_animation_keeps_running() {
     // returning the bones
     assert!(c.apply_physics_bones(Vec::new()));
     assert_eq!(c.physics_owned_bones(), 0);
-    // owning the whole pose is the other, older route and still holds the clock
-    c.physics_pose_active = true;
-    let held = c.animation().unwrap().pose().bones[1].translation.x;
+}
+
+fn skinned_component(rig: &Rig, graph: &Arc<CompiledGraph>) -> SkeletalMeshComponent {
+    let mut c = component(rig, graph);
+    let mut mesh = skeletal_assets::skmesh::SkeletalMeshAsset::new(Some(skeletal_assets::ids::SkeletonId::parse(rig.skeleton.id.as_str()).unwrap()));
+    mesh.joints = (0..3).map(|i| skeletal_assets::skmesh::Joint { bone: format!("b{i}"), inverse_bind: skeletal_assets::math::Mat4::IDENTITY.0 }).collect();
+    c.loaded_mesh = Some(Arc::new(mesh));
+    c.ensure_runtime();
+    c
+}
+
+#[test]
+fn whole_skeleton_physics_ownership_blends_the_drawn_pose_and_never_stops_the_animation() {
+    let rig = rig();
+    let graph = walk_graph(&rig, false);
+    let mut c = skinned_component(&rig, &graph);
     c.advance(0.5);
-    assert_eq!(c.animation().unwrap().pose().bones[1].translation.x, held);
+    let palette_x = |c: &SkeletalMeshComponent, joint: usize| c.bone_palette[joint][3][0];
+    let animated_x = palette_x(&c, 1);
+    let physics: Vec<[[f32; 4]; 4]> = (0..3).map(|i| glam::Mat4::from_translation(glam::Vec3::new(10.0 + i as f32, 0.0, 0.0)).to_cols_array_2d()).collect();
+    assert!(!c.apply_physics_pose(physics[..2].to_vec()), "a pose of the wrong length is refused");
+    assert!(c.apply_physics_pose(physics.clone()));
+    assert_eq!(c.physics_blend_weight(), 1.0);
+    assert!((palette_x(&c, 1) - 11.0).abs() < 1e-4, "weight 1: the drawn bone is the physics bone: {}", palette_x(&c, 1));
+    // the animation keeps advancing underneath: clock, pose, notifies
+    let clock = c.animation().unwrap().pose().bones[1].translation.x;
+    c.advance(0.5);
+    assert!(c.animation().unwrap().pose().bones[1].translation.x > clock, "animation time moved while physics owned the pose");
+    assert!((palette_x(&c, 1) - 11.0).abs() < 1e-4, "the drawn pose is still physics'");
+    // half the pose: halfway between what the animation draws now and the body
+    let animated_now = c.animation().unwrap().pose().bones[1].translation.x;
+    assert!(c.set_physics_blend_weight(0.5));
+    assert!((palette_x(&c, 1) - (animated_now + 11.0) / 2.0).abs() < 1e-3, "{} vs {animated_now}", palette_x(&c, 1));
+    assert!(!c.set_physics_blend_weight(f32::NAN));
+    // weight 0 draws the animation; handing the pose back resumes from where the animation is, not where it was
+    assert!(c.set_physics_blend_weight(0.0));
+    assert!((palette_x(&c, 1) - animated_now).abs() < 1e-4);
+    c.clear_physics_pose();
+    assert_eq!(c.physics_blend_weight(), 0.0);
+    c.advance(0.25);
+    assert!(palette_x(&c, 1) > animated_x && palette_x(&c, 1) > animated_now, "the clock was never held");
 }
 
 #[test]

@@ -1028,9 +1028,7 @@ impl SkeletalMeshComponent {
         if let Some(instance) = self.anim.instance.as_mut() {
             instance.refresh();
         }
-        if !self.physics_pose_active {
-            self.refresh_pose();
-        }
+        self.refresh_pose();
         Ok(())
     }
 
@@ -1050,7 +1048,7 @@ impl SkeletalMeshComponent {
     /// single-sequence player (graph nodes and Montages carry their own rates).
     pub(super) fn advance_notifies(&mut self, delta_seconds: f32) -> Result<(), String> {
         self.reconcile_notify_playback();
-        if self.physics_pose_active || !self.playing || delta_seconds <= 0.0 {
+        if !self.playing || delta_seconds <= 0.0 {
             return Ok(());
         }
         if !delta_seconds.is_finite() || !self.playback_rate.is_finite() {
@@ -1587,16 +1585,14 @@ mod tests {
         assert!(saved.get("elapsed_seconds").is_none());
     }
     #[test]
-    fn seeking_and_playback_preserve_an_active_physics_pose() {
+    fn seeking_and_playback_keep_working_while_physics_owns_the_pose() {
         let mut p = player();
-        p.physics_pose_active = true;
-        let pose = vec![[[3.0; 4]; 4]];
-        p.bone_world_pose = pose.clone();
+        p.physics_pose = Some(vec![glam::Mat4::IDENTITY]);
         p.seek_animation(0.25).unwrap();
-        p.advance(0.5);
         assert_eq!(p.elapsed_seconds, 0.25);
-        assert_eq!(p.bone_world_pose, pose);
-        assert!(p.notify_playback.pending.is_empty());
+        p.advance(0.5);
+        assert!(p.elapsed_seconds > 0.25, "the clock moved: {}", p.elapsed_seconds);
+        assert!(p.physics_pose.is_some(), "ownership is the rig's to give back");
     }
     #[test]
     fn descriptors_keep_identity_across_labels_and_refuse_live_schema_conflicts() {
