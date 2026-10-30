@@ -1754,7 +1754,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     {
         world.take_counts();
     }
-    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms,grow_ms,chunk_slots,leaf_page_capacity
+    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms,grow_ms,chunk_slots,leaf_page_capacity,worker_ms,events_ms,walk_ms,eviction_ms,visits,plan_age,planned,resident
 ");
     let (mut intervals, mut coarse, mut worst, mut switch_px) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -1767,6 +1767,13 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut pages_cpu_ms = Vec::new();
     let mut pages_cpu_parts = [0.0f64; 6];
     let mut worst_wanted = Vec::new();
+    // The residency worker's plans that arrived: its milliseconds (all,
+    // events, plans, evictions), nodes visited, their age when they
+    // arrived, and chunks resident.
+    let (mut worker_ms, mut events_ms, mut walk_ms, mut eviction_ms, mut plan_age) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut visits = Vec::new();
+    let mut resident = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
     // The renderer's CPU and GPU by pass over the flight (summed ms, frames).
@@ -1942,8 +1949,17 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         shown_chunks += s.shown_chunks;
         emptied_chunks += s.emptied_chunks;
         unseen_evicted += s.evicted_unseen;
-        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2},{:.2},{},{}
-", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1], s.grow_ms, s.chunk_slots, s.leaf_pages.1);
+        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2},{:.2},{},{},{:.3},{:.3},{:.3},{:.3},{},{},{},{}
+", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1], s.grow_ms, s.chunk_slots, s.leaf_pages.1, s.plan_ms, s.plan_parts[0], s.plan_parts[1], s.plan_parts[2], s.plan_visits, s.plan_age, u8::from(s.planned), s.resident_chunks);
+        if s.planned {
+            worker_ms.push(s.plan_ms);
+            events_ms.push(s.plan_parts[0]);
+            walk_ms.push(s.plan_parts[1]);
+            eviction_ms.push(s.plan_parts[2]);
+            visits.push(s.plan_visits as f64);
+            plan_age.push(s.plan_age as f64);
+        }
+        resident.push(s.resident_chunks as f64);
         // A frame after a capture waited for its readback.
         if !captured {
             intervals.push(interval);
@@ -2094,6 +2110,24 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         max(&switch_px),
         over(&switch_px, 1.5),
         over(&switch_px, 3.0),
+    );
+    eprintln!(
+        "CHUNKSTRESS {mode}: residency plans {} | worker p50 {:.2} p95 {:.2} max {:.2} ms | events p50 {:.2} | walk p50 {:.2} p95 {:.2} | eviction p50 {:.3} p95 {:.3} | visits p50 {:.0} p95 {:.0} | age p50 {:.0} p95 {:.0} frames | resident p50 {:.0} max {:.0}",
+        worker_ms.len(),
+        percentile(&worker_ms, 0.5),
+        percentile(&worker_ms, 0.95),
+        max(&worker_ms),
+        percentile(&events_ms, 0.5),
+        percentile(&walk_ms, 0.5),
+        percentile(&walk_ms, 0.95),
+        percentile(&eviction_ms, 0.5),
+        percentile(&eviction_ms, 0.95),
+        percentile(&visits, 0.5),
+        percentile(&visits, 0.95),
+        percentile(&plan_age, 0.5),
+        percentile(&plan_age, 0.95),
+        percentile(&resident, 0.5),
+        max(&resident),
     );
     // GPU generation per tile over the flight (its timings lag a few frames).
     let generation: f64 = generate_ms.iter().sum();

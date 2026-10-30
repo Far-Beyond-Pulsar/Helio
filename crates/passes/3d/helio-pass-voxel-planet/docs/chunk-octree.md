@@ -167,10 +167,11 @@ cells may not show:
 
 ## Residency
 
-`residency::Planner` runs on a worker thread (`Worker`) and visits the
-octree from the roots each plan. `ChunkWorld::update` sends it the eye,
-velocity, view and what happened since (`Event`) and takes the latest plan
-without waiting: its drawn set and requests as differences from the last.
+`residency::Planner` runs on a worker thread (`Worker`) and keeps the cut
+between plans ([Incremental residency](#incremental-residency)).
+`ChunkWorld::update` sends it the eye, velocity, view and what happened
+since (`Event`) and takes the latest plan without waiting: its drawn set as
+differences from the last, and its requests.
 
 - **Refinement.** A Mixed node is refined while its cells project larger
   than `lod_pixels` from the eye or from where it will be in
@@ -197,14 +198,16 @@ without waiting: its drawn set and requests as differences from the last.
   a parent back.
 - **Buried nodes** are generated when they hold the eye (`near_cells`) or
   a ray met them.
-- **Eviction.** Generated nodes no plan has visited for `release_frames`
-  (600 by default, `HELIO_VOXEL_CHUNKS_RELEASE_FRAMES`) are released,
-  `MAX_RELEASE` a plan, least recently visited first, so residency follows
-  the cut, not the eye's history. When chunk slots or leaf pages run short
-  (an eighth of the pool, at least two batches' worth), the pool grows; at
-  its most (`Capacity::chunks`), the least recently visited go first (never
-  one visited in the last `IDLE_FRAMES`: it may still be fading out).
-  Bookkeeping of nodes not generated is dropped after `keep_frames`.
+- **Eviction.** Generated nodes out of the cut for `release_frames` (600
+  by default, `HELIO_VOXEL_CHUNKS_RELEASE_FRAMES`) are released,
+  `MAX_RELEASE` a plan, longest out first, so residency follows the cut,
+  not the eye's history. When chunk slots or leaf pages run short (an
+  eighth of the pool, at least two batches' worth), the pool grows; at its
+  most (`Capacity::chunks`), those out of the cut longest go first (never
+  one in it in the last `IDLE_FRAMES`: it may still be fading out). Nodes
+  found empty are remembered as long as chunks (a cut that comes back does
+  not generate them again); bookkeeping of nodes never generated is dropped
+  after `keep_frames`.
 - **Pools grow on demand.** The slot pool (8192 slots at first: meta, mids,
   keys, statics, leaf page lists, draw lists) and the leaf pool (leaves,
   their materials and normals, each page's detail page, the free stack)
@@ -222,6 +225,53 @@ without waiting: its drawn set and requests as differences from the last.
   residency last changed and the last fade ended (what a finer node
   uncovers shows once its fade ends), past the reports in flight then
   (`REPORT_FRAMES`, 8). Hosts render until then.
+
+### Incremental residency
+
+A plan's cost follows what changed, not the tree: the cut is kept between
+plans, and a plan visits only nodes whose outcome may have changed, coarsest
+first (a node coarsening takes its subtree out of the cut before its nodes
+would be visited; one refining visits its children as they enter).
+
+- **Re-checks.** Each visit bounds how far the eye may move, its
+  velocity change and the view turn before its outcome could change, and
+  queues its next visit on three odometers (metres the eye has travelled,
+  metres a second its velocity has changed, radians the view has turned);
+  a window lets the velocity change by what moves the prefetch eye a
+  quarter of the eye's travel more. The bounds are taken over the whole
+  window, halving it from twice the distance until no threshold can be
+  crossed: distances to a box move `DRIFT` (1.25) times as fast as the eye
+  (the linear frame drifts with it), the motion allowance by the velocity
+  and the offset's turn, cone margins `(1 + |cos|) DRIFT` times (and a
+  box's breadth a radian with the view), the horizon by `e / horizon` a
+  metre of climb; a box measured near the eye switches to its centre where
+  it meets the frame's reach. A band far too coarse keeps its chain of
+  wanted nodes under the eye while each step's nearest child stays the
+  nearest and its error stays on its side of 1. A threshold may be passed
+  by `LATENESS` (1/16 of its measure) before the visit, so a node exactly
+  at one is not visited every plan. Ray reports' expiry (`seen_frames`)
+  and edits' waits queue on frames. Each node keeps the due reading of
+  each queue and is queued again only when that comes earlier (an entry
+  that comes out before its due is queued again at it).
+- **Events** mark the nodes they touch, their footprints' other nodes (a
+  band, rock waiting for its surface) and their parents (readiness); a ray
+  report marks a node only when rays had not met it lately. Nodes that
+  want others generated are visited every plan: their requests'
+  priorities follow the eye. A band whose members stay open and that no
+  event marked keeps its children as they were (its children's own visits
+  want what they need). A view whose shape changes, or the first ray
+  report, visits the whole cut once.
+- **Eviction never looks at the cut.** Nodes leaving the cut, or touched
+  while out of it, queue by idle frame in a heap per kind (chunks, empty,
+  never generated); eviction pops the longest idle, skipping entries of
+  nodes that came back or changed since.
+- **The plan's measures** (`coarse_share`, `worst_px`) are taken over the
+  leaves in view as their last visit measured them: within `LATENESS` of a
+  visit now for the thresholds, and a leaf's cells as they were then.
+- **Exactness.** `incremental_plans_match_full_visits` checks, with no
+  lateness, that every plan of a flight over a plane and an Earth (cruising,
+  climbing, turning, rays reporting then expiring, a request budget) draws
+  and wants exactly what a visit of the whole cut does.
 
 ## Generation
 
