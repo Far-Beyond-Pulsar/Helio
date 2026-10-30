@@ -94,9 +94,10 @@ fn volume_dynamics(volume: u32) -> Dynamics {
     d.wind_dir = select(vec2<f32>(0.0), dir / len, len > 1e-6);
     d.wind_strength = max(row.wind_params.z, 0.0);
     d.wave_speed = max(row.wave_params.z, 0.0);
-    // The open sea is the FFT ocean's (`fft.rs`); this field now carries only
-    // what disturbs it (objects, drops), so it injects no wind waves of its own.
-    d.wind_strength = 0.0;
+    // The open sea's wind waves come from the global ocean FFT
+    // (`ocean_fft.rs`); the volume solver carries local disturbances
+    // (objects, drops) plus the cheap traveling wind trains below, which give
+    // a volume its own wind look where the FFT sea does not reach.
     return d;
 }
 
