@@ -117,6 +117,14 @@ VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
   `python tools/ghosting.py <dir>` compares the pairs: light or dark left
   behind what moved (`trail`, `dark`: pixels off by over 0.1), and writes
   `ghost_NNN.png` (brighter than the still in red, darker in blue).
+* `VOXEL_CRAFT_STROKE=<dig|build>:<radius m>:<stamps>[,...]`: instead of
+  the poses, sculpt strokes for what edits cost the frame. Each stamps one
+  brush a frame (a ball dug out, or a cube of cobblestone), dragged sideways
+  over the ground 12 m ahead inside a 16 m query focus, then waits for the
+  world to settle; a `STROKE` log line gives the frame times over the
+  stamps and the settle, the world's part of the frames (snapshots,
+  queries, the player) and the longest stamp call. For example
+  `dig:4:40,build:6:40,dig:0.35:60,build:0.25:60`.
 * `VOXEL_CRAFT_QUALITY=fxaa`: no TSR (FXAA at native resolution), to tell
   what is temporal.
 

@@ -261,6 +261,7 @@ name = "vr_demo"
 path = "vr/main.rs"
 
 [dependencies]
+profiling = { workspace = true }
 helio = { workspace = true, features = ["bake"] }
 helio-core = { workspace = true }
 helio-vg-build = { path = "../helio-vg-build" }

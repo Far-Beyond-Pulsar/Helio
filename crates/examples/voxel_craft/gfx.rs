@@ -75,6 +75,11 @@ struct PassTimings {
     generation: [f64; 7],
     /// Tiles and chunks generated over the window.
     generated: [usize; 2],
+    /// The render thread's CPU a frame over the window (`Renderer::render`'s
+    /// scope, without the surface's acquire), ms; and its own cycles in the
+    /// frame's render call (M: not the time it waited or was descheduled).
+    cpu: Vec<f64>,
+    cycles: Vec<f64>,
     /// The voxel pass's residency over the window: chunks generated,
     /// evicted, evicted never drawn, level switches; the last frame's.
     residency: [usize; 4],
@@ -91,6 +96,14 @@ impl PassTimings {
         stats: Option<helio_pass_voxel_planet::chunks::UpdateStats>,
         size: [u32; 2],
     ) {
+        if let Some(render) = profiling::collect_events()
+            .iter()
+            .filter(|e| e.name == "Helio::Renderer::render")
+            .max_by_key(|e| e.duration_ns)
+        {
+            self.cpu.push(render.duration_ns as f64 * 1e-6);
+        }
+        profiling::clear_events();
         if let Some(s) = stats {
             for (sum, n) in self.residency.iter_mut().zip([
                 s.generated_chunks,
@@ -193,12 +206,58 @@ impl PassTimings {
                 s.fading_nodes
             );
         }
+        if !self.cycles.is_empty() {
+            let mut cycles = std::mem::take(&mut self.cycles);
+            cycles.sort_by(f64::total_cmp);
+            let at = |p: f64| cycles[((cycles.len() - 1) as f64 * p).round() as usize];
+            log::info!(
+                "[timings] render cycles over {} frames (M): mean {:.3} p50 {:.3} p95 {:.3} max {:.3}",
+                cycles.len(),
+                cycles.iter().sum::<f64>() / cycles.len() as f64,
+                at(0.5),
+                at(0.95),
+                at(1.0)
+            );
+        }
+        if !self.cpu.is_empty() {
+            let mut cpu = std::mem::take(&mut self.cpu);
+            cpu.sort_by(f64::total_cmp);
+            let at = |p: f64| cpu[((cpu.len() - 1) as f64 * p).round() as usize];
+            log::info!(
+                "[timings] render cpu over {} frames: mean {:.3} p50 {:.3} p95 {:.3} max {:.3} ms",
+                cpu.len(),
+                cpu.iter().sum::<f64>() / cpu.len() as f64,
+                at(0.5),
+                at(0.95),
+                at(1.0)
+            );
+        }
         self.residency = [0; 4];
         self.voxel = (0, [0.0; 12]);
         self.frames = 0;
         self.total = 0.0;
         self.passes.clear();
     }
+}
+
+/// The calling thread's CPU cycles so far (Windows `QueryThreadCycleTime`:
+/// the cycles it ran, not the time it waited or was descheduled by other
+/// processes); 0 elsewhere.
+fn thread_cycles() -> u64 {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
+        }
+        let mut cycles = 0u64;
+        // SAFETY: the pseudo-handle of the calling thread, and a u64 out.
+        unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+        cycles
+    }
+    #[cfg(not(windows))]
+    0
 }
 
 /// Residency settings for chunk trees at a window of height `h`.
@@ -408,6 +467,9 @@ impl Gfx {
         {
             renderer.set_debug_mode(mode);
         }
+        if std::env::var_os("VOXEL_CRAFT_TIMINGS").is_some() {
+            profiling::enable_profiling();
+        }
         let timings = std::env::var("VOXEL_CRAFT_TIMINGS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -418,6 +480,8 @@ impl Gfx {
                 total: 0.0,
                 passes: Default::default(),
                 voxel: (0, [0.0; 12]),
+                cpu: Vec::new(),
+                cycles: Vec::new(),
                 residency: [0; 4],
                 last_stats: None,
                 generation: [0.0; 7],
@@ -670,6 +734,7 @@ impl Gfx {
         };
         flush_scene_db(&self.scene, &self.queue);
         self.rays.publish(&self.scene.world, &mut self.renderer);
+        let cycles = thread_cycles();
         if let Some(output) = &output {
             let target = output.texture.create_view(&Default::default());
             if let Err(error) = self.renderer.render(&camera, &target) {
@@ -678,7 +743,9 @@ impl Gfx {
         } else if let Err(error) = self.renderer.render_window_frame(&camera, &self.surface) {
             log::error!("render: {error:?}");
         }
+        let cycles = thread_cycles() - cycles;
         if let Some(timings) = &mut self.timings {
+            timings.cycles.push(cycles as f64 * 1e-6);
             let voxel = self
                 .renderer
                 .find_pass_mut::<ChunkPass>()

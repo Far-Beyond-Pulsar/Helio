@@ -1,8 +1,8 @@
 //! The world the game sees: a voxel planet with edits applied off-thread,
 //! read through the planet's query service (`WorldQueries`): bricks of
-//! cells sampled by workers around the player, edits shown on them at
-//! once. Its decoration (trees, structures) is the planet's features
-//! (`decorate`), part of its recipe.
+//! cells sampled by workers around the player, edits shown on them a few
+//! milliseconds after they are made. Its decoration (trees, structures) is
+//! the planet's features (`decorate`), part of its recipe.
 
 pub mod decorate;
 pub mod edits;
@@ -12,7 +12,7 @@ use crate::blocks::Block;
 use edits::Edit;
 use glam::DVec3;
 use helio_pass_voxel_planet::queries::{Resident, WorldQueries};
-use helio_pass_voxel_planet::{Cell, Matter, Planet, RayHit};
+use helio_pass_voxel_planet::{Brush, Cell, Matter, Planet, RayHit};
 use std::sync::Arc;
 use worker::{Job, Worker};
 
@@ -64,28 +64,41 @@ impl World {
         self.queries.resident_within(position, radius)
     }
 
-    /// Whether the whole world around the player is resident.
+    /// Whether the whole world around the player is resident, and shows
+    /// every edit made.
     pub fn loaded(&self) -> bool {
-        self.queries.loading() == 0
+        self.queries.loading() == 0 && self.queries.editing() == 0
     }
 
-    /// Wait until the world around the player is resident (loading a game,
-    /// tests).
+    /// Wait until the world around the player is resident and shows every
+    /// edit made (loading a game, tests).
     pub fn settle(&self) {
-        while self.queries.loading() > 0 {
+        while !self.loaded() {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 
-    /// Applies `edits` (off-thread); queries see them immediately.
+    /// Applies `edits` (off-thread); queries see them in a few milliseconds.
     pub fn edit(&mut self, edits: &[Edit]) {
-        if edits.is_empty() {
-            return;
-        }
         let grid = *self.snapshot.grid();
         let brushes: Vec<_> = edits.iter().map(|e| e.brush(&grid)).collect();
-        self.queries.edit(&brushes);
-        self.worker.submit(Job::Edit(brushes));
+        self.stamp(&brushes);
+    }
+
+    /// Applies `brushes` (off-thread); queries see them in a few milliseconds.
+    pub fn stamp(&mut self, brushes: &[Brush]) {
+        if brushes.is_empty() {
+            return;
+        }
+        self.queries.edit(brushes);
+        self.worker.submit(Job::Edit(brushes.to_vec()));
+    }
+
+    /// Keep the world within `radius` of `center` resident too (focus `id`,
+    /// not the player's).
+    pub fn focus_on(&self, id: u64, center: DVec3, radius: f64) {
+        debug_assert_ne!(id, PLAYER);
+        self.queries.focus(id, center, radius);
     }
 
     /// Whether `cell` is solid. Space not resident yet is: the player

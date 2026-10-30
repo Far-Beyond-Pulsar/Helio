@@ -45,6 +45,7 @@ mod gfx;
 mod input;
 mod palette;
 mod player;
+mod strokes;
 mod structures;
 mod terrain;
 mod world;

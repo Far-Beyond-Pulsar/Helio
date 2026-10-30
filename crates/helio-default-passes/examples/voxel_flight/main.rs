@@ -24,7 +24,9 @@
 //!   other volumes in the scene ([`volumes_tour`]): a Moon orbiting and
 //!   spinning over the horizon, a ship-sized block circling and turning a
 //!   few metres away; frames saved along the way, GPU times recorded
-//!   (`volumes_tour.csv`).
+//!   (`volumes_tour.csv`). `=hover`: that block still, hovering over the
+//!   ground with the sun to the side ([`volumes_hover`]): its shadow on the
+//!   ground and the ground's light on it (`volumes_hover.png`).
 //!
 //! World: `HELIO_VOXEL_FLIGHT_VOXEL` (0.1 m), `_SEED` (7), `_PRESET`
 //! (earth|moon|desert, [`worlds`]: the planet, its features, look, sky and
@@ -78,6 +80,8 @@ struct Flight {
     output: PathBuf,
     /// Pipelined frames not yet known complete.
     in_flight: std::collections::VecDeque<Arc<std::sync::atomic::AtomicBool>>,
+    /// The render thread's cycles in the last `draw`'s recording.
+    render_cycles: u64,
     /// Pick requests drawn frames answer (`pick_probe`).
     picks: Option<SharedPicks>,
     /// Volumes drawn beside the planet (`volumes_tour`), placed each frame.
@@ -325,6 +329,7 @@ impl Flight {
                 .and_then(|v| v.parse().ok()),
             output: output.to_path_buf(),
             in_flight: Default::default(),
+            render_cycles: 0,
             picks: None,
             extra: Vec::new(),
         }
@@ -361,9 +366,11 @@ impl Flight {
             near,
             40_000_000.0,
         );
+        let cycles = thread_cycles();
         self.renderer
             .render(&camera, &self.target.create_view(&Default::default()))
             .unwrap();
+        self.render_cycles = thread_cycles() - cycles;
         let recorded = Instant::now();
         let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = done.clone();
@@ -454,24 +461,7 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
         })
         .unwrap(),
     );
-    let mut ship = Planet::new(PlanetRecipe {
-        shape: helio_pass_voxel_planet::grid::Shape::Plane,
-        plane_size_m: 12.8,
-        voxel_size_m: 0.1,
-        terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat_at(1.2).source(seed),
-        ..Default::default()
-    })
-    .unwrap();
-    ship.apply(Brush {
-        center: [0.0, 2.4, 0.0],
-        radius: 1.2,
-        shape: BrushShape::Cube,
-        op: BrushOp::Add,
-        material: helio_pass_voxel_planet::terrain::material::PLANKS,
-        height: 0.0,
-    })
-    .unwrap();
-    let ship = Arc::new(ship);
+    let ship = ship(seed);
     let up = ground.normalize();
     let ahead = tangent(ground, heading).as_dvec3();
     let side = ahead.cross(up);
@@ -502,6 +492,8 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
     );
     let frames = (seconds * 60.0) as u32;
     let started = Instant::now();
+    // The graph's GPU time by pass, past the first 120 frames.
+    let mut passes: std::collections::BTreeMap<&'static str, (f64, u32)> = Default::default();
     for frame in 0..frames {
         let t = f64::from(frame) / 60.0;
         let [moon_at, ship_at] = place(t);
@@ -524,6 +516,15 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
             .filter_map(|p| p.gpu_ms)
             .map(f64::from)
             .sum();
+        if frame >= 120 {
+            for p in &snapshot.passes {
+                if let Some(ms) = p.gpu_ms {
+                    let entry = passes.entry(p.name).or_default();
+                    entry.0 += f64::from(ms);
+                    entry.1 += 1;
+                }
+            }
+        }
         csv.push_str(&format!(
             "{frame},{t:.3},{cpu:.3},{wait:.3},{gpu:.3},{voxel:.3}
 "
@@ -536,10 +537,149 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
         }
     }
     std::fs::write(flight.output.join("volumes_tour.csv"), csv).unwrap();
+    let mut by_pass: Vec<(&str, f64)> = passes
+        .iter()
+        .map(|(name, (sum, n))| (*name, sum / f64::from((*n).max(1))))
+        .collect();
+    by_pass.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!(
+        "VOLUMES tour gpu mean by pass: {}",
+        by_pass
+            .iter()
+            .filter(|p| p.1 >= 0.02)
+            .map(|(n, ms)| format!("{n} {ms:.2}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // The chunk pass's own stages over the last frames.
+    let timings = flight
+        .renderer
+        .find_pass_mut::<ChunkPass>()
+        .unwrap()
+        .take_timings();
+    let p50 = |f: fn(&helio_pass_voxel_planet::chunks::FrameTimings) -> f64| {
+        percentile(&timings.iter().map(f).collect::<Vec<_>>(), 0.5)
+    };
+    eprintln!(
+        "VOLUMES tour chunk stages p50: draw {:.3} shadows {:.3} (walks {:.3}) denoiser {:.3} occlusion {:.3}",
+        p50(|t| t.draw),
+        p50(|t| t.shadow),
+        p50(|t| t.fallbacks),
+        p50(|t| t.denoise),
+        p50(|t| t.occlusion)
+    );
     eprintln!(
         "VOLUMES tour: {frames} frames in {:.1} s",
         started.elapsed().as_secs_f64()
     );
+}
+
+/// The calling thread's CPU cycles so far (Windows `QueryThreadCycleTime`:
+/// the cycles it ran, not the time it waited or was descheduled by other
+/// processes); 0 elsewhere.
+fn thread_cycles() -> u64 {
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentThread() -> isize;
+            fn QueryThreadCycleTime(thread: isize, cycles: *mut u64) -> i32;
+        }
+        let mut cycles = 0u64;
+        // SAFETY: the pseudo-handle of the calling thread, and a u64 out.
+        unsafe { QueryThreadCycleTime(GetCurrentThread(), &mut cycles) };
+        cycles
+    }
+    #[cfg(not(windows))]
+    0
+}
+
+/// The tours' ship-sized block: a 12.8 m plane of 0.1 m voxels, its ground
+/// a slab 1.2 m thick, a cabin 2.4 m across on it.
+fn ship(seed: u64) -> Arc<Planet> {
+    let mut ship = Planet::new(PlanetRecipe {
+        shape: helio_pass_voxel_planet::grid::Shape::Plane,
+        plane_size_m: 12.8,
+        voxel_size_m: 0.1,
+        terrain: helio_pass_voxel_planet::layers::TerrainLayers::flat_at(1.2).source(seed),
+        ..Default::default()
+    })
+    .unwrap();
+    ship.apply(Brush {
+        center: [0.0, 2.4, 0.0],
+        radius: 1.2,
+        shape: BrushShape::Cube,
+        op: BrushOp::Add,
+        material: helio_pass_voxel_planet::terrain::material::PLANKS,
+        height: 0.0,
+    })
+    .unwrap();
+    Arc::new(ship)
+}
+
+/// `HELIO_VOXEL_FLIGHT_VOLUMES=hover`: the tour's block still, its underside
+/// 2.5 m over the ground 12 m ahead, across the sun (its shadow falls
+/// beside it), the eye 20 m off on its shadow's side looking back at it over
+/// the ground its shadow falls on (the sun ahead). Held
+/// `HELIO_VOXEL_FLIGHT_HOLD_SECONDS` (5) of frames, the last saved
+/// (`volumes_hover.png`), GPU times each frame (`volumes_hover.csv`).
+fn volumes_hover(flight: &mut Flight, ground: DVec3, seed: u64) {
+    let seconds: f64 = std::env::var("HELIO_VOXEL_FLIGHT_HOLD_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5.0);
+    let ship = ship(seed);
+    let up = ground.normalize();
+    let sun = flight.sun_at(ground).as_dvec3();
+    let level = (sun - up * sun.dot(up))
+        .try_normalize()
+        .unwrap_or_else(|| up.any_orthonormal_vector());
+    // Ahead across the sun.
+    let ahead = level.cross(up);
+    let under = flight
+        .planet
+        .surface_point(ground + ahead * 12.0, 0.0);
+    // The slab's underside in the block's frame.
+    let bottom = ship
+        .raycast_of(
+            DVec3::new(0.3, -50.0, 0.2),
+            DVec3::Y,
+            100.0,
+            helio_pass_voxel_planet::Matter::All,
+        )
+        .map_or(0.0, |h| h.distance - 50.0);
+    let at = VolumeTransform::new(
+        under + up * (2.5 - bottom),
+        glam::DQuat::from_rotation_arc(DVec3::Y, up),
+    );
+    flight.extra = vec![VoxelVolume::new(3, ship, at)];
+    let eye = under - level * 20.0 + up * 6.0;
+    let forward = ((under - level * 5.0) - eye).normalize().as_vec3();
+    let mut csv = String::from("frame,cpu_ms,wait_ms,gpu_ms,voxel_gpu_ms\n");
+    let frames = (seconds * 60.0) as u32;
+    for frame in 0..frames {
+        let (cpu, wait) = flight.draw(eye, forward);
+        let snapshot = flight.renderer.timing_snapshot();
+        let gpu: f64 = snapshot
+            .passes
+            .iter()
+            .filter_map(|p| p.gpu_ms)
+            .map(f64::from)
+            .sum();
+        let voxel: f64 = snapshot
+            .passes
+            .iter()
+            .filter(|p| p.name == "VoxelChunks")
+            .filter_map(|p| p.gpu_ms)
+            .map(f64::from)
+            .sum();
+        csv.push_str(&format!("{frame},{cpu:.3},{wait:.3},{gpu:.3},{voxel:.3}\n"));
+    }
+    let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+    flight.capture("volumes_hover");
+    std::fs::write(flight.output.join("volumes_hover.csv"), csv).unwrap();
+    let pass = flight.renderer.find_pass::<ChunkPass>().unwrap();
+    eprintln!("VOLUMES hover: {}", pass.diagnostics());
 }
 
 fn percentile(values: &[f64], p: f64) -> f64 {
@@ -1761,7 +1901,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     {
         world.take_counts();
     }
-    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms,grow_ms,chunk_slots,leaf_page_capacity
+    let mut csv = String::from("t,altitude_m,interval_ms,captured,coarse,worst_px,switches,switch_px,waiting,generated,fading,update_cpu_ms,results_ms,plan_ms,evict_ms,generate_ms,drawn_ms,table_ms,record_ms,wait_ms,pass_prepare_ms,pass_execute_ms,grow_ms,chunk_slots,leaf_page_capacity,worker_ms,events_ms,walk_ms,eviction_ms,visits,plan_age,planned,resident
 ");
     let (mut intervals, mut coarse, mut worst, mut switch_px) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
@@ -1772,8 +1912,20 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     let mut stage_gpu: Vec<[f64; 4]> = Vec::new();
     // The sun pages' planning and recording CPU, a frame.
     let mut pages_cpu_ms = Vec::new();
-    let mut pages_cpu_parts = [0.0f64; 6];
+    let mut pages_cpu_parts = [0.0f64; 5];
+    let mut planner_ms = 0.0;
+    // The render thread's CPU a frame (recording: `Renderer::render`), wall
+    // time and its own cycles (M).
+    let mut record_all = Vec::new();
+    let mut cycles_all = Vec::new();
     let mut worst_wanted = Vec::new();
+    // The residency worker's plans that arrived: its milliseconds (all,
+    // events, plans, evictions), nodes visited, their age when they
+    // arrived, and chunks resident.
+    let (mut worker_ms, mut events_ms, mut walk_ms, mut eviction_ms, mut plan_age) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let mut visits = Vec::new();
+    let mut resident = Vec::new();
     let mut samples = Vec::new();
     let mut slow = Vec::new();
     // The renderer's CPU and GPU by pass over the flight (summed ms, frames).
@@ -1809,6 +1961,21 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         .is_some()
         .then(|| 1.0 / fps.unwrap_or(60.0));
     let mut stepped = 0u32;
+    // `HELIO_VOXEL_STRESS_SCOPES`: the render thread's CPU scopes
+    // (`cpu_scope!`) every frame: their mean over the flight by depth under
+    // `render`, and each slow frame's (recording over
+    // `HELIO_VOXEL_STRESS_SLOW_MS`, 30) as a tree with what no scope covers.
+    let scopes = std::env::var_os("HELIO_VOXEL_STRESS_SCOPES").is_some();
+    let slow_ms: f64 = std::env::var("HELIO_VOXEL_STRESS_SLOW_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30.0);
+    if scopes {
+        profiling::enable_profiling();
+        profiling::clear_events();
+    }
+    let mut scope_sums: std::collections::BTreeMap<(u32, String), f64> = Default::default();
+    let mut scope_frames = 0u32;
     let mut frame_start = Instant::now();
     loop {
         if let Some(pace) = pace {
@@ -1887,6 +2054,55 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             );
         }
         let (record_ms, wait_ms) = flight.draw(eye, forward);
+        if scopes {
+            let events = profiling::collect_events();
+            profiling::clear_events();
+            if let Some(render) = events
+                .iter()
+                .filter(|e| e.name == "Helio::Renderer::render")
+                .max_by_key(|e| e.duration_ns)
+            {
+                let (from, to) = (render.start_ns, render.start_ns + render.duration_ns);
+                let mut tree: Vec<&profiling::ProfileEvent> = events
+                    .iter()
+                    .filter(|e| {
+                        e.thread_id == render.thread_id
+                            && e.start_ns >= from
+                            && e.start_ns + e.duration_ns <= to
+                    })
+                    .collect();
+                tree.sort_by_key(|e| (e.start_ns, std::cmp::Reverse(e.duration_ns)));
+                let ms = |ns: u64| ns as f64 * 1e-6;
+                scope_frames += 1;
+                for e in &tree {
+                    *scope_sums
+                        .entry((e.depth.saturating_sub(render.depth), e.name.clone()))
+                        .or_default() += ms(e.duration_ns);
+                }
+                if record_ms > slow_ms {
+                    // What the scopes right under render leave uncovered.
+                    let covered: u64 = tree
+                        .iter()
+                        .filter(|e| e.depth == render.depth + 1)
+                        .map(|e| e.duration_ns)
+                        .sum();
+                    eprintln!(
+                        "CHUNKSCOPES {mode}: slow frame at t {t:.2} s: render {:.2} ms, under no scope {:.2} ms",
+                        ms(render.duration_ns),
+                        ms(render.duration_ns.saturating_sub(covered))
+                    );
+                    for e in tree.iter().filter(|e| e.duration_ns >= 200_000) {
+                        eprintln!(
+                            "CHUNKSCOPES {mode}:   +{:7.2} {}{} {:.2} ms",
+                            ms(e.start_ns - from),
+                            "  ".repeat(e.depth.saturating_sub(render.depth) as usize),
+                            e.name,
+                            ms(e.duration_ns)
+                        );
+                    }
+                }
+            }
+        }
         let now = Instant::now();
         let interval = (now - last).as_secs_f64() * 1e3;
         last = now;
@@ -1932,6 +2148,7 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             for (sum, ms) in pages_cpu_parts.iter_mut().zip(p.cpu_parts) {
                 *sum += ms;
             }
+            planner_ms += p.planner_ms;
         }
         for timing in pass.take_timings() {
             draw_ms.push(timing.draw);
@@ -1949,11 +2166,22 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         shown_chunks += s.shown_chunks;
         emptied_chunks += s.emptied_chunks;
         unseen_evicted += s.evicted_unseen;
-        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2},{:.2},{},{}
-", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1], s.grow_ms, s.chunk_slots, s.leaf_pages.1);
+        csv += &format!("{t:.4},{altitude:.2},{interval:.2},{},{:.4},{:.3},{},{:.3},{},{},{},{:.2},{},{record_ms:.2},{wait_ms:.2},{:.2},{:.2},{:.2},{},{},{:.3},{:.3},{:.3},{:.3},{},{},{},{}
+", u8::from(captured), s.coarse_share, s.worst_px, s.switches, s.switch_px, s.requests, s.generated_chunks, s.fading_nodes, s.cpu_ms.iter().sum::<f64>(), s.cpu_ms.map(|v| format!("{v:.2}")).join(","), pass_cpu[0], pass_cpu[1], s.grow_ms, s.chunk_slots, s.leaf_pages.1, s.plan_ms, s.plan_parts[0], s.plan_parts[1], s.plan_parts[2], s.plan_visits, s.plan_age, u8::from(s.planned), s.resident_chunks);
+        if s.planned {
+            worker_ms.push(s.plan_ms);
+            events_ms.push(s.plan_parts[0]);
+            walk_ms.push(s.plan_parts[1]);
+            eviction_ms.push(s.plan_parts[2]);
+            visits.push(s.plan_visits as f64);
+            plan_age.push(s.plan_age as f64);
+        }
+        resident.push(s.resident_chunks as f64);
         // A frame after a capture waited for its readback.
         if !captured {
             intervals.push(interval);
+            record_all.push(record_ms);
+            cycles_all.push(flight.render_cycles as f64 * 1e-6);
             slow.push((interval, t, altitude));
         }
         // Counting builds: each frame's rays that left the cut or the box
@@ -2105,6 +2333,24 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         over(&switch_px, 1.5),
         over(&switch_px, 3.0),
     );
+    eprintln!(
+        "CHUNKSTRESS {mode}: residency plans {} | worker p50 {:.2} p95 {:.2} max {:.2} ms | events p50 {:.2} | walk p50 {:.2} p95 {:.2} | eviction p50 {:.3} p95 {:.3} | visits p50 {:.0} p95 {:.0} | age p50 {:.0} p95 {:.0} frames | resident p50 {:.0} max {:.0}",
+        worker_ms.len(),
+        percentile(&worker_ms, 0.5),
+        percentile(&worker_ms, 0.95),
+        max(&worker_ms),
+        percentile(&events_ms, 0.5),
+        percentile(&walk_ms, 0.5),
+        percentile(&walk_ms, 0.95),
+        percentile(&eviction_ms, 0.5),
+        percentile(&eviction_ms, 0.95),
+        percentile(&visits, 0.5),
+        percentile(&visits, 0.95),
+        percentile(&plan_age, 0.5),
+        percentile(&plan_age, 0.95),
+        percentile(&resident, 0.5),
+        max(&resident),
+    );
     // GPU generation per tile over the flight (its timings lag a few frames).
     let generation: f64 = generate_ms.iter().sum();
     let per_chunk = |ms: f64| ms * 1e3 / generated_chunks.max(1) as f64;
@@ -2125,14 +2371,31 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
         let mean =
             |i: usize| stage_gpu.iter().map(|s| s[i]).sum::<f64>() / stage_gpu.len().max(1) as f64;
         eprintln!(
-            "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages cpu mean by part (occluders, readback, invalidate, plan, record, upload) {}",
+            "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages render-thread cpu mean by part (occluders, readback, hand-over, record, upload) {}, planner thread {:.3}",
             mean(0),
             mean(1),
             mean(2),
             mean(3),
             occlusion_ms.iter().sum::<f64>() / occlusion_ms.len().max(1) as f64,
             walks_ms.iter().sum::<f64>() / walks_ms.len().max(1) as f64,
-            pages_cpu_parts.map(|v| format!("{:.3}", v / n)).join(" ")
+            pages_cpu_parts.map(|v| format!("{:.3}", v / n)).join(" "),
+            planner_ms / n
+        );
+        eprintln!(
+            "CHUNKSTRESS {mode}: render thread cpu (recording) mean {:.2} p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms",
+            record_all.iter().sum::<f64>() / record_all.len().max(1) as f64,
+            percentile(&record_all, 0.5),
+            percentile(&record_all, 0.95),
+            percentile(&record_all, 0.99),
+            max(&record_all)
+        );
+        eprintln!(
+            "CHUNKSTRESS {mode}: render thread cycles (M, its own: not descheduled time) mean {:.2} p50 {:.2} p95 {:.2} p99 {:.2} max {:.2}",
+            cycles_all.iter().sum::<f64>() / cycles_all.len().max(1) as f64,
+            percentile(&cycles_all, 0.5),
+            percentile(&cycles_all, 0.95),
+            percentile(&cycles_all, 0.99),
+            max(&cycles_all)
         );
     }
     eprintln!("CHUNKSTRESS {mode}: of {generated_chunks} generated chunks {shown_chunks} were drawn, {emptied_chunks} held nothing, {unseen_evicted} evicted never drawn; footprints computed {computed_footprints}, read from the pool {cached_footprints}");
@@ -2164,6 +2427,17 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+    if scope_frames > 0 {
+        let mut means: Vec<(&(u32, String), f64)> = scope_sums
+            .iter()
+            .map(|(k, sum)| (k, sum / f64::from(scope_frames)))
+            .filter(|(_, ms)| *ms >= 0.02)
+            .collect();
+        means.sort_by(|a, b| a.0 .0.cmp(&b.0 .0).then(b.1.total_cmp(&a.1)));
+        for ((depth, name), ms) in means {
+            eprintln!("CHUNKSCOPES {mode}: mean {}{name} {ms:.3} ms", "  ".repeat(*depth as usize));
+        }
     }
     for (interval, t, altitude) in slow.iter().take(5) {
         eprintln!("CHUNKSTRESS {mode}: slow frame {interval:.1} ms at t {t:.2} s, altitude {altitude:.0} m");
@@ -2493,7 +2767,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
         resident = stats.resident_chunks;
         if n % 60 == 0 {
             eprintln!(
-                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} seen {} slots {} leaves {}",
+                "CHUNKFLY {mode} t {t:5.1} alt {:9.1} coarse {:.3} requests {:5} generated {:3} drawn {:6} resident {:6} evicted {:4} reports {} slots {} leaves {}",
                 flight.planet.air_clearance(eye),
                 stats.coarse_share,
                 stats.requests,
@@ -2501,7 +2775,7 @@ fn chunk_fly(flight: &Flight, mode: &str, ground: DVec3, heading: f64) {
                 stats.drawn_chunks,
                 stats.resident_chunks,
                 stats.evicted_chunks,
-                stats.seen,
+                stats.reports,
                 stats.out_of_slots,
                 stats.out_of_leaves
             );
@@ -3015,8 +3289,12 @@ fn main() {
         return;
     }
     let mut flight = Flight::new(&output, size, quality, planet, preset);
-    if std::env::var_os("HELIO_VOXEL_FLIGHT_VOLUMES").is_some() {
-        volumes_tour(&mut flight, ground, heading, seed);
+    if let Ok(mode) = std::env::var("HELIO_VOXEL_FLIGHT_VOLUMES") {
+        if mode == "hover" {
+            volumes_hover(&mut flight, ground, seed);
+        } else {
+            volumes_tour(&mut flight, ground, heading, seed);
+        }
         return;
     }
     if let Ok(mode) = std::env::var("HELIO_VOXEL_CHUNKS_FLY") {

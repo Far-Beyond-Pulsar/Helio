@@ -69,6 +69,7 @@ helio-pass-vg-shade = { path = "../passes/3d/helio-pass-vg-shade" }
 
 [dev-dependencies]
 env_logger = { workspace = true }
+profiling = { workspace = true }
 pollster = { workspace = true }
 winit = { workspace = true }
 helio-vg-stream = { path = "../helio-vg-stream" }

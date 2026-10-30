@@ -985,7 +985,7 @@ impl RenderPass for CloudTracePass {
             history: u32::from(self.history),
             _pad: [0; 2],
         };
-        helio_core::upload::write_buffer(ctx.queue, &self.params, 0, bytemuck::bytes_of(&params));
+        ctx.write_buffer(&self.params, 0, bytemuck::bytes_of(&params));
 
         let views = vec![
             ctx.depth.clone(),

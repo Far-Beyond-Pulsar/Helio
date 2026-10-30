@@ -218,7 +218,7 @@ impl RenderPass for BufferViewPass {
             }));
             self.bind_group_key = Some(key);
         }
-        ctx.queue.write_buffer(
+        ctx.write_buffer(
             &self.view_buf,
             0,
             &[self.mode.to_le_bytes(), [0; 4], [0; 4], [0; 4]].concat(),

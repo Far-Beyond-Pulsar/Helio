@@ -311,9 +311,19 @@ pub struct PassContext<'a> {
     /// available to passes that use the reflected bind groups to construct a
     /// pipeline without duplicating layout or fixed-function declarations.
     pub reflected_pipeline: Option<&'a crate::shader::ReflectedPipeline>,
+
+    /// The graph's uploads ([`Self::write_buffer`]).
+    pub(crate) uploads: &'a crate::upload::FrameUploads,
 }
 
 impl<'a> PassContext<'a> {
+    /// Upload bytes into a GPU buffer, as `Queue::write_buffer` (before the
+    /// frame's work): with the frame's other writes, in one upload
+    /// (`FrameUploads::defer`).
+    pub fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+        self.uploads.defer(buffer, offset, data);
+    }
+
     /// Execute a retained secondary view graph immediately before this pass
     /// continues recording its primary-view work. Each key owns one graph in
     /// the parent executor, so pass state, pipelines, and graph resources
@@ -348,6 +358,12 @@ impl<'a> PassContext<'a> {
             graph.lock(width.max(1), height.max(1));
         } else if size != [width.max(1), height.max(1)] {
             graph.set_render_size(width.max(1), height.max(1));
+        }
+        // This graph's writes so far, ahead of the child's work (as queue
+        // writes would be: they go out with the next submission, which is
+        // the child's).
+        if let Some(uploads) = self.uploads.record_deferred(self.device) {
+            self.queue.submit([uploads]);
         }
         let mut registry = crate::ResourceRegistry::empty();
         seed_registry(&mut registry);
@@ -788,12 +804,21 @@ pub struct PrepareContext<'a> {
     /// wgpu maintains the device on every `Queue::submit`, which already
     /// delivers map callbacks.
     pub owns_device: bool,
+
+    /// The graph's uploads ([`Self::write_buffer`]); none outside a graph
+    /// (writes then go to the queue).
+    pub uploads: Option<&'a crate::upload::FrameUploads>,
 }
 
 impl<'a> PrepareContext<'a> {
-    /// Upload bytes into a GPU buffer while participating in Helio's debug upload accounting.
+    /// Upload bytes into a GPU buffer, as `Queue::write_buffer` (before the
+    /// frame's work): with the frame's other writes, in one upload
+    /// (`FrameUploads::defer`).
     pub fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
-        crate::upload::write_buffer(self.queue, buffer, offset, data);
+        match self.uploads {
+            Some(uploads) => uploads.defer(buffer, offset, data),
+            None => crate::upload::write_buffer(self.queue, buffer, offset, data),
+        }
     }
 
     /// Upload bytes into a GPU texture while participating in Helio's debug upload accounting.
