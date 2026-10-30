@@ -33,16 +33,14 @@ fn water_sun_radiance(sun_dir: vec3f) -> vec3f {
 }
 
 /// The sky's mean radiance over the whole sphere: what Ultra-Water reads from
-/// the lowest mip of its sky cube to light the water column. The zenith alone
-/// is far too bright at a low sun (the dome is dark overhead and bright only
-/// near the horizon), so average the dome (zenith plus a ring of horizon
-/// samples round the sun) and halve it for the unlit lower hemisphere.
+/// the lowest mip of its sky cube to light the water column. The sky pass
+/// already integrates it: its irradiance SH, for a surface facing up, is the
+/// cosine-weighted upper-hemisphere radiance in scene units, and the lower
+/// hemisphere is unlit, so the sphere mean is half of it. (Averaging a few
+/// samples by hand over-weighted the sun's aureole several times over.)
 fn water_sky_ambient(sun_dir: vec3f) -> vec3f {
-    let zenith = sky_color(vec3f(0.0, 1.0, 0.0), sun_dir);
-    let h = normalize(vec2f(sun_dir.x, sun_dir.z) + vec2f(1e-4, 0.0));
-    let ring = (sky_color(normalize(vec3f(h.x, 0.1, h.y)), sun_dir)
-        + sky_color(normalize(vec3f(-h.x, 0.1, -h.y)), sun_dir)
-        + sky_color(normalize(vec3f(-h.y, 0.1, h.x)), sun_dir)
-        + sky_color(normalize(vec3f(h.y, 0.1, -h.x)), sun_dir)) * 0.25;
-    return 0.5 * (0.3 * zenith + 0.7 * ring);
+    if atmosphere.planet.w >= 0.5 {
+        return 0.5 * atmosphere_sky_irradiance(atmosphere, vec3f(0.0, 1.0, 0.0));
+    }
+    return 0.5 * sky_color(vec3f(0.0, 1.0, 0.0), sun_dir);
 }

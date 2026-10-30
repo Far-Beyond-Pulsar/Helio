@@ -61,6 +61,10 @@ struct Showcase {
     planet: Arc<Planet>,
     scene: pulsar_scenedb::SceneDb,
     sun_entity: pulsar_scenedb::Entity,
+    /// The water volume and its row: its `sun_direction` is the scene's sun, which
+    /// the engine's environment join writes and this demo must keep current.
+    water_entity: pulsar_scenedb::Entity,
+    water_row: GpuWaterVolume,
     sun_preset: String,
     target: wgpu::Texture,
     target_view: wgpu::TextureView,
@@ -269,6 +273,12 @@ impl Showcase {
         // or underwater-window distortion, or the foam tint. Keep Helio's
         // independent caustics, refraction and Fresnel defaults.
         water.wind_params = [0.939_692_6, 0.342_020_15, 9.0, 1.0];
+        // The row's sun is the scene's sun (`default_ocean`'s is a fixed noon
+        // sun the sky never agrees with): caustics, shafts and the surface
+        // light the water from it.
+        let (coast_azimuth, coast_elevation) = preset_sun("coast");
+        let coast_sun = sun_direction(coast_azimuth, coast_elevation);
+        water.sun_direction = [coast_sun.x, coast_sun.y, coast_sun.z, 1.0];
         scene
             .world
             .insert(water_entity, WaterVolumeComponent::from(water));
@@ -302,7 +312,10 @@ impl Showcase {
         renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
         post.tonemap_operator = helio::TonemapOperator::AgxPunchy;
-        post.tonemap_exposure = 2.0;
+        // Metered like Ultra-Water's auto-exposure, so a dark sea under a bright
+        // sunset sky is exposed as a whole instead of by a fixed multiplier.
+        post.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
+        post.tonemap_exposure = 1.0;
         post.color_contrast = [1.06; 3];
         let camera = scene.world.spawn();
         scene.world.insert(
@@ -434,6 +447,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             planet,
             scene,
             sun_entity,
+            water_entity,
+            water_row: water,
             sun_preset: "coast".to_owned(),
             target,
             target_view,
@@ -451,6 +466,12 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             self.scene.world.insert(
                 self.sun_entity,
                 helio_pass_forward_lit::LightComponent::from(directional_sun(azimuth, elevation)),
+            );
+            let sun = sun_direction(azimuth, elevation);
+            self.water_row.sun_direction = [sun.x, sun.y, sun.z, 1.0];
+            self.scene.world.insert(
+                self.water_entity,
+                WaterVolumeComponent::from(self.water_row),
             );
             self.scene.world.flush_gpu_mirror(&self.queue);
             self.sun_preset = preset.to_owned();
@@ -736,10 +757,10 @@ impl AppState {
 
 fn preset_view(preset: &str) -> (DVec3, Vec3) {
     match preset {
-        // Lagoon view: offshore and low (2.5 m, like Ultra-Water's camera) so the sea is seen at grazing angles; the island
+        // Lagoon view: offshore and low (5 m, Ultra-Water's Golden hour camera) so the sea is seen at grazing angles; the island
         // silhouette, with a level sightline that leaves animated sea in front.
         "coast" => (
-            DVec3::new(-1_060.7, 2.5, -1_060.7),
+            DVec3::new(-1_060.7, 5.0, -1_060.7),
             Vec3::new(0.707, -0.03, 0.707),
         ),
         // Breakers source framing: place the camera 35 m offshore and 40 m
