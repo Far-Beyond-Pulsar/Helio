@@ -356,6 +356,9 @@ pub struct WaterSimPass {
     pub(crate) caustics_bgs: [Option<wgpu::BindGroup>; 3],
 
     pub(crate) _tint_scratch_tex: wgpu::Texture,
+    /// The surface's own depth (see `pipeline::water_depth_target`).
+    pub(crate) _water_depth_tex: wgpu::Texture,
+    pub(crate) water_depth_view: wgpu::TextureView,
     pub(crate) tint_scratch_view: wgpu::TextureView,
     /// Samples `tint_scratch_view` for the blit back; rebuilt with it on resize.
     pub(crate) tint_blit_bg: Option<wgpu::BindGroup>,
@@ -772,6 +775,10 @@ impl WaterSimPass {
             pipeline::tint_scratch(device, tint_w, tint_h, self.surface_format);
         self.tint_scratch_view = tint_scratch_view;
         self._tint_scratch_tex = tint_scratch_tex;
+        let (water_depth_tex, water_depth_view) =
+            pipeline::water_depth_target(device, tint_w, tint_h);
+        self._water_depth_tex = water_depth_tex;
+        self.water_depth_view = water_depth_view;
         self.tint_blit_bg = None;
         let (shafts_tex, shafts_view) = pipeline::shafts_scratch(
             device,
@@ -2117,7 +2124,14 @@ impl RenderPass for WaterSimPass {
                     let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Surface"),
                         color_attachments: &color_attachments,
-                        depth_stencil_attachment: Some(depth_attachment.clone()),
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.water_depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR),
+                                store: wgpu::StoreOp::Discard,
+                            }),
+                            stencil_ops: None,
+                        }),
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,

@@ -172,7 +172,10 @@ impl Showcase {
         // A near-ground atmosphere centred so the plane's y=0 surface lies at
         // its ground radius; Earth's scattering and the same authored haze
         // recipe used by voxel_flight provide the air and horizon depth.
-        let world_radius = 10_000.0;
+        // Earth's real radius: the air keeps its 100 km thickness around any
+        // planet, so a smaller one shortens the sun's path at a low sun to a
+        // fraction of the real column and the sunset never reddens.
+        let world_radius = 6_360_000.0;
         let atmosphere = scene.world.spawn();
         scene.world.insert(
             atmosphere,

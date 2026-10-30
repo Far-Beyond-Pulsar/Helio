@@ -162,6 +162,34 @@ pub(crate) fn tint_scratch(
     (texture, view)
 }
 
+/// The water surface's own depth buffer. The scene's depth holds only opaque
+/// geometry, and the surface is drawn without writing it, so overlapping
+/// swells (a near crest over a far one at a grazing view) painted in draw
+/// order. Water tests and writes this one; occlusion by the opaque scene is
+/// the shader's own depth-copy test.
+pub(crate) fn water_depth_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Water Surface Depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
 pub(crate) fn shafts_scratch(
     device: &wgpu::Device,
     width: u32,
@@ -948,6 +976,7 @@ impl WaterSimPass {
         );
 
         let (tint_scratch_tex, tint_scratch_view) = tint_scratch(device, 1, 1, surface_format);
+        let (water_depth_tex, water_depth_view) = water_depth_target(device, 1, 1);
         let (shafts_scratch_tex, shafts_scratch_view) = shafts_scratch(device, 1, 1);
 
         let underwater_tint_bgl =
@@ -1446,10 +1475,11 @@ impl WaterSimPass {
                     cull_mode: None,
                     ..Default::default()
                 },
+                // Writes the surface's own depth so near swells hide far ones.
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(helio_core::depth::NEARER_EQUAL),
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(helio_core::depth::NEARER),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -1908,6 +1938,8 @@ impl WaterSimPass {
             underwater_tint_bg: Default::default(),
             _tint_scratch_tex: tint_scratch_tex,
             tint_scratch_view,
+            _water_depth_tex: water_depth_tex,
+            water_depth_view,
             tint_blit_bg: None,
             underwater_tint_bgl,
             underwater_tint_pipeline,
