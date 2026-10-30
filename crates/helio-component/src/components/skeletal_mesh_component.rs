@@ -149,6 +149,57 @@ pub enum RootMotionModeSetting {
     RootMotionFromMontagesOnly,
 }
 
+/// Who owns root motion when the component is networked.
+///
+/// Root motion is movement, and movement has one authority. The contract:
+/// - `Standalone` (the default): this process runs the animation and moves the owner.
+/// - `Authority` (the server): runs the animation, moves the owner, and logs every move so a
+///   correction for an owning client can be derived from the same data.
+/// - `AutonomousProxy` (the owning client): runs the animation and moves the owner at once
+///   (prediction) and logs every move with its sequence number for the server to verify.
+/// - `SimulatedProxy` (every other client): the animation advances so the pose looks right,
+///   but the owner is never moved by it; its transform comes from replication.
+///
+/// Montage-owned root motion follows the same role; each logged move carries the Montage part
+/// and the Montage playback it came from, so the server can start the same Montage at the
+/// same position. Delivery of the moves between processes is a networking-layer concern (see
+/// `.agents/ANIMATION.md`, Networked root motion).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
+pub enum RootMotionAuthoritySetting {
+    #[default]
+    Standalone,
+    Authority,
+    AutonomousProxy,
+    SimulatedProxy,
+}
+
+impl RootMotionAuthoritySetting {
+    /// Whether the animation moves the owner in this process.
+    pub fn moves_owner(self) -> bool {
+        !matches!(self, Self::SimulatedProxy)
+    }
+
+    /// Whether moves are logged for exchange with the other side.
+    pub fn logs_moves(self) -> bool {
+        matches!(self, Self::Authority | Self::AutonomousProxy)
+    }
+}
+
+/// One advance's root motion as the authority and the owning client exchange it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootMotionMove {
+    /// Counts up from 1 per component; a correction names the last move it accepts.
+    pub sequence: u64,
+    /// Animation time the advance ran, after the playback rate.
+    pub delta_seconds: f32,
+    /// The owner move after the component's root-motion policy (what was applied or would be).
+    pub delta: RootMotion,
+    /// The part of it that came from Montages.
+    pub montage_delta: RootMotion,
+    /// The Montage playing with root motion at the end of the advance, with its position.
+    pub montage: Option<(String, f32)>,
+}
+
 /// How much of the extracted rotation turns the owner.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Reflectable)]
 pub enum RootMotionRotationSetting {
@@ -230,6 +281,10 @@ pub struct SkeletalMeshComponent {
     #[serde(default)]
     #[property]
     pub root_motion_vertical: bool,
+    /// Who owns root motion when networked; see [`RootMotionAuthoritySetting`].
+    #[serde(default)]
+    #[property]
+    pub root_motion_authority: RootMotionAuthoritySetting,
 
     #[serde(skip)]
     pub mesh_asset_id: AssetId,
@@ -273,6 +328,11 @@ pub struct SkeletalMeshComponent {
     /// Root motion of the latest advance the owner has not been moved by yet.
     #[serde(skip)]
     pending_root_motion: Option<RootMotion>,
+    /// Moves logged for exchange, oldest first (only for roles that log).
+    #[serde(skip)]
+    root_motion_moves: Vec<RootMotionMove>,
+    #[serde(skip)]
+    root_motion_sequence: u64,
     /// Bones the physics rig owns right now: mesh-space matrices that replace the
     /// animated bone in the published palette (the animation keeps running).
     #[serde(skip)]
@@ -413,6 +473,7 @@ impl SkeletalMeshComponent {
         self.notify_playback.end_all(EndReason::Teardown);
         self.notify_playback.push_lifecycle_events(&cancelled);
         self.pending_root_motion = None;
+        self.root_motion_moves.clear();
         self.physics_bone_overrides.clear();
         self.physics_pose = None;
         self.physics_blend_weight = None;
@@ -759,6 +820,11 @@ impl SkeletalMeshComponent {
 
     /// The owner move the latest advance asks for, once: the engine applies it in
     /// the animation phase. `None` when there is nothing to apply.
+    /// The moves logged since the last call, oldest first. Empty for roles that do not log.
+    pub fn drain_root_motion_moves(&mut self) -> Vec<RootMotionMove> {
+        std::mem::take(&mut self.root_motion_moves)
+    }
+
     pub(crate) fn take_root_motion(&mut self) -> Option<RootMotion> {
         self.pending_root_motion.take().filter(|delta| !delta.is_identity())
     }
@@ -1800,3 +1866,7 @@ mod phase5_tests;
 #[cfg(test)]
 #[path = "skeletal_state_event_tests.rs"]
 mod state_event_tests;
+
+#[cfg(test)]
+#[path = "skeletal_net_tests.rs"]
+mod net_tests;

@@ -14,7 +14,7 @@ use skeletal_assets::{
     },
 };
 
-use super::SkeletalMeshComponent;
+use super::{RootMotionMove, SkeletalMeshComponent};
 use pulsar_events::{
     EventCategory, EventHub, entity_channel,
     gamma::{DynEvent, DynValue, EventDescriptor, FieldType},
@@ -1071,7 +1071,20 @@ impl SkeletalMeshComponent {
         let events = std::mem::take(&mut instance.report.montage_events);
         self.anim.montage_events.extend(events.iter().cloned());
         let collected = self.notify_playback.collect_report(&instance.report, &events, self.loaded_graph.as_ref().map_or("", |g| g.id.as_str()));
-        self.pending_root_motion = Some(policy.delta(&instance.report.root_motion, &instance.report.montage_root_motion));
+        let delta = policy.delta(&instance.report.root_motion, &instance.report.montage_root_motion);
+        if self.root_motion_authority.logs_moves() {
+            let montage_delta = policy.delta(&instance.report.montage_root_motion, &instance.report.montage_root_motion);
+            let montage = instance
+                .montages
+                .instances()
+                .iter()
+                .find(|m| !matches!(m.montage.root_motion, skeletal_assets::montage::MontageRootMotion::Ignore))
+                .map(|m| (m.montage.id.clone(), m.position as f32));
+            self.root_motion_sequence += 1;
+            self.root_motion_moves.push(RootMotionMove { sequence: self.root_motion_sequence, delta_seconds: instance.report.advanced, delta: delta.clone(), montage_delta, montage });
+        }
+        // a simulated proxy's owner is moved by replication, never by its animation
+        self.pending_root_motion = self.root_motion_authority.moves_owner().then_some(delta);
         if let (Some(position), Some(sequence)) = (position, self.loaded_animation.as_ref()) {
             let duration = sequence.clip.duration as f64;
             self.elapsed_seconds = if looping && duration > 0.0 { position.rem_euclid(duration) as f32 } else { position.clamp(0.0, duration) as f32 };
