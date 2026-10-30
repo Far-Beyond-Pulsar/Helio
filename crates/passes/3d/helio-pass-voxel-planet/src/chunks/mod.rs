@@ -970,6 +970,27 @@ impl Eye {
         (across.length() <= self.reach).then(|| across + axes[2] * d[2])
     }
 
+    /// How far the eye may move before measuring the tile switches between
+    /// [`Self::offset`]'s linear frame and its centre (its nearest point
+    /// across the face meets the frame's reach): infinite where it cannot
+    /// (planes; faces the eye is not over, whose tiles near it lie past the
+    /// reach). Layers do not matter: the reach is across the face.
+    fn reach_margin(&self, tile: Footprint, _range: (i32, i32)) -> f64 {
+        let Some((e, axes)) = self.faces[tile.face as usize].filter(|_| self.reach.is_finite())
+        else {
+            return f64::INFINITY;
+        };
+        let s = f64::from(1u32 << tile.level);
+        let (i0, j0) = (
+            f64::from(tile.cx * CHUNK) * s,
+            f64::from(tile.cy * CHUNK) * s,
+        );
+        let w = f64::from(CHUNK) * s;
+        let across = axes[0] * (e[0].clamp(i0, i0 + w) - e[0])
+            + axes[1] * (e[1].clamp(j0, j0 + w) - e[1]);
+        (across.length() - self.reach).abs()
+    }
+
     /// From the eye towards the tile's columns between layers `range`:
     /// [`Self::offset`] near it, else to their centre.
     fn toward(&self, grid: &Grid, tile: Footprint, range: (i32, i32)) -> DVec3 {
@@ -1827,9 +1848,14 @@ pub struct UpdateStats {
     /// Drawn Mixed nodes in view coarser than wanted, as a share of them.
     pub coarse_share: f64,
     /// Frames since the eye the plan in use was made for, and the worker's
-    /// milliseconds on it.
+    /// milliseconds on it (and of those its events, plans and evictions:
+    /// `residency::Plans::parts`) and the nodes it visited; whether it
+    /// arrived this frame.
     pub plan_age: u64,
     pub plan_ms: f64,
+    pub plan_parts: [f64; 3],
+    pub plan_visits: usize,
+    pub planned: bool,
     /// [`residency::Plan::worst_px`] of the latest plan, and its node;
     /// [`residency::Plan::worst_wanted`].
     pub worst_px: f64,
@@ -2200,7 +2226,7 @@ pub struct ChunkWorld {
     /// ray reports they saw), the frame they were made for and the worker's
     /// milliseconds on them.
     planned: Option<(u64, u64)>,
-    plan_made: (u64, f64),
+    plan_made: (u64, f64, [f64; 3], usize),
     /// Footprints whose columns are on the GPU, and this update's frame.
     frame_now: u64,
     /// Generated nodes with a chunk, and their layers by footprint.
@@ -3406,7 +3432,7 @@ impl ChunkWorld {
             worker: residency::Worker::spawn(),
             gen_turn: 0,
             planned: None,
-            plan_made: (0, 0.0),
+            plan_made: (0, 0.0, [0.0; 3], 0),
             frame_now: 0,
             nodes: Default::default(),
             footprint_nodes: Default::default(),
@@ -4648,7 +4674,8 @@ impl ChunkWorld {
         let mut evicted = Vec::new();
         if let Some(plans) = self.worker.poll() {
             self.planned = Some((plans.events_seen, plans.reports_seen));
-            self.plan_made = (plans.frame, plans.ms);
+            self.plan_made = (plans.frame, plans.ms, plans.parts, plans.visits);
+            stats.planned = true;
             for planned in plans.volumes {
                 // A volume removed since its plan was made: nothing of it.
                 let Some(vol) = self.volumes[usize::from(planned.volume)].as_mut() else {
@@ -4667,6 +4694,8 @@ impl ChunkWorld {
         removed.append(&mut self.removed_drawn);
         stats.plan_age = frame.saturating_sub(self.plan_made.0);
         stats.plan_ms = self.plan_made.1;
+        stats.plan_parts = self.plan_made.2;
+        stats.plan_visits = self.plan_made.3;
         let mut packs: Vec<(NodeKey, u32, i32, Option<Quarters>, Option<u64>)> = Vec::new();
         for key in evicted {
             let Some(mut vol) = self.take_volume(key.volume) else {
