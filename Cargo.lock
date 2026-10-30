@@ -2499,6 +2499,7 @@ dependencies = [
  "helio-pass-indirect-dispatch",
  "helio-pass-object-batch",
  "helio-pass-occlusion-cull",
+ "helio-pass-sky",
  "helio-pass-voxel-planet",
  "pollster 0.4.0",
  "pulsar_reflection",

@@ -12,6 +12,7 @@ pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-hiz = { workspace = true }
+helio-pass-sky = { workspace = true }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-object-batch = { workspace = true }
 helio-pass-indirect-dispatch = { workspace = true }

@@ -1,5 +1,7 @@
 //!use helio_prelude
 //!use water_shore_surface
+//!use atmosphere
+//!use water_sky
 //
 // Underwater participating medium.
 //
@@ -56,6 +58,12 @@ struct WaterVolume {
 struct OceanPhase { patches: array<vec4f, 4> }
 @group(0) @binding(10) var<uniform> ocean_phase: OceanPhase;
 @group(0) @binding(11) var shafts_tex: texture_2d<f32>;
+const UNDER_SCATTERING: f32 = 0.03;  // UnderwaterPass params.scattering (1/m)
+@group(0) @binding(20) var<uniform> atmosphere: AtmosphereFrame;
+@group(0) @binding(21) var sky_view_lut: texture_2d<f32>;
+fn water_sky_lut(uv: vec2f) -> vec3f {
+    return textureSampleLevel(sky_view_lut, scene_samp, uv, 0.0).rgb;
+}
 
 /// Vertical distance over which entering the water ramps in, in metres. Without
 /// this the effect switches on the instant the camera crosses the plane, which
@@ -273,24 +281,26 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     }
 
     // ── Beer-Lambert toward the in-scattered medium colour ───────────────────
+    // Ultra-Water's UnderwaterPass, as written: extinction plus a 0.03 /m
+    // scattering coefficient, towards the surface underside's deep-water
+    // colour (the same `water_sky` helpers the surface uses), darker with the
+    // camera's depth and brighter looking up towards the light.
     let extinction = max(vol.extinction.rgb, vec3f(1e-4));
-    let transmit   = exp(-extinction * dist);
+    let sigma_t    = extinction + vec3f(UNDER_SCATTERING);
+    let transmit   = exp(-sigma_t * dist);
 
-    let phase    = helio_hg_phase(dot(ray_dir, normalize(vol.sun_direction.xyz)), 0.35)
-                 * 4.0 * HELIO_PI;
-    let inscatter = max(vol.water_color.rgb, vec3f(0.02, 0.10, 0.28))
-                  * clamp(phase, 0.4, 2.0);
+    let sun_dir  = normalize(vol.sun_direction.xyz);
+    let sun_rad  = water_sun_radiance(sun_dir);
+    let inscatter = vol.water_color.rgb
+        * (water_sky_ambient(sun_dir) + sun_rad * max(sun_dir.y, 0.0))
+        * exp(-extinction * cam_depth * 0.5)
+        * mix(0.55, 1.35, ray_dir.y * 0.5 + 0.5);
 
     var color = lit * transmit + inscatter * (1.0 - transmit);
 
     // ── God rays ─────────────────────────────────────────────────────────────
-    color += inscatter * upsample_shafts(uv_g, depth, dist);
-
-    // ── Vignette ─────────────────────────────────────────────────────────────
-    let d        = in.uv - 0.5;
-    let vignette = 1.0 - dot(d, d) * 3.2;
-    let vig_str  = clamp(cam_depth * 0.06, 0.0, 0.45);
-    color *= mix(1.0, max(vignette, 0.0), vig_str);
+    // col += sunColor * shafts * (scattering * shaftStrength), strength 2.
+    color += sun_rad * upsample_shafts(uv_g, depth, dist) * (UNDER_SCATTERING * 2.0);
 
     // Ramp the whole effect in across the waterline.
     return vec4f(mix(scene_raw.rgb, color, submersion), 1.0);

@@ -157,6 +157,8 @@ impl WaterSurfaceQueries {
             &[
                 helio_pass_hiz::HIZ_SNIPPET,
                 crate::pipeline::WATER_SHORE_SNIPPET,
+                helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
+                crate::pipeline::WATER_SKY_SNIPPET,
                 helio_core::wgsl_snippet!("//!use water_query", "../shaders/water_query.wgsl"),
             ],
         );

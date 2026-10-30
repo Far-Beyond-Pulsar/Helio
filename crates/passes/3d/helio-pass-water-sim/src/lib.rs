@@ -286,6 +286,11 @@ pub struct WaterSimPass {
     pub(crate) caustics_mip_pipeline: wgpu::RenderPipeline,
 
     pub(crate) caustics_sampler: wgpu::Sampler,
+    /// Zeroed atmosphere frame / sky table, bound until a sky publishes.
+    pub(crate) fallback_atmosphere: wgpu::Buffer,
+    pub(crate) fallback_sky_table: wgpu::Buffer,
+    pub(crate) _fallback_sky_view_tex: wgpu::Texture,
+    pub(crate) fallback_sky_view: wgpu::TextureView,
 
     /// Startup-baked, tileable RGBA foam material and its mip chain.
     pub(crate) _foam_texture: wgpu::Texture,
@@ -864,6 +869,10 @@ impl RenderPass for WaterSimPass {
             // Min-reduced depth pyramid, marched for water reflections. Built
             // by HiZBuildPass from `depth` alone, so it is available here.
             "hiz_nearest",
+            // The sky the sea reflects and scatters.
+            helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE,
+            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
         ]
     }
     fn writes(&self) -> &'static [&'static str] {
@@ -1923,6 +1932,26 @@ impl RenderPass for WaterSimPass {
                     }
                 };
 
+                let atmosphere_buf = ctx
+                    .registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
+                        helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+                    ))
+                    .unwrap_or(&self.fallback_atmosphere);
+                let sky_table_buf = ctx
+                    .registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
+                        helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE,
+                    ))
+                    .unwrap_or(&self.fallback_sky_table);
+
+                let sky_view_tex = ctx
+                    .registry
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                        helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
+                    ))
+                    .unwrap_or(&self.fallback_sky_view);
+
                 // Rebuilt whenever anything it binds changes.
                 let render_bg = self
                     .render_bg
@@ -2047,6 +2076,18 @@ impl RenderPass for WaterSimPass {
                                     resource: wgpu::BindingResource::Sampler(
                                         &self.caustics_sampler,
                                     ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 25,
+                                    resource: atmosphere_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 26,
+                                    resource: sky_table_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 27,
+                                    resource: wgpu::BindingResource::TextureView(sky_view_tex),
                                 },
                             ],
                         },
@@ -2325,6 +2366,19 @@ impl RenderPass for WaterSimPass {
                     shafts_pass.draw(0..3, 0..1);
                     drop(shafts_pass);
 
+                    let tint_atmosphere = ctx
+                        .registry
+                        .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
+                            helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+                        ))
+                        .unwrap_or(&self.fallback_atmosphere);
+                    let tint_sky_view = ctx
+                        .registry
+                        .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
+                        ))
+                        .unwrap_or(&self.fallback_sky_view);
+
                     // Rebuilt whenever anything it binds changes.
                     let tint_bg = self
                         .underwater_tint_bg
@@ -2404,6 +2458,16 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 16,
                                         resource: self.shore_params.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 20,
+                                        resource: tint_atmosphere.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 21,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            tint_sky_view,
+                                        ),
                                     },
                                 ],
                             },

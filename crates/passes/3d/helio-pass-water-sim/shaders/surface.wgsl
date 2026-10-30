@@ -1,6 +1,8 @@
 //!use helio_prelude
 //!use water_shore_surface
 //!use helio_hiz
+//!use atmosphere
+//!use water_sky
 //!use water_query
 //
 // Water surface — above-water and underwater views.
@@ -67,6 +69,12 @@ struct OceanPhase { patches: array<vec4f, 4> }
 @group(0) @binding(18) var foam_material_samp: sampler;
 @group(0) @binding(19) var<storage, read> reflection_cameras: array<Camera, 1>;
 @group(0) @binding(20) var planar_reflection_tex: texture_2d<f32>;
+@group(0) @binding(25) var<uniform> atmosphere: AtmosphereFrame;
+@group(0) @binding(26) var<uniform> atmosphere_sky_table: array<vec4<f32>, 2304>;
+@group(0) @binding(27) var sky_view_lut: texture_2d<f32>;
+fn water_sky_lut(uv: vec2f) -> vec3f {
+    return textureSampleLevel(sky_view_lut, shared_samp, uv, 0.0).rgb;
+}
 @group(0) @binding(23) var caustics_deep_tex: texture_2d<f32>;
 @group(0) @binding(24) var caustics_samp: sampler;
 
@@ -396,7 +404,7 @@ fn water_sun_specular(
         let glint_strength = 0.6 * smoothstep(4.0, 30.0, camera_distance);
         specular *= mix(1.0, multiplier, glint_strength);
     }
-    return specular;
+    return specular * water_sun_radiance(light_dir);
 }
 
 /// Light scattered toward the eye by the medium itself.
@@ -408,8 +416,8 @@ fn water_inscatter(view_dir: vec3f, sun_dir: vec3f, vol: WaterVolume) -> vec3f {
     // Ultra-Water weights the medium colour by ambient sky radiance and direct
     // sunlight. Keep its authored clear-water scatter values; the demo's
     // directional light carries intensity 3 and a warm tint.
-    let ambient = sky_color(vec3f(0.0, 1.0, 0.0), sun_dir);
-    let sun_radiance = vec3f(3.0, 2.82, 2.46);
+    let ambient = water_sky_ambient(sun_dir);
+    let sun_radiance = water_sun_radiance(sun_dir);
     let sun_phase = clamp(helio_hg_phase(dot(view_dir, sun_dir), 0.35)
         * 4.0 * HELIO_PI, 0.4, 2.0);
     let direct = sun_radiance * (0.3 + 0.7 * sun_phase) * max(sun_dir.y, 0.0);
@@ -665,15 +673,24 @@ fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume, above_w
     return result;
 }
 
-// ── Sky ──────────────────────────────────────────────────────────────────────
-
-fn sky_color(ray: vec3f, light_dir: vec3f) -> vec3f {
-    let up      = clamp(ray.y, 0.0, 1.0);
-    let horizon = vec3f(0.80, 0.90, 1.00);
-    let zenith  = vec3f(0.10, 0.30, 0.80);
-    let sky     = mix(horizon, zenith, up * up);
-    let spec    = pow(max(0.0, dot(normalize(light_dir), ray)), 5000.0);
-    return sky + vec3f(spec) * vec3f(10.0, 8.0, 6.0);
+/// the ray leaves the screen or lands on opaque geometry.
+fn sky_from_screen(ray: vec3f) -> vec4f {
+    let dir  = normalize(vec3f(ray.x, abs(ray.y), ray.z));
+    let clip = cameras[0].view_proj * vec4f(cameras[0].position_near.xyz + dir * 10000.0, 1.0);
+    if clip.w <= 1e-3 {
+        return vec4f(0.0);
+    }
+    let uv = helio_ndc_to_uv(clip.xy / clip.w);
+    let border = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    if border <= 0.0 {
+        return vec4f(0.0);
+    }
+    let depth = textureSampleLevel(depth_texture, depth_sampler, uv, 0);
+    if !helio_is_sky(depth) {
+        return vec4f(0.0);
+    }
+    let rgb = textureSampleLevel(scene_color, shared_samp, uv, 0.0).rgb;
+    return vec4f(rgb, smoothstep(0.0, 0.08, border));
 }
 
 /// Reflected radiance for a ray leaving the surface. Sky is the baseline; a
@@ -685,7 +702,10 @@ fn water_reflection(
     light_dir: vec3f,
     vol:       WaterVolume,
 ) -> vec3f {
-    let sky = sky_color(ray, light_dir);
+    // The sky the camera actually sees (clouds, sun disc) where the reflected
+    // ray lands on screen over sky pixels; the cloudless LUT elsewhere.
+    let screen_sky = sky_from_screen(ray);
+    let sky = mix(sky_color(ray, light_dir), screen_sky.rgb, screen_sky.a);
 
     // The mirrored capture is invalid underwater (or before the first above-
     // water frame). Do not sample a stale prior view; retain the analytic sky
@@ -713,7 +733,12 @@ fn water_reflection(
     // proportion to the resolved spectral slope, while preserving sharp calm
     // water and keeping high-frequency FFT chop stable.
     let reflection_lod = clamp(length(normal.xz) * 1.7, 0.0, 8.0);
-    let planar = textureSampleLevel(planar_reflection_tex, shared_samp, capture_uv, reflection_lod).rgb;
+    let planar_raw = textureSampleLevel(planar_reflection_tex, shared_samp, capture_uv, reflection_lod);
+    // The capture holds only lit geometry: sky pixels are never written, so
+    // they stay black. Fill them with the sky (Ultra-Water composites its
+    // premultiplied planar target over the sky cube the same way).
+    let coverage = smoothstep(0.0, 0.03, dot(planar_raw.rgb, vec3f(1.0)));
+    let planar = mix(sky, planar_raw.rgb, coverage);
 
     if vol.ssr_params.x <= 0.5 {
         return planar;
@@ -854,9 +879,21 @@ fn fs_above(in: VertexOutput) -> vec4f {
     let inscatter     = water_inscatter(view_dir, light_dir, vol);
     // A restrained crest lift uses the existing medium color; no unrelated
     // caustics or legacy volume parameter is repurposed as an SSS control.
-    let crest_scatter = vol.water_color.rgb * max(dot(normal, light_dir), 0.0) * 0.08;
+    // Ultra-Water's SSS (uSSS = 1.6, 0.06, 0.05): sunlight glowing through
+    // the crests (k1, strongest looking into the sun on lit-from-behind
+    // peaks), a view-facing term (k2) and a small diffuse lift.
+    let sss_sun = water_sun_radiance(light_dir);
+    let n_dot_l = dot(normal, light_dir);
+    let n_dot_v = max(dot(normal, -view_dir), 1e-4);
+    let crest_h = max(in.world_pos.y - vol.bounds_max.w, 0.0);
+    let sss_k1 = 1.6 * crest_h
+        * pow(clamp(dot(light_dir, -view_dir), 0.0, 1.0), 4.0)
+        * pow(0.5 - 0.5 * n_dot_l, 3.0);
+    let sss_k2 = 0.06 * pow(n_dot_v, 2.0);
+    let sss = (sss_k1 + sss_k2) * vol.water_color.rgb * sss_sun
+        + 0.05 * max(n_dot_l, 0.0) * vol.water_color.rgb * sss_sun;
     let through_water = refracted * transmittance
-        + (inscatter + crest_scatter) * (1.0 - transmittance);
+        + (inscatter + sss) * (1.0 - transmittance);
 
     // ── Reflection ───────────────────────────────────────────────────────────
     let reflected_ray = reflect(view_dir, normal);
@@ -881,8 +918,13 @@ fn fs_above(in: VertexOutput) -> vec4f {
     let foam_solid = smoothstep(0.2, 0.9, foam_density * (0.55 + 0.7 * foam.billow));
     let foam_tint_mix = max(foam_solid, smoothstep(0.3, 0.9, foam.pattern) * 0.6);
     let foam_albedo = mix(vec3f(0.62, 0.78, 0.82), vec3f(0.95), foam_tint_mix);
-    let foam_light = (0.2 + 0.8 * clamp(dot(foam_normal, light_dir) * 0.8 + 0.2, 0.0, 1.0))
-        * mix(foam_ao, 1.0, 0.4);
+    // Lit as Ultra-Water does: the sun's radiance on the lumpy normal, the sky
+    // as ambient, and the sun shining through thin foam from behind the crest.
+    let foam_sun = water_sun_radiance(light_dir);
+    let foam_ambient = water_sky_ambient(light_dir);
+    var foam_light = foam_sun * (0.15 + 0.85 * clamp(dot(foam_normal, light_dir) * 0.8 + 0.2, 0.0, 1.0))
+        * mix(foam_ao, 1.0, 0.4) + foam_ambient * 1.1 * foam_ao;
+    foam_light += foam_sun * pow(clamp(dot(light_dir, -view_dir), 0.0, 1.0), 4.0) * 0.4 * (1.0 - foam_solid);
     // Zero is the legacy value of this formerly-unused lane; interpret it as
     // Ultra-Water's default brightness so older volume rows remain visible.
     let foam_brightness = select(0.85, vol.reflection_refraction.w, vol.reflection_refraction.w > 0.0);
@@ -960,12 +1002,25 @@ fn fs_under(in: VertexOutput) -> vec4f {
 // ── Combined entry point ─────────────────────────────────────────────────────
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    // Continuous ocean: above or underwater based on camera height.
-    let cam_above = cameras[0].position_near.y > in.world_pos.y;
-    if cam_above {
-        return fs_above(in);
-    } else {
-        return fs_under(in);
+fn fs_main(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4f {
+    // Which side of the sea the camera is on is a property of the camera, not
+    // of the fragment (Ultra-Water's `uCamSide`). Deciding it per fragment from
+    // `camera.y > fragment.y` shaded every crest taller than the camera with
+    // the underwater look. Far from the surface the answer is obvious; near
+    // it, compare with the exact displaced height at the camera.
+    let vol = volumes[in.vol_index];
+    let cam = cameras[0].position_near.xyz;
+    let rest = vol.bounds_max.w;
+    var cam_above = cam.y > rest;
+    if abs(cam.y - rest) < 24.0 {
+        cam_above = cam.y > water_surface_at(cam.xz, vol, in.vol_index);
     }
+    // Folded crests flip triangles: drop faces that cannot face the camera's
+    // side (the top face is the front face).
+    if cam_above {
+        if !front { discard; }
+        return fs_above(in);
+    }
+    if front { discard; }
+    return fs_under(in);
 }

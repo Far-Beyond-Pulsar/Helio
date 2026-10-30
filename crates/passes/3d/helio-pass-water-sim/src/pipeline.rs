@@ -11,6 +11,13 @@ pub(crate) const WATER_SHORE_SNIPPET: helio_core::shader::ShaderSnippet = helio_
     "../shaders/water_surface_shared.wgsl"
 );
 
+/// The sky as the water sees it (`water_sky.wgsl`): one colour for the surface
+/// underside and the underwater medium.
+pub(crate) const WATER_SKY_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
+    "//!use water_sky",
+    "../shaders/water_sky.wgsl"
+);
+
 fn storage_read_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -735,7 +742,65 @@ impl WaterSimPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // The resolved atmosphere and its sky table: the sea reflects
+                // and is lit by the real sky, as Ultra-Water does with its cube.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 25,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            helio_pass_sky::atmosphere::ATMOSPHERE_FRAME_BYTES,
+                        ),
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 26,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: wgpu::BufferSize::new(
+                            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE_BYTES,
+                        ),
+                    },
+                    count: None,
+                },
+                // The sky-view LUT: the sky's radiance by direction, the same
+                // table the sky is drawn from.
+                texture_entry(
+                    27,
+                    wgpu::TextureSampleType::Float { filterable: true },
+                    wgpu::TextureViewDimension::D2,
+                ),
             ],
+        });
+        let fallback_sky_view_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water No Sky View"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let fallback_sky_view =
+            fallback_sky_view_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        // Bound until an atmosphere publishes (planet.w = 0: no sky).
+        let fallback_atmosphere = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water No Atmosphere"),
+            size: helio_pass_sky::atmosphere::ATMOSPHERE_FRAME_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let fallback_sky_table = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water No Sky Table"),
+            size: helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
         });
 
         let caustics_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -994,13 +1059,28 @@ impl WaterSimPass {
                         wgpu::TextureViewDimension::D2Array,
                     ),
                     uniform_buffer_entry(16, 32),
+                    // The atmosphere frame and sky-view LUT: the medium is
+                    // lit by the same sky as the surface underside.
+                    uniform_buffer_entry(
+                        20,
+                        helio_pass_sky::atmosphere::ATMOSPHERE_FRAME_BYTES,
+                    ),
+                    texture_entry(
+                        21,
+                        wgpu::TextureSampleType::Float { filterable: true },
+                        wgpu::TextureViewDimension::D2,
+                    ),
                 ],
             });
         let underwater_tint_shader = helio_core::shader::module_with(
             device,
             "Water Underwater Tint Shader",
             helio_core::include_wgsl!("../shaders/underwater_fog.wgsl"),
-            &[WATER_SHORE_SNIPPET],
+            &[
+                WATER_SHORE_SNIPPET,
+                helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
+                WATER_SKY_SNIPPET,
+            ],
         );
         let underwater_tint_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Underwater Tint PL"),
@@ -1147,7 +1227,12 @@ impl WaterSimPass {
             device,
             "Water Surface Shader",
             helio_core::include_wgsl!("../shaders/surface.wgsl"),
-            &[helio_pass_hiz::HIZ_SNIPPET, WATER_SHORE_SNIPPET],
+            &[
+                helio_pass_hiz::HIZ_SNIPPET,
+                WATER_SHORE_SNIPPET,
+                helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
+                WATER_SKY_SNIPPET,
+            ],
         );
 
         let vbl = vec4_vbl();
@@ -1768,6 +1853,10 @@ impl WaterSimPass {
             caustics_deep_mip_views,
             caustics_mip_pipeline,
             caustics_sampler,
+            fallback_atmosphere,
+            fallback_sky_table,
+            _fallback_sky_view_tex: fallback_sky_view_tex,
+            fallback_sky_view,
             _foam_texture: foam_texture,
             foam_view,
             foam_mip_views,
