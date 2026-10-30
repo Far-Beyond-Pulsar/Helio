@@ -153,10 +153,11 @@ pub(crate) struct MaterialGpu {
 }
 
 /// The shading table of `appearance` (linear colours; sRGB is public, so
-/// convert once, not per pixel) and its detail weights.
+/// convert once, not per pixel), its detail weights and its shape weights
+/// (x: smoothing).
 pub(crate) fn material_table(
     appearance: &TerrainAppearance,
-) -> ([MaterialGpu; MATERIALS], [f32; 4]) {
+) -> ([MaterialGpu; MATERIALS], [f32; 4], [f32; 4]) {
     let clean = |v: f32| {
         if v.is_finite() {
             v.clamp(0.0, 1.0)
@@ -207,7 +208,11 @@ pub(crate) fn material_table(
             ],
         }
     });
-    (materials, appearance.detail.map(clean))
+    (
+        materials,
+        appearance.detail.map(clean),
+        [clean(appearance.smoothing), 0.0, 0.0, 0.0],
+    )
 }
 
 /// `World` of world.wgsl: the grid mapping.

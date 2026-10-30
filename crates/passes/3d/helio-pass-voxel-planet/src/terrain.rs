@@ -402,6 +402,17 @@ pub struct TerrainAppearance {
     /// Patch contrast, voxel pigment contrast, edge darkening, step
     /// softness (share of the slope's normal in natural voxel steps' light).
     pub detail: [f32; 4],
+    /// How smooth surfaces are lit, 0 to 1: at 0 voxel faces are lit by
+    /// their own planes (natural steps by the slope they stand for), at 1
+    /// every hit is lit by the normal of the smooth surface the voxels
+    /// approximate (a quadratic B-spline density over the cells around it,
+    /// continuous across cells), edits, caves, overhangs and features
+    /// included, with the voxels' edge darkening and pigment mosaic faded.
+    /// The voxels themselves (collision, ray casts, edits) are unchanged.
+    /// A host's per-world setting (the voxel component's `smoothness`), not
+    /// part of an appearance file.
+    #[serde(skip)]
+    pub smoothing: f32,
 }
 
 impl Default for TerrainAppearance {
@@ -501,6 +512,7 @@ impl Default for TerrainAppearance {
         Self {
             materials,
             detail: [0.3, 0.4, 0.08, 0.75],
+            smoothing: 0.0,
         }
     }
 }

@@ -1122,7 +1122,8 @@ impl ChunkWorld {
             .0,
         );
         let (brushes, brush_capacity) = brush_buffer(&device, &queue, &view.faces);
-        let (materials, detail) = crate::engine::material_table(&planet.field().appearance());
+        let (materials, detail, shape) =
+            crate::engine::material_table(&planet.field().appearance());
         let params = |label: &str| {
             buffer(
                 label,
@@ -1199,7 +1200,11 @@ impl ChunkWorld {
             }),
             materials: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("chunk materials"),
-                contents: bytemuck::bytes_of(&ChunkMaterials { materials, detail }),
+                contents: bytemuck::bytes_of(&ChunkMaterials {
+                    materials,
+                    detail,
+                    shape,
+                }),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             }),
             views: VolumeViews {

@@ -166,6 +166,7 @@ struct MaterialGpu {
 struct Materials {
     m: array<MaterialGpu, 32>,
     detail: vec4<f32>, // patch contrast, pigment contrast, edge darkening, step softness
+    shape: vec4<f32>,  // surface smoothing
 }
 @group(0) @binding(7) var<uniform> materials: Materials;
 
@@ -1986,7 +1987,10 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
         }
     }
     let smooth_ground = 1.0 - under_refined(key, projected);
-    let mosaic = mosaic_weight(projected) * smooth_ground;
+    // A smooth world fades the voxels' own look: their per-voxel pigment
+    // and darkened edges.
+    let smoothing = materials.shape.x;
+    let mosaic = mosaic_weight(projected) * smooth_ground * (1.0 - 0.6 * smoothing);
     // The cell centre's noise-domain point: the same pigment from every
     // face of it.
     let centre = vec3<f32>(c.m0.w, c.m1.w, c.m2.w) + mat3x3<f32>(c.m0.xyz, c.m1.xyz, c.m2.xyz) * (vec3<f32>(cell) + 0.5);
@@ -2030,7 +2034,7 @@ fn surface_look(slot: u32, cell: vec3<i32>, axis: u32, sign: u32, hit_material: 
         // Crisp voxel edges while a cell spans several pixels.
         let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
         let fade = clamp((projected - 3.0) / 6.0, 0.0, 1.0);
-        ao *= 1.0 - materials.detail.z * fade * ao_weight * (1.0 - smoothstep(0.0, 0.12, edge));
+        ao *= 1.0 - materials.detail.z * (1.0 - smoothing) * fade * ao_weight * (1.0 - smoothstep(0.0, 0.12, edge));
     }
     return Look(albedo, ao);
 }
@@ -2390,6 +2394,56 @@ fn slope_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, c: ChunkDraw) -> vec
     return n * inverseSqrt(l);
 }
 
+// The quadratic B-spline kernel at distance `x` (cells) and its slope: it
+// spans three cells, so the point in a cell meets exactly that cell and its
+// neighbours, and its sum over a lattice is 1 (a flat face keeps its
+// normal), with a continuous slope.
+fn spline_weights(x: f32) -> vec2<f32> {
+    let a = abs(x);
+    if a < 0.5 { return vec2<f32>(0.75 - a * a, -2.0 * x); }
+    if a < 1.5 {
+        let u = 1.5 - a;
+        return vec2<f32>(0.5 * u * u, -sign(x) * u);
+    }
+    return vec2<f32>(0.0);
+}
+
+// The normal of the smooth surface the solid cells around `cell` (chunk
+// `slot`, frame `c`) approximate, at cell-space point `local` in or on it,
+// in the world: minus the gradient of their density, solid cells' centres
+// weighted by a separable quadratic B-spline (`spline_weights`) so it is
+// continuous across cells, the face's own where it is flat and rounding
+// edges, steps and corners across about a cell. Zero where the density is
+// flat (a thin wall, a symmetric pinch).
+fn smooth_normal(slot: u32, key: vec4<i32>, cell: vec3<i32>, local: vec3<f32>, c: ChunkDraw) -> vec3<f32> {
+    var wx: array<vec2<f32>, 3>;
+    var wy: array<vec2<f32>, 3>;
+    var wz: array<vec2<f32>, 3>;
+    for (var i = 0; i < 3; i++) {
+        let at = vec3<f32>(cell + vec3<i32>(i - 1)) + 0.5;
+        wx[i] = spline_weights(local.x - at.x);
+        wy[i] = spline_weights(local.y - at.y);
+        wz[i] = spline_weights(local.z - at.z);
+    }
+    var g = vec3<f32>(0.0);
+    for (var k = 0; k < 3; k++) {
+        for (var j = 0; j < 3; j++) {
+            for (var i = 0; i < 3; i++) {
+                // The cell itself is solid (a hit).
+                let solid = (i == 1 && j == 1 && k == 1) || solid_near(slot, key, cell + vec3<i32>(i - 1, j - 1, k - 1));
+                if !solid { continue; }
+                g += vec3<f32>(wx[i].y * wy[j].x * wz[k].x, wx[i].x * wy[j].y * wz[k].x, wx[i].x * wy[j].x * wz[k].y);
+            }
+        }
+    }
+    // Out of the solid: down the density's gradient; a cell-space covector
+    // to the world by M's inverse transposed.
+    let n = -g.x * c.i0.xyz - g.y * c.i1.xyz - g.z * c.i2.xyz;
+    let l = dot(n, n);
+    if !(l > 1e-12) { return vec3<f32>(0.0); }
+    return n * inverseSqrt(l);
+}
+
 // The ground's normal at pixel `q` (hit at distance `t`) from the hits two
 // pixels each way: on each axis the side nearer in distance (not across a
 // silhouette), facing the eye; zero where an axis has no hit near. Over
@@ -2449,12 +2503,21 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     // speckle).
     let stored = leaf_ground(v.x, cell, c);
     let step = dot(stored, stored) > 0.0 && !solid_near(v.x, key, cell + vec3<i32>(0, 0, 1));
-    if !step && coarse == 0.0 { return f; }
-    let w = max(select(0.0, materials.detail.w, step), coarse);
+    // A world made smooth lights every hit by the smooth surface its voxels
+    // approximate (`smooth_normal`), natural steps by their exact slope.
+    let smoothing = materials.shape.x;
+    if !step && coarse == 0.0 && smoothing <= 0.0 { return f; }
+    let w = max(max(select(0.0, materials.detail.w, step), coarse), smoothing);
     // The heightfield's exact slope stored with the leaf; else, cells of a
     // pixel or less: the slope the hits around make (a few loads); larger
     // ones measure their column tops (`slope_normal`).
     var ground = ground_hint;
+    if smoothing > 0.0 && !step {
+        // At this hit, not a neighbour's: it varies across the face.
+        let position = pixel_ray(q, size) * t;
+        let local = vec3<f32>(c.i0.w, c.i1.w, c.i2.w) + vec3<f32>(dot(c.i0.xyz, position), dot(c.i1.xyz, position), dot(c.i2.xyz, position));
+        ground = smooth_normal(v.x, key, cell, local, c);
+    }
     if dot(ground, ground) == 0.0 { ground = stored; }
     if dot(ground, ground) == 0.0 && length(c.m0.xyz) <= 1.5 * pixel_m { ground = screen_ground(q, size, t); }
     if dot(ground, ground) == 0.0 { ground = slope_normal(v.x, key, cell, c); }
@@ -2465,7 +2528,13 @@ fn hit_face(v: vec2<u32>, ground_hint: vec3<f32>, q: vec2<u32>, size: vec2<u32>,
     if !(l > 1e-6) { return f; }
     f.ground = ground;
     f.shading = shading * inverseSqrt(l);
-    f.skip = 2.0 * w;
+    // A sun ray passes the steps the smooth surface stands for by as far as
+    // it leans from the face (none on a flat wall: no leak at its foot).
+    var skip_w = max(select(0.0, materials.detail.w, step), coarse);
+    if smoothing > 0.0 && !step {
+        skip_w = max(skip_w, smoothing * clamp(2.0 * length(cross(ground, normal)), 0.0, 1.0));
+    }
+    f.skip = 2.0 * skip_w;
     f.light_skip = 2.0 * coarse;
     return f;
 }

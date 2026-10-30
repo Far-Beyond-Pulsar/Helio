@@ -336,6 +336,21 @@ pub struct VoxelTerrainComponent {
     #[serde(default)]
     #[property(category = "Appearance", label = "Terrain appearance (JSON)")]
     pub appearance_parameters: String,
+    /// How smooth the world's surfaces are lit, 0 to 1: at 0 voxel faces
+    /// show as blocks (natural slopes excepted); at 1 every hit takes the
+    /// normal of the smooth surface its voxels approximate, so sculpted
+    /// terrain, edits, caves and asteroids read as rounded rock instead of
+    /// steps. Only the shading changes: voxels, collision, ray casts and
+    /// edits stay exact.
+    #[serde(default)]
+    #[property(
+        min = 0.0,
+        max = 1.0,
+        step = 0.05,
+        category = "Appearance",
+        label = "Surface smoothing"
+    )]
+    pub smoothness: f32,
 
     /// Whether it can be dug and built (the sculpt tool, block methods).
     #[property(category = "Editing")]
@@ -370,6 +385,7 @@ impl Default for VoxelTerrainComponent {
             air_tint: default_air_tint(),
             air_haze: default_air_scale(),
             appearance_parameters: String::new(),
+            smoothness: 0.0,
             editable: true,
             source_revision: 0,
             edits: VoxelEditJournal::default(),
@@ -426,6 +442,7 @@ impl Clone for VoxelTerrainComponent {
             air_tint: self.air_tint,
             air_haze: self.air_haze,
             appearance_parameters: self.appearance_parameters.clone(),
+            smoothness: self.smoothness,
             editable: self.editable,
             source_revision: self.source_revision,
             edits: self.edits.clone(),

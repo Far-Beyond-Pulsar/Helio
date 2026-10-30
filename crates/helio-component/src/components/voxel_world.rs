@@ -840,6 +840,22 @@ impl VoxelTerrainComponent {
         Ok(())
     }
 
+    /// How smooth the world's surfaces are lit (0: blocks, 1: the smooth
+    /// surface its voxels approximate).
+    #[world_method(pure, category = "Voxel|Appearance")]
+    fn smoothness(world: &World, entity: Entity) -> Result<f64, String> {
+        Ok(f64::from(terrain(world, entity)?.smoothness))
+    }
+
+    #[world_method(category = "Voxel|Appearance")]
+    fn set_smoothness(world: &mut World, entity: Entity, smoothness: f64) -> Result<(), String> {
+        if !smoothness.is_finite() {
+            return Err("smoothness must be finite".into());
+        }
+        terrain_mut(world, entity)?.smoothness = smoothness.clamp(0.0, 1.0) as f32;
+        Ok(())
+    }
+
     /// Whether the world can be dug and built.
     #[world_method(pure, category = "Voxel|Editing")]
     fn is_editable(world: &World, entity: Entity) -> Result<bool, String> {

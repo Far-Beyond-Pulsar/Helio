@@ -847,6 +847,7 @@ pub struct GiRays<'a> {
 struct ChunkMaterials {
     materials: [crate::engine::MaterialGpu; crate::engine::MATERIALS],
     detail: [f32; 4],
+    shape: [f32; 4],
 }
 
 /// A chunk's affine frame: world = origin + m * cell coordinates.
@@ -8454,11 +8455,15 @@ impl ChunkWorld {
     /// detail).
     pub fn set_appearance(&mut self, id: VolumeId, appearance: &crate::engine::TerrainAppearance) {
         let Some(vol) = self.volume(id) else { return };
-        let (materials, detail) = crate::engine::material_table(appearance);
+        let (materials, detail, shape) = crate::engine::material_table(appearance);
         self.queue.write_buffer(
             &vol.materials,
             0,
-            bytemuck::bytes_of(&ChunkMaterials { materials, detail }),
+            bytemuck::bytes_of(&ChunkMaterials {
+                materials,
+                detail,
+                shape,
+            }),
         );
     }
 

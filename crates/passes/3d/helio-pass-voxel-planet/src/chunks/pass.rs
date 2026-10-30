@@ -25,11 +25,27 @@ struct HeldVolume {
     exporting: bool,
 }
 
+/// The appearance a volume shows: the host's, else `generator`'s own, lit
+/// `smoothing` smooth.
+fn shown_appearance(
+    host: Option<TerrainAppearance>,
+    smoothing: f32,
+    generator: impl FnOnce() -> TerrainAppearance,
+) -> TerrainAppearance {
+    TerrainAppearance {
+        smoothing,
+        ..host.unwrap_or_else(generator)
+    }
+}
+
 pub struct ChunkPass {
     source: SharedPlanetFrame,
     config: ResidencyConfig,
     /// The host's art settings (none: each terrain generator's).
     appearance: Option<TerrainAppearance>,
+    /// The host's surface smoothing (`TerrainAppearance::smoothing`), over
+    /// whichever appearance is shown.
+    smoothing: f32,
     debug_mode: u32,
     world: Option<ChunkWorld>,
     /// The frame's volumes the world holds.
@@ -86,6 +102,7 @@ impl ChunkPass {
             source,
             config,
             appearance: None,
+            smoothing: 0.0,
             debug_mode: 0,
             world: None,
             held: Vec::new(),
@@ -147,17 +164,42 @@ impl ChunkPass {
             return false;
         }
         self.appearance = appearance;
+        self.apply_appearance();
+        true
+    }
+
+    /// Light the terrain's surfaces `smoothing` smooth (0 to 1; see
+    /// `TerrainAppearance::smoothing`) over whichever appearance is shown.
+    /// Returns whether it changed.
+    pub fn set_smoothing(&mut self, smoothing: f32) -> bool {
+        let smoothing = if smoothing.is_finite() {
+            smoothing.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if self.smoothing == smoothing {
+            return false;
+        }
+        self.smoothing = smoothing;
+        self.apply_appearance();
+        true
+    }
+
+    /// Send the appearance shown to every volume the world holds.
+    fn apply_appearance(&mut self) {
+        let (appearance, smoothing) = (self.appearance, self.smoothing);
         if let (Some(world), Some(frame)) = (&mut self.world, &self.shown) {
             for v in &frame.volumes {
                 if let Some(held) = self.held.iter().find(|h| h.id == v.volume.id) {
                     world.set_appearance(
                         held.volume,
-                        &appearance.unwrap_or_else(|| v.volume.planet.field().appearance()),
+                        &shown_appearance(appearance, smoothing, || {
+                            v.volume.planet.field().appearance()
+                        }),
                     );
                 }
             }
         }
-        true
     }
 
     /// A host viewport should keep rendering until residency settles.
@@ -346,6 +388,7 @@ impl RenderPass for ChunkPass {
         self.kept_loaded = previous.kept_loaded.take();
         // A graph rebuild must not revert the host's art settings.
         self.appearance = previous.appearance;
+        self.smoothing = previous.smoothing;
         if self.scene.is_none() {
             self.scene = previous.scene.take();
         }
@@ -531,8 +574,13 @@ impl ChunkPass {
                 world.remove_volume(self.held.swap_remove(n).volume);
             }
             let volume = world.add_volume(v.volume.id, planet, v.volume.transform);
-            if let Some(appearance) = &self.appearance {
-                world.set_appearance(volume, appearance);
+            if self.appearance.is_some() || self.smoothing != 0.0 {
+                world.set_appearance(
+                    volume,
+                    &shown_appearance(self.appearance, self.smoothing, || {
+                        v.volume.planet.field().appearance()
+                    }),
+                );
             }
             self.kept_loaded = v
                 .kept
