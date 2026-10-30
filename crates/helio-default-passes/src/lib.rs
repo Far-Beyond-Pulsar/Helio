@@ -2298,10 +2298,14 @@ pub fn voxel_scene_materials() -> helio_pass_voxel_planet::chunks::scene::SceneM
         let materials = ctx
             .scene_buffers
             .get(pulsar_scenedb::gpu::BufferKey::of("materials"))?;
+        let water_shore_fields = ctx.registry.texture_binding("water_shore_fields");
+        let water_shore_params = ctx.registry.buffer_binding("water_shore_params");
         Some(SceneMaterialInputs {
             materials: &materials.buffer,
             texture_views: textures.texture_views,
             samplers: textures.samplers,
+            water_shore_fields,
+            water_shore_params,
             version: (textures.version, materials.epoch as u64),
         })
     })

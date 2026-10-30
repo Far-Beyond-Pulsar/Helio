@@ -25,8 +25,8 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use helio_core::ResourceRegistry;
 use helio_core::graph::{ResourceBuilder, ResourceSize};
+use helio_core::ResourceRegistry;
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Marker opting a shader into [`HIZ`]. Must appear in the source.

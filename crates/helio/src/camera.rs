@@ -223,10 +223,26 @@ mod tests {
     /// rotation: passes invert it by its transpose.
     #[test]
     fn look_to_any_length_keeps_the_rotation_orthonormal() {
-        let camera = Camera::perspective_look_to(DVec3::new(0.0, 200.0, 0.0), Vec3::new(1.0, 0.45, 0.2), Vec3::Y, 1.2, 16.0 / 9.0, 0.1, 1e7);
+        let camera = Camera::perspective_look_to(
+            DVec3::new(0.0, 200.0, 0.0),
+            Vec3::new(1.0, 0.45, 0.2),
+            Vec3::Y,
+            1.2,
+            16.0 / 9.0,
+            0.1,
+            1e7,
+        );
         let r = glam::Mat3::from_mat4(camera.rotation);
         assert!((r * r.transpose()).abs_diff_eq(glam::Mat3::IDENTITY, 1e-5));
-        let at = Camera::perspective_look_at(Vec3::new(0.0, 200.0, 0.0), Vec3::new(3.0, 201.35, 0.6), Vec3::Y, 1.2, 16.0 / 9.0, 0.1, 1e7);
+        let at = Camera::perspective_look_at(
+            Vec3::new(0.0, 200.0, 0.0),
+            Vec3::new(3.0, 201.35, 0.6),
+            Vec3::Y,
+            1.2,
+            16.0 / 9.0,
+            0.1,
+            1e7,
+        );
         assert!(at.rotation.abs_diff_eq(camera.rotation, 1e-5));
     }
 
@@ -234,8 +250,18 @@ mod tests {
     /// its rotation and eye.
     #[test]
     fn from_matrices_keeps_the_view() {
-        let view = glam::camera::rh::view::look_at_mat4(Vec3::new(3.0, 4.0, 5.0), Vec3::new(-1.0, 0.5, 2.0), Vec3::Y);
-        let camera = Camera::from_matrices(view, helio_core::depth::perspective(1.0, 1.5, 0.1), Vec3::new(3.0, 4.0, 5.0), 0.1, 100.0);
+        let view = glam::camera::rh::view::look_at_mat4(
+            Vec3::new(3.0, 4.0, 5.0),
+            Vec3::new(-1.0, 0.5, 2.0),
+            Vec3::Y,
+        );
+        let camera = Camera::from_matrices(
+            view,
+            helio_core::depth::perspective(1.0, 1.5, 0.1),
+            Vec3::new(3.0, 4.0, 5.0),
+            0.1,
+            100.0,
+        );
         assert!(camera.view_in(DVec3::ZERO).abs_diff_eq(view, 1e-5));
     }
 
@@ -244,9 +270,21 @@ mod tests {
     /// f32 coordinates it is off by the half metre f32 steps by out there.
     #[test]
     fn far_geometry_projects_exactly_relative_to_the_followed_origin() {
-        let eye = DVec3::new(-3_426_954.099417845, 4_769_291.620032467, -2_476_450.5275892294);
+        let eye = DVec3::new(
+            -3_426_954.099417845,
+            4_769_291.620032467,
+            -2_476_450.5275892294,
+        );
         let forward = Vec3::new(0.9167773, 0.29777223, -0.2661786);
-        let camera = Camera::perspective_look_to(eye, forward, Vec3::new(-0.39, 0.81, -0.44), 0.8, 1.5, 0.1, 1e7);
+        let camera = Camera::perspective_look_to(
+            eye,
+            forward,
+            Vec3::new(-0.39, 0.81, -0.44),
+            0.8,
+            1.5,
+            0.1,
+            1e7,
+        );
         let origin = follow_origin(None, eye);
         assert!((eye - origin).abs().max_element() <= WORLD_ORIGIN_CELL / 2.0);
         let vertex = eye + forward.as_dvec3().normalize() * 25.0 + DVec3::new(0.3, 0.0, 0.0);
@@ -257,10 +295,18 @@ mod tests {
         };
         let clip = camera.view_proj_in(origin) * (vertex - origin).as_vec3().extend(1.0);
         let rebased = (clip.truncate() / clip.w).as_dvec3();
-        assert!((rebased - exact).truncate().length() < 1e-4, "{rebased} vs {exact}");
+        assert!(
+            (rebased - exact).truncate().length() < 1e-4,
+            "{rebased} vs {exact}"
+        );
         // Moving within a cell keeps the origin; leaving it moves it.
-        assert_eq!(follow_origin(Some(origin), eye + DVec3::new(500.0, -400.0, 300.0)), origin);
+        assert_eq!(
+            follow_origin(Some(origin), eye + DVec3::new(500.0, -400.0, 300.0)),
+            origin
+        );
         let far = eye + DVec3::new(5_000.0, 0.0, 0.0);
-        assert!((far - follow_origin(Some(origin), far)).abs().max_element() <= WORLD_ORIGIN_CELL / 2.0);
+        assert!(
+            (far - follow_origin(Some(origin), far)).abs().max_element() <= WORLD_ORIGIN_CELL / 2.0
+        );
     }
 }

@@ -34,6 +34,92 @@ struct SceneMap {
 @group(2) @binding(1) var<storage, read> scene_materials: array<SceneGpuMaterial>;
 @group(2) @binding(2) var scene_textures: binding_array<texture_2d<f32>, MATERIAL_TEXTURES>;
 @group(2) @binding(3) var scene_samplers: binding_array<sampler, MATERIAL_TEXTURES>;
+// Shared with WaterSim. Layer 0 holds terrain height/coast distance/coast
+// gradient; layer 1 holds travel time/front direction/shoaling. state.zw is
+// the map center relative to this frame's eye, matching chunk hit positions.
+struct WaterShoreParams { center_extent: vec4<f32>, state: vec4<f32> }
+@group(2) @binding(4) var water_shore_fields: texture_2d_array<f32>;
+// Kept in group 3: WGPU forbids uniform buffers in a group that contains
+// descriptor binding arrays (the scene texture/sampler table in group 2).
+@group(3) @binding(0) var<uniform> water_shore_params: WaterShoreParams;
+
+fn swash_hash12(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + vec3<f32>(33.33));
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn swash_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (vec2<f32>(3.0) - 2.0 * f);
+    return mix(
+        mix(swash_hash12(i), swash_hash12(i + vec2<f32>(1.0, 0.0)), u.x),
+        mix(swash_hash12(i + vec2<f32>(0.0, 1.0)), swash_hash12(i + vec2<f32>(1.0)), u.x),
+        u.y,
+    );
+}
+
+fn swash_at(world_xz_from_eye: vec2<f32>) -> vec3<f32> {
+    if water_shore_params.state.x < 0.5 { return vec3<f32>(0.0); }
+    let extent = max(water_shore_params.center_extent.zw, vec2<f32>(1e-3));
+    let uv = (world_xz_from_eye - water_shore_params.state.zw) / extent + vec2<f32>(0.5);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { return vec3<f32>(0.0); }
+    // Map-relative coordinates preserve phase across camera motion and world
+    // origin rebases, while keeping the noise domain local to the authored map.
+    let map_xz = world_xz_from_eye - water_shore_params.state.zw;
+    let size = vec2<f32>(textureDimensions(water_shore_fields, 0));
+    let pixel = uv * size - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(pixel));
+    let f = fract(pixel);
+    let hi = vec2<i32>(size) - vec2<i32>(1);
+    let p00 = clamp(base, vec2<i32>(0), hi);
+    let p10 = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), hi);
+    let p01 = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), hi);
+    let p11 = clamp(base + vec2<i32>(1, 1), vec2<i32>(0), hi);
+    let shore = mix(
+        mix(textureLoad(water_shore_fields, p00, 0, 0), textureLoad(water_shore_fields, p10, 0, 0), f.x),
+        mix(textureLoad(water_shore_fields, p01, 0, 0), textureLoad(water_shore_fields, p11, 0, 0), f.x),
+        f.y,
+    );
+    if shore.x < -0.3 || shore.y > 60.0 { return vec3<f32>(0.0); }
+    let travel = mix(
+        mix(textureLoad(water_shore_fields, p00, 1, 0), textureLoad(water_shore_fields, p10, 1, 0), f.x),
+        mix(textureLoad(water_shore_fields, p01, 1, 0), textureLoad(water_shore_fields, p11, 1, 0), f.x),
+        f.y,
+    );
+    var shore_dir = -shore.zw / max(length(shore.zw), 1e-3);
+    if dot(travel.yz, travel.yz) > 0.25 { shore_dir = normalize(travel.yz); }
+    let time = water_shore_params.state.y;
+    let phase_noise = swash_noise(map_xz * 0.0042) * 9.0
+        + swash_noise(map_xz * 0.011 + vec2<f32>(7.0)) * 2.5;
+    let group = 0.45 + 0.55 * swash_noise(map_xz * 0.004
+        + vec2<f32>(time * 0.021, -time * 0.017));
+    let swell_dir = vec2<f32>(-0.9659258, 0.2588190);
+    let exposure = mix(0.25, 1.0, smoothstep(-0.3, 0.7, dot(shore_dir, swell_dir)));
+    let amplitude = 0.55;
+    let wavelength = 30.0;
+    let speed = 1.0;
+    let runup = 0.55 * amplitude * exposure * group * smoothstep(0.35, 0.8, length(shore.zw));
+    if runup < 0.02 { return vec3<f32>(0.0); }
+    if shore.x > runup {
+        let residual_wetness = 0.5 * (1.0 - smoothstep(runup, 1.5 * runup, shore.x));
+        return vec3<f32>(0.0, 0.0, residual_wetness);
+    }
+    let omega = sqrt(9.81 * 6.2831853 / wavelength) * speed;
+    let phase = fract((omega * time + phase_noise) / 6.2831853);
+    let eta = runup * select(
+        cos((phase - 0.3) / 0.7 * 1.5708),
+        sin(phase / 0.3 * 1.5708),
+        phase < 0.3,
+    );
+    let film = eta - shore.x;
+    let edge = select(0.0, smoothstep(-0.01, 0.0, film) * (1.0 - smoothstep(0.0, 0.05, film)), phase < 0.35);
+    let pass_phase = 0.3 + 0.7 * acos(clamp(shore.x / runup, 0.0, 1.0)) / 1.5708;
+    let dry_phase = select(phase - pass_phase, phase + 1.0 - pass_phase, phase <= pass_phase);
+    let dry = dry_phase * 6.2831853 / omega;
+    return vec3<f32>(max(film, 0.0), edge, select(exp(-dry / 5.0), 1.0, film > 0.0));
+}
 
 // A material texture's coordinate along a face axis: base cells from `b`
 // (a cell's first base cell) plus its span `span` of base cells at `t`
@@ -59,8 +145,9 @@ fn tile_coord(b: i32, t: f32, span: f32, tile: i32) -> f32 {
 // the cosine of the view's angle to it): the normals under the whole
 // footprint widen the roughness (specular anti-aliasing,
 // `normal_map_roughness`).
-fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32, slant: f32) -> SceneSurface {
-    let none = SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, false);
+fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32, slant: f32, world_xz_from_eye: vec2<f32>) -> SceneSurface {
+    let swash = select(vec3<f32>(0.0), swash_at(world_xz_from_eye), axis == 2u && sign == 1u);
+    let none = SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, swash, false);
     let faces = scene_map.faces[min(m, 31u)];
     var row = faces.y;
     if axis == 2u {
@@ -114,7 +201,7 @@ fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_c
         let spread = textureSampleLevel(scene_textures[slot], scene_samplers[slot], uv, footprint).a;
         roughness = normal_map_roughness(roughness, spread, 1.0);
     }
-    return SceneSurface(colour, roughness, material.emissive.rgb * material.emissive.w * texel, normal, occlusion, true);
+    return SceneSurface(colour, roughness, material.emissive.rgb * material.emissive.w * texel, normal, occlusion, swash, true);
 }
 
 // The mip level whose texels are a pixel wide, for texture `slot` spanning

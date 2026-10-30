@@ -257,6 +257,11 @@ pub struct PassContext<'a> {
     /// Device reference for creating bind groups in execute() if needed (rare).
     pub device: &'a wgpu::Device,
 
+    /// Pointer to the parent graph's retained secondary-view graphs. The
+    /// executor lends this only for the duration of `execute()`; passes must
+    /// use [`Self::execute_secondary_graph`] rather than retain the pointer.
+    pub(crate) secondary_graphs: *mut std::collections::HashMap<&'static str, crate::graph::RenderGraph>,
+
     /// Open typed per-frame resource registry.
     pub registry: &'a crate::ResourceRegistry<'a>,
 
@@ -309,6 +314,46 @@ pub struct PassContext<'a> {
 }
 
 impl<'a> PassContext<'a> {
+    /// Execute a retained secondary view graph immediately before this pass
+    /// continues recording its primary-view work. Each key owns one graph in
+    /// the parent executor, so pass state, pipelines, and graph resources
+    /// survive frames and resize with the requested view size.
+    ///
+    /// The child submits its own command buffers on the same queue. Queue
+    /// ordering makes its outputs visible to later primary-graph submissions,
+    /// while the separate camera and target keep its culling and attachments
+    /// independent of the primary view.
+    pub fn execute_secondary_graph<F, S>(
+        &mut self,
+        key: &'static str,
+        width: u32,
+        height: u32,
+        scene: &dyn crate::SceneInput,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        build: F,
+        seed_registry: S,
+    ) -> crate::Result<wgpu::SubmissionIndex>
+    where
+        F: FnOnce(&wgpu::Device, &wgpu::Queue) -> crate::graph::RenderGraph,
+        S: FnOnce(&mut crate::ResourceRegistry<'_>),
+    {
+        // SAFETY: the pointer is installed by RenderGraph while it holds
+        // exclusive access to its secondary graph map, and PassContext cannot
+        // escape the synchronous pass execution that owns that borrow.
+        let graphs = unsafe { &mut *self.secondary_graphs };
+        let graph = graphs.entry(key).or_insert_with(|| build(self.device, self.queue));
+        let size = graph.render_size().internal;
+        if !graph.is_locked() {
+            graph.lock(width.max(1), height.max(1));
+        } else if size != [width.max(1), height.max(1)] {
+            graph.set_render_size(width.max(1), height.max(1));
+        }
+        let mut registry = crate::ResourceRegistry::empty();
+        seed_registry(&mut registry);
+        graph.execute_with_registry(scene, target, depth, &mut registry)
+    }
+
     /// The graph's GPU milliseconds in the last frame measured (a few
     /// frames back), when the profiler times it: a pass streaming work in
     /// can size it to what the frame leaves.

@@ -117,7 +117,9 @@ impl ApplicationHandler for App {
         } else {
             None
         };
-        let offset = (self.scene.camera)(0.0, config.width as f32 / config.height as f32).eye.as_vec3()
+        let offset = (self.scene.camera)(0.0, config.width as f32 / config.height as f32)
+            .eye
+            .as_vec3()
             - self.scene.orbit_target;
         self.state = Some(State {
             window,

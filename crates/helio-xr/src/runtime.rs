@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use crate::{
-    Result, XrInput, XrInstance, XrSession, XrSwapchain, create_wgpu_device, create_wgpu_instance,
+    create_wgpu_device, create_wgpu_instance, Result, XrInput, XrInstance, XrSession, XrSwapchain,
 };
 
 /// The OpenXR runtime, graphics device, session, input actions, and eye

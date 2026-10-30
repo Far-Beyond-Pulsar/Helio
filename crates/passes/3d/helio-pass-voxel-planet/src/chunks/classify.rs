@@ -425,7 +425,12 @@ impl Faces {
     pub fn slices_from(&self, from: usize) -> Vec<(usize, &[FaceBrush])> {
         let mut out = Vec::new();
         let mut at = 0;
-        for run in self.runs.iter().map(|r| r.as_slice()).chain([self.recent.as_slice()]) {
+        for run in self
+            .runs
+            .iter()
+            .map(|r| r.as_slice())
+            .chain([self.recent.as_slice()])
+        {
             let end = at + run.len();
             if end > from && !run.is_empty() {
                 let skip = from.saturating_sub(at);
@@ -437,7 +442,9 @@ impl Faces {
     }
     /// Faces from `from` on (without walking those before).
     pub fn iter_from(&self, from: usize) -> impl Iterator<Item = &FaceBrush> + '_ {
-        self.slices_from(from).into_iter().flat_map(|(_, run)| run.iter())
+        self.slices_from(from)
+            .into_iter()
+            .flat_map(|(_, run)| run.iter())
     }
     /// The faces `[from, to)` in one list.
     pub fn collect(&self, from: usize, to: usize) -> Vec<FaceBrush> {
@@ -481,7 +488,10 @@ impl LargeIndex {
             std::sync::Arc::new(BrushIndex::new(&faces.collect(from, to), from as u32, true)),
         ));
         while self.runs.len() >= 2 {
-            let (a, b) = (&self.runs[self.runs.len() - 2], &self.runs[self.runs.len() - 1]);
+            let (a, b) = (
+                &self.runs[self.runs.len() - 2],
+                &self.runs[self.runs.len() - 1],
+            );
             if a.1 > b.1 {
                 break;
             }

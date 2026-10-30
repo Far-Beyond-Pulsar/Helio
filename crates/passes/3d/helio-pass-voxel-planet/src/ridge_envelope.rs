@@ -346,8 +346,7 @@ mod tests {
         let first = field.program();
         assert_eq!(
             first.constants.len(),
-            std::mem::size_of::<crate::landform::LandformConstants>()
-                + 66 * 16
+            std::mem::size_of::<crate::landform::LandformConstants>() + 66 * 16
         );
         let start = Instant::now();
         for _ in 0..1024 {

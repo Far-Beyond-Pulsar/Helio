@@ -280,6 +280,7 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 @group(2) @binding(6) var env_sampler:    sampler;
 @group(2) @binding(7) var shadow_depth_sampler: sampler;  // Non-comparison sampler for PCSS blocker search
 @group(2) @binding(8) var water_caustics: texture_2d<f32>;  // Caustics texture from WaterCausticsPass
+@group(2) @binding(23) var water_caustics_deep: texture_2d<f32>;
 @group(2) @binding(9) var caustics_sampler: sampler;  // Sampler for caustics
 @group(2) @binding(10) var<storage, read> water_volumes: array<GpuWaterVolume>;  // Water volumes
 // Baked lightmap atlas (Rgba16Float, pre-baked indirect illumination for Static geometry)
@@ -298,6 +299,9 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 // Zero is unfiltered. See helio-pass-shadow.
 @group(2) @binding(20) var shadow_transmittance: texture_2d_array<f32>;
 @group(2) @binding(21) var transmittance_sampler: sampler;
+// f64-reduced to the 12 m FFT tile on the CPU; the legacy volume phase uses
+// a different period and cannot be reused here.
+@group(2) @binding(22) var<uniform> water_caustics_phase: vec4<f32>;
 
 // Reflection captures, uploaded sorted by influence volume, largest first.
 // The blend below runs front-to-back and saturates, so ordering is what lets a
@@ -1640,24 +1644,39 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     return vec4<f32>(contribution + water_caustics_light(world_pos), 0.0);
 }
 
-// Light the first water volume's caustics add to a surface below its water
-// line. Additive, so it is composed with the reflections: base lighting is at
-// its sampled-texture budget.
+/// Add the same periodic three-depth caustics field used by the water surface.
+/// The dedicated phase uniform is reduced from the f64 world origin to this
+/// 12 m tile, independently of the legacy 270 m volume-relative simulation.
 fn water_caustics_light(world_pos: vec3<f32>) -> vec3<f32> {
     if arrayLength(&water_volumes) == 0u {
         return vec3<f32>(0.0);
     }
     let vol = water_volumes[0];
-    if world_pos.y >= vol.bounds_max.w || vol.caustics_params.x <= 0.5 {
+    let depth = vol.bounds_max.w - world_pos.y;
+    if depth <= 0.0 || vol.caustics_params.x <= 0.5 {
         return vec3<f32>(0.0);
     }
-    // Sampled at the world XZ position, `caustics_params.z` metres a tile;
-    // in a camera-relative frame, offset by the volume's world phase so the
-    // pattern stays put while the origin does (exactly so for tile sizes
-    // that divide 270 m).
-    let caustics_uv = (world_pos.xz + vol.world_phase.xy) / vol.caustics_params.z;
-    let caustic_value = textureSampleLevel(water_caustics, caustics_sampler, caustics_uv, 0.0).r;
-    return vec3<f32>(0.7, 0.9, 1.0) * caustic_value * vol.caustics_params.y;
+    let uv = fract((world_pos.xz + water_caustics_phase.xy) / 12.0);
+    let footprint = max(length(dpdx(world_pos.xz)), length(dpdy(world_pos.xz)));
+    let near_lod = clamp(log2(max(footprint * 512.0 / 12.0, 1.0)), 0.0, 9.0);
+    let deep_lod = clamp(log2(max(footprint * 256.0 / 12.0, 1.0)), 0.0, 8.0);
+    var caustic: f32;
+    if depth <= 4.0 {
+        let shallow = textureSampleLevel(water_caustics, caustics_sampler,
+            uv, near_lod).r;
+        let mid = textureSampleLevel(water_caustics_deep, caustics_sampler,
+            uv, deep_lod).r;
+        caustic = mix(shallow, mid, smoothstep(1.5, 4.0, clamp(depth, 1.5, 4.0)));
+    } else {
+        let mid = textureSampleLevel(water_caustics_deep, caustics_sampler,
+            uv, deep_lod).r;
+        let deep = textureSampleLevel(water_caustics_deep, caustics_sampler,
+            uv, deep_lod).g;
+        caustic = mix(mid, deep, smoothstep(4.0, 10.0, clamp(depth, 4.0, 10.0)));
+    }
+    let attenuation = exp(-max(depth - 1.5, 0.0) * 0.12);
+    return vec3<f32>(0.7, 0.9, 1.0) * max(caustic - 1.0, 0.0)
+         * vol.caustics_params.y * attenuation;
 }
 
 // Logical face metadata maps all filtering into a guarded physical tile.

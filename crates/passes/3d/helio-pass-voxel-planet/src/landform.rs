@@ -12,11 +12,11 @@
 //! are omitted: coarse levels are band-limited point samples of the same
 //! field rather than an independent smooth replacement.
 use crate::grid::Grid;
-use crate::planet_maps::{self, MapView, PlanetMaps, MAP_HEADER};
 use crate::noise::{
     fade, hash3, lerp, mul16, mul_fine, mul_shr, mul_shr_signed, noise, noise_fine,
     noise_fine_grad, scale, sin_turns, unit_q30, FINE_ONE, ONE, Q30,
 };
+use crate::planet_maps::{self, MapView, PlanetMaps, MAP_HEADER};
 use crate::terrain::{Column, TerrainAppearance, TerrainField, TerrainProgram, HEIGHT_ONE};
 use crate::volumes::VolumeLayer;
 use bytemuck::{Pod, Zeroable};
@@ -1215,7 +1215,14 @@ pub fn height_parts(
     p: IVec3,
     level: u32,
 ) -> (i32, u32) {
-    parts(k, maps, p, level, None, level_ops(k, level, false).into_iter())
+    parts(
+        k,
+        maps,
+        p,
+        level,
+        None,
+        level_ops(k, level, false).into_iter(),
+    )
 }
 
 /// [`height_parts`] of many points of one level without maps (the planet
@@ -1457,7 +1464,11 @@ fn parts(
 fn snowline(c: &LandformConstants, t0: i32) -> i32 {
     let (snow, per) = (c.maps[3][0], c.maps[3][1]);
     if per == 0 {
-        return if t0 > snow { i32::MAX / 2 } else { i32::MIN / 2 };
+        return if t0 > snow {
+            i32::MAX / 2
+        } else {
+            i32::MIN / 2
+        };
     }
     (t0 - snow).clamp(-8192, 8192) * per
 }
@@ -1496,7 +1507,13 @@ fn earthlike_material(
     let altitude = layer.wrapping_mul(c.header[1]);
     if surface == RIVER_BED && depth < dirt * 2 {
         // River beds: gravel and sand over silt.
-        return if depth == 0 && h & 3 == 0 { SAND } else if depth < dirt { GRAVEL } else { CLAY };
+        return if depth == 0 && h & 3 == 0 {
+            SAND
+        } else if depth < dirt {
+            GRAVEL
+        } else {
+            CLAY
+        };
     }
     if top_height < c.levels[3] {
         // Low basins: meadow with mud patches of a few metres over silt,
@@ -1543,7 +1560,11 @@ fn earthlike_material(
         // Sediment: dry fans of sand and gravel, wet plains of meadow over
         // soil and silt.
         return if wet < FINE_ONE / 10 * 3 {
-            if depth == 0 && h & 3 != 0 { SAND } else { GRAVEL }
+            if depth == 0 && h & 3 != 0 {
+                SAND
+            } else {
+                GRAVEL
+            }
         } else if depth == 0 {
             GRASS
         } else if depth < dirt {
@@ -1655,7 +1676,11 @@ fn rules_material(
 ) -> u32 {
     let river = surface == RIVER_BED;
     // Sediment is no gully.
-    let erosion = if surface == ALLUVIUM { 0 } else { i32::from(surface as u8 as i8).max(-126) };
+    let erosion = if surface == ALLUVIUM {
+        0
+    } else {
+        i32::from(surface as u8 as i8).max(-126)
+    };
     let altitude = layer.wrapping_mul(c.header[1]);
     let (temperature, wet) = planet_maps::climate(maps, p, altitude);
     let seed = c.header[3] as u32;
@@ -1781,7 +1806,14 @@ impl LandformField {
         let streams = maps.as_ref().and_then(|m| {
             let r = m.rivers()?;
             constants.maps = m.header;
-            (r.streams > 0).then(|| Arc::new(crate::streams::Streams::new(m.clone(), &constants, r, r.streams)))
+            (r.streams > 0).then(|| {
+                Arc::new(crate::streams::Streams::new(
+                    m.clone(),
+                    &constants,
+                    r,
+                    r.streams,
+                ))
+            })
         });
         if let Some(m) = &maps {
             constants.maps = m.header;

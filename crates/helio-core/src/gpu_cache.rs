@@ -132,7 +132,13 @@ fn get<K: Hash + Eq, V: Clone>(
         map.retain(|_, e| e.used > cut);
     }
     let value = make();
-    map.insert(key, Entry { value: value.clone(), used: frame });
+    map.insert(
+        key,
+        Entry {
+            value: value.clone(),
+            used: frame,
+        },
+    );
     (value, true)
 }
 
@@ -142,13 +148,19 @@ impl GpuCache {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Caches> {
-        self.caches.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.caches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The bind group `desc` describes: the cached one when the same layout
     /// binds the same resources, else a new one (cached). Bind groups over
     /// external textures are never cached.
-    pub fn bind_group(&self, device: &wgpu::Device, desc: &wgpu::BindGroupDescriptor<'_>) -> wgpu::BindGroup {
+    pub fn bind_group(
+        &self,
+        device: &wgpu::Device,
+        desc: &wgpu::BindGroupDescriptor<'_>,
+    ) -> wgpu::BindGroup {
         let binding = |b: &wgpu::BufferBinding<'_>| Binding {
             buffer: b.buffer.clone(),
             offset: b.offset,
@@ -160,7 +172,9 @@ impl GpuCache {
             .map(|entry| {
                 let bound = match &entry.resource {
                     wgpu::BindingResource::Buffer(b) => Bound::Buffer(binding(b)),
-                    wgpu::BindingResource::BufferArray(bs) => Bound::Buffers(bs.iter().map(binding).collect()),
+                    wgpu::BindingResource::BufferArray(bs) => {
+                        Bound::Buffers(bs.iter().map(binding).collect())
+                    }
                     wgpu::BindingResource::Sampler(s) => Bound::Sampler((*s).clone()),
                     wgpu::BindingResource::SamplerArray(ss) => {
                         Bound::Samplers(ss.iter().map(|s| (*s).clone()).collect())
@@ -188,7 +202,9 @@ impl GpuCache {
         };
         let mut caches = self.lock();
         let frame = caches.frame;
-        let (group, made) = get(&mut caches.groups, frame, key, || device.create_bind_group(desc));
+        let (group, made) = get(&mut caches.groups, frame, key, || {
+            device.create_bind_group(desc)
+        });
         caches.created.bind_groups += u64::from(made);
         group
     }
@@ -201,7 +217,11 @@ impl GpuCache {
 
     /// The view `desc` describes of `texture`: cached by the texture and the
     /// descriptor (its label is the first view's).
-    pub fn view_with(&self, texture: &wgpu::Texture, desc: &wgpu::TextureViewDescriptor<'_>) -> wgpu::TextureView {
+    pub fn view_with(
+        &self,
+        texture: &wgpu::Texture,
+        desc: &wgpu::TextureViewDescriptor<'_>,
+    ) -> wgpu::TextureView {
         let key = ViewKey {
             texture: texture.clone(),
             format: desc.format,
@@ -221,9 +241,15 @@ impl GpuCache {
     /// A buffer holding `desc.contents`: immutable ones (neither `COPY_DST`
     /// nor mappable) up to 4 KiB are shared by contents and usage, others are
     /// new.
-    pub fn buffer_init(&self, device: &wgpu::Device, desc: &wgpu::util::BufferInitDescriptor<'_>) -> wgpu::Buffer {
+    pub fn buffer_init(
+        &self,
+        device: &wgpu::Device,
+        desc: &wgpu::util::BufferInitDescriptor<'_>,
+    ) -> wgpu::Buffer {
         use wgpu::util::DeviceExt;
-        let writable = wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::MAP_WRITE;
+        let writable = wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::MAP_READ
+            | wgpu::BufferUsages::MAP_WRITE;
         if desc.usage.intersects(writable) || desc.contents.len() > MAX_SHARED_BYTES {
             return device.create_buffer_init(desc);
         }
@@ -233,7 +259,9 @@ impl GpuCache {
         };
         let mut caches = self.lock();
         let frame = caches.frame;
-        let (buffer, made) = get(&mut caches.buffers, frame, key, || device.create_buffer_init(desc));
+        let (buffer, made) = get(&mut caches.buffers, frame, key, || {
+            device.create_buffer_init(desc)
+        });
         caches.created.buffers += u64::from(made);
         buffer
     }
@@ -338,13 +366,14 @@ impl PooledBuffer {
         use std::sync::atomic::Ordering;
         self.state.store(PENDING, Ordering::Release);
         let state = self.state.clone();
-        self.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-            let mapped = result.is_ok();
-            state.store(if mapped { MAPPED } else { IDLE }, Ordering::Release);
-            if mapped {
-                ready.store(true, Ordering::Release);
-            }
-        });
+        self.slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let mapped = result.is_ok();
+                state.store(if mapped { MAPPED } else { IDLE }, Ordering::Release);
+                if mapped {
+                    ready.store(true, Ordering::Release);
+                }
+            });
     }
 
     /// Unmap it if mapped (shadows `wgpu::Buffer::unmap`, which errors on an
@@ -424,7 +453,12 @@ mod tests {
         })
     }
 
-    fn group(cache: &GpuCache, device: &wgpu::Device, layout: &wgpu::BindGroupLayout, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn group(
+        cache: &GpuCache,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        buffer: &wgpu::Buffer,
+    ) -> wgpu::BindGroup {
         cache.bind_group(
             device,
             &wgpu::BindGroupDescriptor {
@@ -439,12 +473,16 @@ mod tests {
     }
 
     fn allocated(device: &wgpu::Device) -> Option<u64> {
-        device.generate_allocator_report().map(|r| r.total_allocated_bytes)
+        device
+            .generate_allocator_report()
+            .map(|r| r.total_allocated_bytes)
     }
 
     #[test]
     fn frames_binding_the_same_resources_share_one_bind_group() {
-        let Some((device, _queue)) = gpu() else { return };
+        let Some((device, _queue)) = gpu() else {
+            return;
+        };
         let cache = GpuCache::new();
         let layout = layout(&device);
         let (a, b) = (storage(&device, 64), storage(&device, 64));
@@ -473,28 +511,42 @@ mod tests {
     /// A resource its owner dropped is released a few frames later.
     #[test]
     fn replaced_resources_are_released_after_a_few_frames() {
-        let Some((device, _queue)) = gpu() else { return };
-        let Some(before) = allocated(&device) else { return };
+        let Some((device, _queue)) = gpu() else {
+            return;
+        };
+        let Some(before) = allocated(&device) else {
+            return;
+        };
         let cache = GpuCache::new();
         let layout = layout(&device);
         let big = storage(&device, 64 << 20);
         group(&cache, &device, &layout, &big);
         drop(big);
-        assert!(allocated(&device).unwrap() >= before + (64 << 20), "the cache keeps it for now");
+        assert!(
+            allocated(&device).unwrap() >= before + (64 << 20),
+            "the cache keeps it for now"
+        );
         for _ in 0..=KEEP_FRAMES {
             cache.end_frame();
         }
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
         assert!(cache.is_empty());
-        assert!(allocated(&device).unwrap() < before + (1 << 20), "released once the entry expired");
+        assert!(
+            allocated(&device).unwrap() < before + (1 << 20),
+            "released once the entry expired"
+        );
     }
 
     /// An owner that replaces what it binds clears the cache: the old
     /// resources go at once, not after the keep window.
     #[test]
     fn a_cleared_cache_releases_at_once() {
-        let Some((device, _queue)) = gpu() else { return };
-        let Some(before) = allocated(&device) else { return };
+        let Some((device, _queue)) = gpu() else {
+            return;
+        };
+        let Some(before) = allocated(&device) else {
+            return;
+        };
         let cache = GpuCache::new();
         let layout = layout(&device);
         let big = storage(&device, 64 << 20);
@@ -511,10 +563,13 @@ mod tests {
     fn caches_go_with_their_owners_and_devices() {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         for _ in 0..4 {
-            let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default())) else {
+            let Ok(adapter) = pollster::block_on(instance.request_adapter(&Default::default()))
+            else {
                 return;
             };
-            let Ok((device, _queue)) = pollster::block_on(adapter.request_device(&Default::default())) else {
+            let Ok((device, _queue)) =
+                pollster::block_on(adapter.request_device(&Default::default()))
+            else {
                 return;
             };
             let cache = GpuCache::new();
@@ -522,7 +577,11 @@ mod tests {
             let buffer = storage(&device, 16 << 20);
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
-                size: wgpu::Extent3d { width: 512, height: 512, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: 512,
+                    height: 512,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -537,7 +596,9 @@ mod tests {
             }
             // Cache, resources and device dropped, in no particular order.
         }
-        let Some(report) = instance.generate_report() else { return };
+        let Some(report) = instance.generate_report() else {
+            return;
+        };
         let hub = &report.hub;
         let live = [
             ("buffers", hub.buffers.num_allocated),

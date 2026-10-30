@@ -9,6 +9,7 @@ use helio_pass_sky::atmosphere::{
     ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET,
 };
 use pulsar_scenedb::gpu::BufferKey;
+use wgpu::util::DeviceExt;
 
 /// The chain unmap table (`portal_unmap`): 256 chains of one `mat4x4<f32>`, a
 /// uniform because the fragment stage is at its storage-buffer limit.
@@ -68,6 +69,8 @@ pub struct DeferredLightPass {
     reflection_pipeline: wgpu::RenderPipeline,
     reflection_debug_pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
+    /// World-origin phase reduced in f64 to the shared 12 m FFT caustics tile.
+    caustics_phase_buf: wgpu::Buffer,
     shadow_config_buf: wgpu::Buffer,
     bgl_0: wgpu::BindGroupLayout,
     fallback_shadow_caster_counts: wgpu::Buffer,
@@ -102,9 +105,9 @@ pub struct DeferredLightPass {
     bind_group_3_key: Option<[wgpu::Buffer; 4]>,
     reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
     reflection_bind_group_2_key: Option<(
-        [wgpu::TextureView; 4],
+        [wgpu::TextureView; 5],
         [wgpu::Sampler; 2],
-        [wgpu::Buffer; 2],
+        [wgpu::Buffer; 3],
     )>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -206,6 +209,11 @@ impl DeferredLightPass {
             size: std::mem::size_of::<DeferredGlobals>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
+        });
+        let caustics_phase_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Deferred Water Caustics Phase"),
+            contents: bytemuck::cast_slice(&[0.0f32; 4]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let shadow_config_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -571,7 +579,7 @@ impl DeferredLightPass {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -789,6 +797,7 @@ impl DeferredLightPass {
             reflection_pipeline,
             reflection_debug_pipeline,
             globals_buf,
+            caustics_phase_buf,
             shadow_config_buf,
             bgl_0,
             fallback_shadow_caster_counts,
@@ -912,6 +921,7 @@ impl RenderPass for DeferredLightPass {
             helio_pass_gi::GI_IRRADIANCE,
             "render_environment",
             "water_caustics",
+            "water_caustics_deep",
             "pre_aa",
             "baked_lightmap",
             "baked_lightmap_sampler",
@@ -931,6 +941,19 @@ impl RenderPass for DeferredLightPass {
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Keep the periodic caustics lookup stable across large-world origin
+        // rebases without deriving the phase through an f32 world position.
+        let caustics_phase = [
+            ctx.world_origin.x.rem_euclid(12.0) as f32,
+            ctx.world_origin.z.rem_euclid(12.0) as f32,
+            0.0,
+            0.0,
+        ];
+        ctx.write_buffer(
+            &self.caustics_phase_buf,
+            0,
+            bytemuck::cast_slice(&caustics_phase),
+        );
         let environment = ctx
             .registry
             .get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
@@ -1175,6 +1198,10 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get(helio_core::ResourceKey::new("water_caustics"))
             .unwrap_or(&self.fallback_caustics_view);
+        let caustics_deep_view = ctx
+            .registry
+            .get(helio_core::ResourceKey::new("water_caustics_deep"))
+            .unwrap_or(&self.fallback_caustics_view);
         // `"water_volumes"` is resolved fresh from the SceneDB mirror by key,
         // exactly like `"scene_lights"` in `ForwardLitPass` -- no Renderer
         // method writes this pass's water-volume input.
@@ -1296,9 +1323,14 @@ impl RenderPass for DeferredLightPass {
                 ssr_view.clone(),
                 planar_view.clone(),
                 caustics_view.clone(),
+                caustics_deep_view.clone(),
             ],
             [env_sampler.clone(), self.caustics_sampler.clone()],
-            [reflection_captures_buf.clone(), water_volumes.clone()],
+            [
+                reflection_captures_buf.clone(),
+                water_volumes.clone(),
+                self.caustics_phase_buf.clone(),
+            ],
         );
         if self.reflection_bind_group_2_key.as_ref() != Some(&reflection_scene_key) {
             self.reflection_bind_group_2 =
@@ -1318,6 +1350,7 @@ impl RenderPass for DeferredLightPass {
                         },
                         texture_view_entry(16, planar_view),
                         texture_view_entry(8, caustics_view),
+                        texture_view_entry(23, caustics_deep_view),
                         wgpu::BindGroupEntry {
                             binding: 9,
                             resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
@@ -1325,6 +1358,10 @@ impl RenderPass for DeferredLightPass {
                         wgpu::BindGroupEntry {
                             binding: 10,
                             resource: water_volumes.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 22,
+                            resource: self.caustics_phase_buf.as_entire_binding(),
                         },
                     ],
                 }));
@@ -1914,6 +1951,7 @@ fn reflection_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
         // Water caustics texture, its sampler and the water volumes
         // (`water_caustics_light`).
         texture_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
+        texture_entry(23, wgpu::TextureSampleType::Float { filterable: true }),
         wgpu::BindGroupLayoutEntry {
             binding: 9,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -1921,7 +1959,21 @@ fn reflection_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
             count: None,
         },
         storage_entry(10),
+        uniform_entry(22),
     ]
+}
+
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(16),
+        },
+        count: None,
+    }
 }
 
 fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

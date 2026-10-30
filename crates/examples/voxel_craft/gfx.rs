@@ -542,7 +542,11 @@ impl Gfx {
         #[cfg(target_arch = "wasm32")]
         let render_eye = eye;
         let sun = view.sun.normalize();
-        *self.source.lock().unwrap() = Some(PlanetFrame::single(render_eye, planet.clone(), sun.as_vec3()));
+        *self.source.lock().unwrap() = Some(PlanetFrame::single(
+            render_eye,
+            planet.clone(),
+            sun.as_vec3(),
+        ));
         // The sun's light follows the sky.
         update_light(
             &mut self.scene.world,
