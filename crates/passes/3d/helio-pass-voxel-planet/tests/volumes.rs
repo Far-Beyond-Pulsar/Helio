@@ -3,8 +3,10 @@
 //! (`Volumes`): a turned Earth far from the origin draws as in its own
 //! frame, a moon and a ship-sized block draw beside a planet with the
 //! nearest hit winning, a moving and spinning volume draws where it is each
-//! frame, picks name the volume they hit, and a turned volume is lit as in
-//! its own frame.
+//! frame, picks name the volume they hit, a turned volume is lit as in its
+//! own frame, and volumes light each other: their sun shadows and the GI
+//! probes' rays cross from one into another as CPU rays over every volume
+//! do.
 mod common;
 use common::{gpu, Gpu};
 use glam::{DQuat, DVec3, Mat4, Vec3};
@@ -108,6 +110,9 @@ struct Scene {
     /// The direction to the sun (world).
     sun: Vec3,
     last: Option<Mat4>,
+    /// GI rays to trace each frame (`gi_rays`), from a clipmap around the
+    /// eye.
+    gi: Option<[wgpu::Buffer; 4]>,
 }
 
 impl Scene {
@@ -117,10 +122,17 @@ impl Scene {
 
     fn with_capacity(gpu: &Gpu, volumes: &Volumes, capacity: Capacity) -> Self {
         let mut world = ChunkWorld::with_capacity(&gpu.device, &gpu.queue, capacity);
+        // Each volume added, timed (its form's pipelines; the second the
+        // passes lighting across volumes).
         let ids = volumes
             .volumes
             .iter()
-            .map(|v| world.add_volume(v.id, &v.planet, v.transform))
+            .map(|v| {
+                let clock = std::time::Instant::now();
+                let id = world.add_volume(v.id, &v.planet, v.transform);
+                eprintln!("volume {} added in {:.1} s", v.id, clock.elapsed().as_secs_f64());
+                id
+            })
             .collect();
         Self {
             world,
@@ -128,6 +140,7 @@ impl Scene {
             frame: 0,
             sun: Vec3::new(0.3, 0.8, 0.4).normalize(),
             last: None,
+            gi: None,
         }
     }
 
@@ -157,6 +170,22 @@ impl Scene {
             self.frame,
             &camera.config(),
         );
+        if self.gi.is_some() {
+            self.world.follow_gi(
+                helio_pass_gi::Clipmap::around(camera.eye, helio_pass_gi::DEFAULT_FINEST_SPACING),
+                camera.eye,
+                camera.eye,
+            );
+        }
+        let gi = self
+            .gi
+            .as_ref()
+            .map(|[frame, rays, hits, sun]| helio_pass_voxel_planet::chunks::GiRays {
+                frame,
+                rays,
+                hits,
+                sun,
+            });
         self.world.draw(
             &mut recorder,
             self.frame,
@@ -169,7 +198,7 @@ impl Scene {
             camera.size,
             None,
             None,
-            None,
+            gi.as_ref(),
         );
         if let Some(picks) = picks {
             self.world.copy_picks(&mut recorder, picks);
@@ -746,5 +775,343 @@ impl ChainNormals for Vec<Vec<f32>> {
                 )
             })
             .collect()
+    }
+}
+
+/// A world with a wall of brick on the sun's side of a spot of land, and a
+/// ship-sized block (`block`) hovering a few metres over the ground beside
+/// it: the ground's world, the block's transform, the land's point, up, and
+/// the direction to the wall.
+fn wall_and_block() -> (Arc<Planet>, VolumeTransform, DVec3, DVec3, DVec3) {
+    let mut earth = Planet::new(PlanetRecipe::default()).unwrap();
+    let dir = land(&earth, 4, 0.37, 0.61);
+    let ground = earth.surface_point(dir, 0.0);
+    let up = earth.grid().up(ground);
+    let side = up.any_orthonormal_vector();
+    earth
+        .apply(Brush {
+            center: (ground + side * 10.5 + up * 2.0).to_array(),
+            radius: 3.0,
+            shape: BrushShape::Cube,
+            op: BrushOp::Add,
+            material: material::BRICK,
+            height: 0.0,
+        })
+        .unwrap();
+    // The block's underside in its frame (its slab's), then 2.5 m over the
+    // ground.
+    let bottom = block()
+        .raycast_of(DVec3::new(0.3, -50.0, 0.2), DVec3::Y, 100.0, Matter::All)
+        .map_or(0.0, |h| h.distance - 50.0);
+    let at = VolumeTransform::new(
+        ground + up * (2.5 - bottom),
+        DQuat::from_rotation_arc(DVec3::Y, up),
+    );
+    (Arc::new(earth), at, ground, up, side)
+}
+
+/// The sun at the hits of a settled view of `volumes` against CPU rays over
+/// every volume: of hits facing the sun within the level-0 range whose
+/// drawn place is the CPU's (same volume, distance within a few
+/// centimetres), those compared, those whose drawn sun (steady shadows:
+/// each hit's walks over the sun's disk) differs from the CPU ray's by more
+/// than half (by receiver: lit, shadowed by itself, by another volume), and
+/// those the CPU finds shadowed by another volume than their own, by
+/// receiver. Hits whose CPU ray meets its caster farther than `reach` are
+/// left out (casters out of the view: the drawn cut holds them coarse, or
+/// not at all).
+#[derive(Debug, Default)]
+struct CrossShadows {
+    compared: usize,
+    wrong: usize,
+    wrong_by: Vec<[usize; 3]>,
+    shadowed_by_other: Vec<usize>,
+}
+
+fn cross_shadows(gpu: &Gpu, volumes: &Volumes, camera: &Camera, sun: DVec3, reach: f64) -> CrossShadows {
+    let mut scene = Scene::with_capacity(
+        gpu,
+        volumes,
+        Capacity {
+            chunks: 2 * CAPACITY.chunks,
+            ..CAPACITY
+        },
+    );
+    scene.sun = sun.as_vec3();
+    scene.world.set_steady_shadows(true);
+    let hits = scene.settle(gpu, camera);
+    let lit = read_rgba16(gpu, &scene.world.targets().unwrap().sun, 0);
+    let view_proj = camera.view_proj();
+    let near = 0.7 * 0.1 / camera.pixel_angle();
+    let mut out = CrossShadows {
+        wrong_by: vec![[0; 3]; volumes.volumes.len()],
+        shadowed_by_other: vec![0; volumes.volumes.len()],
+        ..Default::default()
+    };
+    for y in (0..camera.size[1]).step_by(2) {
+        for x in (0..camera.size[0]).step_by(2) {
+            let i = (y * camera.size[0] + x) as usize;
+            let dir = camera.pixel_dir(view_proj, x, y);
+            let (Some(drawn), Some(cpu)) = (hits[i], volumes.raycast(camera.eye, dir, near, Matter::All))
+            else {
+                continue;
+            };
+            if drawn.volume != cpu.id
+                || (drawn.distance - cpu.hit.distance).abs() > 0.03 + 1e-3 * cpu.hit.distance
+                || cpu.normal.dot(sun) < 0.15
+            {
+                continue;
+            }
+            let at = camera.eye + dir * cpu.hit.distance + cpu.normal * 1e-3;
+            let blocker = volumes.raycast(at, sun, 1000.0, Matter::All);
+            if blocker.is_some_and(|b| b.hit.distance > reach) {
+                continue;
+            }
+            let cpu_lit = blocker.is_none();
+            out.compared += 1;
+            let by = blocker.map_or(0, |b| if b.index == cpu.index { 1 } else { 2 });
+            out.shadowed_by_other[cpu.index] += usize::from(by == 2);
+            if (f64::from(lit[i]) - if cpu_lit { 1.0 } else { 0.0 }).abs() > 0.5 {
+                out.wrong += 1;
+                out.wrong_by[cpu.index][by] += 1;
+                if by == 0 && out.wrong_by[cpu.index][by] <= 12 {
+                    // Where the sun ray passes the other volumes (their
+                    // frames): its nearest point to each one's origin.
+                    for v in &volumes.volumes {
+                        let (o, d) = (v.transform.to_local(at), v.transform.dir_to_local(sun));
+                        let t = (-o.dot(d)).max(0.0);
+                        eprintln!("  vs {}: local origin {o:.2} dir {d:.3} nearest {:.2}", v.id, o + d * t);
+                    }
+                }
+                if out.wrong_by[cpu.index][by] <= 3 {
+                    eprintln!(
+                        "pixel {x},{y}: volume {} drawn sun {} cpu {} (blocker {:?})",
+                        cpu.id,
+                        lit[i],
+                        u8::from(cpu_lit),
+                        blocker.map(|b| b.id)
+                    );
+                }
+            }
+        }
+    }
+    eprintln!("{out:?}");
+    out
+}
+
+/// Volumes shadow each other: under a low sun a wall of the ground's
+/// shades the block hovering beside it, and the block shades the ground
+/// under it; every sunward hit near the eye is in the sun where a CPU ray
+/// toward it over every volume meets nothing, but a fiftieth (cells along
+/// a shadow's edge, the sun's disk).
+#[test]
+fn volumes_shadow_each_other() {
+    let Some(gpu) = gpu() else { return };
+    let (earth, at, ground, up, side) = wall_and_block();
+    let volumes = Volumes::new(vec![
+        VoxelVolume::new(1, earth, VolumeTransform::IDENTITY),
+        VoxelVolume::new(5, Arc::new(block()), at),
+    ]);
+    // The sun 20 degrees up over the wall; the eye back and up, looking
+    // down at the block and the ground its shadow falls on.
+    let sun = (side + up * 0.364).normalize();
+    let fwd = up.cross(side);
+    let eye = ground - fwd * 18.0 + up * 12.0 - side * 2.0;
+    let camera = Camera {
+        eye,
+        forward: ((ground - side * 2.0) - eye).normalize().as_vec3(),
+        up: up.as_vec3(),
+        size: [640, 360],
+    };
+    let c = cross_shadows(gpu, &volumes, &camera, sun, 40.0);
+    assert!(c.compared > 10_000, "{c:?}");
+    assert!(c.shadowed_by_other[0] > 300 && c.shadowed_by_other[1] > 50, "{c:?}");
+    assert!(c.wrong * 50 <= c.compared, "{c:?}");
+    for (wrong, shadowed) in c.wrong_by.iter().zip(&c.shadowed_by_other) {
+        assert!(wrong[2] * 50 <= *shadowed, "{c:?}");
+    }
+}
+
+/// GI rays from the probes about a block hovering over the ground cross
+/// into it (`gi_trace_cross`) and keep the nearer hit: every ray whose CPU
+/// hit over every volume is in view near the eye (level 0 drawn there) hits
+/// at the CPU's distance with the CPU's face, the block's and the ground's
+/// alike; a hundredth may differ (grazing cells).
+#[test]
+fn gi_rays_cross_into_other_volumes() {
+    let Some(gpu) = gpu() else { return };
+    let (earth, at, ground, up, side) = wall_and_block();
+    let volumes = Volumes::new(vec![
+        VoxelVolume::new(1, earth, VolumeTransform::IDENTITY),
+        VoxelVolume::new(5, Arc::new(block()), at),
+    ]);
+    let fwd = up.cross(side);
+    let eye = ground - fwd * 9.0 + up * 2.0 - side * 3.0;
+    let camera = Camera {
+        eye,
+        forward: (at.position - eye).normalize().as_vec3(),
+        up: up.as_vec3(),
+        size: [320, 180],
+    };
+    // The finest level's probes within 8 m of the block, out of every
+    // volume's rock; 64 random rays each.
+    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
+    let probes: Vec<u32> = (0..helio_pass_gi::LEVEL_PROBES)
+        .filter(|&p| {
+            let o = clipmap.position(p);
+            o.distance(at.position) < 8.0 && !volumes.solid(o, Matter::All)
+        })
+        .take(400)
+        .collect();
+    let mut next = xorshift(0x9e37_79b9_7f4a_7c15);
+    let mut unit = || loop {
+        let v =
+            DVec3::new(next() as f64, next() as f64, next() as f64) / u64::MAX as f64 * 2.0 - 1.0;
+        if v.length_squared() > 1e-4 && v.length_squared() <= 1.0 {
+            return v.normalize();
+        }
+    };
+    let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize)
+        .map(|_| unit())
+        .collect();
+    let mut scene = Scene::new(gpu, &volumes);
+    scene.gi = Some(gi_rays(
+        gpu,
+        eye,
+        &probes,
+        &dirs.iter().map(|d| d.as_vec3()).collect::<Vec<_>>(),
+        scene.sun,
+    ));
+    scene.settle(gpu, &camera);
+    // One frame's hits (the GI pass clears them each frame).
+    let hits_buffer = &scene.gi.as_ref().unwrap()[2];
+    gpu.queue
+        .write_buffer(hits_buffer, 0, &vec![0u8; hits_buffer.size() as usize]);
+    scene.frame(gpu, &camera, None);
+    let hits = read_words(gpu, &scene.gi.as_ref().unwrap()[2]);
+    let view_proj = camera.view_proj();
+    let near = 0.7 * 0.1 / camera.pixel_angle();
+    let (mut compared, mut wrong, mut by_volume) = (0, 0, [0usize; 2]);
+    for (k, d) in dirs.iter().enumerate() {
+        let origin = clipmap.position(probes[k / helio_pass_gi::RAYS as usize]);
+        let Some(cpu) = volumes.raycast(origin, *d, 30.0, Matter::All) else {
+            continue;
+        };
+        let hit_at = origin + *d * cpu.hit.distance;
+        let clip = view_proj * (hit_at - eye).as_vec3().extend(1.0);
+        let ndc = clip.truncate() / clip.w;
+        if clip.w <= 0.0 || ndc.x.abs() > 0.95 || ndc.y.abs() > 0.95 || (hit_at - eye).length() > near {
+            continue;
+        }
+        compared += 1;
+        by_volume[cpu.index] += 1;
+        let hit = &hits[k * 4..k * 4 + 4];
+        let t = f32::from_bits(hit[0]);
+        let n = (DVec3::new(
+            f64::from(hit[1] & 1023),
+            f64::from((hit[1] >> 10) & 1023),
+            f64::from((hit[1] >> 20) & 1023),
+        ) / 1023.0
+            * 2.0
+            - 1.0)
+            .normalize_or_zero();
+        let exact = t > 0.0
+            && (f64::from(t) - cpu.hit.distance).abs() <= 2e-3 + cpu.hit.distance * 1e-5
+            && n.dot(cpu.normal) > 0.99;
+        if !exact {
+            wrong += 1;
+            if wrong < 8 {
+                eprintln!(
+                    "ray {k}: drawn t {t} n {n}, cpu volume {} at {} n {}",
+                    cpu.id, cpu.hit.distance, cpu.normal
+                );
+            }
+        }
+    }
+    eprintln!("GI rays: compared {compared} (ground {}, block {}), wrong {wrong}", by_volume[0], by_volume[1]);
+    assert!(by_volume[0] > 500 && by_volume[1] > 500, "{by_volume:?}");
+    assert!(wrong * 100 <= compared, "{wrong} of {compared}");
+}
+
+/// GI's buffers for rays from `probes` (storage indices of a clipmap around
+/// `eye`) along `dirs` (`RAYS` a probe), the sun towards `sun` (as
+/// tests/chunks.rs's).
+fn gi_rays(gpu: &Gpu, eye: DVec3, probes: &[u32], dirs: &[Vec3], sun: Vec3) -> [wgpu::Buffer; 4] {
+    use wgpu::util::DeviceExt;
+    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
+    let frame = helio_pass_gi::GpuFrame {
+        levels: clipmap.levels(eye),
+        sky: [0.0; 4],
+        ground: [0.0; 4],
+        counts: [probes.len() as u32, 0, 0, 0],
+        rotation: [0.0, 0.0, 0.0, 1.0],
+        prev_rotation: [0.0, 0.0, 0.0, 1.0],
+    };
+    let mut rays = Vec::with_capacity(dirs.len() * 8);
+    for (k, d) in dirs.iter().enumerate() {
+        let probe = probes[k / helio_pass_gi::RAYS as usize];
+        let o = (clipmap.position(probe) - eye).as_vec3();
+        rays.extend_from_slice(&[
+            o.x.to_bits(),
+            o.y.to_bits(),
+            o.z.to_bits(),
+            1e30f32.to_bits(),
+            d.x.to_bits(),
+            d.y.to_bits(),
+            d.z.to_bits(),
+            probe,
+        ]);
+    }
+    let init = |label, contents: &[u8], usage| {
+        gpu.device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents,
+                usage,
+            })
+    };
+    let storage =
+        wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST;
+    [
+        init(
+            "gi frame",
+            bytemuck::bytes_of(&frame),
+            wgpu::BufferUsages::UNIFORM,
+        ),
+        init("gi rays", bytemuck::cast_slice(&rays), storage),
+        init("gi hits", &vec![0u8; dirs.len() * 16], storage),
+        init(
+            "gi sun",
+            bytemuck::cast_slice(&[sun.x, sun.y, sun.z, 0.0, 1.0, 1.0, 1.0, 0.0]),
+            storage,
+        ),
+    ]
+}
+
+fn read_words(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<u32> {
+    let staging = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: buffer.size(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = gpu.device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
+    gpu.queue.submit([encoder.finish()]);
+    staging
+        .slice(..)
+        .map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    gpu.device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .unwrap();
+    bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec()
+}
+
+fn xorshift(mut state: u64) -> impl FnMut() -> u64 {
+    move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
     }
 }

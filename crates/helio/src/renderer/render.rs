@@ -42,11 +42,11 @@ impl Renderer {
     }
 
     fn poll_cull_stats_readback(&mut self) {
+        // The frame's one poll (`render`, `render_xr`) delivered the map.
         if !self.owns_device {
             return;
         }
 
-        let _ = self.device.poll(wgpu::PollType::Poll);
         let result = match &self.cull_stats_readback_state {
             CullStatsReadbackState::Idle | CullStatsReadbackState::Disabled => return,
             CullStatsReadbackState::Mapping(completion) => completion
@@ -645,6 +645,9 @@ impl Renderer {
             return Err(helio_core::Error::InvalidPassConfig(
                 "HLFS RT stereo support is not implemented".into(),
             ));
+        }
+        if self.owns_device {
+            let _ = self.device.poll(wgpu::PollType::Poll);
         }
         self.poll_cull_stats_readback();
 

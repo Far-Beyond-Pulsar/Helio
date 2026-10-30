@@ -309,6 +309,11 @@ struct ChunkStatic {
     bounds: [f32; 4],
 }
 
+/// A chunk record's size in vec4s (`chunk_records.wgsl`):
+/// its slot, its `ChunkStatic` (9), its key; and in bytes.
+const RECORD_VEC4S: usize = 2 + std::mem::size_of::<ChunkStatic>() / 16;
+const RECORD_BYTES: usize = RECORD_VEC4S * 16;
+
 /// A planet-centred position as a high and a low f32 part.
 fn split(v: DVec3) -> ([f32; 4], [f32; 4]) {
     let hi = v.as_vec3();
@@ -341,13 +346,16 @@ struct DrawParams {
     /// centre (w); a plane's up is +y.
     up: [f32; 4],
     /// x: the eye's squared radius less the ceiling's (a plane: its height
-    /// over the ceiling), from f64.
+    /// over the ceiling), from f64; z: a plane's eye height over its band's
+    /// bottom (its world's lowest solid).
     ceiling: [f32; 4],
     /// The planet's radius and voxel (m), its first exact level
     /// ([`exact_level`]), the eye's squared radius less the planet's (from
     /// f64).
     planet: [f32; 4],
-    /// x: the octree's coarsest level; y: nodes fading.
+    /// x: the octree's coarsest level; y: nodes fading; z: the chunk an
+    /// eye under the ground walks from; w: the volume's anchor
+    /// (`ChunkWorld::place_anchors`).
     cut: [u32; 4],
     /// The eye in the scene lights' coordinates; w 1 with lights bound.
     light_eye: [f32; 4],
@@ -432,6 +440,69 @@ fn screen_rect(v: &ViewInput, vol: &volumes::Volume) -> [u32; 4] {
     let x1 = clamp(x[1] + 2.0, v.size[0]).max(x0);
     let y1 = clamp(y[1] + 2.0, v.size[1]).max(y0);
     [x0, y0, x1, y1]
+}
+
+/// The pixels volume `vol`'s sun shadow can fall on in view `v`: its
+/// bounds' rectangle (`screen_rect`) stretched the way the shadow runs from
+/// it, to its vanishing point (where the direction away from the sun
+/// projects) when that is ahead of the eye (the infinite cylinder of the
+/// shadow projects into the hull of the bounds' disk and that point), else
+/// to the view's edges it heads for (it comes towards the eye). The whole
+/// view where the bounds reach behind the eye.
+fn shadow_rect(v: &ViewInput, vol: &volumes::Volume) -> [u32; 4] {
+    let whole = [0, 0, v.size[0], v.size[1]];
+    let rect = screen_rect(v, vol);
+    if vol.bounds.is_none() || rect == whole {
+        return whole;
+    }
+    let size = Vec2::new(v.size[0] as f32, v.size[1] as f32);
+    let (mut lo, mut hi) = (
+        Vec2::new(rect[0] as f32, rect[1] as f32),
+        Vec2::new(rect[2] as f32, rect[3] as f32),
+    );
+    let away = v.view_proj * (-v.sun).extend(0.0);
+    if away.w > 1e-6 {
+        // NDC y up, pixels y down.
+        let ndc = away.truncate().truncate() / away.w;
+        let p = Vec2::new((ndc.x * 0.5 + 0.5) * size.x, (0.5 - ndc.y * 0.5) * size.y);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    } else {
+        // The way its centre's projection moves along the shadow (the sign
+        // of d/ds of (c + s a).xy / (c + s a).w).
+        let c = v.view_proj * (vol.transform.position - v.eye).as_vec3().extend(1.0);
+        let d = away.truncate().truncate() * c.w - c.truncate().truncate() * away.w;
+        if d.x > 0.0 {
+            hi.x = size.x;
+        } else if d.x < 0.0 {
+            lo.x = 0.0;
+        }
+        if d.y > 0.0 {
+            lo.y = 0.0;
+        } else if d.y < 0.0 {
+            hi.y = size.y;
+        }
+    }
+    let clamp = |p: f32, most: u32| (p.max(0.0) as u32).min(most);
+    let x0 = clamp(lo.x, v.size[0]) / RECT_ALIGN * RECT_ALIGN;
+    let y0 = clamp(lo.y, v.size[1]) / RECT_ALIGN * RECT_ALIGN;
+    [
+        x0,
+        y0,
+        clamp(hi.x + 1.0, v.size[0]).max(x0),
+        clamp(hi.y + 1.0, v.size[1]).max(y0),
+    ]
+}
+
+/// Whether volume `caster`'s sun shadow (its bounds' cylinder away from the
+/// sun, `sun` towards it) reaches `receiver`'s bounds.
+fn shadow_reaches(caster: &volumes::Volume, receiver: &volumes::Volume, sun: DVec3) -> bool {
+    let (Some(rc), Some(rr)) = (caster.bounds, receiver.bounds) else {
+        return true;
+    };
+    let d = receiver.transform.position - caster.transform.position;
+    let along = -d.dot(sun);
+    along > -(rc + rr) && (d + sun * along).length() < rc + rr
 }
 
 /// A view of the volumes in the world frame (`ChunkWorld::draw_params`):
@@ -557,7 +628,8 @@ struct SunOcclusion {
     asking: Option<sun_pages::Asking>,
     /// A page of zeros: pages with no terrain under them.
     empty: wgpu::Buffer,
-    pages: sun_pages::SunPages,
+    /// The pages' planner, on its own thread a frame ahead.
+    pages: sun_pages::SunPlanner,
     /// Each volume's placement when last seen (a move changes the
     /// occluders where it was and is).
     placed: FxHashMap<u16, crate::volume::VolumeTransform>,
@@ -647,7 +719,7 @@ impl SunOcclusion {
                 u64::from(so::SUN_OCCLUSION_PAGE * so::SUN_OCCLUSION_PAGE * 4),
                 wgpu::BufferUsages::COPY_SRC,
             ),
-            pages: sun_pages::SunPages::new(voxel),
+            pages: sun_pages::SunPlanner::spawn(voxel),
             placed: FxHashMap::default(),
             drawn_frame: 0,
             settled_since: None,
@@ -971,6 +1043,27 @@ impl Eye {
         ];
         let across = axes[0] * d[0] + axes[1] * d[1];
         (across.length() <= self.reach).then(|| across + axes[2] * d[2])
+    }
+
+    /// How far the eye may move before measuring the tile switches between
+    /// [`Self::offset`]'s linear frame and its centre (its nearest point
+    /// across the face meets the frame's reach): infinite where it cannot
+    /// (planes; faces the eye is not over, whose tiles near it lie past the
+    /// reach). Layers do not matter: the reach is across the face.
+    fn reach_margin(&self, tile: Footprint, _range: (i32, i32)) -> f64 {
+        let Some((e, axes)) = self.faces[tile.face as usize].filter(|_| self.reach.is_finite())
+        else {
+            return f64::INFINITY;
+        };
+        let s = f64::from(1u32 << tile.level);
+        let (i0, j0) = (
+            f64::from(tile.cx * CHUNK) * s,
+            f64::from(tile.cy * CHUNK) * s,
+        );
+        let w = f64::from(CHUNK) * s;
+        let across = axes[0] * (e[0].clamp(i0, i0 + w) - e[0])
+            + axes[1] * (e[1].clamp(j0, j0 + w) - e[1]);
+        (across.length() - self.reach).abs()
     }
 
     /// From the eye towards the tile's columns between layers `range`:
@@ -1822,16 +1915,25 @@ pub struct UpdateStats {
     pub fading_nodes: usize,
     pub drawn_chunks: usize,
     pub resident_chunks: usize,
-    /// Nodes rays met (ray reports this frame), and Buried nodes rays met
+    /// Ray reports since the last update (each a node a 32x32 tile's rays
+    /// met: the planner decodes them); the distinct nodes among them, in a
+    /// counting build (`Capacity::counters`, else 0: counting them costs a
+    /// hash a report on the render thread); Buried nodes rays met
     /// (generated next).
+    pub reports: usize,
     pub seen: usize,
     pub reached: usize,
     /// Drawn Mixed nodes in view coarser than wanted, as a share of them.
     pub coarse_share: f64,
     /// Frames since the eye the plan in use was made for, and the worker's
-    /// milliseconds on it.
+    /// milliseconds on it (and of those its events, plans and evictions:
+    /// `residency::Plans::parts`) and the nodes it visited; whether it
+    /// arrived this frame.
     pub plan_age: u64,
     pub plan_ms: f64,
+    pub plan_parts: [f64; 3],
+    pub plan_visits: usize,
+    pub planned: bool,
     /// [`residency::Plan::worst_px`] of the latest plan, and its node;
     /// [`residency::Plan::worst_wanted`].
     pub worst_px: f64,
@@ -2114,11 +2216,6 @@ pub struct ChunkWorld {
     /// slots.
     feedback: wgpu::Buffer,
     feedback_slots: Vec<ReachSlot>,
-    /// Whether this world polls the device for its readbacks: not on a
-    /// host's shared device (`PrepareContext::owns_device`), where polling
-    /// waits behind the host's submits and presents (wgpu maintains the
-    /// device on every submit, which delivers the map callbacks).
-    polls_device: bool,
     /// Whether draws write the plain colour target (a world drawn alone:
     /// tests, harnesses); a host's gbuffer takes the published surface.
     plain_colour: bool,
@@ -2129,17 +2226,33 @@ pub struct ChunkWorld {
     pick_slots: Vec<PickSlot>,
     /// Each slot's chunk key (`chunk_keys`, mirrored).
     slot_keys: Vec<[i32; 4]>,
-    /// Nodes rays reported since the last update: met, and Buried ones met.
-    seen: Vec<NodeKey>,
+    /// Ray reports since the last update: each frame's table keys of the
+    /// nodes met, as read back (the planner decodes them,
+    /// `residency::Event::Reports`); Buried nodes met.
+    seen: Vec<std::sync::Arc<[[i32; 4]]>>,
     reached: Vec<NodeKey>,
     /// Frames of ray reports read and not yet sent to the planner, and the
     /// planner's count of them when residency last changed or a fade last
     /// ran: settled takes plans that saw `REPORT_FRAMES` of them since.
     reports_unsent: u64,
     quiet_from: u64,
-    /// Chunk table changes scattered (`chunk_table.wgsl`).
+    /// Chunk table changes scattered (`chunk_table.wgsl`), uploaded into
+    /// their own buffer (a count, then the changes).
     table_layout: wgpu::BindGroupLayout,
     table_pipeline: wgpu::ComputePipeline,
+    table_changes: wgpu::Buffer,
+    /// The frame's small writes as one upload (`FrameUploads`: a copy each
+    /// where it is written, one queue write a call that records).
+    uploads: helio_core::upload::FrameUploads,
+    /// Chunks' frames and keys written this frame (generated, restored,
+    /// read back), by slot (the last write of a slot wins): uploaded at once
+    /// into `records_buffer` and scattered into `statics` and `chunk_keys`
+    /// (`chunk_records.wgsl`).
+    records: Vec<[[i32; 4]; RECORD_VEC4S]>,
+    record_at: FxHashMap<u32, usize>,
+    records_layout: wgpu::BindGroupLayout,
+    records_pipeline: wgpu::ComputePipeline,
+    records_buffer: wgpu::Buffer,
     pack_data: wgpu::Buffer,
     pack_alloc: wgpu::Buffer,
     pack_readbacks: std::collections::VecDeque<PackReadback>,
@@ -2197,6 +2310,11 @@ pub struct ChunkWorld {
     /// removed ones still drawn.
     volumes: Vec<Option<volumes::Volume>>,
     primary: Option<u16>,
+    /// Each volume's anchor this draw (`place_anchors`), by index.
+    anchors: Vec<u32>,
+    /// Where each volume but the primary was at the last update (foliage's
+    /// ground changes where one near the eye moves).
+    ground_placed: FxHashMap<u16, crate::volume::VolumeTransform>,
     unplanned: Vec<u16>,
     removed_drawn: Vec<NodeKey>,
     /// Every volume's planner, on its thread.
@@ -2207,7 +2325,7 @@ pub struct ChunkWorld {
     /// ray reports they saw), the frame they were made for and the worker's
     /// milliseconds on them.
     planned: Option<(u64, u64)>,
-    plan_made: (u64, f64),
+    plan_made: (u64, f64, [f64; 3], usize),
     /// Footprints whose columns are on the GPU, and this update's frame.
     frame_now: u64,
     /// Generated nodes with a chunk, and their layers by footprint.
@@ -2245,11 +2363,31 @@ pub struct ChunkWorld {
 }
 
 /// A draw's bind groups (`ChunkWorld::last_groups`): each traced volume's,
-/// nearest first, with its index.
+/// nearest first, with its index; the volumes foliage's probes walk past
+/// the primary (`probe_ground`), their groups for it.
 #[derive(Clone)]
 struct DrawGroups {
     volumes: Vec<(u16, wgpu::BindGroup, [u32; 4])>,
+    ground: Vec<(u16, wgpu::BindGroup)>,
 }
+
+/// A volume that lights the other volumes' points in a draw
+/// (`ChunkWorld::cross_volumes`): its bind group (the camera's view, over
+/// `shadow`'s rectangle), the rectangle its sun shadow can fall on another
+/// volume's hits in (none: it falls on none), whether the GI probes' rays
+/// reach it and foliage's probes may meet it.
+struct CrossVolume {
+    index: u16,
+    group: wgpu::BindGroup,
+    shadow: Option<[u32; 4]>,
+    gi: bool,
+    ground: bool,
+}
+
+/// How far from the eye (m) foliage's probes may meet a volume besides the
+/// primary: its bands' reach (`helio_pass_foliage_place`, 320 m) and a
+/// largest tile.
+const FOLIAGE_REACH: f64 = 512.0;
 
 /// What generation costs on the GPU: milliseconds of a tile's columns and
 /// of a chunk's columns and tree on average, chunks a tile, and the lines
@@ -3041,6 +3179,31 @@ impl ChunkWorld {
                 cache: None,
             },
         );
+        let records_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("chunk records"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/chunk_records.wgsl").into()),
+        });
+        let records_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("chunk records"),
+            entries: &[storage(0, true, c), storage(1, false, c), storage(2, false, c)],
+        });
+        let records_pipeline = helio_core::shader::create_compute_pipeline(
+            device,
+            wgpu::ComputePipelineDescriptor {
+                label: Some("chunk records"),
+                layout: Some(
+                    &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: None,
+                        bind_group_layouts: &[Some(&records_layout)],
+                        immediate_size: 0,
+                    }),
+                ),
+                module: &records_module,
+                entry_point: Some("records_update"),
+                compilation_options: Default::default(),
+                cache: None,
+            },
+        );
         let layouts = volumes::DrawLayouts::new(device);
         let (uv_grid_view, uv_grid_sampler) = create_uv_grid(device, queue);
         // Zeroed: the reversed depth's far, no mesh anywhere.
@@ -3321,7 +3484,6 @@ impl ChunkWorld {
                 BURIED_BYTES,
                 s | wgpu::BufferUsages::COPY_SRC,
             ),
-            polls_device: true,
             plain_colour: true,
             debug_mode: 0,
             counting: capacity.counters,
@@ -3371,6 +3533,13 @@ impl ChunkWorld {
             slot_keys: vec![[-1, 0, 0, 0]; slots],
             table_layout,
             table_pipeline,
+            table_changes: buffer("chunk table changes", 16 + 1024 * 48, s),
+            uploads: helio_core::upload::FrameUploads::new(device, queue, "chunk uploads"),
+            records: Vec::new(),
+            record_at: FxHashMap::default(),
+            records_layout,
+            records_pipeline,
+            records_buffer: buffer("chunk records", (16 + 256 * RECORD_BYTES) as u64, s),
             pack_data: buffer(
                 "chunk packs",
                 PACK_WORDS * 4,
@@ -3448,12 +3617,14 @@ impl ChunkWorld {
             free_pages_seen: leaf_capacity / LEAF_PAGE,
             volumes: Vec::new(),
             primary: None,
+            anchors: Vec::new(),
+            ground_placed: FxHashMap::default(),
             unplanned: Vec::new(),
             removed_drawn: Vec::new(),
             worker: residency::Worker::spawn(),
             gen_turn: 0,
             planned: None,
-            plan_made: (0, 0.0),
+            plan_made: (0, 0.0, [0.0; 3], 0),
             frame_now: 0,
             nodes: Default::default(),
             footprint_nodes: Default::default(),
@@ -3842,16 +4013,7 @@ impl ChunkWorld {
             32.0,
             vol.exact_level,
         );
-        self.queue.write_buffer(
-            &self.statics,
-            u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64,
-            bytemuck::bytes_of(&record),
-        );
-        self.queue.write_buffer(
-            &self.chunk_keys,
-            u64::from(slot) * 16,
-            bytemuck::cast_slice(&key.table_key()),
-        );
+        self.write_record(slot, &record, key.table_key());
         self.slot_keys[slot as usize] = key.table_key();
         let shown = self.drawn_set.holds(key);
         if let Some(old) = self.insert_resident(
@@ -4097,16 +4259,7 @@ impl ChunkWorld {
             });
             // Layers not read back yet: the whole chunk.
             let record = chunk_static(&grid, fp, cz, slot, (0.0, 64.0), 32.0, vol.exact_level);
-            self.queue.write_buffer(
-                &self.statics,
-                u64::from(slot) * std::mem::size_of::<ChunkStatic>() as u64,
-                bytemuck::bytes_of(&record),
-            );
-            self.queue.write_buffer(
-                &self.chunk_keys,
-                u64::from(slot) * 16,
-                bytemuck::cast_slice(&key.table_key()),
-            );
+            self.write_record(slot, &record, key.table_key());
             self.slot_keys[slot as usize] = key.table_key();
             readback.chunks.push((key, slot, self.serial));
             let shown = self.drawn_set.holds(key);
@@ -4527,6 +4680,34 @@ impl ChunkWorld {
         self.claim_timing(frame);
         self.frame_now = frame;
         let mut stats = UpdateStats::default();
+        // The primary volume follows the eye (`follow_eye`): in a new one,
+        // foliage near the eye and every GI probe are placed again.
+        let before = self.primary;
+        self.follow_eye(eye);
+        if before.is_some() && self.primary != before {
+            let near = DVec3::splat(FOLIAGE_REACH);
+            self.ground_changes.push([eye - near, eye + near]);
+            self.gi_clipmap = None;
+        }
+        // The other volumes near the eye that moved change foliage's ground
+        // where they were and are (`ground_probe_cross`).
+        for vol in self.volumes.iter().flatten() {
+            if Some(vol.index) == self.primary {
+                continue;
+            }
+            let last = self.ground_placed.insert(vol.index, vol.transform);
+            let Some(last) = last.filter(|t| *t != vol.transform) else {
+                continue;
+            };
+            if let Some(r) = vol.bounds {
+                if (vol.transform.position - eye).length() - r < FOLIAGE_REACH {
+                    for t in [last, vol.transform] {
+                        self.ground_changes
+                            .push([t.position - DVec3::splat(r), t.position + DVec3::splat(r)]);
+                    }
+                }
+            }
+        }
         // Volumes the planner does not know yet, with this update's settings.
         for index in std::mem::take(&mut self.unplanned) {
             if let Some(vol) = self.volumes[usize::from(index)].as_mut() {
@@ -4548,9 +4729,7 @@ impl ChunkWorld {
             clock = std::time::Instant::now();
         };
         // 1. Finished generation results: measured footprints, occupancy.
-        if self.polls_device {
-            let _ = self.device.poll(wgpu::PollType::Poll);
-        }
+        let results_scope = helio_core::CpuScope::new("VoxelChunks: results");
         while self
             .readbacks
             .front()
@@ -4651,11 +4830,8 @@ impl ChunkWorld {
                             about,
                             vol.exact_level,
                         );
-                        self.queue.write_buffer(
-                            &self.statics,
-                            u64::from(c.slot) * std::mem::size_of::<ChunkStatic>() as u64,
-                            bytemuck::bytes_of(&record),
-                        );
+                        let slot = c.slot;
+                        self.write_record(slot, &record, self.slot_keys[slot as usize]);
                     }
                     self.put_volume(vol);
                 }
@@ -4719,16 +4895,18 @@ impl ChunkWorld {
             }
             r.buffer.unmap();
         }
+        drop(results_scope);
         // Ray reports: nodes met, and Buried nodes met (generate them).
-        stats.seen = self.seen.len();
+        let events_scope = helio_core::CpuScope::new("VoxelChunks: report events");
+        stats.reports = self.seen.iter().map(|r| r.len()).sum();
+        if self.counting {
+            let distinct: FxHashSet<[i32; 4]> = self.seen.iter().flat_map(|r| r.iter().copied()).collect();
+            stats.seen = distinct.len();
+        }
         stats.reached = self.reached.len();
-        for key in std::mem::take(&mut self.seen) {
-            if let Some(vol) = self
-                .volumes
-                .get_mut(usize::from(key.volume))
-                .and_then(Option::as_mut)
-            {
-                vol.events.push(residency::Event::Seen(key));
+        for reports in std::mem::take(&mut self.seen) {
+            for vol in self.volumes.iter_mut().flatten() {
+                vol.events.push(residency::Event::Reports(reports.clone()));
             }
         }
         for key in std::mem::take(&mut self.reached) {
@@ -4740,6 +4918,7 @@ impl ChunkWorld {
                 vol.events.push(residency::Event::Reached(key));
             }
         }
+        drop(events_scope);
         lap(&mut stats, 0);
         // 2. The latest plans (made on the worker from an eye a frame or two
         // old) and their evictions; then the next plans, with what slots
@@ -4748,7 +4927,8 @@ impl ChunkWorld {
         let mut evicted = Vec::new();
         if let Some(plans) = self.worker.poll() {
             self.planned = Some((plans.events_seen, plans.reports_seen));
-            self.plan_made = (plans.frame, plans.ms);
+            self.plan_made = (plans.frame, plans.ms, plans.parts, plans.visits);
+            stats.planned = true;
             for planned in plans.volumes {
                 // A volume removed since its plan was made: nothing of it.
                 let Some(vol) = self.volumes[usize::from(planned.volume)].as_mut() else {
@@ -4767,6 +4947,8 @@ impl ChunkWorld {
         removed.append(&mut self.removed_drawn);
         stats.plan_age = frame.saturating_sub(self.plan_made.0);
         stats.plan_ms = self.plan_made.1;
+        stats.plan_parts = self.plan_made.2;
+        stats.plan_visits = self.plan_made.3;
         let mut packs: Vec<(NodeKey, u32, i32, Option<Quarters>, Option<u64>)> = Vec::new();
         for key in evicted {
             let Some(mut vol) = self.take_volume(key.volume) else {
@@ -4986,6 +5168,7 @@ impl ChunkWorld {
         let grid = vol.grid;
         let local_eye = Eye::new(&grid, vol.local_eye(eye));
         let mut batch = GenBatch::default();
+        let queue_scope = helio_core::CpuScope::new("VoxelChunks: generate: queue");
         let mut readback = Readback {
             buffer: self.readback_pool.get(&self.device, 16),
             ready: Default::default(),
@@ -5170,6 +5353,8 @@ impl ChunkWorld {
             job[2] = results_at + n as u32;
         }
         readback.chunks.extend(restores.nodes.iter().copied());
+        drop(queue_scope);
+        let record_scope = helio_core::CpuScope::new("VoxelChunks: generate: record");
         // The batch's footprints: those it computes first (the kernels run
         // over them), then those it reads from the pool.
         let computed_count = computed.len();
@@ -5217,8 +5402,7 @@ impl ChunkWorld {
         vol.brick_cache.upload(&self.device, &self.queue, encoder);
         let pack_group = (!packs.is_empty()).then(|| {
             let jobs: Vec<[u32; 4]> = packs.iter().map(|&(_, slot, ..)| [slot, 0, 0, 0]).collect();
-            self.queue
-                .write_buffer(&self.pack_alloc, 0, &vec![0u8; (1 + 2 * MAX_PACKS) * 4]);
+            encoder.clear_buffer(&self.pack_alloc, 0, Some((1 + 2 * MAX_PACKS as u64) * 4));
             self.keep_group(&jobs, &[[0; 4]], &[0])
         });
         let restore_group = (!restores.jobs.is_empty())
@@ -5232,13 +5416,14 @@ impl ChunkWorld {
             &vol.brick_cache.buffer,
         );
         if !tile_jobs.is_empty() {
-            self.queue
-                .write_buffer(&self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
+            self.uploads
+                .write(encoder, &self.tile_jobs, 0, bytemuck::cast_slice(&tile_jobs));
             let empty: Vec<[i32; 4]> =
                 vec![[i32::MAX, i32::MIN + 1, i32::MAX, i32::MIN + 1]; computed_count.max(1) * 4];
-            self.queue
-                .write_buffer(&self.tile_ranges, 0, bytemuck::cast_slice(&empty));
-            self.queue.write_buffer(
+            self.uploads
+                .write(encoder, &self.tile_ranges, 0, bytemuck::cast_slice(&empty));
+            self.uploads.write(
+                encoder,
                 &self.tile_ranges,
                 (TILE_BATCH * RANGE_WORDS * 4) as u64,
                 bytemuck::bytes_of(&(computed_count as i32)),
@@ -5257,19 +5442,22 @@ impl ChunkWorld {
             let (jobs, tiles, slots) = vol.blocks.take_batch(&vol.features, computed);
             let words = |at: usize| at as u64 * 4;
             if !jobs.is_empty() {
-                self.queue.write_buffer(
+                self.uploads.write(
+                    encoder,
                     &vol.feature_blocks,
                     words(candidates::JOBS_AT),
                     bytemuck::cast_slice(&jobs),
                 );
             }
-            self.queue.write_buffer(
+            self.uploads.write(
+                encoder,
                 &vol.feature_blocks,
                 words(candidates::TILES_AT),
                 bytemuck::cast_slice(&tiles),
             );
             if !slots.is_empty() {
-                self.queue.write_buffer(
+                self.uploads.write(
+                    encoder,
                     &vol.feature_blocks,
                     words(candidates::SLOTS_AT),
                     bytemuck::cast_slice(&slots),
@@ -5280,8 +5468,8 @@ impl ChunkWorld {
             0
         };
         if !chunk_jobs.is_empty() {
-            self.queue
-                .write_buffer(&self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
+            self.uploads
+                .write(encoder, &self.chunk_jobs, 0, bytemuck::cast_slice(&chunk_jobs));
             if vol.has_features {
                 encoder.clear_buffer(
                     &self.job_features,
@@ -5476,6 +5664,7 @@ impl ChunkWorld {
         }
         // Slots evicted now are reused from the next frame.
         self.free_slots.extend(evictions);
+        drop(record_scope);
         lap(&mut stats, 3);
         self.finish_update(encoder, stats, added, removed, frame, unseen)
     }
@@ -5505,12 +5694,10 @@ impl ChunkWorld {
         // the fade ends (while it lasts the probe may meet either level). A node drawn
         // coarser in place of finer ones, or no longer drawn, does not change it: the
         // finer ground placed the foliage there, and placing it again against the coarser
-        // would only make it flicker as a still view's cut breathes. Foliage grows on the
-        // primary volume only.
-        if let Some(primary) = self
-            .primary
-            .and_then(|p| self.volumes[usize::from(p)].as_ref())
-        {
+        // would only make it flicker as a still view's cut breathes. Foliage is tiled on
+        // the primary volume (the others near the eye change its ground where they move:
+        // `update`).
+        if let Some(primary) = self.primary.and_then(|p| self.volumes[usize::from(p)].as_ref()) {
             let (grid, transform, volume) = (primary.grid, primary.transform, primary.index);
             let levels = grid.levels();
             let mut over_removed = FxHashSet::default();
@@ -5649,21 +5836,24 @@ impl ChunkWorld {
         // One upload of the changed entries, scattered on the GPU.
         let changes = self.drawn_set.take_changes();
         if !changes.is_empty() {
-            let buffer = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let bytes = 16 + std::mem::size_of_val(&changes[..]) as u64;
+            if bytes > self.table_changes.size() {
+                self.table_changes = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("chunk table changes"),
-                    contents: bytemuck::cast_slice(&changes),
-                    usage: wgpu::BufferUsages::STORAGE,
+                    size: bytes.next_power_of_two(),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
                 });
-            let group = self.gpu_cache.bind_group(
-                &self.device,
-                &wgpu::BindGroupDescriptor {
-                    label: Some("chunk table"),
-                    layout: &self.table_layout,
-                    entries: &[entry(0, &buffer), entry(1, &self.chunk_table)],
-                },
-            );
+            }
+            let head = [(changes.len() / 3) as i32, 0, 0, 0];
+            self.uploads.write(encoder, &self.table_changes, 0, bytemuck::cast_slice(&head));
+            self.uploads
+                .write(encoder, &self.table_changes, 16, bytemuck::cast_slice(&changes));
+            let group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
+                label: Some("chunk table"),
+                layout: &self.table_layout,
+                entries: &[entry(0, &self.table_changes), entry(1, &self.chunk_table)],
+            });
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk table"),
                 timestamp_writes: None,
@@ -5703,7 +5893,69 @@ impl ChunkWorld {
         stats.chunk_slots = self.slot_capacity;
         stats.leaf_pages = (pages.saturating_sub(self.free_pages_seen), pages);
         stats.resident_chunks = self.nodes.len();
+        self.flush_records(encoder);
+        self.uploads.flush();
         stats
+    }
+
+    /// Chunk `slot`'s frame `record` and key `key`, written with the
+    /// frame's others ([`Self::flush_records`]; the last write of a slot
+    /// wins).
+    fn write_record(&mut self, slot: u32, record: &ChunkStatic, key: [i32; 4]) {
+        let mut r = [[0i32; 4]; RECORD_VEC4S];
+        r[0][0] = slot as i32;
+        r[1..RECORD_VEC4S - 1].copy_from_slice(bytemuck::cast_slice(bytemuck::bytes_of(record)));
+        r[RECORD_VEC4S - 1] = key;
+        match self.record_at.entry(slot) {
+            std::collections::hash_map::Entry::Occupied(at) => self.records[*at.get()] = r,
+            std::collections::hash_map::Entry::Vacant(at) => {
+                at.insert(self.records.len());
+                self.records.push(r);
+            }
+        }
+    }
+
+    /// The frame's chunk records in one upload, scattered into `statics`
+    /// and `chunk_keys` by one dispatch, as Unreal's scatter uploads do (a
+    /// write a chunk was a wgpu staging buffer a chunk: hundreds a frame
+    /// while loading).
+    fn flush_records(&mut self, encoder: &mut helio_core::CommandRecorder<'_>) {
+        if self.records.is_empty() {
+            return;
+        }
+        let count = self.records.len();
+        let bytes = 16 + (count * RECORD_BYTES) as u64;
+        if bytes > self.records_buffer.size() {
+            self.records_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("chunk records"),
+                size: bytes.next_power_of_two(),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        let head = [count as i32, 0, 0, 0];
+        self.uploads.write(encoder, &self.records_buffer, 0, bytemuck::cast_slice(&head));
+        self.uploads
+            .write(encoder, &self.records_buffer, 16, bytemuck::cast_slice(&self.records));
+        let group = self.gpu_cache.bind_group(&self.device, &wgpu::BindGroupDescriptor {
+            label: Some("chunk records"),
+            layout: &self.records_layout,
+            entries: &[
+                entry(0, &self.records_buffer),
+                entry(1, &self.statics),
+                entry(2, &self.chunk_keys),
+            ],
+        });
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("chunk records"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.records_pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(((count * (RECORD_VEC4S - 1)) as u32).div_ceil(64), 1, 1);
+        drop(pass);
+        self.records.clear();
+        self.record_at.clear();
     }
 
     /// Copy the last draw's hits under `picks`' requests (at most
@@ -5811,6 +6063,7 @@ impl ChunkWorld {
             }
         }
         self.gpu_cache.end_frame();
+        self.uploads.end_frame();
         // Picks: answer those mapped, map those just copied.
         for n in 0..self.pick_slots.len() {
             match &self.pick_slots[n].state {
@@ -5861,6 +6114,7 @@ impl ChunkWorld {
         }
         // Ray reports: Buried nodes met, and the nodes the sampled hits
         // want (met, with their ancestors).
+        helio_core::cpu_scope!("VoxelChunks: ray reports");
         let reached = &mut self.reached;
         take_reports(&mut self.buried_slots, |data| {
             let words: &[[i32; 4]] = bytemuck::cast_slice(data);
@@ -5871,16 +6125,11 @@ impl ChunkWorld {
         take_reports(&mut self.feedback_slots, |data| {
             *reports += 1;
             let words: &[[i32; 4]] = bytemuck::cast_slice(data);
-            let mut unique: FxHashSet<[i32; 4]> = FxHashSet::default();
             let count = (words[0][0] as u32 as usize).min(words.len() - 1);
-            seen.extend(
-                words[1..=count]
-                    .iter()
-                    .filter(|k| unique.insert(**k))
-                    .map(|k| NodeKey::from_table_key(*k)),
-            );
+            seen.push(words[1..=count].into());
         });
         // Timestamps: map those just submitted, read those mapped.
+        helio_core::cpu_scope!("VoxelChunks: timestamps and results");
         let period = f64::from(self.queue.get_timestamp_period()) / 1.0e6;
         for slot in &mut self.timing_slots {
             if let Some(ready) = &slot.ready {
@@ -5956,9 +6205,6 @@ impl ChunkWorld {
                     });
                 slot.ready = Some(ready);
             }
-        }
-        if self.polls_device {
-            let _ = self.device.poll(wgpu::PollType::Poll);
         }
         if let Some(r) = self.pending.take() {
             r.buffer.map_read(r.ready.clone());
@@ -6080,12 +6326,6 @@ impl ChunkWorld {
     /// `node`'s drawn state (diagnostics, `DrawnSet::describe`).
     pub fn describe_drawn(&self, node: NodeKey) -> (bool, Option<i32>, Option<(u64, bool, bool)>) {
         self.drawn_set.describe(node)
-    }
-
-    /// Whether to poll the device for readbacks (false on a host's
-    /// shared device).
-    pub fn set_polls_device(&mut self, polls: bool) {
-        self.polls_device = polls;
     }
 
     /// Whether draws write the plain colour target ([`Targets::colour`]).
@@ -6303,7 +6543,13 @@ impl ChunkWorld {
                 _ => [0.0, 1.0, 0.0, 0.0],
             },
             ceiling: match grid {
-                Some(g) if g.grid.is_plane() => [(eye.y - g.ceiling) as f32, 0.0, 0.0, 0.0],
+                Some(g) if g.grid.is_plane() => {
+                    // Its band's bottom, the world's lowest solid (the
+                    // nodes under it are rock no ray from the camera
+                    // reaches: a plane's underside is no world's).
+                    let bottom = g.floor + CEILING_MARGIN;
+                    [(eye.y - g.ceiling) as f32, 0.0, (eye.y - bottom) as f32, 0.0]
+                }
                 Some(g) => {
                     let c = g.grid.radius() + g.ceiling;
                     [(eye.length_squared() - c * c) as f32, 0.0, 0.0, 0.0]
@@ -6325,7 +6571,9 @@ impl ChunkWorld {
                     Some(g) if v.ortho.is_none() => self.eye_chunk(g, eye),
                     _ => u32::MAX,
                 },
-                0,
+                grid.and_then(|g| self.anchors.get(usize::from(g.index)))
+                    .copied()
+                    .unwrap_or(u32::MAX),
             ],
             light_eye: v.light_eye.map_or([0.0; 4], |e| e.extend(1.0).to_array()),
             // Two of the finest probes' spacings: the probes' visibility
@@ -6439,6 +6687,16 @@ impl ChunkWorld {
         self.pipelines[usize::from(plane)].as_ref().unwrap()
     }
 
+    /// The passes of volume `index`'s form lighting other volumes' points
+    /// (built when the second volume came: `cross_volumes` lists none
+    /// before).
+    fn cross_pipelines(&self, index: u16) -> &volumes::CrossPipelines {
+        self.pipelines_of(index)
+            .cross
+            .as_ref()
+            .expect("a world of more than one volume has its cross pipelines")
+    }
+
     /// The volumes with chunks in the drawn cut.
     fn volumes_drawn(&self) -> FxHashSet<u16> {
         let mut out = FxHashSet::default();
@@ -6448,6 +6706,138 @@ impl ChunkWorld {
         }
         for c in &self.drawn_set.list {
             out.insert((self.slot_keys[c.slot as usize][0] >> 16) as u16);
+        }
+        out
+    }
+
+    /// Each volume's anchor for the walks that enter it from elsewhere
+    /// (`enter_volume`), for an eye at `eye` (world): the finest drawn chunk
+    /// finer than its exact levels over the eye's column (a sphere's frames
+    /// hold near their chunks), else a plane's coarsest drawn chunk (its
+    /// frames are one affine map); none with a single volume.
+    fn place_anchors(&mut self, eye: DVec3) {
+        self.anchors.clear();
+        self.anchors.resize(self.volumes.len(), u32::MAX);
+        if self.volumes.iter().flatten().count() < 2 {
+            return;
+        }
+        // Each volume's eye column (face, i, j), exact level and form; its
+        // best chunk: over the column, its level, slot.
+        type Column = ((u8, i32, i32), u32, bool);
+        let columns: Vec<Option<Column>> = self
+            .volumes
+            .iter()
+            .map(|v| {
+                v.as_ref().map(|v| {
+                    let (cell, _) = v.grid.locate(v.transform.to_local(eye));
+                    ((cell.face, cell.i, cell.j), v.exact_level, v.grid.is_plane())
+                })
+            })
+            .collect();
+        let mut best: Vec<Option<(bool, u32, u32)>> = vec![None; self.volumes.len()];
+        for c in &self.drawn_set.list {
+            let key = self.slot_keys[c.slot as usize];
+            let index = (key[0] >> 16) as usize;
+            let Some(Some(((face, i, j), exact, plane))) = columns.get(index) else {
+                continue;
+            };
+            let level = ((key[0] >> 8) & 0xff) as u32;
+            if !plane && level >= *exact {
+                continue;
+            }
+            let over = (key[0] & 0xff) as u8 == *face
+                && (i >> level).div_euclid(CHUNK) == key[1]
+                && (j >> level).div_euclid(CHUNK) == key[2];
+            if !over && !plane {
+                continue;
+            }
+            let better = best[index].is_none_or(|(o, l, _)| {
+                (over && !o) || (over == o && if over { level < l } else { level > l })
+            });
+            if better {
+                best[index] = Some((over, level, c.slot));
+            }
+        }
+        for (anchor, best) in self.anchors.iter_mut().zip(best) {
+            if let Some((_, _, slot)) = best {
+                *anchor = slot;
+            }
+        }
+    }
+
+    /// The volumes that light the other volumes' points in view `v` (those
+    /// with drawn chunks, `drawn_in`, when more than one is held): those
+    /// whose sun shadow can fall on another traced volume (`order`,
+    /// `shadow_reaches`), over the rectangle it can fall in (`shadow_rect`);
+    /// those the GI probes' rays reach (`gi`: they trace this view) and
+    /// foliage's probes may meet, but the primary (whose own passes walk
+    /// them); with their parameters for it (the camera's, placed by `prev`
+    /// a frame ago, over the shadow's rectangle) and bind group.
+    fn cross_volumes(
+        &self,
+        v: &ViewInput,
+        order: &[u16],
+        drawn_in: &FxHashSet<u16>,
+        gi: bool,
+        prev: &[(u16, crate::volume::VolumeTransform)],
+    ) -> Vec<CrossVolume> {
+        let mut out = Vec::new();
+        if self.volumes.iter().flatten().count() < 2 {
+            return out;
+        }
+        let sun = v.sun.as_dvec3().normalize_or_zero();
+        // The GI clipmap's coarsest level's side from the eye: its probes
+        // and their rays.
+        let gi_reach = self
+            .gi_clipmap
+            .filter(|_| gi)
+            .map(|c| c.spacing(helio_pass_gi::LEVELS - 1) * helio_pass_gi::SIDE as f64);
+        for vol in self
+            .volumes
+            .iter()
+            .flatten()
+            .filter(|w| drawn_in.contains(&w.index))
+        {
+            let within = |reach: f64| {
+                vol.bounds
+                    .is_none_or(|b| (vol.transform.position - v.eye).length() - b < reach)
+            };
+            let casts = sun != DVec3::ZERO
+                && order.iter().any(|&r| {
+                    r != vol.index
+                        && self.volumes[usize::from(r)]
+                            .as_ref()
+                            .is_some_and(|rv| shadow_reaches(vol, rv, sun))
+                });
+            let others = Some(vol.index) != self.primary;
+            let gi = others && gi_reach.is_some_and(within);
+            let ground = others && within(FOLIAGE_REACH);
+            if !(casts || gi || ground) {
+                continue;
+            }
+            // Its pass in the view (past the traced where it is not one).
+            let pass = order
+                .iter()
+                .position(|&i| i == vol.index)
+                .unwrap_or(order.len());
+            let traced = (order.len() + usize::from(pass == order.len())).max(2);
+            let last = prev
+                .iter()
+                .find(|(i, _)| *i == vol.index)
+                .map_or(vol.transform, |(_, t)| *t);
+            let mut params = self.draw_params(v, Some((vol, last)), pass as u32, traced as u32, 0);
+            if casts {
+                params.rect = shadow_rect(v, vol);
+            }
+            self.queue
+                .write_buffer(&vol.views.cross, 0, bytemuck::bytes_of(&params));
+            out.push(CrossVolume {
+                index: vol.index,
+                group: self.draw_group(&vol.views.cross, vol, self.camera_view(vol)),
+                shadow: casts.then_some(params.rect),
+                gi,
+                ground,
+            });
         }
         out
     }
@@ -6500,7 +6890,7 @@ impl ChunkWorld {
         eye: DVec3,
         sun: Vec3,
     ) {
-        use helio_pass_shadow_matrix::{SUN_OCCLUSION_TABLE_WORDS, SUN_OCCLUSION_WINDOW};
+        use helio_pass_shadow_matrix::SUN_OCCLUSION_TABLE_WORDS;
         let toward = sun.as_dvec3().normalize();
         let Some(voxel) = self
             .primary
@@ -6533,12 +6923,21 @@ impl ChunkWorld {
         };
         stamp(self, encoder, 16);
         let clock = std::time::Instant::now();
-        let mut changes = std::mem::take(&mut self.occluder_changes);
+        let changes = std::mem::take(&mut self.occluder_changes);
         let refined = std::mem::take(&mut self.occluder_refined);
         let settled = self.residency_settled();
         let o = self
             .sun_occlusion
             .get_or_insert_with(|| SunOcclusion::new(&self.device, voxel));
+        let mut job = sun_pages::PlanJob {
+            frame,
+            eye,
+            sun: toward,
+            settled,
+            asked: Vec::new(),
+            changes,
+            refined,
+        };
         // Volumes moved since: where they were and are now.
         for vol in self.volumes.iter().flatten() {
             let last = o.placed.insert(vol.index, vol.transform);
@@ -6546,22 +6945,25 @@ impl ChunkWorld {
                 match vol.bounds {
                     Some(r) => {
                         for t in [last.unwrap(), vol.transform] {
-                            changes
+                            job.changes
                                 .push([t.position - DVec3::splat(r), t.position + DVec3::splat(r)]);
                         }
                     }
-                    None => changes.push([DVec3::splat(-1e30), DVec3::splat(1e30)]),
+                    None => job.changes.push([DVec3::splat(-1e30), DVec3::splat(1e30)]),
                 }
             }
         }
-        // The pages asked for, back.
+        // The pages asked for, back (copied for the planner's thread).
         for r in &mut o.request_slots {
             if let ReachState::Mapping(ready) = &r.slot.state {
                 if ready.load(std::sync::atomic::Ordering::Acquire) {
                     {
                         let data = r.slot.buffer.slice(..).get_mapped_range().unwrap();
-                        if let Some(asking) = &r.asking {
-                            o.pages.asked(asking, bytemuck::cast_slice(&data));
+                        if let Some(asking) = r.asking {
+                            let mut words = o.pages.spare.pop().unwrap_or_default();
+                            words.clear();
+                            words.extend_from_slice(bytemuck::cast_slice(&data));
+                            job.asked.push((asking, words));
                         }
                     }
                     r.slot.buffer.unmap();
@@ -6569,24 +6971,22 @@ impl ChunkWorld {
                 }
             }
         }
-        let mut laps = [
-            self.occluder_ms,
-            clock.elapsed().as_secs_f64() * 1e3,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ];
+        let mut laps = [self.occluder_ms, clock.elapsed().as_secs_f64() * 1e3, 0.0, 0.0, 0.0];
         o.drawn_frame = frame;
         o.settled_since = settled.then(|| o.settled_since.unwrap_or(frame));
-        o.pages.invalidate(&changes, sun_pages::Stale::Changed);
-        o.pages.invalidate(&refined, sun_pages::Stale::Coarse);
+        // This frame's inputs go to the planner's thread for the next frame
+        // (at once when it is free, else with the next frames'); the plan it
+        // made from earlier frames' is traced if it is done (made while the
+        // last frame recorded: the frame never waits for it).
+        job.frame = frame + 1;
+        o.pages.queue(job);
+        let (windows, rows, parts) = o
+            .pages
+            .try_take()
+            .map_or_else(Default::default, |p| (p.windows, p.rows, Some(p.parts)));
         laps[2] = clock.elapsed().as_secs_f64() * 1e3;
-        o.pages.begin(frame, eye, toward);
-        let windows = o.pages.plan(frame, settled);
-        laps[3] = clock.elapsed().as_secs_f64() * 1e3;
-        let current = o.pages.current().unwrap();
-        o.asking = Some(sun_pages::Asking {
+        // (No epoch before the first plan: nothing is read against one.)
+        o.asking = o.pages.current().map(|current| sun_pages::Asking {
             epoch: current.id,
             frame,
             eye_pages: o.pages.eye_pages(eye),
@@ -6601,58 +7001,46 @@ impl ChunkWorld {
         let mut at = 0;
         for window in &windows {
             let near = self.trace_occlusion_view(encoder, frame, eye, window, &drawn_in, &mut at);
-            self.sun_occlusion
-                .as_mut()
-                .unwrap()
-                .pages
-                .traced(window, near, frame);
+            self.sun_occlusion.as_mut().unwrap().pages.traced(window, near);
         }
-        laps[4] = clock.elapsed().as_secs_f64() * 1e3;
+        laps[3] = clock.elapsed().as_secs_f64() * 1e3;
         // The tables' changed rows (runs of them a write), the near
         // planes, the frame; this frame's requests cleared.
         let o = self.sun_occlusion.as_mut().unwrap();
-        let mut rows: Vec<usize> = o.pages.dirty_rows.drain().collect();
-        rows.sort_unstable();
-        let row = SUN_OCCLUSION_WINDOW as usize;
-        let mut i = 0;
-        while i < rows.len() {
-            let mut j = i + 1;
-            while j < rows.len() && rows[j] == rows[j - 1] + 1 {
-                j += 1;
-            }
-            let (from, to) = (rows[i] * row, (rows[j - 1] + 1) * row);
-            self.queue.write_buffer(
-                &o.pages_buffer,
-                from as u64 * 4,
-                bytemuck::cast_slice(&o.pages.table[from..to]),
-            );
-            i = j;
+        for (from, words) in &rows {
+            self.uploads
+                .write(encoder, &o.pages_buffer, *from as u64 * 4, bytemuck::cast_slice(words));
         }
         let (gpu, near) = o.pages.frame(eye);
-        self.queue.write_buffer(
+        self.uploads.write(
+            encoder,
             &o.pages_buffer,
             u64::from(SUN_OCCLUSION_TABLE_WORDS) * 4,
             bytemuck::cast_slice(&near),
         );
-        self.queue
-            .write_buffer(&o.frame, 0, bytemuck::bytes_of(&gpu));
+        self.uploads.write(encoder, &o.frame, 0, bytemuck::bytes_of(&gpu));
         encoder.clear_buffer(&o.requests, 0, None);
-        // The planner's and the views' recording CPU time, by part (the
-        // update's occluder boxes; readback; invalidation; planning;
-        // recording; uploads); with HELIO_SUN_PAGES_LOG, the frames that
-        // traced pages.
-        laps[5] = clock.elapsed().as_secs_f64() * 1e3;
-        o.pages.stats.cpu_ms = laps[5] + laps[0];
-        o.pages.stats.cpu_parts = [
+        self.uploads.flush();
+        // The render thread's CPU time, by part (the update's occluder
+        // boxes; readback; handing over and taking plans; recording;
+        // uploads), and
+        // the planner's on its thread; with HELIO_SUN_PAGES_LOG, the frames
+        // that traced pages.
+        laps[4] = clock.elapsed().as_secs_f64() * 1e3;
+        let stats = &mut o.pages.stats;
+        stats.cpu_ms = laps[4] + laps[0];
+        stats.cpu_parts = [
             laps[0],
             laps[1],
             laps[2] - laps[1],
             laps[3] - laps[2],
             laps[4] - laps[3],
-            laps[5] - laps[4],
         ];
-        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() && o.pages.stats.traced > 0 {
-            eprintln!("SUNPAGES frame {frame}: {:?}", o.pages.stats);
+        if let Some(parts) = parts {
+            stats.planner_ms = parts.iter().sum();
+        }
+        if std::env::var_os("HELIO_SUN_PAGES_LOG").is_some() && parts.is_some() && stats.traced > 0 {
+            eprintln!("SUNPAGES frame {frame}: {stats:?}, planner parts {parts:?}");
         }
         stamp(self, encoder, 17);
     }
@@ -6664,7 +7052,7 @@ impl ChunkWorld {
     /// within it. None where no volume lies under the view.
     fn occlusion_depths(
         &self,
-        e: &sun_pages::Epoch,
+        e: &sun_pages::EpochGrid,
         lo: [f64; 2],
         hi: [f64; 2],
     ) -> Option<(f64, f64)> {
@@ -6840,8 +7228,8 @@ impl ChunkWorld {
             params.rect = rect;
             let offset = *at * OCCLUSION_PARAMS_STRIDE;
             *at += 1;
-            self.queue
-                .write_buffer(&o.params_ring, offset, bytemuck::bytes_of(&params));
+            self.uploads
+                .write(encoder, &o.params_ring, offset, bytemuck::bytes_of(&params));
             self.trace_view(
                 encoder,
                 ViewBuffers {
@@ -7035,8 +7423,8 @@ impl ChunkWorld {
                 std::mem::size_of::<DrawParams>() as u64,
             ),
             None => self
-                .queue
-                .write_buffer(vb.params, 0, bytemuck::bytes_of(params)),
+                .uploads
+                .write(encoder, vb.params, 0, bytemuck::bytes_of(params)),
         }
         // The atmosphere's sun disk (its frame's `sun.w`, the cosine of its
         // angular radius) into `sky.z`.
@@ -7293,8 +7681,45 @@ impl ChunkWorld {
         );
     }
 
+    /// [`Self::draw`] for eye `eye_index` (0 the camera's, 1 a stereo
+    /// pair's right), its writes uploaded.
     #[allow(clippy::too_many_arguments)]
     fn draw_for_eye(
+        &mut self,
+        encoder: &mut helio_core::CommandRecorder<'_>,
+        frame: u64,
+        eye: DVec3,
+        view_proj: Mat4,
+        prev_view_proj: Mat4,
+        jitter: [Vec2; 2],
+        near: f32,
+        sun: Vec3,
+        size: [u32; 2],
+        scene_depth: Option<&wgpu::TextureView>,
+        lights: Option<&SceneLights<'_>>,
+        gi: Option<&GiRays<'_>>,
+        eye_index: usize,
+    ) {
+        self.record_eye(
+            encoder,
+            frame,
+            eye,
+            view_proj,
+            prev_view_proj,
+            jitter,
+            near,
+            sun,
+            size,
+            scene_depth,
+            lights,
+            gi,
+            eye_index,
+        );
+        self.uploads.flush();
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_eye(
         &mut self,
         encoder: &mut helio_core::CommandRecorder<'_>,
         frame: u64,
@@ -7348,8 +7773,8 @@ impl ChunkWorld {
         if self.slots_version != Some(self.drawn_set.version()) {
             let slots: Vec<u32> = self.drawn_set.list.iter().map(|c| c.slot).collect();
             if !slots.is_empty() {
-                self.queue
-                    .write_buffer(&self.drawn_slots, 0, bytemuck::cast_slice(&slots));
+                self.uploads
+                    .write(encoder, &self.drawn_slots, 0, bytemuck::cast_slice(&slots));
             }
             self.slots_version = Some(self.drawn_set.version());
         }
@@ -7367,6 +7792,7 @@ impl ChunkWorld {
             gi: gi.is_some(),
             ortho: None,
         };
+        self.place_anchors(eye);
         let (moved, prev) = self.volume_motions(&input, eye_index);
         let timing = self
             .queries
@@ -7389,8 +7815,8 @@ impl ChunkWorld {
         };
         // The camera's own parameters (the world frame), for the denoiser.
         let camera = self.draw_params(&input, None, 0, traced, u32::from(moved));
-        self.queue
-            .write_buffer(&self.params, 0, bytemuck::bytes_of(&camera));
+        self.uploads
+            .write(encoder, &self.params, 0, bytemuck::bytes_of(&camera));
         if let Some(frame) = &self.atmosphere_frame {
             encoder.copy_buffer_to_buffer(
                 frame,
@@ -7427,6 +7853,7 @@ impl ChunkWorld {
             );
             groups.push((index, group, params.rect));
         }
+        let cross = self.cross_volumes(&input, &order, &drawn_in, gi.is_some(), &prev);
         let targets = self.targets.as_ref().unwrap();
         {
             // 4. Sun shadows: samples, then every hit, and meshes before
@@ -7501,9 +7928,10 @@ impl ChunkWorld {
                 },
             );
             // No fallbacks yet.
-            self.queue
-                .write_buffer(&targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
-            self.queue.write_buffer(
+            self.uploads
+                .write(encoder, &targets.fallbacks, 0, bytemuck::cast_slice(&[0u32]));
+            self.uploads.write(
+                encoder,
                 &targets.fallback_groups,
                 0,
                 bytemuck::cast_slice(&[0u32, 1, 1]),
@@ -7571,6 +7999,15 @@ impl ChunkWorld {
                 pass.set_bind_group(0, group, &[]);
                 pass.dispatch_workgroups_indirect(&targets.fallback_groups, 0);
             }
+            // 4b. Each volume's shadow on the others' hits and the meshes,
+            // over the rectangle it can fall in, once all have their own.
+            for c in &cross {
+                let Some(rect) = c.shadow else { continue };
+                pass.set_pipeline(&self.cross_pipelines(c.index).shadow);
+                pass.set_bind_group(0, &c.group, &[]);
+                let (x, y) = rect_groups(rect, 8);
+                pass.dispatch_workgroups(x, y, 1);
+            }
             drop(pass);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("chunk local shadows"),
@@ -7620,7 +8057,8 @@ impl ChunkWorld {
                 timestamp_writes: end(7),
             });
             // 6. The GI probes' rays (a thread a ray, past the frame's
-            // count none), through the primary volume.
+            // count none), through the primary volume, then each other
+            // volume they reach (the nearer hit kept).
             if let (Some(gi), true, Some(occlusion), Some((_, group, _))) = (
                 gi,
                 self.gi_clipmap.is_some(),
@@ -7649,6 +8087,11 @@ impl ChunkWorld {
                 pass.set_bind_group(1, &gi_group, &[]);
                 pass.set_pipeline(&self.pipelines_of(primary).gi_trace);
                 pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
+                for c in cross.iter().filter(|c| c.gi) {
+                    pass.set_bind_group(0, &c.group, &[]);
+                    pass.set_pipeline(&self.cross_pipelines(c.index).gi_trace);
+                    pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
+                }
             }
             drop(pass);
             self.denoise(
@@ -7748,7 +8191,14 @@ impl ChunkWorld {
             slot.frame = Some((frame, self.last_generated.0, self.last_generated.1));
             self.timing_now = None;
         }
-        self.last_groups = Some(DrawGroups { volumes: groups });
+        self.last_groups = Some(DrawGroups {
+            volumes: groups,
+            ground: cross
+                .into_iter()
+                .filter(|c| c.ground)
+                .map(|c| (c.index, c.group))
+                .collect(),
+        });
     }
 
     /// The traces' counts since the last call (with
@@ -7853,7 +8303,7 @@ impl ChunkWorld {
         eye: DVec3,
         camera: Vec3,
     ) {
-        // Foliage grows on the primary volume: its walks in its frame.
+        // Foliage is tiled on the primary volume: its walks in its frame.
         let Some(primary) = self.primary else { return };
         let Some((_, group, _)) = self
             .last_groups
@@ -7936,6 +8386,13 @@ impl ChunkWorld {
                 .ground_probe,
         );
         pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+        // The other volumes near the eye, where they stand on that ground or
+        // hold it (`ground_probe_cross`).
+        for (index, group) in self.last_groups.iter().flat_map(|g| &g.ground) {
+            pass.set_bind_group(0, group, &[]);
+            pass.set_pipeline(&self.cross_pipelines(*index).ground_probe);
+            pass.dispatch_workgroups(count.div_ceil(64), 1, 1);
+        }
     }
 
     pub fn follow_gi(&mut self, clipmap: helio_pass_gi::Clipmap, world_eye: DVec3, eye: DVec3) {

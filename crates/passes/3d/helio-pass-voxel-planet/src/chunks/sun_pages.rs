@@ -75,16 +75,47 @@ pub(super) struct PageKey {
     pub page: [i32; 2],
 }
 
-/// An epoch: the sun its pages were traced for (`sun`, toward it), their
-/// grid's axes (right, down, forward from the sun) and anchor; its table
-/// slot; its resident pages and the pages asked for (the last frame each
-/// was asked in).
-pub(super) struct Epoch {
+/// An epoch's grid: the sun its pages were traced for (`sun`, toward it),
+/// their axes (right, down, forward from the sun) and anchor; its table
+/// slot. What the render thread needs of an epoch to trace and read its
+/// pages (a copy comes with each [`Planned`]).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct EpochGrid {
     pub id: u64,
     pub sun: DVec3,
     pub axes: [DVec3; 3],
     pub anchor: DVec3,
     pub slot: usize,
+}
+
+impl EpochGrid {
+    /// Planet-centred `p` along right and down from the anchor (m).
+    pub fn across(&self, p: DVec3) -> [f64; 2] {
+        let d = p - self.anchor;
+        [d.dot(self.axes[0]), d.dot(self.axes[1])]
+    }
+
+    /// The point of the plane through the anchor across the sun at `at`
+    /// (m along right and down).
+    pub fn point(&self, at: [f64; 2]) -> DVec3 {
+        self.anchor + self.axes[0] * at[0] + self.axes[1] * at[1]
+    }
+
+    /// `p`'s texel in a level of texels `texel` m wide: whole, fraction.
+    fn texel_of(&self, p: DVec3, texel: f64) -> ([i64; 2], [f64; 2]) {
+        let c = self.across(p).map(|c| c / texel);
+        let whole = c.map(f64::floor);
+        (
+            [whole[0] as i64, whole[1] as i64],
+            [c[0] - whole[0], c[1] - whole[1]],
+        )
+    }
+}
+
+/// An epoch: its grid ([`EpochGrid`]), its resident pages and the pages
+/// asked for (the last frame each was asked in).
+pub(super) struct Epoch {
+    grid: EpochGrid,
     created: u64,
     resident: FxHashMap<PageKey, u16>,
     asked: FxHashMap<PageKey, u64>,
@@ -109,11 +140,13 @@ impl Epoch {
         let right = forward.cross(hint).normalize();
         let up = right.cross(forward);
         Self {
-            id,
-            sun,
-            axes: [right, -up, forward],
-            anchor,
-            slot,
+            grid: EpochGrid {
+                id,
+                sun,
+                axes: [right, -up, forward],
+                anchor,
+                slot,
+            },
             created: frame,
             resident: FxHashMap::default(),
             asked: FxHashMap::default(),
@@ -121,28 +154,6 @@ impl Epoch {
             newly: Vec::new(),
             heard: None,
         }
-    }
-
-    /// Planet-centred `p` along right and down from the anchor (m).
-    pub fn across(&self, p: DVec3) -> [f64; 2] {
-        let d = p - self.anchor;
-        [d.dot(self.axes[0]), d.dot(self.axes[1])]
-    }
-
-    /// The point of the plane through the anchor across the sun at `at`
-    /// (m along right and down).
-    pub fn point(&self, at: [f64; 2]) -> DVec3 {
-        self.anchor + self.axes[0] * at[0] + self.axes[1] * at[1]
-    }
-
-    /// `p`'s texel in a level of texels `texel` m wide: whole, fraction.
-    fn texel_of(&self, p: DVec3, texel: f64) -> ([i64; 2], [f64; 2]) {
-        let c = self.across(p).map(|c| c / texel);
-        let whole = c.map(f64::floor);
-        (
-            [whole[0] as i64, whole[1] as i64],
-            [c[0] - whole[0], c[1] - whole[1]],
-        )
     }
 
     /// Whether every page asked for is resident and its terrain unchanged.
@@ -158,13 +169,20 @@ impl Epoch {
     }
 }
 
-/// A physical page: the epoch and page it holds, its near plane (planet-
-/// centred distance along its epoch's sun), the last frame it was asked
-/// for, and whether it is traced again ([`Stale`]).
+impl std::ops::Deref for Epoch {
+    type Target = EpochGrid;
+
+    fn deref(&self) -> &EpochGrid {
+        &self.grid
+    }
+}
+
+/// A physical page: the epoch and page it holds, the last frame it was
+/// asked for, and whether it is traced again ([`Stale`]). (Its near plane
+/// is the render thread's: [`SunPlanner::traced`].)
 #[derive(Clone, Copy)]
 struct Physical {
     owner: Option<(u64, PageKey)>,
-    near: f64,
     used: u64,
     stale: Stale,
 }
@@ -203,11 +221,15 @@ pub struct SunPageStats {
     pub views: usize,
     pub epochs: usize,
     pub out_of_pages: bool,
-    /// CPU time of the frame's sun occlusion (ms), and by part: the
-    /// update's occluder boxes, readback, invalidation, planning, the views'
-    /// recording, uploads.
+    /// Render-thread CPU time of the frame's sun occlusion (ms), and by
+    /// part: the update's occluder boxes, the requests' readback, handing
+    /// the inputs over and taking the plan (never waiting for it), the
+    /// views' recording, uploads; and the planner's own time on its thread
+    /// for the last plan taken (requests, invalidation, planning: off the
+    /// frame).
     pub cpu_ms: f64,
-    pub cpu_parts: [f64; 6],
+    pub cpu_parts: [f64; 5],
+    pub planner_ms: f64,
 }
 
 pub(super) struct SunPages {
@@ -234,7 +256,6 @@ impl SunPages {
             physical: vec![
                 Physical {
                     owner: None,
-                    near: 0.0,
                     used: 0,
                     stale: Stale::No,
                 };
@@ -247,26 +268,35 @@ impl SunPages {
         }
     }
 
-    /// Level `level`'s texel (m).
-    pub fn texel(&self, level: usize) -> f64 {
-        self.finest * (level as f64).exp2()
-    }
-
     /// The current epoch.
     pub fn current(&self) -> Option<&Epoch> {
         self.epochs.first()
     }
 
     /// The eye's page in each level of the current epoch.
-    pub fn eye_pages(&self, eye: DVec3) -> [[i32; 2]; LEVELS] {
-        let mut out = [[0; 2]; LEVELS];
-        if let Some(e) = self.current() {
-            for (level, o) in out.iter_mut().enumerate() {
-                let (t, _) = e.texel_of(eye, self.texel(level));
-                *o = t.map(|t| (t >> PAGE_SHIFT) as i32);
+    #[cfg(test)]
+    fn eye_pages(&self, eye: DVec3) -> [[i32; 2]; LEVELS] {
+        eye_pages(self.finest, self.current().map(|e| &e.grid), eye)
+    }
+
+    /// The table's rows changed since the last call, as runs of rows: the
+    /// first word of each and its words.
+    pub fn take_rows(&mut self) -> Vec<(usize, Vec<u32>)> {
+        let mut rows: Vec<usize> = self.dirty_rows.drain().collect();
+        rows.sort_unstable();
+        let row = SUN_OCCLUSION_WINDOW as usize;
+        let mut runs = Vec::new();
+        let mut i = 0;
+        while i < rows.len() {
+            let mut j = i + 1;
+            while j < rows.len() && rows[j] == rows[j - 1] + 1 {
+                j += 1;
             }
+            let (from, to) = (rows[i] * row, (rows[j - 1] + 1) * row);
+            runs.push((from, self.table[from..to].to_vec()));
+            i = j;
         }
-        out
+        runs
     }
 
     /// The frame's epochs for the sun toward `sun` and the eye at `eye`
@@ -725,81 +755,294 @@ impl SunPages {
             }
             self.physical[p as usize].owner = None;
         }
+        // The views' pages resident, their table entries set: the plan is
+        // made ahead of the frame that traces them (`SunPlanner`), whose
+        // upload of these rows goes with the trace. (A cut that refines
+        // under them later marks them [`Stale::Coarse`]: `invalidate`.)
+        let (id, slot) = (self.epochs[0].id, self.epochs[0].slot);
+        for v in &views {
+            for &(key, p) in &v.pages {
+                let e = &mut self.epochs[0];
+                e.resident.insert(key, p);
+                e.todo.remove(&key);
+                // Pages traced ahead of a request are kept as if asked now.
+                let used = e.asked.get(&key).copied().unwrap_or(0).max(frame);
+                self.physical[p as usize] = Physical {
+                    owner: Some((id, key)),
+                    used,
+                    stale: Stale::No,
+                };
+                let i = sun_occlusion_table_index(slot, key.level as usize, key.page);
+                self.table[i] = sun_occlusion_entry(key.page, u32::from(p));
+                self.dirty_rows.insert(i / SUN_OCCLUSION_WINDOW as usize);
+            }
+        }
         stats.traced = views.iter().map(|v| v.pages.len()).sum();
         stats.views = views.len();
         stats.resident = self.epochs.iter().map(|e| e.resident.len()).sum();
         self.stats = stats;
         views
     }
+}
 
-    /// The pages of `window` traced this frame through a near plane `near`
-    /// (world distance along the current epoch's sun): resident, their table
-    /// entries set. (A cut that refines under them later marks them
-    /// [`Stale::Coarse`]: `invalidate`.)
-    pub fn traced(&mut self, window: &Window, near: f64, frame: u64) {
-        let (id, slot) = (self.epochs[0].id, self.epochs[0].slot);
-        for &(key, p) in &window.pages {
-            self.epochs[0].resident.insert(key, p);
-            self.epochs[0].todo.remove(&key);
-            // Pages traced ahead of a request are kept as if asked now.
-            let used = self.epochs[0]
-                .asked
-                .get(&key)
-                .copied()
-                .unwrap_or(0)
-                .max(frame);
-            self.physical[p as usize] = Physical {
-                owner: Some((id, key)),
-                near,
-                used,
-                stale: Stale::No,
-            };
-            let i = sun_occlusion_table_index(slot, key.level as usize, key.page);
-            self.table[i] = sun_occlusion_entry(key.page, u32::from(p));
-            self.dirty_rows.insert(i / SUN_OCCLUSION_WINDOW as usize);
+/// Level `level`'s texel (m) of pages whose finest is `finest`.
+pub(super) fn texel(finest: f64, level: usize) -> f64 {
+    finest * (level as f64).exp2()
+}
+
+/// The eye's page in each level of epoch `e` (none: all zero).
+pub(super) fn eye_pages(finest: f64, e: Option<&EpochGrid>, eye: DVec3) -> [[i32; 2]; LEVELS] {
+    let mut out = [[0; 2]; LEVELS];
+    if let Some(e) = e {
+        for (level, o) in out.iter_mut().enumerate() {
+            let (t, _) = e.texel_of(eye, texel(finest, level));
+            *o = t.map(|t| (t >> PAGE_SHIFT) as i32);
+        }
+    }
+    out
+}
+
+/// The frame for the eye at `eye` (planet-centred): the epochs, the eye in
+/// each level; and each physical page's near plane relative to the eye
+/// (`nears`: the epoch it was traced for and its planet-centred distance
+/// along that epoch's sun; a point `p` lies `dot(p, forward) - near` past
+/// it). A page of an epoch gone reads 0: no table entry points at it.
+pub(super) fn frame(
+    finest: f64,
+    epochs: &[EpochGrid],
+    nears: &[(u64, f64)],
+    eye: DVec3,
+) -> (SunOcclusionFrame, Vec<f32>) {
+    let mut frame = SunOcclusionFrame {
+        info: [
+            finest as f32,
+            LEVELS as f32,
+            SUN_OCCLUSION_PAGE as f32,
+            SUN_OCCLUSION_WINDOW as f32,
+        ],
+        atlas: [SUN_OCCLUSION_ATLAS_PAGES, SUN_OCCLUSION_TABLE_WORDS, 0, 0],
+        ..Default::default()
+    };
+    for (out, e) in frame.epochs.iter_mut().zip(epochs) {
+        let [right, down, forward] = e.axes.map(|a| a.as_vec3());
+        *out = SunOcclusionEpoch {
+            right: right.extend((e.slot + 1) as f32).to_array(),
+            down: down.extend(0.0).to_array(),
+            forward: forward.extend(0.0).to_array(),
+            levels: std::array::from_fn(|level| {
+                let (t, f) = e.texel_of(eye, texel(finest, level));
+                SunOcclusionLevel {
+                    texel: t.map(|t| t as i32),
+                    frac: f.map(|f| f as f32),
+                }
+            }),
+        };
+    }
+    // Each epoch's sun once, not a search a page.
+    let along: Vec<(u64, f64)> = epochs.iter().map(|e| (e.id, eye.dot(e.sun))).collect();
+    let near = nears
+        .iter()
+        .map(|&(id, near)| {
+            along
+                .iter()
+                .find(|a| a.0 == id)
+                .map_or(0.0, |a| (a.1 - near) as f32)
+        })
+        .collect();
+    (frame, near)
+}
+
+/// What the render thread hands the planner after a frame, for the next:
+/// the frame planned for, the eye and the sun toward which, whether the
+/// residency has settled, the requests read back (what each was asked
+/// against, its words), the boxes whose terrain changed and those drawn
+/// finer since.
+pub(super) struct PlanJob {
+    pub frame: u64,
+    pub eye: DVec3,
+    pub sun: DVec3,
+    pub settled: bool,
+    pub asked: Vec<(Asking, Vec<u32>)>,
+    pub changes: Vec<[DVec3; 2]>,
+    pub refined: Vec<[DVec3; 2]>,
+}
+
+/// A frame's plan from the planner's thread: the views to trace (their
+/// pages resident and in the table already), the epochs, the table's
+/// changed rows (runs: first word, words), the planner's stats and its time
+/// (ms) by part (requests, invalidation, planning), and the request words'
+/// buffers back for reuse.
+pub(super) struct Planned {
+    pub windows: Vec<Window>,
+    pub epochs: Vec<EpochGrid>,
+    pub rows: Vec<(usize, Vec<u32>)>,
+    pub stats: SunPageStats,
+    pub parts: [f64; 3],
+    pub spent: Vec<Vec<u32>>,
+}
+
+/// The sun pages' planner on its own thread, a frame ahead: after frame N
+/// records, the frame's requests and changed boxes go to it
+/// ([`Self::queue`]) and frame N+1 takes the plan they made when it is done
+/// ([`Self::try_take`]; the plan takes ~1 ms, the rest of a frame ~10). The
+/// frame never waits for it: a plan not done yet is taken by a later frame,
+/// and the inputs of the frames in between go to the next plan together
+/// (a woken thread on a busy machine can wait a scheduling quantum for a
+/// core). A plan is the same function of its inputs as on the render
+/// thread, its table rows uploaded with the traces that fill them whichever
+/// frame takes it; it sees each frame's requests a frame (or more) later,
+/// which the requests' own latency (read back a frame or two late) already
+/// covers. The render thread keeps what only it knows: each physical page's
+/// near plane, set where it records the trace ([`Self::traced`]).
+pub(super) struct SunPlanner {
+    pub finest: f64,
+    jobs: std::sync::mpsc::Sender<PlanJob>,
+    plans: std::sync::Mutex<std::sync::mpsc::Receiver<Planned>>,
+    /// Whether a job is on the thread (its plan not taken yet), and the
+    /// inputs gathered for the next one while it is.
+    in_flight: bool,
+    next: Option<PlanJob>,
+    /// The epochs of the plan taken last (current first).
+    pub epochs: Vec<EpochGrid>,
+    /// Each physical page's epoch and near plane, as last traced.
+    nears: Vec<(u64, f64)>,
+    pub stats: SunPageStats,
+    /// Request word buffers to reuse.
+    pub spare: Vec<Vec<u32>>,
+}
+
+impl SunPlanner {
+    /// A planner for a world whose finest voxel is `voxel` m
+    /// ([`SunPages::new`]), its thread started.
+    pub fn spawn(voxel: f64) -> Self {
+        let (jobs, inbox) = std::sync::mpsc::channel::<PlanJob>();
+        let (outbox, plans) = std::sync::mpsc::channel();
+        let pages = SunPages::new(voxel);
+        let finest = pages.finest;
+        std::thread::Builder::new()
+            .name("sun pages planner".into())
+            .spawn(move || {
+                let mut pages = pages;
+                while let Ok(mut job) = inbox.recv() {
+                    let clock = std::time::Instant::now();
+                    for (asking, words) in &job.asked {
+                        pages.asked(asking, words);
+                    }
+                    let t0 = clock.elapsed().as_secs_f64() * 1e3;
+                    pages.invalidate(&job.changes, Stale::Changed);
+                    pages.invalidate(&job.refined, Stale::Coarse);
+                    let t1 = clock.elapsed().as_secs_f64() * 1e3;
+                    pages.begin(job.frame, job.eye, job.sun);
+                    let windows = pages.plan(job.frame, job.settled);
+                    let planned = Planned {
+                        windows,
+                        epochs: pages.epochs.iter().map(|e| e.grid).collect(),
+                        rows: pages.take_rows(),
+                        stats: pages.stats,
+                        parts: [t0, t1 - t0, clock.elapsed().as_secs_f64() * 1e3 - t1],
+                        spent: job.asked.drain(..).map(|(_, words)| words).collect(),
+                    };
+                    if outbox.send(planned).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("the sun pages planner thread starts");
+        Self {
+            finest,
+            jobs,
+            plans: std::sync::Mutex::new(plans),
+            in_flight: false,
+            next: None,
+            epochs: Vec::new(),
+            nears: vec![(u64::MAX, 0.0); SUN_OCCLUSION_PHYSICAL as usize],
+            stats: SunPageStats::default(),
+            spare: Vec::new(),
         }
     }
 
-    /// The frame for the eye at `eye` (planet-centred): the epochs, the eye
-    /// in each level; and each physical page's near plane relative to the
-    /// eye (along its epoch's forward: a point `p` lies `dot(p, forward) -
-    /// near` past it).
-    pub fn frame(&self, eye: DVec3) -> (SunOcclusionFrame, Vec<f32>) {
-        let mut frame = SunOcclusionFrame {
-            info: [
-                self.finest as f32,
-                LEVELS as f32,
-                SUN_OCCLUSION_PAGE as f32,
-                SUN_OCCLUSION_WINDOW as f32,
-            ],
-            atlas: [SUN_OCCLUSION_ATLAS_PAGES, SUN_OCCLUSION_TABLE_WORDS, 0, 0],
-            ..Default::default()
+    /// A frame's inputs for the next plan: on the planner's thread at once
+    /// when it is free, else with the frames' after it when it is (their
+    /// requests and boxes together, the latest frame's eye, sun and
+    /// settling).
+    pub fn queue(&mut self, job: PlanJob) {
+        let next = match self.next.take() {
+            Some(mut next) => {
+                next.asked.extend(job.asked);
+                next.changes.extend(job.changes);
+                next.refined.extend(job.refined);
+                PlanJob {
+                    asked: next.asked,
+                    changes: next.changes,
+                    refined: next.refined,
+                    ..job
+                }
+            }
+            None => job,
         };
-        for (out, e) in frame.epochs.iter_mut().zip(&self.epochs) {
-            let [right, down, forward] = e.axes.map(|a| a.as_vec3());
-            *out = SunOcclusionEpoch {
-                right: right.extend((e.slot + 1) as f32).to_array(),
-                down: down.extend(0.0).to_array(),
-                forward: forward.extend(0.0).to_array(),
-                levels: std::array::from_fn(|level| {
-                    let (t, f) = e.texel_of(eye, self.texel(level));
-                    SunOcclusionLevel {
-                        texel: t.map(|t| t as i32),
-                        frac: f.map(|f| f as f32),
-                    }
-                }),
-            };
+        if self.in_flight {
+            self.next = Some(next);
+        } else {
+            self.jobs.send(next).expect("the sun pages planner runs");
+            self.in_flight = true;
         }
-        let near = self
-            .physical
-            .iter()
-            .map(|p| {
-                p.owner
-                    .and_then(|(id, _)| self.epochs.iter().find(|e| e.id == id))
-                    .map_or(0.0, |e| (eye.dot(e.sun) - p.near) as f32)
-            })
-            .collect();
-        (frame, near)
+    }
+
+    /// The plan on its way, if it is done (never waits): its epochs and
+    /// stats kept; the inputs gathered since go to the planner.
+    pub fn try_take(&mut self) -> Option<Planned> {
+        if !self.in_flight {
+            return None;
+        }
+        let mut planned = match self
+            .plans
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .try_recv()
+        {
+            Ok(planned) => planned,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                panic!("the sun pages planner stopped")
+            }
+        };
+        self.in_flight = false;
+        self.epochs.clone_from(&planned.epochs);
+        self.stats = planned.stats;
+        self.spare.append(&mut planned.spent);
+        if let Some(next) = self.next.take() {
+            self.queue(next);
+        }
+        Some(planned)
+    }
+
+    /// The current epoch of the plan taken last.
+    pub fn current(&self) -> Option<&EpochGrid> {
+        self.epochs.first()
+    }
+
+    /// Level `level`'s texel (m).
+    pub fn texel(&self, level: usize) -> f64 {
+        texel(self.finest, level)
+    }
+
+    /// The eye's page in each level of the current epoch.
+    pub fn eye_pages(&self, eye: DVec3) -> [[i32; 2]; LEVELS] {
+        eye_pages(self.finest, self.current(), eye)
+    }
+
+    /// `window`'s pages traced this frame through a near plane `near`
+    /// (planet-centred distance along the current epoch's sun).
+    pub fn traced(&mut self, window: &Window, near: f64) {
+        let id = self.current().map_or(u64::MAX, |e| e.id);
+        for &(_, p) in &window.pages {
+            self.nears[p as usize] = (id, near);
+        }
+    }
+
+    /// The frame for the eye at `eye` ([`frame`]).
+    pub fn frame(&self, eye: DVec3) -> (SunOcclusionFrame, Vec<f32>) {
+        frame(self.finest, &self.epochs, &self.nears, eye)
     }
 }
 
@@ -818,9 +1061,15 @@ mod tests {
         let traced: usize = views.iter().map(|v| v.pages.len()).sum();
         assert!(traced > 0 && traced <= TRACE_PAGES);
         assert_eq!(usize::from(views[0].level), LEVELS - 1);
-        for v in &views {
-            pages.traced(v, 0.0, 0);
+        // Planned pages are resident at once (traced by the frame the plan
+        // is for), their table entries set.
+        let e = pages.current().unwrap();
+        for &(key, p) in &views[0].pages {
+            assert_eq!(e.resident.get(&key), Some(&p));
+            let i = sun_occlusion_table_index(e.slot, usize::from(key.level), key.page);
+            assert_eq!(sun_occlusion_entry_physical(pages.table[i], key.page), Some(u32::from(p)));
         }
+        assert!(!pages.take_rows().is_empty() && pages.take_rows().is_empty());
         // Everything asked traced within a few frames, then nothing.
         let mut frame = 1;
         loop {
@@ -828,9 +1077,6 @@ mod tests {
             let views = pages.plan(frame, true);
             if views.is_empty() {
                 break;
-            }
-            for v in &views {
-                pages.traced(v, 0.0, frame);
             }
             frame += 1;
             assert!(frame < 160, "the pages around the eye took {frame} frames");
@@ -857,15 +1103,7 @@ mod tests {
         let eye = DVec3::new(0.0, 1000.0, 0.0);
         let sun = DVec3::Y;
         pages.begin(0, eye, sun);
-        loop {
-            let views = pages.plan(0, true);
-            if views.is_empty() {
-                break;
-            }
-            for v in &views {
-                pages.traced(v, 0.0, 0);
-            }
-        }
+        while !pages.plan(0, true).is_empty() {}
         let e = pages.current().unwrap();
         // A 1 m box at the eye's column: the coarse pages over it, nothing
         // far away.
@@ -879,7 +1117,7 @@ mod tests {
         let over: Vec<&PageKey> = near
             .iter()
             .filter(|k| {
-                let m = pages.texel(usize::from(k.level)) * f64::from(PAGE);
+                let m = texel(pages.finest, usize::from(k.level)) * f64::from(PAGE);
                 let a = e.across(eye);
                 (0..2).all(|i| (a[i] / m).floor() as i32 == k.page[i])
             })
@@ -895,9 +1133,7 @@ mod tests {
         let mut sun = DVec3::new(0.3, 0.8, 0.4).normalize();
         for frame in 0..400 {
             pages.begin(frame, eye, sun);
-            for v in pages.plan(frame, true) {
-                pages.traced(&v, 0.0, frame);
-            }
+            pages.plan(frame, true);
             let asking = Asking {
                 epoch: pages.current().unwrap().id,
                 frame,
@@ -918,6 +1154,85 @@ mod tests {
         );
     }
 
+    /// The planner's thread plans exactly what the planner does on the
+    /// caller's: the same views, epochs and table rows for the same jobs
+    /// (a flight with requests, changed and refined boxes and a turning
+    /// sun), and its frame reads the near planes traced.
+    #[test]
+    fn the_planner_thread_plans_what_the_planner_does() {
+        let mut thread = SunPlanner::spawn(0.1);
+        let mut local = SunPages::new(0.1);
+        let mut sun = DVec3::new(0.3, 0.8, 0.4).normalize();
+        let job = |frame: u64, eye: DVec3, sun: DVec3, asking: Option<Asking>| {
+            let mut words = vec![0u32; LEVELS * (WINDOW * WINDOW) as usize / 32];
+            for level in [2usize, 5, 9] {
+                for d in -3i32..=3 {
+                    let bit = level * (WINDOW * WINDOW) as usize
+                        + ((WINDOW / 2 + d) * WINDOW + WINDOW / 2 + (frame as i32 % 5) - 2) as usize;
+                    words[bit / 32] |= 1 << (bit % 32);
+                }
+            }
+            let c = eye - DVec3::Y * 1000.0;
+            PlanJob {
+                frame,
+                eye,
+                sun,
+                settled: frame > 30,
+                asked: asking.into_iter().map(|a| (a, words.clone())).collect(),
+                changes: if frame % 7 == 0 { vec![[c, c + DVec3::splat(3.0)]] } else { Vec::new() },
+                refined: vec![[c - DVec3::splat(20.0), c + DVec3::splat(6.4)]],
+            }
+        };
+        let mut asking = None;
+        for frame in 0..120u64 {
+            let eye = DVec3::new(frame as f64 * 3.0, 1000.0, frame as f64 * 1.5);
+            let j = job(frame, eye, sun, asking);
+            for (a, words) in &j.asked {
+                local.asked(a, words);
+            }
+            local.invalidate(&j.changes, Stale::Changed);
+            local.invalidate(&j.refined, Stale::Coarse);
+            local.begin(j.frame, j.eye, j.sun);
+            let windows = local.plan(j.frame, j.settled);
+            let rows = local.take_rows();
+            thread.queue(j);
+            let planned = loop {
+                if let Some(planned) = thread.try_take() {
+                    break planned;
+                }
+                std::thread::yield_now();
+            };
+            assert_eq!(planned.windows.len(), windows.len(), "frame {frame}");
+            for (a, b) in planned.windows.iter().zip(&windows) {
+                assert_eq!((a.level, a.origin, &a.pages), (b.level, b.origin, &b.pages));
+            }
+            assert_eq!(planned.rows, rows, "frame {frame}");
+            assert_eq!(
+                planned.epochs.iter().map(|e| (e.id, e.slot)).collect::<Vec<_>>(),
+                local.epochs.iter().map(|e| (e.id, e.slot)).collect::<Vec<_>>()
+            );
+            for (n, w) in planned.windows.iter().enumerate() {
+                thread.traced(w, 500.0 + n as f64);
+            }
+            asking = Some(Asking {
+                epoch: thread.current().unwrap().id,
+                frame,
+                eye_pages: thread.eye_pages(eye),
+            });
+            assert_eq!(asking.unwrap().eye_pages, local.eye_pages(eye));
+            sun = glam::DQuat::from_rotation_y(0.0005).mul_vec3(sun);
+        }
+        // A page traced last frame reads its near plane from the eye.
+        let eye = DVec3::new(0.0, 1000.0, 0.0);
+        let (_, nears) = thread.frame(eye);
+        let e = *thread.current().unwrap();
+        let resident = local.current().unwrap().resident.values().copied().collect::<Vec<_>>();
+        assert!(resident
+            .iter()
+            .filter(|&&p| thread.nears[p as usize].0 == e.id)
+            .all(|&p| nears[p as usize] == (eye.dot(e.sun) - thread.nears[p as usize].1) as f32));
+    }
+
     /// The planner's CPU in a cruise-like flight (run with --release
     /// --ignored --nocapture): ~3000 pages asked, the atlas full, refined
     /// boxes every frame.
@@ -928,6 +1243,7 @@ mod tests {
         let mut pages = SunPages::new(0.1);
         let sun = DVec3::new(0.3, 0.8, 0.4).normalize();
         let mut parts = [0.0f64; 4];
+        let nears = vec![(0u64, 0.0f64); SUN_OCCLUSION_PHYSICAL as usize];
         let frames = 2000;
         for frame in 0..frames {
             let eye = DVec3::new(frame as f64 * 3.0, 1000.0, frame as f64 * 1.5);
@@ -966,12 +1282,11 @@ mod tests {
                 .collect();
             pages.invalidate(&boxes, Stale::Coarse);
             let t3 = Instant::now();
-            let views = pages.plan(frame, true);
-            for v in &views {
-                pages.traced(v, 0.0, frame);
-            }
+            pages.plan(frame, true);
+            let _ = pages.take_rows();
             let t4 = Instant::now();
-            let _ = pages.frame(eye);
+            let grids: Vec<EpochGrid> = pages.epochs.iter().map(|e| e.grid).collect();
+            let _ = super::frame(pages.finest, &grids, &nears, eye);
             let t5 = Instant::now();
             if frame >= frames / 2 {
                 for (p, d) in parts

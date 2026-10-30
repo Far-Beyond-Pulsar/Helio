@@ -53,7 +53,7 @@ impl PlanetFrame {
         }
     }
 
-    /// The primary volume's world, if any.
+    /// The frame's first volume's world, if any.
     pub fn planet(&self) -> Option<&Arc<Planet>> {
         self.volumes.first().map(|v| &v.volume.planet)
     }

@@ -208,6 +208,8 @@ impl Game {
         }
 
         let mut controls = self.input.controls();
+        // The world's part of the frame: snapshots, queries, the player.
+        let world_started = Instant::now();
         self.world.update();
         self.world.follow(self.player.position);
         #[cfg(not(target_arch = "wasm32"))]
@@ -226,6 +228,7 @@ impl Game {
         }
         self.interaction
             .update(&mut self.player, &mut self.world, &controls, dt);
+        let world_ms = world_started.elapsed().as_secs_f64() * 1e3;
 
         self.total_frames += 1;
         if let Some(t) = &self.tour {
@@ -267,7 +270,10 @@ impl Game {
         let shot = self
             .tour
             .as_mut()
-            .and_then(|t| t.step(&mut self.player, &mut self.world, settled, &mut self.quit));
+            .and_then(|t| {
+                t.world_ms = world_ms;
+                t.step(&mut self.player, &mut self.world, settled, &mut self.quit)
+            });
         let (eye, look) = self.player.camera(&self.world);
         #[cfg(not(target_arch = "wasm32"))]
         let (eye, look) = vr.as_ref().map_or((eye, look), |vr| {
@@ -382,6 +388,10 @@ struct Tour {
     shots: u32,
     /// A flight instead of the poses (`VOXEL_CRAFT_FLIGHT`).
     flight: Option<Flight>,
+    /// Sculpt strokes instead of the poses (`VOXEL_CRAFT_STROKE`), and this
+    /// frame's world milliseconds they log.
+    strokes: Option<crate::strokes::Strokes>,
+    world_ms: f64,
 }
 
 /// `VOXEL_CRAFT_FLIGHT=<frames>` with `VOXEL_CRAFT_SHOTS`: a sideways flight
@@ -452,6 +462,8 @@ impl Tour {
             burst,
             shots: 0,
             flight,
+            strokes: crate::strokes::Strokes::from_env(),
+            world_ms: 0.0,
         }
     }
 
@@ -550,6 +562,10 @@ impl Tour {
         }
         if self.flight.is_some() {
             return self.fly(player, world, settled, quit);
+        }
+        if let Some(strokes) = &mut self.strokes {
+            strokes.step(player, world, settled, self.world_ms, quit);
+            return None;
         }
         if self.waited == u32::MAX {
             self.set_pose(player);

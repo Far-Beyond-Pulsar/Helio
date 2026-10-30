@@ -748,7 +748,7 @@ impl OcclusionCullPass {
         if self.pvs_buf.size() < bytes.len() as u64 {
             self.pvs_buf = create_pvs_buf(ctx.device, bytes.len() as u64);
         }
-        ctx.queue.write_buffer(&self.pvs_buf, 0, bytes);
+        ctx.write_buffer(&self.pvs_buf, 0, bytes);
         self.pvs_grid = Some(grid);
     }
 }
@@ -915,7 +915,7 @@ impl RenderPass for OcclusionCullPass {
                 segment_count: self.segments.segments().len() as u32,
                 _pad: 0,
             };
-            ctx.queue.write_buffer(
+            ctx.write_buffer(
                 &self.range_compact_params,
                 bucket as u64 * 256,
                 bytemuck::bytes_of(&params),

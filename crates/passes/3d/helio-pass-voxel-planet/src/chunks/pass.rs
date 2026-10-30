@@ -229,7 +229,7 @@ impl ChunkPass {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
-            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} chunk_slots={} leaf_pages={} leaf_page_capacity={} grow_ms={:.2} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
+            "chunks settled={} kept_loaded={:?} kept_chunks={} kept_bytes={} detail_pages={} detail_capacity={} chunk_slots={} leaf_pages={} leaf_page_capacity={} grow_ms={:.2} out_of_details={} drawn_nodes={} drawn_chunks={} resident_chunks={} evicted={} deferred={} fading={} waiting={} footprints={} chunks={} reports={} seen={} reached={} budget={} coarse={:.3} worst_px={:.2} worst={} plan_age={} plan_ms={:.1} switch_px={:.2} out_of_slots={} out_of_leaves={} cpu_ms={:?} draw_ms={:?} shadow_ms={:?} denoise_ms={:?} generate_ms={:?}",
             self.settled(),
             self.kept_loaded,
             s.kept_chunks,
@@ -250,6 +250,7 @@ impl ChunkPass {
             s.requests,
             s.generated_footprints,
             s.generated_chunks,
+            s.reports,
             s.seen,
             s.reached,
             s.budget,
@@ -475,8 +476,8 @@ impl ChunkPass {
     fn prepare_frame(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // The last frame was submitted: its results can be mapped.
         if let Some(world) = &mut self.world {
-            world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);
+            helio_core::cpu_scope!("VoxelChunks: submitted");
             world.submitted();
             self.timings.extend(world.take_timings());
             let excess = self.timings.len().saturating_sub(KEEP_TIMINGS);
@@ -498,7 +499,6 @@ impl ChunkPass {
         };
         let world = self.world.get_or_insert_with(|| {
             let mut world = ChunkWorld::new(ctx.device, ctx.queue);
-            world.set_polls_device(ctx.owns_device);
             world.set_plain_colour(false);
             world.set_debug_mode(self.debug_mode);
             world
@@ -550,12 +550,11 @@ impl ChunkPass {
         for gone in std::mem::replace(&mut self.held, held) {
             world.remove_volume(gone.volume);
         }
-        if let (Some(primary), Some(first)) = (self.held.first(), frame.volumes.first()) {
-            world.set_primary(primary.volume);
-            // Foliage tiles the primary volume this pass draws (a rebuilt
-            // graph's new pass too).
+        // Foliage tiles the volume the world follows the eye on (its
+        // primary; a rebuilt graph's new pass too).
+        if let Some(v) = primary_volume(world, &self.held, &frame) {
             self.planet_ground
-                .set_volume(*first.volume.planet.grid(), first.volume.transform);
+                .set_volume(*v.volume.planet.grid(), v.volume.transform);
         }
         // A save's export: a volume's resident edited chunks packed (over
         // the next updates), then its kept chunks answered for its world.
@@ -705,14 +704,17 @@ impl ChunkPass {
             self.budget_ms = Some(budget);
             config.generate_ms = Some(budget);
         }
-        self.stats = world.update(
-            encoder,
-            residency_eye,
-            velocity,
-            Some(view),
-            ctx.frame_num,
-            &config,
-        );
+        self.stats = {
+            helio_core::cpu_scope!("VoxelChunks: update");
+            world.update(
+                encoder,
+                residency_eye,
+                velocity,
+                Some(view),
+                ctx.frame_num,
+                &config,
+            )
+        };
         if let Some((map, _)) = &self.scene {
             world.set_material_map(map);
         }
@@ -726,7 +728,11 @@ impl ChunkPass {
         // The sun's occlusion by the terrain, for what else the sun lights
         // (fine cells and meshes in this draw, the GI probes' hits,
         // volumetric fog): the pages its readers asked for and lack.
-        world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
+        {
+            helio_core::cpu_scope!("VoxelChunks: sun occlusion");
+            world.draw_sun_occlusion(encoder, ctx.frame_num, trace_eye, frame.sun);
+        }
+        helio_core::cpu_scope!("VoxelChunks: draw");
         world.draw_for_eye(
             encoder,
             ctx.frame_num,
@@ -760,14 +766,14 @@ impl ChunkPass {
         );
         // Foliage's ground: where the drawn terrain changed, and this frame's
         // questions (`chunks::ground`) answered against the cut just drawn
-        // (the primary volume's).
+        // (the primary volume's, and the others' near the eye).
         self.foliage_ground
             .push_changes(world.take_ground_changes());
         if let Some(question) = self.foliage_ground.take_question() {
             let exchange = (
                 binding(helio_pass_foliage_place::GROUND_QUERIES),
                 binding(helio_pass_foliage_place::GROUND_HITS),
-                frame.planet(),
+                primary_volume(world, &self.held, &frame).map(|v| &v.volume.planet),
             );
             if let (Some(queries), Some(hits), Some(planet)) = exchange {
                 world.probe_ground(
@@ -789,6 +795,18 @@ impl ChunkPass {
         }
         Ok(())
     }
+}
+
+/// The frame's volume the world takes as its primary (`ChunkWorld::primary`:
+/// the one the eye is nearest the surface of), `held` in the frame's order.
+fn primary_volume<'a>(
+    world: &ChunkWorld,
+    held: &[HeldVolume],
+    frame: &'a PlanetFrame,
+) -> Option<&'a crate::engine::VolumeFrame> {
+    let primary = world.primary()?;
+    let at = held.iter().position(|h| h.volume == primary)?;
+    frame.volumes.get(at)
 }
 
 /// The voxel shader unprojects a direction from zero (`pixel_ray`), unlike

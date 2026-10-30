@@ -5216,3 +5216,201 @@ fn moon_pole_rays_end_on_chunks() {
         wrong.len()
     );
 }
+
+/// The desert at 10 cm voxels (seed 7), an eye 3 m over its ground at
+/// face 4's (0.41, 0.57), and the face's cell rows there (i, j: unit,
+/// horizontal).
+fn desert_steps() -> (Planet, DVec3, DVec3, DVec3) {
+    let planet = Planet::new(PlanetRecipe {
+        voxel_size_m: 0.1,
+        terrain: TerrainLayers::desert().source(7),
+        ..Default::default()
+    })
+    .unwrap();
+    let grid = planet.grid();
+    let dir = land(&planet, 4, 0.41, 0.57);
+    let eye = planet.surface_point(dir, 3.0);
+    let up = grid.up(eye);
+    let (cell, _) = grid.locate(eye);
+    let at = [f64::from(cell.i), f64::from(cell.j), f64::from(cell.k)];
+    let along = |a: usize| {
+        let mut b = at;
+        b[a] += 1.0;
+        let v = grid.position(cell.face, b) - grid.position(cell.face, at);
+        (v - up * v.dot(up)).normalize()
+    };
+    let (row_i, row_j) = (along(0), along(1));
+    (planet, eye, row_i, row_j)
+}
+
+/// Every second pixel's hit (each way) of cells three pixels wide or more
+/// in `view`, under each of `suns` (10 degrees up toward each direction),
+/// with step softness 0 (each step lit by its own faces, as levels storing
+/// `detail[3] = 0` draw), a point sun and steady shadows: its walked sun
+/// against the CPU's ray from a hundredth of a cell off its face, wherever
+/// the CPU's rays from points a few thousandths of a cell around that agree
+/// (a ray along an edge meets either side of it). The suns with wrong hits,
+/// and how many.
+fn sun_rays_against_cpu(gpu: &Gpu, planet: &Planet, view: &View, suns: &[(&str, DVec3)]) -> Vec<(String, usize)> {
+    use rayon::prelude::*;
+    let grid = planet.grid();
+    let up = grid.up(view.eye);
+    let mut world = World::new(gpu, planet);
+    let appearance = helio_pass_voxel_planet::engine::TerrainAppearance {
+        detail: [0.3, 0.4, 0.08, 0.0],
+        ..Default::default()
+    };
+    world.chunks.set_appearance(VolumeId(0), &appearance);
+    world.chunks.set_sun_angular_radius(0.0);
+    world.chunks.set_steady_shadows(true);
+    let low = 10f64.to_radians();
+    let view_proj = view.view_proj(planet);
+    let [w, h] = view.size;
+    let mut failed = Vec::new();
+    for &(name, toward) in suns {
+        let toward = (toward.normalize() * low.cos() + up * low.sin()).normalize();
+        world.sun = toward.as_vec3();
+        let hits = world.settle(gpu, planet, view);
+        for _ in 0..3 {
+            world.frame(gpu, planet, view, None);
+        }
+        let walked = read_sun_walked(gpu, &world);
+        let ties = std::sync::atomic::AtomicUsize::new(0);
+        // Every second pixel each way.
+        let checked: Vec<_> = (0..(w / 2) * (h / 2))
+            .into_par_iter()
+            .filter_map(|n| {
+                let (x, y) = ((n % (w / 2)) * 2, (n / (w / 2)) * 2);
+                let n = y * w + x;
+                let hit = hits[n as usize]?;
+                let code = hit.entered?;
+                let size = grid.voxel_size() * f64::from(1u32 << hit.level);
+                if size < 3.0 * hit.distance * view.pixel_angle() {
+                    return None;
+                }
+                let p = view.eye + view.pixel_dir(view_proj, x, y) * hit.distance;
+                let c = hit.cell;
+                let q = grid.face_coords(c.face, p)?;
+                let axis = (code >> 1) as usize;
+                // A cell's axis there (the GPU offsets a ray along it).
+                let unit = |a: usize| {
+                    let mut b = q;
+                    b[a] += 1e-3;
+                    (grid.position(c.face, b) - grid.position(c.face, q)) * 1e3
+                };
+                // Entered stepping up an axis: through its low side.
+                let normal = unit(axis).normalize() * if code & 1 == 1 { -1.0 } else { 1.0 };
+                let facing = normal.dot(toward) > 0.0;
+                let lit_from = |o: DVec3| facing && planet.raycast(o, toward, 60.0).is_none();
+                let o = p + normal * (0.01 * size);
+                let cpu = lit_from(o);
+                let (t1, t2) = ((axis + 1) % 3, (axis + 2) % 3);
+                let (u1, u2) = (unit(t1).normalize(), unit(t2).normalize());
+                let tie = [u1, -u1, u2, -u2, normal * 0.5, -normal * 0.5]
+                    .iter()
+                    .any(|&v| lit_from(o + v * (0.004 * size)) != cpu);
+                if tie {
+                    ties.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
+                Some((x, y, hit, cpu, walked[n as usize] > 0.5))
+            })
+            .collect();
+        let wrong: Vec<_> = checked.iter().filter(|c| c.3 != c.4).collect();
+        let dark = wrong.iter().filter(|c| c.3).count();
+        eprintln!(
+            "sun {name}: {} hits checked ({} ties left out), {} lit; {} wrong ({dark} dark where the CPU's ray sees the sun)",
+            checked.len(),
+            ties.into_inner(),
+            checked.iter().filter(|c| c.3).count(),
+            wrong.len()
+        );
+        for &&(x, y, hit, cpu, _) in wrong.iter().take(12) {
+            eprintln!("  ({x}, {y}): level {} cell {:?} entered {:?} at {:.3} m; cpu lit {cpu}", hit.level, hit.cell, hit.entered, hit.distance);
+        }
+        assert!(checked.len() > 10_000, "{} hits checked", checked.len());
+        if !wrong.is_empty() {
+            failed.push((name.to_string(), wrong.len()));
+        }
+    }
+    failed
+}
+
+/// Sun rays from drawn hits against CPU rays, on the desert's stepped
+/// ground under low suns (`sun_rays_against_cpu`): along the face's cell
+/// rows (the walls of every step and every chunk side parallel to them), a
+/// fraction of a degree off them, and across them.
+#[test]
+fn sun_rays_from_steps_match_cpu_rays() {
+    let Some(gpu) = gpu() else { return };
+    let (planet, eye, row_i, row_j) = desert_steps();
+    let up = planet.grid().up(eye);
+    let view = View::new(eye, (row_i * 0.8 + row_j * 0.6 - up * 0.6).normalize().as_vec3(), [640, 360]);
+    let off = 0.3f64.to_radians();
+    let suns = [
+        ("along i", row_i),
+        ("along j", -row_j),
+        ("0.3 degrees off i", row_i * off.cos() + row_j * off.sin()),
+        ("across", row_i - row_j * 0.7),
+    ];
+    let failed = sun_rays_against_cpu(gpu, &planet, &view, &suns);
+    assert!(failed.is_empty(), "sun rays off the CPU's: {failed:?}");
+}
+
+/// As `sun_rays_from_steps_match_cpu_rays`, over walls on chunk sides: two
+/// trenches dug half a metre into the desert, crossing at a chunk's corner
+/// (each one's wall on the chunk side beside it), and a block raised on the
+/// next chunk corner, seen from 2 m over them looking steeply down (as an
+/// editor's camera), with the host's near plane.
+#[test]
+fn sun_rays_from_walls_on_chunk_sides_match_cpu_rays() {
+    let Some(gpu) = gpu() else { return };
+    let (mut planet, eye, row_i, row_j) = desert_steps();
+    let (cell, _) = planet.grid().locate(eye);
+    let face = cell.face;
+    let (i0, j0) = (f64::from((cell.i >> 6) * 64 + 64), f64::from((cell.j >> 6) * 64 + 64));
+    let ground = |planet: &Planet, i: f64, j: f64| planet.surface_point(planet.grid().direction(face, i, j), 0.0);
+    let corner = ground(&planet, i0, j0);
+    let up = planet.grid().up(corner);
+    // Cube brushes are squares of the face's cells: one 0.3 m in radius
+    // centred 3 cells past a chunk side spans the 6 cells from it.
+    let mut boxes = Vec::new();
+    for n in -5..6 {
+        let n = f64::from(n) * 6.0;
+        boxes.push((i0 + 3.0, j0 + n, BrushOp::Remove));
+        boxes.push((i0 + n, j0 + 3.0, BrushOp::Remove));
+    }
+    // 8 cells square over the chunk corner 64 cells along i.
+    boxes.push((i0 + 64.0, j0, BrushOp::Add));
+    for &(i, j, op) in &boxes {
+        let at = ground(&planet, i, j);
+        let up = planet.grid().up(at);
+        let add = op == BrushOp::Add;
+        planet
+            .apply(Brush {
+                center: (at + up * if add { 0.1 } else { 0.25 }).to_array(),
+                radius: if add { 0.4 } else { 0.3 },
+                shape: BrushShape::Cube,
+                op,
+                material: if add { material::BRICK } else { 0 },
+                height: if add { 0.3 } else { 0.5 },
+            })
+            .unwrap();
+    }
+    let eye = corner + up * 2.0 - row_i * 1.2 - row_j * 1.6;
+    let forward = (corner + row_i * 0.6 - eye).normalize().as_vec3();
+    let near = (planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
+    // The hits themselves first: the CPU's cells.
+    matches_exactly(gpu, &planet, View { near, ..View::new(eye, forward, [640, 360]) }, 20_000);
+    let view = View { near, ..View::new(eye, forward, [640, 360]) };
+    let off = 0.3f64.to_radians();
+    let suns = [
+        ("along i", row_i),
+        ("along j", -row_j),
+        ("0.3 degrees off j", -row_j * off.cos() + row_i * off.sin()),
+        ("across", row_i - row_j * 0.7),
+        ("diagonal", row_i + row_j),
+    ];
+    let failed = sun_rays_against_cpu(gpu, &planet, &view, &suns);
+    assert!(failed.is_empty(), "sun rays off the CPU's: {failed:?}");
+}

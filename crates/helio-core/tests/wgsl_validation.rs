@@ -36,6 +36,9 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_gi::GI_COMMON_SNIPPET,
     helio_pass_gi::GI_SAMPLE_SNIPPET,
     helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
+    helio_pass_water_sim::pipeline::WATER_SHORE_SNIPPET,
+    helio_pass_water_sim::pipeline::WATER_SKY_SNIPPET,
+    helio_pass_water_sim::surface_query::WATER_QUERY_SNIPPET,
 ];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -121,6 +124,9 @@ fn is_composed(path: &Path) -> bool {
         // in the device's material binding mode); validated composed, both
         // modes, by `helio-pass-gi`'s `shaders_validate`.
         "helio-pass-gi/shaders/gi_mesh_trace.wgsl",
+        // The water surface's query kernel, a snippet of `surface.wgsl`
+        // (`//!use water_query`): validated composed with it.
+        "helio-pass-water-sim/shaders/water_query.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
@@ -258,9 +264,10 @@ fn every_wgsl_shader_parses_and_validates() {
     // pieces (volumes.wgsl for caves and cliffs, planet_maps.wgsl for the
     // baked maps, joined them), and the virtual geometry's declaration pieces
     // (vg-format, vg-stream, vg-bvh, vg-dense, vg-raster, vg-shade,
-    // helio-mats' vg_alpha).
+    // helio-mats' vg_alpha). 58 (2026-10-30): Ultra-Water's snippets
+    // (water-sim's water_sky.wgsl and water_surface_shared.wgsl).
     assert!(
-        skipped.len() <= 56,
+        skipped.len() <= 58,
         "{} shaders were skipped as fragments/composed modules, which is more than expected:\n{}",
         skipped.len(),
         skipped.join("\n")
