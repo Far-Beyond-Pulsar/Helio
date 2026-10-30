@@ -10,12 +10,21 @@ gpu = []
 [dependencies]
 pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
+helio-mats = { workspace = true }
 helio-pass-hiz = { workspace = true }
+helio-pass-sky = { workspace = true }
+helio-pass-gbuffer = { workspace = true }
+helio-pass-object-batch = { workspace = true }
+helio-pass-indirect-dispatch = { workspace = true }
+helio-pass-occlusion-cull = { workspace = true }
+helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
+glam = { workspace = true }
+helio-pass-voxel-planet = { path = "../helio-pass-voxel-planet", default-features = false }
+rayon = "1.12"
 
 [dev-dependencies]
-glam = { workspace = true }
 pollster = { workspace = true }

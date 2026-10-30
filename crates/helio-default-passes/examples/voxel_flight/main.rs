@@ -474,10 +474,8 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
         let moon_at = (ahead * elevation.cos() + up * elevation.sin()) * orbit;
         let spin = glam::DQuat::from_axis_angle(side, t * std::f64::consts::TAU / 60.0);
         let around = 0.5 * t;
-        let ship_at = ground
-            + ahead * 25.0
-            + up * 6.0
-            + (ahead * around.cos() + side * around.sin()) * 8.0;
+        let ship_at =
+            ground + ahead * 25.0 + up * 6.0 + (ahead * around.cos() + side * around.sin()) * 8.0;
         let ship_turn = glam::DQuat::from_rotation_arc(DVec3::Y, up)
             * glam::DQuat::from_rotation_y(-around * 2.0);
         [
@@ -488,8 +486,10 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
     let forward = (ahead * 15f64.to_radians().cos() + up * 15f64.to_radians().sin())
         .normalize()
         .as_vec3();
-    let mut csv = String::from("frame,t,cpu_ms,wait_ms,gpu_ms,voxel_gpu_ms
-");
+    let mut csv = String::from(
+        "frame,t,cpu_ms,wait_ms,gpu_ms,voxel_gpu_ms
+",
+    );
     let frames = (seconds * 60.0) as u32;
     let started = Instant::now();
     // The graph's GPU time by pass, past the first 120 frames.
@@ -525,8 +525,10 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
                 }
             }
         }
-        csv.push_str(&format!("{frame},{t:.3},{cpu:.3},{wait:.3},{gpu:.3},{voxel:.3}
-"));
+        csv.push_str(&format!(
+            "{frame},{t:.3},{cpu:.3},{wait:.3},{gpu:.3},{voxel:.3}
+"
+        ));
         if frame % 150 == 149 {
             let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
             flight.capture(&format!("volumes_tour_{:02}", frame / 150));
@@ -885,8 +887,7 @@ fn harness_world(flight: &Flight) -> helio_pass_voxel_planet::chunks::ChunkWorld
         counters: std::env::var_os("HELIO_VOXEL_CHUNKS_COUNT").is_some(),
         ..Capacity::default()
     };
-    let mut world =
-        ChunkWorld::of_planet(&flight.device, &flight.queue, &flight.planet, capacity);
+    let mut world = ChunkWorld::of_planet(&flight.device, &flight.queue, &flight.planet, capacity);
     world.set_trace_rounds(
         std::env::var("HELIO_VOXEL_CHUNKS_ROUNDS")
             .ok()
@@ -1674,11 +1675,17 @@ fn memory_report(flight: &Flight, mode: &str) {
     }
     let mut rows: Vec<_> = by_label.into_iter().collect();
     rows.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
-    let mut csv = String::from("label,mb,count
-");
+    let mut csv = String::from(
+        "label,mb,count
+",
+    );
     for (label, (bytes, n)) in &rows {
-        csv += &format!("\"{}\",{:.2},{n}
-", label.replace('"', "'"), *bytes as f64 / 1048576.0);
+        csv += &format!(
+            "\"{}\",{:.2},{n}
+",
+            label.replace('"', "'"),
+            *bytes as f64 / 1048576.0
+        );
     }
     let _ = std::fs::write(flight.output.join(format!("memory_{mode}.csv")), csv);
     eprintln!(
@@ -2248,9 +2255,12 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
                     match flight.planet.raycast(eye, dir, 6.0e6) {
                         Some(hit) => {
                             eprintln!("LOSTDIAG t {t:.3} altitude {altitude:.0} pixel {px},{py}: ground at {:.0} m, cell {:?}", hit.distance, hit.cell);
-                            for (key, z, drawn) in
-                                world.chunks_over(VolumeId(0), hit.cell.face, hit.cell.i, hit.cell.j)
-                            {
+                            for (key, z, drawn) in world.chunks_over(
+                                VolumeId(0),
+                                hit.cell.face,
+                                hit.cell.i,
+                                hit.cell.j,
+                            ) {
                                 eprintln!("LOSTDIAG   level {} node {},{},{} occupied {z:?} drawn {drawn}", key.level, key.cx, key.cy, key.cz);
                             }
                             // The nodes over it at every level, in the drawn set.
@@ -2358,7 +2368,8 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
     );
     {
         let n = pages_cpu_ms.len().max(1) as f64;
-        let mean = |i: usize| stage_gpu.iter().map(|s| s[i]).sum::<f64>() / stage_gpu.len().max(1) as f64;
+        let mean =
+            |i: usize| stage_gpu.iter().map(|s| s[i]).sum::<f64>() / stage_gpu.len().max(1) as f64;
         eprintln!(
             "CHUNKSTRESS {mode}: chunk gpu mean draw {:.3} shadows {:.3} denoise {:.3} generate {:.3} occlusion {:.3} walks {:.3} ms; sun pages render-thread cpu mean by part (occluders, readback, hand-over, record, upload) {}, planner thread {:.3}",
             mean(0),
@@ -2909,7 +2920,9 @@ fn cave_view(planet: &Planet, near: DVec3) -> Option<(DVec3, Vec3)> {
     let volumes = planet.volumes()?;
     let air = |c: Cell| {
         (-1..=1).all(|a| {
-            (-1..=1).all(|b| (-1..=1).all(|d| !planet.solid(Cell::new(c.face, c.i + a, c.j + b, c.k + d))))
+            (-1..=1).all(|b| {
+                (-1..=1).all(|d| !planet.solid(Cell::new(c.face, c.i + a, c.j + b, c.k + d)))
+            })
         })
     };
     let shift = volumes.region_shift();
@@ -2926,7 +2939,8 @@ fn cave_view(planet: &Planet, near: DVec3) -> Option<(DVec3, Vec3)> {
                         // Over the floor on the axis, a quarter along.
                         let at = |n: usize| (p.a[n] * 3 + p.b[n]) / 4;
                         let k = ((at(2) + i64::from(p.rv) / 3) >> 2) as i32;
-                        let cell = Cell::new(base.face, (at(0) >> 2) as i32, (at(1) >> 2) as i32, k);
+                        let cell =
+                            Cell::new(base.face, (at(0) >> 2) as i32, (at(1) >> 2) as i32, k);
                         if !air(cell) {
                             return None;
                         }
@@ -2935,7 +2949,12 @@ fn cave_view(planet: &Planet, near: DVec3) -> Option<(DVec3, Vec3)> {
                         // Along the axis, climbs and drops included (level,
                         // a sloping passage's floor fills the view).
                         let end_k = ((p.b[2] + i64::from(p.rv) / 3) >> 2) as i32;
-                        let end = grid.cell_center(Cell::new(base.face, (p.b[0] >> 2) as i32, (p.b[1] >> 2) as i32, end_k));
+                        let end = grid.cell_center(Cell::new(
+                            base.face,
+                            (p.b[0] >> 2) as i32,
+                            (p.b[1] >> 2) as i32,
+                            end_k,
+                        ));
                         let along = end - eye;
                         let ahead = if (along - up * along.dot(up)).length() > 1.0 {
                             along.normalize()

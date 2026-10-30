@@ -760,7 +760,6 @@ fn clamp_to_face(grid: &Grid, level: u32, lo: i64, hi: i64) -> [i64; 2] {
 /// (the cell's brick index is `64 z` plus the bit).
 pub type Mask = [u64; 8];
 
-
 /// One brick column's share of a brush's cells: its cell columns `x`, `y`
 /// in `[from, to)` (brick cells) and the bricks of the column to fill.
 struct Stack {

@@ -720,7 +720,6 @@ impl Bench {
             .collect();
         std::fs::write(path, pixels).expect("write frame dump");
     }
-
 }
 
 fn percentile(sorted: &[f64], p: f64) -> f64 {

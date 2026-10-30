@@ -445,10 +445,7 @@ impl Planet {
             &grid,
             recipe.terrain.seed,
         )?);
-        let volumes = field
-            .volumes()
-            .filter(|v| v.caves() || v.cliffs())
-            .cloned();
+        let volumes = field.volumes().filter(|v| v.caves() || v.cliffs()).cloned();
         Ok(Self {
             fingerprint: crate::record::recipe_fingerprint(&recipe),
             recipe: Arc::new(recipe),
@@ -774,7 +771,12 @@ impl Planet {
     /// below and above its top they may change (`tile_volumes_main`).
     pub fn volume_column(&self, face: u8, i: i32, j: i32, level: u32) -> Arc<VolumeColumn> {
         let key = (face, i, j, level);
-        if let Some(c) = self.volume_columns.lock().expect("volume columns").get(&key) {
+        if let Some(c) = self
+            .volume_columns
+            .lock()
+            .expect("volume columns")
+            .get(&key)
+        {
             return Arc::clone(c);
         }
         let height = self.column_height(face, i, j, level);
@@ -822,7 +824,15 @@ impl Planet {
     /// Generated kind of level cell `k` of a column before edits (0 air,
     /// 1 solid): the heightfield, its cliff shape and its caves
     /// (`chunk_columns_main`).
-    pub fn column_kind(&self, c: &VolumeColumn, face: u8, i: i32, j: i32, k: i32, level: u32) -> u32 {
+    pub fn column_kind(
+        &self,
+        c: &VolumeColumn,
+        face: u8,
+        i: i32,
+        j: i32,
+        k: i32,
+        level: u32,
+    ) -> u32 {
         let Some(v) = &self.volumes else {
             return terrain::terrain_kind(c.top, k);
         };
@@ -839,7 +849,11 @@ impl Planet {
                 level,
             );
         }
-        if solid && c.primitives.iter().any(|p| v.carves(p, c.x, c.y, k, level, c.height)) {
+        if solid
+            && c.primitives
+                .iter()
+                .any(|p| v.carves(p, c.x, c.y, k, level, c.height))
+        {
             solid = false;
         }
         u32::from(solid)
@@ -1216,7 +1230,6 @@ impl Planet {
     /// The material the terrain gives base cell `cell` were it solid there,
     /// edits and features ignored.
     pub fn terrain_material(&self, cell: Cell) -> u32 {
-
         let slope = self.material_slope(cell.face, cell.i, cell.j);
         // Materials vary in 3D (`shade` samples the cell's volume point): a
         // cliff's voxels are not one column's colour.
@@ -1597,10 +1610,9 @@ impl Planet {
             .baked
             .solid_top(face, 0, i, j)
             .unwrap_or(i32::MIN);
-        let mut k = (self.generated_top(face, i, j, 0)
-            + self.features_above_of(matter))
-        .max(added)
-        .max(baked);
+        let mut k = (self.generated_top(face, i, j, 0) + self.features_above_of(matter))
+            .max(added)
+            .max(baked);
         let floor = ((self.inner_radius() - g.radius()) / g.voxel_size()).floor() as i32;
         while k > floor && self.kind_in(&mut column, Cell::new(face, i, j, k - 1), matter) != 1 {
             k -= 1;

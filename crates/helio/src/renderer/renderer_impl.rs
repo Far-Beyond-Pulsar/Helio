@@ -352,15 +352,15 @@ impl Renderer {
         for camera in [&mut left, &mut right] {
             let view_id = camera.jitter_frame[3].to_bits();
             let current = glam::Mat4::from_cols_array(&camera.view_proj);
-            let previous =
-                self.prev_view_proj_by_view
-                    .get(&view_id)
-                    .map_or(current, |&(previous, origin, _)| {
-                        helio_core::temporal::rebase_previous_projection(
-                            previous,
-                            self.world_origin - origin,
-                        )
-                    });
+            let previous = self.prev_view_proj_by_view.get(&view_id).map_or(
+                current,
+                |&(previous, origin, _)| {
+                    helio_core::temporal::rebase_previous_projection(
+                        previous,
+                        self.world_origin - origin,
+                    )
+                },
+            );
             camera.prev_view_proj = previous.to_cols_array();
             self.prev_view_proj_by_view
                 .insert(view_id, (current, self.world_origin, self.frame_count));

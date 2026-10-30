@@ -293,7 +293,9 @@ impl RegionPool {
     pub(crate) fn new(device: &wgpu::Device, program: &TerrainProgram, capacity: usize) -> Self {
         let source = program.regions.clone();
         let capacity = if source.is_some() { capacity.max(1) } else { 0 };
-        let words = source.as_ref().map_or(4, |r| r.0.words().next_multiple_of(4));
+        let words = source
+            .as_ref()
+            .map_or(4, |r| r.0.words().next_multiple_of(4));
         let entries = (2 * capacity).next_power_of_two();
         let size = 16 * (1 + entries as u64) + 4 * (words * capacity) as u64;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -303,8 +305,16 @@ impl RegionPool {
             mapped_at_creation: true,
         });
         {
-            let mut head = buffer.slice(..16).get_mapped_range_mut().expect("a mapped region head");
-            let head_words = [(entries - 1) as u32, capacity as u32, words as u32, (1 + entries) as u32];
+            let mut head = buffer
+                .slice(..16)
+                .get_mapped_range_mut()
+                .expect("a mapped region head");
+            let head_words = [
+                (entries - 1) as u32,
+                capacity as u32,
+                words as u32,
+                (1 + entries) as u32,
+            ];
             head.copy_from_slice(bytemuck::cast_slice(&head_words));
         }
         buffer.unmap();
@@ -329,7 +339,14 @@ impl RegionPool {
 
     /// The regions the program reads over footprint columns `[i0, i1] x
     /// [j0, j1]` of `face` at grid level `level` (none without regions).
-    pub(crate) fn keys(&self, grid: &crate::grid::Grid, face: u8, level: u32, i: [i32; 2], j: [i32; 2]) -> Vec<[u32; 2]> {
+    pub(crate) fn keys(
+        &self,
+        grid: &crate::grid::Grid,
+        face: u8,
+        level: u32,
+        i: [i32; 2],
+        j: [i32; 2],
+    ) -> Vec<[u32; 2]> {
         let mut out = Vec::new();
         if let Some(r) = &self.source {
             r.0.keys(grid, face, level, i, j, &mut out);
@@ -350,7 +367,10 @@ impl RegionPool {
                 .map(|(k, e)| (*k, e.0, e.1))
                 .collect();
             old.sort_unstable_by_key(|e| (e.2, e.0));
-            for e in old.iter().take((n - self.free.len()).max(self.capacity / 8)) {
+            for e in old
+                .iter()
+                .take((n - self.free.len()).max(self.capacity / 8))
+            {
                 self.resident.remove(&e.0);
                 self.free.push(e.1);
             }
@@ -468,7 +488,10 @@ impl RegionPool {
             self.making.remove(&k);
             self.place(k, w, frame);
         }
-        self.made.lock().unwrap_or_else(|e| e.into_inner()).extend(rest);
+        self.made
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(rest);
     }
 
     /// Upload the regions made and the table, if it changed (before the
@@ -476,7 +499,11 @@ impl RegionPool {
     pub(crate) fn flush(&mut self, queue: &wgpu::Queue) {
         let base = 16 * (1 + self.entries as u64);
         for (slot, w) in self.pending.drain(..) {
-            queue.write_buffer(&self.buffer, base + 4 * (u64::from(slot) * self.words as u64), bytemuck::cast_slice(&w));
+            queue.write_buffer(
+                &self.buffer,
+                base + 4 * (u64::from(slot) * self.words as u64),
+                bytemuck::cast_slice(&w),
+            );
         }
         if !self.table_dirty || self.capacity == 0 {
             return;
@@ -905,7 +932,9 @@ pub fn verify_field(
                 continue;
             }
             let p = network[(vnext() % network.len() as u64) as usize];
-            let deepest = v.deepest_level(p.flags & crate::volumes::CHAMBER != 0).max(0) as u64;
+            let deepest = v
+                .deepest_level(p.flags & crate::volumes::CHAMBER != 0)
+                .max(0) as u64;
             let level = (vnext() % (deepest + 1)) as u32;
             let t = (vnext() % 17) as i64;
             let at = |n: usize| p.a[n] + (p.b[n] - p.a[n]) * t / 16;
@@ -995,7 +1024,10 @@ fn verify_cells(
             )
         })
         .collect();
-    let volume: Vec<IVec4> = volume.iter().map(|v| IVec4::new(v[0], v[1], 0, 0)).collect();
+    let volume: Vec<IVec4> = volume
+        .iter()
+        .map(|v| IVec4::new(v[0], v[1], 0, 0))
+        .collect();
     let samples = inputs.len() as u32;
     let module = helio_core::shader::module(
         device,
@@ -1270,12 +1302,21 @@ fn verify_cell(
     let cliff = v.cliff(grid.domain_point(face, i, j, level), slope, level);
     let mut solid = k < top;
     if cliff.rise > 0 && k >= top - cliff.cells && k < top + cliff.cells {
-        solid = v.cliff_solid(&cliff, grid.volume_point(face, i, j, k, level), height, k, level);
+        solid = v.cliff_solid(
+            &cliff,
+            grid.volume_point(face, i, j, k, level),
+            height,
+            k,
+            level,
+        );
     }
     let mut covering = 0;
     if v.caves() && level as i32 <= v.deepest_level(true) {
         let half = (1 << level) >> 1;
-        let (x, y) = (crate::volumes::q2_center(i, level), crate::volumes::q2_center(j, level));
+        let (x, y) = (
+            crate::volumes::q2_center(i, level),
+            crate::volumes::q2_center(j, level),
+        );
         for (ri, rj) in v.owners((i << level) + half, (j << level) + half) {
             for p in planet.cave_network(face, ri, rj).iter() {
                 if v.resolved(p, level) && p.covers(x, y, v.roughness()) {
@@ -1292,10 +1333,7 @@ fn verify_cell(
 
 /// A planet's volume constants (`volumes` uniform; zero without volumes).
 pub(crate) fn volume_constants(planet: &Planet) -> crate::volumes::VolumeConstants {
-    planet
-        .volumes()
-        .map(|v| v.constants())
-        .unwrap_or_default()
+    planet.volumes().map(|v| v.constants()).unwrap_or_default()
 }
 
 #[cfg(test)]

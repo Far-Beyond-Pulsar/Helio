@@ -476,10 +476,17 @@ impl SunPages {
                         if c & 2 == 0 { lo.y } else { hi.y },
                         if c & 4 == 0 { lo.z } else { hi.z },
                     ));
-                    r = [r[0].min(a[0]), r[1].min(a[1]), r[2].max(a[0]), r[3].max(a[1])];
+                    r = [
+                        r[0].min(a[0]),
+                        r[1].min(a[1]),
+                        r[2].max(a[0]),
+                        r[3].max(a[1]),
+                    ];
                 }
                 let span = (r[2] - r[0]).max(r[3] - r[1]).max(0.0);
-                let first = (0..LEVELS).find(|&l| span <= page_m(l)).unwrap_or(LEVELS - 1);
+                let first = (0..LEVELS)
+                    .find(|&l| span <= page_m(l))
+                    .unwrap_or(LEVELS - 1);
                 let Some(start) = (first..LEVELS).find(|&l| held[l]) else {
                     continue;
                 };
@@ -603,7 +610,16 @@ impl SunPages {
             .iter()
             .map(|&(class, coarse, k)| {
                 let crowd = if class >= 2 { in_block[&block(&k)] } else { 0 };
-                ((class, std::cmp::Reverse(crowd), coarse, k.page[1], k.page[0]), (class, coarse, k))
+                (
+                    (
+                        class,
+                        std::cmp::Reverse(crowd),
+                        coarse,
+                        k.page[1],
+                        k.page[0],
+                    ),
+                    (class, coarse, k),
+                )
             })
             .collect();
         stats.asked = e.asked.len();
@@ -1255,7 +1271,12 @@ mod tests {
             let t2 = Instant::now();
             let boxes: Vec<[DVec3; 2]> = (0..200)
                 .map(|i| {
-                    let c = eye + DVec3::new((i % 20) as f64 * 7.0 - 70.0, -1000.0, (i / 20) as f64 * 7.0 - 35.0);
+                    let c = eye
+                        + DVec3::new(
+                            (i % 20) as f64 * 7.0 - 70.0,
+                            -1000.0,
+                            (i / 20) as f64 * 7.0 - 35.0,
+                        );
                     [c, c + DVec3::splat(6.4)]
                 })
                 .collect();
@@ -1268,7 +1289,10 @@ mod tests {
             let _ = super::frame(pages.finest, &grids, &nears, eye);
             let t5 = Instant::now();
             if frame >= frames / 2 {
-                for (p, d) in parts.iter_mut().zip([t2 - t1, t3 - t2, t4 - t3, t5 - t4 + (t1 - t)]) {
+                for (p, d) in parts
+                    .iter_mut()
+                    .zip([t2 - t1, t3 - t2, t4 - t3, t5 - t4 + (t1 - t)])
+                {
                     *p += d.as_secs_f64() * 1e3 / (frames / 2) as f64;
                 }
             }

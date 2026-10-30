@@ -218,7 +218,10 @@ impl Volumes {
         if c.spacing_m <= 0.0 || c.roughness_m <= 0.0 || k.region_km <= 0.0 {
             return Err("cave spacing, roughness and cliff region sizes must be positive".into());
         }
-        if c.depth_min_m > c.depth_max_m || c.chamber_min_m > c.chamber_max_m || c.tunnel_min_m > c.tunnel_max_m {
+        if c.depth_min_m > c.depth_max_m
+            || c.chamber_min_m > c.chamber_max_m
+            || c.tunnel_min_m > c.tunnel_max_m
+        {
             return Err("cave ranges must be ordered (low, high)".into());
         }
         if c.chamber_height <= 0.0 || c.tunnel_height <= 0.0 {
@@ -400,9 +403,7 @@ impl VolumeLayer {
         let q16 = |share: f64| (share.clamp(0.0, 1.0) * f64::from(ONE)).round() as i32;
         let q8 = |share: f64| (share.clamp(0.0, 4.0) * 256.0).round() as i32;
         let mm = |m: f64| (m.max(0.0) * 1000.0).round().min(f64::from(1 << 28)) as i32;
-        let domain_shift = |m: f64| {
-            ((m / DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as i32
-        };
+        let domain_shift = |m: f64| ((m / DOMAIN_UNIT).log2().round().clamp(1.0, 30.0)) as i32;
         let region = ((c.spacing_m / voxel).log2().round().clamp(10.0, 13.0)) as i32;
         let s = 1i32 << region;
         // Radii within a region's bounds (`docs/volumes.md`, owners): S/16
@@ -418,8 +419,13 @@ impl VolumeLayer {
         if k.enabled && amplitude > 0 && k.share > 0.0 {
             flags |= 2;
         }
-        let shape = |height: f64, floor: f64| q8(height.clamp(0.1, 1.0)) | (q8(floor.clamp(0.0, 1.0)) << 16);
-        let rough_shift = ((c.roughness_m / voxel * 4.0).log2().round().clamp(2.0, 20.0)) as i32;
+        let shape = |height: f64, floor: f64| {
+            q8(height.clamp(0.1, 1.0)) | (q8(floor.clamp(0.0, 1.0)) << 16)
+        };
+        let rough_shift = ((c.roughness_m / voxel * 4.0)
+            .log2()
+            .round()
+            .clamp(2.0, 20.0)) as i32;
         let eighths = |slope: f64| (slope * 8.0).round().clamp(0.0, 4096.0) as i32;
         let wn = (k.noise.clamp(0.0, 1.0) * 256.0 * 4.0 / 3.0).round() as i32;
         let ws = ((1.0 - k.noise.clamp(0.0, 1.0)) * 256.0).round() as i32;
@@ -529,8 +535,7 @@ impl VolumeLayer {
     /// Whether `p` is resolved at `level`: its smaller radius at least a
     /// cell.
     pub fn resolved(&self, p: &Primitive, level: u32) -> bool {
-        p.r.min(p.rv) >= 4 << level
-            && level as i32 <= self.deepest_level(p.flags & CHAMBER != 0)
+        p.r.min(p.rv) >= 4 << level && level as i32 <= self.deepest_level(p.flags & CHAMBER != 0)
     }
 
     fn hash(&self, face: u8, ri: i32, rj: i32, slot: i32) -> u32 {
@@ -558,19 +563,26 @@ impl VolumeLayer {
     /// Whether a region the hash allows is active under gate `gate` (Q8)
     /// at its hub.
     fn gate_passes(&self, face: u8, ri: i32, rj: i32, gate: i32) -> bool {
-        ((self.hash(face, ri, rj, H_ACTIVE) >> 16) as i32) < (self.k.shares[0] * gate.clamp(0, 256)) >> 8
+        ((self.hash(face, ri, rj, H_ACTIVE) >> 16) as i32)
+            < (self.k.shares[0] * gate.clamp(0, 256)) >> 8
     }
     /// A node in the region's middle half.
     fn node(&self, face: u8, ri: i32, rj: i32, n: i32) -> (i32, i32) {
         let s = 1 << self.region_shift();
         let at = |slot: i32, r: i32| {
-            r * s + s / 4 + (((s / 2) * (self.hash(face, ri, rj, H_SITE + 2 * n + slot) >> 16) as i32) >> 16)
+            r * s
+                + s / 4
+                + (((s / 2) * (self.hash(face, ri, rj, H_SITE + 2 * n + slot) >> 16) as i32) >> 16)
         };
         (at(0, ri), at(1, rj))
     }
     /// Hub depth (Q2 layers) of a region.
     fn hub_depth(&self, face: u8, ri: i32, rj: i32) -> i32 {
-        Self::pick(self.k.depths[1], self.k.depths[2], self.hash(face, ri, rj, H_DEPTH))
+        Self::pick(
+            self.k.depths[1],
+            self.k.depths[2],
+            self.hash(face, ri, rj, H_DEPTH),
+        )
     }
     /// The entrance's end: a quarter region from the hub at most, in the
     /// middle half.
@@ -696,7 +708,11 @@ impl VolumeLayer {
             edge(&mut out, hub, c, m as i32 - 1, 0);
         }
         for axis in 0..2usize {
-            let (ni, nj) = if axis == 0 { (ri + 1, rj) } else { (ri, rj + 1) };
+            let (ni, nj) = if axis == 0 {
+                (ri + 1, rj)
+            } else {
+                (ri, rj + 1)
+            };
             if !sites[4 + axis].used || !self.gate_passes(face, ni, nj, ground[4 + axis].1) {
                 continue;
             }
@@ -742,7 +758,11 @@ impl VolumeLayer {
         if r_eff <= 0 {
             return false;
         }
-        let e = [(x - p.a[0]) as i32, (y - p.a[1]) as i32, zc.wrapping_sub(p.a[2] as i32)];
+        let e = [
+            (x - p.a[0]) as i32,
+            (y - p.a[1]) as i32,
+            zc.wrapping_sub(p.a[2] as i32),
+        ];
         let d = [
             (p.b[0] - p.a[0]) as i32,
             (p.b[1] - p.a[1]) as i32,
@@ -800,7 +820,12 @@ impl VolumeLayer {
     /// (their owners' sites, links into the next regions included; none
     /// where caves are not resolved): what generation keeps resident for
     /// them (a field's regions).
-    pub fn ground_columns(&self, level: u32, x: [i32; 2], y: [i32; 2]) -> Option<([i32; 2], [i32; 2])> {
+    pub fn ground_columns(
+        &self,
+        level: u32,
+        x: [i32; 2],
+        y: [i32; 2],
+    ) -> Option<([i32; 2], [i32; 2])> {
         if !self.caves() || level as i32 > self.deepest_level(true) {
             return None;
         }
@@ -860,7 +885,11 @@ impl VolumeLayer {
         let d = height.wrapping_sub(z);
         let mut g = 0;
         if c.noise {
-            let n = noise(q, self.k.cliff_shape[1] as u32, (self.k.head[3] as u32) ^ SEED_CLIFF);
+            let n = noise(
+                q,
+                self.k.cliff_shape[1] as u32,
+                (self.k.head[3] as u32) ^ SEED_CLIFF,
+            );
             g += (n >> 4) * self.k.cliff_mix[0];
         }
         if c.strata {
@@ -932,11 +961,22 @@ mod tests {
                     let (h, _) = p.reach(v.roughness());
                     let h = i64::from(h);
                     for c in [p.a, p.b] {
-                        assert!(c[0] - h >= 4 * s * i64::from(ri) && c[0] + h < 4 * s * (i64::from(ri) + 2));
-                        assert!(c[1] - h >= 4 * s * i64::from(rj) && c[1] + h < 4 * s * (i64::from(rj) + 2));
+                        assert!(
+                            c[0] - h >= 4 * s * i64::from(ri)
+                                && c[0] + h < 4 * s * (i64::from(ri) + 2)
+                        );
+                        assert!(
+                            c[1] - h >= 4 * s * i64::from(rj)
+                                && c[1] + h < 4 * s * (i64::from(rj) + 2)
+                        );
                     }
                     // Not both +i and +j past the region.
-                    let past = |c: [i64; 3]| (c[0] >= 4 * s * (i64::from(ri) + 1), c[1] >= 4 * s * (i64::from(rj) + 1));
+                    let past = |c: [i64; 3]| {
+                        (
+                            c[0] >= 4 * s * (i64::from(ri) + 1),
+                            c[1] >= 4 * s * (i64::from(rj) + 1),
+                        )
+                    };
                     assert!(!(past(p.a).0 && past(p.b).1) && !(past(p.a).1 && past(p.b).0));
                     let d = (0..3).map(|n| (p.b[n] - p.a[n]).abs()).max().unwrap();
                     assert!(d < 1 << 14, "segment {d}");
@@ -1025,7 +1065,10 @@ mod tests {
                         if p.flags & ENTRANCE != 0 && GROUND[0].0 / 100 - k < 80 {
                             continue;
                         }
-                        assert!(carved(&v, &nets, i, j, k, 0), "tunnel {p:?} closed at {t}/8");
+                        assert!(
+                            carved(&v, &nets, i, j, k, 0),
+                            "tunnel {p:?} closed at {t}/8"
+                        );
                         checked += 1;
                     }
                 }
@@ -1094,7 +1137,14 @@ mod tests {
                             let entrance = v.owners(x, y).into_iter().any(|(a, b)| {
                                 nets(a, b).iter().any(|q| {
                                     q.flags & ENTRANCE != 0
-                                        && v.carves(q, q2_center(x, 0), q2_center(y, 0), k, 0, GROUND[0].0)
+                                        && v.carves(
+                                            q,
+                                            q2_center(x, 0),
+                                            q2_center(y, 0),
+                                            k,
+                                            0,
+                                            GROUND[0].0,
+                                        )
                                 })
                             });
                             assert!(entrance, "cover broken at {x} {y} {k}");

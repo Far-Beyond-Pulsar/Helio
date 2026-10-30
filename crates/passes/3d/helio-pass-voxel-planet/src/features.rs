@@ -291,7 +291,10 @@ impl CompiledSpawn {
     ) -> bool {
         let p = grid.domain_point(face, i, j, 0);
         let wander = if self.wander_shift > 0 {
-            scale(noise(p, self.wander_shift, self.seed ^ 0x7a3d_e1f1), self.wander)
+            scale(
+                noise(p, self.wander_shift, self.seed ^ 0x7a3d_e1f1),
+                self.wander,
+            )
         } else {
             0
         };
@@ -468,7 +471,8 @@ impl CompiledFeatures {
                     .clamp(-1.0e9, 1.0e9)
                     .round() as i32
             };
-            let wet = |m: f64| (m.clamp(0.0, 1.0) * f64::from(crate::planet_maps::WET)).round() as i32;
+            let wet =
+                |m: f64| (m.clamp(0.0, 1.0) * f64::from(crate::planet_maps::WET)).round() as i32;
             let climate = [
                 degrees(s.temperature_c[0]),
                 degrees(s.temperature_c[1]),
@@ -594,7 +598,14 @@ impl CompiledFeatures {
             let mid = 1 << (level - 1);
             if self.drawn(s, level)
                 || sp.far_material == 0
-                || !sp.grows_at(grid, field, face, (i << level) + mid, (j << level) + mid, ground)
+                || !sp.grows_at(
+                    grid,
+                    field,
+                    face,
+                    (i << level) + mid,
+                    (j << level) + mid,
+                    ground,
+                )
             {
                 continue;
             }
@@ -1106,7 +1117,9 @@ mod tests {
         };
         let compiled = CompiledFeatures::new(&set, &grid, 7).unwrap();
         let (wandering, fixed) = (&compiled.spawns[0], &compiled.spawns[1]);
-        let field = crate::layers::TerrainLayers::flat().field(&grid, 7).unwrap();
+        let field = crate::layers::TerrainLayers::flat()
+            .field(&grid, 7)
+            .unwrap();
         let field = &field;
         let n = grid.cells() / 2;
         let (mut above, mut below) = (0, 0);

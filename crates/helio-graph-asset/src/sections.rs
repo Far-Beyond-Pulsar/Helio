@@ -194,6 +194,7 @@ pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
             outputs: Vec::new(),
             nodes: Vec::new(),
             connections: Vec::new(),
+            zip_ties: Vec::new(),
         };
         let mut outer: Vec<Connection> = Vec::new();
         let node_id = format!("node_{id}");
@@ -317,6 +318,7 @@ mod tests {
                     wire(("a", "out"), ("b", "in")),
                     wire(("b", "out"), (SECTION_EXIT, "out")),
                 ],
+                zip_ties: Vec::new(),
             }],
             ..GraphAsset::default()
         }

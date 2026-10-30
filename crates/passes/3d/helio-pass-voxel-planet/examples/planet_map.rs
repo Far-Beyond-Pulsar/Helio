@@ -80,9 +80,19 @@ fn colour(h: i32, m: u32) -> [f64; 3] {
 }
 
 /// Shaded colours of a `w` x `h` grid of directions.
-fn render(planet: &Planet, w: usize, h: usize, level: u32, pixel_m: f64, at: &dyn Fn(usize, usize) -> DVec3) -> Vec<u8> {
-    let samples: Vec<(i32, u32)> = (0..w * h).map(|n| sample(planet, at(n % w, n / w), level)).collect();
-    let height = |x: usize, y: usize| f64::from(samples[y.min(h - 1) * w + x.min(w - 1)].0.max(0)) / 1000.0;
+fn render(
+    planet: &Planet,
+    w: usize,
+    h: usize,
+    level: u32,
+    pixel_m: f64,
+    at: &dyn Fn(usize, usize) -> DVec3,
+) -> Vec<u8> {
+    let samples: Vec<(i32, u32)> = (0..w * h)
+        .map(|n| sample(planet, at(n % w, n / w), level))
+        .collect();
+    let height =
+        |x: usize, y: usize| f64::from(samples[y.min(h - 1) * w + x.min(w - 1)].0.max(0)) / 1000.0;
     let mut img = vec![0u8; w * h * 3];
     for y in 0..h {
         for x in 0..w {
@@ -91,7 +101,11 @@ fn render(planet: &Planet, w: usize, h: usize, level: u32, pixel_m: f64, at: &dy
             let dx = (height(x + 1, y) - height(x.saturating_sub(1), y)) / (2.0 * pixel_m);
             let dy = (height(x, y + 1) - height(x, y.saturating_sub(1))) / (2.0 * pixel_m);
             let n = DVec3::new(-dx * 3.0, -dy * 3.0, 1.0).normalize();
-            let shade = if hh < -3_000 { 1.0 } else { (0.35 + 0.75 * n.dot(DVec3::new(-0.6, -0.6, 0.55).normalize())).clamp(0.2, 1.3) };
+            let shade = if hh < -3_000 {
+                1.0
+            } else {
+                (0.35 + 0.75 * n.dot(DVec3::new(-0.6, -0.6, 0.55).normalize())).clamp(0.2, 1.3)
+            };
             let c = colour(hh, m).map(|v| (v * shade).min(255.0) as u8);
             img[(y * w + x) * 3..][..3].copy_from_slice(&c);
         }
@@ -153,7 +167,10 @@ fn main() {
                     let [lat, lon] = river.expect("a world with rivers");
                     [lat, lon, v[1].parse().expect("km")]
                 } else {
-                    let v: Vec<f64> = v.iter().map(|x| x.trim().parse().expect("lat,lon,km")).collect();
+                    let v: Vec<f64> = v
+                        .iter()
+                        .map(|x| x.trim().parse().expect("lat,lon,km"))
+                        .collect();
                     [v[0], v[1], v[2]]
                 }
             })
@@ -168,11 +185,18 @@ fn main() {
     let (w, h) = (1024usize, 512usize);
     let pixel = std::f64::consts::TAU * radius / w as f64;
     let started = std::time::Instant::now();
-    let img = render(&planet, w, h, level_for(&planet, pixel / 4.0), pixel, &|x, y| {
-        let lon = (x as f64 + 0.5) / w as f64 * std::f64::consts::TAU;
-        let lat = (0.5 - (y as f64 + 0.5) / h as f64) * std::f64::consts::PI;
-        DVec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin())
-    });
+    let img = render(
+        &planet,
+        w,
+        h,
+        level_for(&planet, pixel / 4.0),
+        pixel,
+        &|x, y| {
+            let lon = (x as f64 + 0.5) / w as f64 * std::f64::consts::TAU;
+            let lat = (0.5 - (y as f64 + 0.5) / h as f64) * std::f64::consts::PI;
+            DVec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin())
+        },
+    );
     println!("global map in {:.2} s", started.elapsed().as_secs_f64());
     save(&out.join("global.png"), &img, w, h);
 
@@ -187,11 +211,7 @@ fn main() {
             let (height, _, p) = sample_at(&planet, d, level);
             let (t, m) = planet.field().climate(p, height.max(0));
             let wet = f64::from(m) / 65_535.0;
-            let mut c = [
-                190.0 - 140.0 * wet,
-                150.0 + 20.0 * wet,
-                90.0 - 40.0 * wet,
-            ];
+            let mut c = [190.0 - 140.0 * wet, 150.0 + 20.0 * wet, 90.0 - 40.0 * wet];
             let cold = ((5.0 - f64::from(t) / 128.0) / 25.0).clamp(0.0, 1.0);
             for v in &mut c {
                 *v += (245.0 - *v) * cold;
@@ -216,7 +236,9 @@ fn main() {
             let mut c = [grey; 3];
             let worn = (f64::from(-cut) / 300_000.0).clamp(0.0, 1.0);
             let buried = if fill > i32::MIN / 2 && fill >= height - 1_000 {
-                (f64::from(fill.max(-1_000_000)) - f64::from(height - 100_000)).clamp(0.0, 100_000.0) / 100_000.0
+                (f64::from(fill.max(-1_000_000)) - f64::from(height - 100_000))
+                    .clamp(0.0, 100_000.0)
+                    / 100_000.0
             } else {
                 0.0
             };
@@ -277,11 +299,18 @@ fn main() {
         let north = centre.cross(east);
         let side = 512usize;
         let pixel = km * 1000.0 / side as f64;
-        let img = render(&planet, side, side, level_for(&planet, pixel / 2.0), pixel, &|x, y| {
-            let u = (x as f64 + 0.5) / side as f64 - 0.5;
-            let v = 0.5 - (y as f64 + 0.5) / side as f64;
-            (centre * radius + (east * u + north * v) * km * 1000.0).normalize()
-        });
+        let img = render(
+            &planet,
+            side,
+            side,
+            level_for(&planet, pixel / 2.0),
+            pixel,
+            &|x, y| {
+                let u = (x as f64 + 0.5) / side as f64 - 0.5;
+                let v = 0.5 - (y as f64 + 0.5) / side as f64;
+                (centre * radius + (east * u + north * v) * km * 1000.0).normalize()
+            },
+        );
         save(&out.join(format!("region_{n}.png")), &img, side, side);
     }
 }

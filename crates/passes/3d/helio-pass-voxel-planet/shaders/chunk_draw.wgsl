@@ -2147,6 +2147,7 @@ struct SceneSurface {
     // In the face's texture frame (x along u, y against v, z out).
     normal: vec3<f32>,
     occlusion: f32,
+    swash: vec3<f32>,
     valid: bool,
 }
 
@@ -2227,7 +2228,8 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
     let level = u32(key_level(chunk_keys[v.x].x)) & 31u;
     // A pixel's footprint along the face over its width (the view's slant).
     let slant = 1.0 / max(abs(dot(normal, normalize(position))), 1.0 / 16.0);
-    let scene = scene_surface(material, axis, sign, level, chunk_keys[v.x].yzw * 64 + cell, voxel_in_cell(c, cell, position), pixel_m, slant);
+    let world_xz_from_eye = to_world(position).xz;
+    let scene = scene_surface(material, axis, sign, level, chunk_keys[v.x].yzw * 64 + cell, voxel_in_cell(c, cell, position), pixel_m, slant, world_xz_from_eye);
     var occlusion = 1.0;
     if scene.valid {
         albedo = scene.albedo;
@@ -2235,6 +2237,17 @@ fn publish(@builtin(position) pixel: vec4<f32>) -> GOut {
         emissive = scene.emissive;
         occlusion = scene.occlusion;
         normal = textured_normal(normal, scene.normal, c, axis);
+    }
+    // The land-side half of Ultra-Water's shared shore phase: an advancing
+    // bore darkens and smooths the sand, with a narrow foam edge and a drying
+    // wet line. The optional scene-material shader evaluates the shared field.
+    if axis == 2u && sign == 1u {
+        let wetness = clamp(scene.swash.z, 0.0, 1.0);
+        let film = clamp(scene.swash.x / 0.08, 0.0, 1.0);
+        let edge_foam = clamp(scene.swash.y, 0.0, 1.0);
+        albedo *= mix(1.0, 0.62, max(film, wetness * 0.55));
+        albedo = mix(albedo, vec3<f32>(0.78, 0.84, 0.84), edge_foam * 0.72);
+        roughness = mix(roughness, 0.09, max(film, wetness * 0.8));
     }
     out.albedo = vec4<f32>(albedo, 1.0);
     if debug_mode() == 32u {

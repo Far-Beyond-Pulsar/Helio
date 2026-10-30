@@ -269,6 +269,9 @@ pub struct RenderGraph {
     pub(crate) xr_active: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
+    /// Persistent secondary-view graphs, keyed by the pass that owns each
+    /// capture (planar reflections, portals, editor probes, ...).
+    secondary_graphs: HashMap<&'static str, RenderGraph>,
     /// Optional resources passes declared for the current frame; see
     /// [`crate::FrameDemands`].
     frame_demands: crate::FrameDemands,
@@ -421,6 +424,7 @@ impl RenderGraph {
             xr_active: false,
             pass_cache: Vec::new(),
             frame_count: 0,
+            secondary_graphs: HashMap::new(),
             frame_demands: crate::FrameDemands::default(),
             resize_pending: false,
             graph_data: None,
@@ -436,6 +440,18 @@ impl RenderGraph {
         queue: &wgpu::Queue,
     ) -> Self {
         let mut graph = Self::new(device, queue);
+        graph.owns_device = false;
+        graph
+    }
+
+    /// Construct an externally driven graph from the borrowed handles exposed
+    /// to render passes. wgpu handles are cheap shared handles, so this keeps
+    /// secondary graphs owned by a pass from having to retain a frontend's
+    /// `Arc<Device>` just to create their executor.
+    pub fn new_with_external_device_ref(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let device = std::sync::Arc::new(device.clone());
+        let queue = queue.clone();
+        let mut graph = Self::new(&device, &queue);
         graph.owns_device = false;
         graph
     }
@@ -827,6 +843,11 @@ impl RenderGraph {
             [self.internal_w, self.internal_h],
             [self.output_w, self.output_h],
         )
+    }
+
+    /// Whether this graph has completed [`Self::lock`] and can execute.
+    pub fn is_locked(&self) -> bool {
+        self.locked
     }
 
     /// Find the index of the first pass matching type `T`.
@@ -1690,7 +1711,18 @@ impl RenderGraph {
                     for action in actions {
                         match action {
                             PrePassAction::Route { name, view } => {
-                                registry.route_named_texture(name, view, "Graph");
+                                // A declared external input may also be the
+                                // attachment supplied to a writer (for
+                                // example an imported camera target). Keep the
+                                // seeded view in that case so the graph routes
+                                // the caller-owned target through the writer.
+                                let external_view = self.external_inputs.contains(name)
+                                    && registry
+                                        .get(crate::ResourceKey::<&wgpu::TextureView>::new(name))
+                                        .is_some();
+                                if !external_view {
+                                    registry.route_named_texture(name, view, "Graph");
+                                }
                             }
                             PrePassAction::Group { name, members } => {
                                 // Generic: the core resolves a `write_group`'s
@@ -1758,6 +1790,7 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
+                            secondary_graphs: &mut self.secondary_graphs as *mut _,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1879,6 +1912,7 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
+                            secondary_graphs: &mut self.secondary_graphs as *mut _,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -1955,6 +1989,7 @@ impl RenderGraph {
                                 width: self.internal_w,
                                 height: self.internal_h,
                                 device: scene.device(),
+                                secondary_graphs: &mut self.secondary_graphs as *mut _,
                                 registry: &*registry,
                                 owns_device: self.owns_device,
                                 resource_pool: &self.pool,
@@ -2015,6 +2050,7 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         device: scene.device(),
+                        secondary_graphs: &mut self.secondary_graphs as *mut _,
                         registry: &*registry,
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,

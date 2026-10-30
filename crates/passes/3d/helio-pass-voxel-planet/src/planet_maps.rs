@@ -32,7 +32,7 @@
 //! transcendental functions), in a fixed order, so every machine bakes the
 //! same maps from the same world.
 use crate::grid::{face_of, Grid, DOMAIN_UNIT, FACE_BASIS, PLANE_FACE};
-use crate::landform::{self, recip_q30, LandformConstants, smooth_min};
+use crate::landform::{self, recip_q30, smooth_min, LandformConstants};
 use crate::noise::{
     hash3, mul_shr, mul_shr_signed, noise, noise_fine, scale, unit_q30, FINE_ONE, Q30,
 };
@@ -277,7 +277,12 @@ pub fn climate_header(c: &ClimateSpec) -> [[i32; 4]; MAP_HEADER] {
         0
     };
     let mut h = [[0; 4]; MAP_HEADER];
-    h[2] = [0, (t * f64::from(DEGREE)).round() as i32, (m * f64::from(WET)).round() as i32, lapse];
+    h[2] = [
+        0,
+        (t * f64::from(DEGREE)).round() as i32,
+        (m * f64::from(WET)).round() as i32,
+        lapse,
+    ];
     h[3] = [
         (c.snow_c * f64::from(DEGREE)).round() as i32,
         if lapse > 0 { 1_000_000 / lapse } else { 0 },
@@ -413,7 +418,11 @@ impl CubeGrid {
         (id / per, r % self.n, r / self.n)
     }
     fn basis(&self, slot: usize) -> [DVec3; 3] {
-        let face = if self.half > 0.0 { PLANE_FACE } else { slot as u8 };
+        let face = if self.half > 0.0 {
+            PLANE_FACE
+        } else {
+            slot as u8
+        };
         FACE_BASIS[face as usize].map(|v| IVec3::from_array(v).as_dvec3())
     }
     /// Face coordinates `(u, v)` in `[-1, 1]` of continuous texel coordinates.
@@ -444,13 +453,21 @@ impl CubeGrid {
     /// Domain point (domain units, rounded).
     pub(crate) fn point(&self, slot: usize, x: f64, y: f64) -> IVec3 {
         let p = self.local(slot, x, y);
-        let p = if self.half > 0.0 { p } else { p * self.radius_du };
+        let p = if self.half > 0.0 {
+            p
+        } else {
+            p * self.radius_du
+        };
         IVec3::new(p.x.round() as i32, p.y.round() as i32, p.z.round() as i32)
     }
     /// The slot and continuous texel coordinates of a direction (sphere) or
     /// domain position (plane), clamped to the face.
     pub(crate) fn locate(&self, p: DVec3) -> (usize, f64, f64) {
-        let slot = if self.half > 0.0 { 0 } else { face_of(p) as usize };
+        let slot = if self.half > 0.0 {
+            0
+        } else {
+            face_of(p) as usize
+        };
         let [n, a, b] = self.basis(slot);
         let (u, v) = if self.half > 0.0 {
             (p.dot(a) / self.half, p.dot(b) / self.half)
@@ -481,7 +498,16 @@ impl CubeGrid {
     fn neighbours(&self, id: usize, out: &mut [usize; 8]) -> usize {
         let (slot, x, y) = self.at(id);
         let mut count = 0;
-        for (dx, dy) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
+        for (dx, dy) in [
+            (-1, -1),
+            (0, -1),
+            (1, -1),
+            (-1, 0),
+            (1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+        ] {
             if let Some(n) = self.real(slot, x + dx, y + dy, false) {
                 if n != id && !out[..count].contains(&n) {
                     out[count] = n;
@@ -651,7 +677,12 @@ fn vertex_pair(m: MapView, p: IVec3, at: i32, units: [i32; 2]) -> [i32; 2] {
     };
     let ((ix, wx), (iy, wy)) = (axis(xq), axis(yq));
     let base = at as usize + slot as usize * (v * v) as usize + (iy * v + ix) as usize;
-    let words = [m.tables[base], m.tables[base + 1], m.tables[base + v as usize], m.tables[base + v as usize + 1]];
+    let words = [
+        m.tables[base],
+        m.tables[base + 1],
+        m.tables[base + v as usize],
+        m.tables[base + v as usize + 1],
+    ];
     let mut out = [0i32; 2];
     for (half, unit) in units.iter().enumerate() {
         let [a, b, c, d] = words.map(|w| (w >> (16 * half)) as u16 as i16 as i32 * unit);
@@ -781,11 +812,19 @@ pub(crate) fn swing(p: IVec3, bend: IVec3, a: i32) -> IVec3 {
 /// for `length` domain units, and the position of its foot along it.
 pub(crate) fn axis(p: IVec3, node: IVec3, e: IVec3, length: i32) -> (i32, i32) {
     let d = p - node;
-    let along = mul_shr_signed(d.x, e.x, 30) + mul_shr_signed(d.y, e.y, 30) + mul_shr_signed(d.z, e.z, 30);
+    let along =
+        mul_shr_signed(d.x, e.x, 30) + mul_shr_signed(d.y, e.y, 30) + mul_shr_signed(d.z, e.z, 30);
     let a = along.clamp(0, length.max(0));
-    let w = d - IVec3::new(mul_shr_signed(a, e.x, 30), mul_shr_signed(a, e.y, 30), mul_shr_signed(a, e.z, 30));
+    let w = d - IVec3::new(
+        mul_shr_signed(a, e.x, 30),
+        mul_shr_signed(a, e.y, 30),
+        mul_shr_signed(a, e.z, 30),
+    );
     let n = unit_q30(w);
-    let dist = (mul_shr_signed(w.x, n.x, 30) + mul_shr_signed(w.y, n.y, 30) + mul_shr_signed(w.z, n.z, 30)).max(0);
+    let dist = (mul_shr_signed(w.x, n.x, 30)
+        + mul_shr_signed(w.y, n.y, 30)
+        + mul_shr_signed(w.z, n.z, 30))
+    .max(0);
     (dist, a)
 }
 
@@ -826,7 +865,13 @@ fn segment(r: &[u32], p: IVec3, bends: [IVec3; 3], cell: i32) -> SegmentAt {
     let mut z = bed + wall_rise((dist - floodplain).max(0), floodplain, wall);
     let mut inside = false;
     let flow = if dist < floodplain && channel > 0 {
-        axis(swing(swing(valley, bends[1], m[1]), bends[2], m[2]), node, e, length).0
+        axis(
+            swing(swing(valley, bends[1], m[1]), bends[2], m[2]),
+            node,
+            e,
+            length,
+        )
+        .0
     } else {
         i32::MAX
     };
@@ -840,7 +885,12 @@ fn segment(r: &[u32], p: IVec3, bends: [IVec3; 3], cell: i32) -> SegmentAt {
         z -= (cut * resolved) >> 8;
         inside = resolved > 0;
     }
-    SegmentAt { z, inside, dist, bed }
+    SegmentAt {
+        z,
+        inside,
+        dist,
+        bed,
+    }
 }
 
 /// Height `h` (mm) of the column at domain point `p` (reference level
@@ -868,7 +918,9 @@ pub fn carve(m: MapView, p: IVec3, level: u32, h: i32) -> (i32, bool) {
                 continue;
             }
             let reach = ((word >> 24) as i32) << 12;
-            if (xq - ((tx << 16) + 32_768)).abs() > reach || (yq - ((ty << 16) + 32_768)).abs() > reach {
+            if (xq - ((tx << 16) + 32_768)).abs() > reach
+                || (yq - ((ty << 16) + 32_768)).abs() > reach
+            {
                 continue;
             }
             let at = header[1][2] as usize + ((word & 0xff_ffff) - 1) as usize * RECORD_WORDS;
@@ -906,7 +958,9 @@ fn nearest_river(m: MapView, p: IVec3) -> Option<(i32, i32)> {
                 continue;
             }
             let reach = ((word >> 24) as i32) << 12;
-            if (xq - ((tx << 16) + 32_768)).abs() > reach || (yq - ((ty << 16) + 32_768)).abs() > reach {
+            if (xq - ((tx << 16) + 32_768)).abs() > reach
+                || (yq - ((ty << 16) + 32_768)).abs() > reach
+            {
                 continue;
             }
             let at = header[1][2] as usize + ((word & 0xff_ffff) - 1) as usize * RECORD_WORDS;
@@ -933,14 +987,21 @@ pub fn maps(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> Arc<PlanetMap
     let key = fingerprint(spec, k, grid);
     let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.retain(|(_, w)| w.strong_count() > 0);
-    if let Some(maps) = cache.iter().find(|(k, _)| *k == key).and_then(|(_, w)| w.upgrade()) {
+    if let Some(maps) = cache
+        .iter()
+        .find(|(k, _)| *k == key)
+        .and_then(|(_, w)| w.upgrade())
+    {
         return maps;
     }
     let path = disk_dir().map(|dir| dir.join(format!("{key:016x}.maps")));
-    let loaded = path.as_ref().and_then(|p| load(p, key)).map(|m| PlanetMaps {
-        rivers: spec.rivers.clone(),
-        ..m
-    });
+    let loaded = path
+        .as_ref()
+        .and_then(|p| load(p, key))
+        .map(|m| PlanetMaps {
+            rivers: spec.rivers.clone(),
+            ..m
+        });
     let maps = Arc::new(loaded.unwrap_or_else(|| {
         let maps = bake(spec, k, grid);
         if let Some(p) = &path {
@@ -974,14 +1035,22 @@ pub fn fingerprint(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> u64 {
 /// Where bakes are kept: `HELIO_PLANET_MAPS_CACHE` (a directory; empty
 /// turns the disk cache off), else the user's cache directory.
 fn disk_dir() -> Option<std::path::PathBuf> {
-    let configured = DISK.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let configured = DISK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     if let Some(dir) = configured {
         return dir;
     }
     if let Some(dir) = std::env::var_os("HELIO_PLANET_MAPS_CACHE") {
         return (!dir.is_empty()).then(|| dir.into());
     }
-    let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
+    let env = |key: &str| {
+        std::env::var_os(key)
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+    };
     let base = if cfg!(windows) {
         env("LOCALAPPDATA")
     } else if cfg!(target_os = "macos") {
@@ -997,7 +1066,10 @@ static DISK: OnceLock<Mutex<Option<Option<std::path::PathBuf>>>> = OnceLock::new
 /// Keep bakes in `dir` (`None`: never on disk), over the environment's
 /// and the default.
 pub fn set_disk_cache(dir: Option<std::path::PathBuf>) {
-    *DISK.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
+    *DISK
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(dir);
 }
 
 const FILE_MAGIC: &[u8; 8] = b"HPMAPS03";
@@ -1010,10 +1082,23 @@ fn encode(key: u64, maps: &PlanetMaps) -> Vec<u8> {
     out.extend_from_slice(bytemuck::cast_slice(&maps.header));
     out.extend_from_slice(bytemuck::cast_slice(&maps.valleys));
     let s = &maps.stats;
-    for v in [s.texels, s.ocean, s.rivers, s.lakes, s.sinks, s.clipped, s.table_bytes, s.sediment] {
+    for v in [
+        s.texels,
+        s.ocean,
+        s.rivers,
+        s.lakes,
+        s.sinks,
+        s.clipped,
+        s.table_bytes,
+        s.sediment,
+    ] {
         out.extend_from_slice(&(v as u64).to_le_bytes());
     }
-    for v in [s.largest, s.bake_ms].iter().chain(&s.phase_ms).chain(&s.worn_m) {
+    for v in [s.largest, s.bake_ms]
+        .iter()
+        .chain(&s.phase_ms)
+        .chain(&s.worn_m)
+    {
         out.extend_from_slice(&v.to_le_bytes());
     }
     out.extend_from_slice(&(maps.tables.len() as u64).to_le_bytes());
@@ -1220,7 +1305,11 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
     let reach_m = (c.continentality_km * 3_000.0).max(step_m);
     // Distance to the sea any way (m).
     let coast = distances(&cg, &c_ocean);
-    let moisture_shift = 64 - ((c.continentality_km * 500.0 * DU) as u64).max(2).leading_zeros() - 1;
+    let moisture_shift = 64
+        - ((c.continentality_km * 500.0 * DU) as u64)
+            .max(2)
+            .leading_zeros()
+        - 1;
     let c_climate: Vec<(f64, f64)> = (0..cg.texels())
         .into_par_iter()
         .map(|id| {
@@ -1229,7 +1318,9 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
             let here = cg.local(slot, fx, fy);
             let (s, _) = frame(here);
             let point = cg.point(slot, fx, fy);
-            let wander = |salt: u32| f64::from(noise_fine(point, moisture_shift, seed ^ salt)) / f64::from(FINE_ONE);
+            let wander = |salt: u32| {
+                f64::from(noise_fine(point, moisture_shift, seed ^ salt)) / f64::from(FINE_ONE)
+            };
             let t = temperature(c, s.abs()) + 1.5 * wander(0x2c1b_3c6d);
             let base = precipitation(s.abs());
             if c_ocean[id] {
@@ -1311,7 +1402,10 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
         let raw_c: Vec<i32> = (0..cg.texels())
             .map(|id| (child(id).iter().map(|&t| i64::from(raw[t])).sum::<i64>() / 4) as i32)
             .collect();
-        let wet_c: Vec<f64> = moist.iter().map(|m| (m * c.wetness).clamp(0.0, 1.0)).collect();
+        let wet_c: Vec<f64> = moist
+            .iter()
+            .map(|m| (m * c.wetness).clamp(0.0, 1.0))
+            .collect();
         let centres_c: Vec<DVec3> = (0..cg.texels())
             .map(|id| {
                 let (slot, x, y) = cg.at(id);
@@ -1319,8 +1413,14 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
             })
             .collect();
         let areas_c: Vec<f64> = (0..cg.texels()).map(|id| cg.area_km2(id)).collect();
-        let eroded = erode(&cg, &raw_c, &c_ocean, &wet_c, &centres_c, &areas_c, strength);
-        let delta: Vec<f64> = eroded.iter().zip(&raw_c).map(|(e, r)| f64::from(e - r)).collect();
+        let eroded = erode(
+            &cg, &raw_c, &c_ocean, &wet_c, &centres_c, &areas_c, strength,
+        );
+        let delta: Vec<f64> = eroded
+            .iter()
+            .zip(&raw_c)
+            .map(|(e, r)| f64::from(e - r))
+            .collect();
         (0..g.texels())
             .into_par_iter()
             .map(|id| {
@@ -1347,8 +1447,15 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
     let fine = fine_relief(k, level);
 
     // Drainage: filled from the sea, the plane's edges and dry basins.
-    let Routing { filled, down, order, seed_set } = route(&g, &Neighbours::new(&g), &raw, &ocean, &wet, &centres);
-    stats.sinks = (0..g.texels()).filter(|&id| seed_set[id] && !ocean[id] && !g.on_edge(id)).count();
+    let Routing {
+        filled,
+        down,
+        order,
+        seed_set,
+    } = route(&g, &Neighbours::new(&g), &raw, &ocean, &wet, &centres);
+    stats.sinks = (0..g.texels())
+        .filter(|&id| seed_set[id] && !ocean[id] && !g.on_edge(id))
+        .count();
     let mut discharge: Vec<f64> = (0..g.texels()).map(|id| areas[id] * wet[id]).collect();
     for &id in &order {
         if let Some(d) = down[id] {
@@ -1389,7 +1496,10 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
         let land = (0..g.texels()).filter(|&id| !ocean[id]);
         stats.worn_m = [
             f64::from(worn.iter().map(|w| w.0).min().unwrap_or(0)) / 1000.0,
-            land.clone().map(|id| f64::from(raw[id] - raw0[id])).sum::<f64>() / 1000.0
+            land.clone()
+                .map(|id| f64::from(raw[id] - raw0[id]))
+                .sum::<f64>()
+                / 1000.0
                 / land.clone().count().max(1) as f64,
             f64::from(land.clone().map(|id| raw[id] - raw0[id]).max().unwrap_or(0)) / 1000.0,
         ];
@@ -1401,7 +1511,10 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
     // its steepest step between texels).
     let (mut moved, mut steepest) = (0.0f64, 0.0f64);
     if strength > 0.0 {
-        let texel_du = (0..g.texels()).map(|id| g.side_m(id)).fold(f64::INFINITY, f64::min) * DU;
+        let texel_du = (0..g.texels())
+            .map(|id| g.side_m(id))
+            .fold(f64::INFINITY, f64::min)
+            * DU;
         let near = |id: usize| {
             let (n, count) = around(id);
             std::iter::once(id).chain(n.into_iter().take(count))
@@ -1410,8 +1523,15 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
             let (cut, fill) = worn[id];
             let fill_near = near(id).map(|t| worn[t].1).max().unwrap_or(fill);
             let lowest = f64::from(raw0[id] + cut) - fine * 1000.0;
-            moved = moved.max(f64::from(-cut)).max(f64::from(fill_near) - lowest);
-            let step = |f: fn(&(i32, i32)) -> i32| near(id).map(|t| (f(&worn[t]) - f(&worn[id])).abs()).max().unwrap_or(0);
+            moved = moved
+                .max(f64::from(-cut))
+                .max(f64::from(fill_near) - lowest);
+            let step = |f: fn(&(i32, i32)) -> i32| {
+                near(id)
+                    .map(|t| (f(&worn[t]) - f(&worn[id])).abs())
+                    .max()
+                    .unwrap_or(0)
+            };
             steepest = steepest.max(f64::from(step(|w| w.0) + step(|w| w.1)) / texel_du);
         }
         moved += f64::from(SEDIMENT_ROUNDING);
@@ -1483,7 +1603,11 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
         };
         let span = (to - at).as_dvec3();
         let length = span.length();
-        let e = if length > 0.0 { span / length } else { DVec3::ZERO };
+        let e = if length > 0.0 {
+            span / length
+        } else {
+            DVec3::ZERO
+        };
         let side = g.side_m(id);
         let limit = 0.8 * side;
         let mut floodplain = (r.floodplain_m * q.sqrt()).min(limit * 0.5);
@@ -1524,7 +1648,8 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
         // the channel's stays on the floodplain.
         let bend = 1.75 * f64::from(m0) * DOMAIN_UNIT;
         let reach = floodplain + foot + bend + rise / (f64::from(wall_q6.min(255)) / 64.0);
-        let cull = ((((to_m - at_m).length() + reach + 0.4 * side) / side + 0.5) * 16.0).ceil() as u32;
+        let cull =
+            ((((to_m - at_m).length() + reach + 0.4 * side) / side + 0.5) * 16.0).ceil() as u32;
         let q15 = |v: f64| ((v * 32_767.0).round() as i32 as u16) as u32;
         records.extend_from_slice(&[
             at.x as u32,
@@ -1537,7 +1662,8 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
             q15(e.x) | q15(e.y) << 16,
             q15(e.z) | ((length / 64.0).round() as u32).min(65_535) << 16,
             bed[id] as u32,
-            ((bed[id] - bed_b).clamp(0, 0x3f_ffff) as u32) | ((depth * 10.0).round() as u32).min(1023) << 22,
+            ((bed[id] - bed_b).clamp(0, 0x3f_ffff) as u32)
+                | ((depth * 10.0).round() as u32).min(1023) << 22,
         ]);
         let n = records.len() / RECORD_WORDS;
         index[id] = n as u32 | cull.min(255) << 24;
@@ -1594,7 +1720,9 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
     let records_at = pad(climate_at + g.slots() * (sc * sc) as usize);
     let mut tables = vec![0u32; records_at];
     let drained = |id: usize| {
-        let log = ((1.0 + discharge[id]).log2() * f64::from(DISCHARGE_ONE)).round().clamp(0.0, 65_535.0) as u32;
+        let log = ((1.0 + discharge[id]).log2() * f64::from(DISCHARGE_ONE))
+            .round()
+            .clamp(0.0, 65_535.0) as u32;
         log | u32::from(lake[id]) << 16
             | u32::from(ocean[id]) << 17
             | u32::from(index[id] != 0 && !lake[id]) << 18
@@ -1625,12 +1753,16 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
                     }
                 }
                 let half = |sum: i64, unit: i32| {
-                    ((sum as f64 / count.max(1) as f64 / f64::from(unit)).round().clamp(-16_383.0, 16_383.0) as i16) as u16
+                    ((sum as f64 / count.max(1) as f64 / f64::from(unit))
+                        .round()
+                        .clamp(-16_383.0, 16_383.0) as i16) as u16
                 };
                 let word = u32::from(half(cut, CUT_UNIT)) | u32::from(half(fill, FILL_UNIT)) << 16;
                 let edge = x == 0 || y == 0 || x == g.n || y == g.n;
                 let word = if edge && g.half == 0.0 {
-                    *shared.entry(g.point(slot, f64::from(x), f64::from(y))).or_insert(word)
+                    *shared
+                        .entry(g.point(slot, f64::from(x), f64::from(y)))
+                        .or_insert(word)
                 } else {
                     word
                 };
@@ -1640,9 +1772,14 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
         for y in -CLIMATE_GHOST..cg.n + CLIMATE_GHOST {
             for x in -CLIMATE_GHOST..cg.n + CLIMATE_GHOST {
                 if let Some(id) = cg.real(slot, x, y, true) {
-                    let t = (c_climate[id].0 * f64::from(DEGREE)).round().clamp(-32_768.0, 32_767.0) as i16;
-                    let w = ((c_wet[id] * c.wetness).clamp(0.0, 1.0) * f64::from(WET)).round() as u32;
-                    tables[climate_at + slot * (sc * sc) as usize + ((y + CLIMATE_GHOST) * sc + x + CLIMATE_GHOST) as usize] =
+                    let t = (c_climate[id].0 * f64::from(DEGREE))
+                        .round()
+                        .clamp(-32_768.0, 32_767.0) as i16;
+                    let w =
+                        ((c_wet[id] * c.wetness).clamp(0.0, 1.0) * f64::from(WET)).round() as u32;
+                    tables[climate_at
+                        + slot * (sc * sc) as usize
+                        + ((y + CLIMATE_GHOST) * sc + x + CLIMATE_GHOST) as usize] =
                         u32::from(t as u16) | w << 16;
                 }
             }
@@ -1692,8 +1829,12 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
         tables,
         stats,
         valleys: [
-            ((cut + 1.0) * 1000.0 + moved).ceil().min(f64::from(i32::MAX / 2)) as i32,
-            ((slope + steepest) * 256.0).ceil().min(f64::from(i32::MAX / 2)) as i32,
+            ((cut + 1.0) * 1000.0 + moved)
+                .ceil()
+                .min(f64::from(i32::MAX / 2)) as i32,
+            ((slope + steepest) * 256.0)
+                .ceil()
+                .min(f64::from(i32::MAX / 2)) as i32,
         ],
         grid: g,
         drains,
@@ -1705,8 +1846,13 @@ pub fn bake(spec: &MapSpec, k: &LandformConstants, grid: &Grid) -> PlanetMaps {
 /// A texel's node: a jittered point of the middle half of the texel
 /// (continuous texel coordinates).
 fn texel_jitter(seed: u32, slot: usize, x: i32, y: i32) -> (f64, f64) {
-    let j = |salt: u32| f64::from(hash3(x, y, slot as i32, seed ^ salt) & 0xffff) / 65_536.0 * 0.5 - 0.25;
-    (f64::from(x) + 0.5 + j(0x68e3_1da4), f64::from(y) + 0.5 + j(0x1b87_3593))
+    let j = |salt: u32| {
+        f64::from(hash3(x, y, slot as i32, seed ^ salt) & 0xffff) / 65_536.0 * 0.5 - 0.25
+    };
+    (
+        f64::from(x) + 0.5 + j(0x68e3_1da4),
+        f64::from(y) + 0.5 + j(0x1b87_3593),
+    )
 }
 
 /// A texel's node as a domain point, on a 16-unit lattice (segments meet
@@ -1758,7 +1904,14 @@ struct Routing {
 /// The drainage of heights `h` (mm): filled from the sea, the plane's
 /// edges and dry basins' floors (priority flood, rising 1 mm a texel), each
 /// texel draining to its steepest lower neighbour.
-fn route(g: &CubeGrid, nb: &Neighbours, h: &[i32], ocean: &[bool], wet: &[f64], centres: &[DVec3]) -> Routing {
+fn route(
+    g: &CubeGrid,
+    nb: &Neighbours,
+    h: &[i32],
+    ocean: &[bool],
+    wet: &[f64],
+    centres: &[DVec3],
+) -> Routing {
     let key = |id: usize| (h[id], id);
     let mut seeds: Vec<usize> = (0..g.texels())
         .into_par_iter()
@@ -1800,7 +1953,8 @@ fn route(g: &CubeGrid, nb: &Neighbours, h: &[i32], ocean: &[bool], wet: &[f64], 
             for &n in nb.of(id) {
                 let n = n as usize;
                 if filled[n] < filled[id] {
-                    let slope = f64::from(filled[id] - filled[n]) / (centres[id] - centres[n]).length().max(1.0);
+                    let slope = f64::from(filled[id] - filled[n])
+                        / (centres[id] - centres[n]).length().max(1.0);
                     if best.map_or(true, |(s, b)| slope > s || (slope == s && n < b)) {
                         best = Some((slope, n));
                     }
@@ -1905,7 +2059,8 @@ fn erode(
                     return h[id];
                 }
                 let around = nb.of(id);
-                let mean = around.iter().map(|&t| h[t as usize]).sum::<f64>() / around.len().max(1) as f64;
+                let mean =
+                    around.iter().map(|&t| h[t as usize]).sum::<f64>() / around.len().max(1) as f64;
                 h[id] + creep * (mean - h[id])
             })
             .collect();
@@ -1943,7 +2098,15 @@ fn distances(g: &CubeGrid, sources: &[bool]) -> Vec<f64> {
             }
         }
     }
-    d.iter().map(|&v| if v == u64::MAX { f64::INFINITY } else { v as f64 }).collect()
+    d.iter()
+        .map(|&v| {
+            if v == u64::MAX {
+                f64::INFINITY
+            } else {
+                v as f64
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1970,8 +2133,14 @@ mod tests {
                 let p = g.point(slot, f64::from(x) + 0.5, f64::from(y) + 0.5);
                 let (s, xq, yq) = coords(&header, p);
                 assert_eq!(s as usize, slot);
-                assert!((xq - ((x << 16) + 32_768)).abs() < 64, "{slot} {x} {y}: {xq}");
-                assert!((yq - ((y << 16) + 32_768)).abs() < 64, "{slot} {x} {y}: {yq}");
+                assert!(
+                    (xq - ((x << 16) + 32_768)).abs() < 64,
+                    "{slot} {x} {y}: {xq}"
+                );
+                assert!(
+                    (yq - ((y << 16) + 32_768)).abs() < 64,
+                    "{slot} {x} {y}: {yq}"
+                );
             }
         }
     }
@@ -2005,7 +2174,11 @@ mod tests {
         assert!(s.worn_m[0] < -50.0, "{:?}", s.worn_m);
         assert!(s.worn_m[2] > 20.0, "{:?}", s.worn_m);
         assert!(s.sediment > s.texels / 500, "{}", s.sediment);
-        let view = MapView { header: &maps.header, tables: &maps.tables, streams: None };
+        let view = MapView {
+            header: &maps.header,
+            tables: &maps.tables,
+            streams: None,
+        };
         let r = f64::from(grid.sphere_constants()[2]);
         let point = |d: DVec3| {
             let p = d.normalize() * r;
@@ -2037,7 +2210,10 @@ mod tests {
                 samples += 1;
             }
         }
-        eprintln!("worst steps over {samples} samples 40 m apart: cut {} mm, fill {} mm", worst[0], worst[1]);
+        eprintln!(
+            "worst steps over {samples} samples 40 m apart: cut {} mm, fill {} mm",
+            worst[0], worst[1]
+        );
         assert!(worst[0] < 3_000 && worst[1] < 3_000, "{worst:?}");
     }
 
@@ -2054,9 +2230,21 @@ mod tests {
         let mut bytes = encode(key, &maps);
         let back = decode(&bytes, key).expect("its own file loads");
         assert!(back.stats.loaded);
-        assert_eq!((back.header, &back.tables, back.valleys), (maps.header, &maps.tables, maps.valleys));
-        assert_eq!((back.grid, &back.drains, back.ocean), (maps.grid, &maps.drains, maps.ocean));
-        assert_eq!(MapStats { loaded: false, ..back.stats }, maps.stats);
+        assert_eq!(
+            (back.header, &back.tables, back.valleys),
+            (maps.header, &maps.tables, maps.valleys)
+        );
+        assert_eq!(
+            (back.grid, &back.drains, back.ocean),
+            (maps.grid, &maps.drains, maps.ocean)
+        );
+        assert_eq!(
+            MapStats {
+                loaded: false,
+                ..back.stats
+            },
+            maps.stats
+        );
         assert!(decode(&bytes, key ^ 1).is_none());
         let middle = bytes.len() / 2;
         bytes[middle] ^= 1;
@@ -2088,7 +2276,11 @@ mod tests {
             let bytes = encode(1, &maps);
             let loading = std::time::Instant::now();
             assert!(decode(&bytes, 1).is_some());
-            eprintln!("  cache file {:.1} MB, decoded in {:.0} ms", bytes.len() as f64 / 1e6, loading.elapsed().as_secs_f64() * 1e3);
+            eprintln!(
+                "  cache file {:.1} MB, decoded in {:.0} ms",
+                bytes.len() as f64 / 1e6,
+                loading.elapsed().as_secs_f64() * 1e3
+            );
             let texel_km = 2.0 * radius / 1000.0 / f64::from(maps.header[0][1]);
             eprintln!(
                 "radius {:.0} km: {} texels ({texel_km:.1} km), bake {:.2} s (heights {:.2}, climate {:.2}, erosion {:.2}, drainage {:.2}, rivers and table {:.2}), table {:.1} MB, working set ~{:.0} MB",
@@ -2133,7 +2325,11 @@ mod tests {
         let equator = DVec3::new(1.0, 0.0, 0.0);
         let (t_pole, _) = field.climate(at(pole), 0);
         let (t_equator, _) = field.climate(at(equator), 0);
-        eprintln!("equator {} C, pole {} C", t_equator / DEGREE, t_pole / DEGREE);
+        eprintln!(
+            "equator {} C, pole {} C",
+            t_equator / DEGREE,
+            t_pole / DEGREE
+        );
         assert!(t_equator > t_pole + 35 * DEGREE);
         let (t_high, _) = field.climate(at(equator), 3_000_000);
         assert!((t_equator - t_high - (6.5 * 3.0 * f64::from(DEGREE)) as i32).abs() < DEGREE);
@@ -2170,7 +2366,8 @@ mod tests {
         let stack = TerrainLayers::earth();
         let field = stack.field(&grid, 7).unwrap();
         let mut dry = stack.clone();
-        dry.layers.retain(|l| l.kind != crate::layers::LayerKind::Rivers);
+        dry.layers
+            .retain(|l| l.kind != crate::layers::LayerKind::Rivers);
         let dry = dry.field(&grid, 7).unwrap();
         let nodes = field.maps().unwrap().river_nodes();
         let (mut cut, mut channels, mut worst, mut samples) = (0i64, 0usize, 0, 0usize);
@@ -2221,7 +2418,11 @@ mod tests {
             }
             let [nrm, a, b] = FACE_BASIS[slot as usize].map(|v| IVec3::from_array(v).as_dvec3());
             let towards = if near(x) {
-                if x < 1 << 16 { -a } else { a }
+                if x < 1 << 16 {
+                    -a
+                } else {
+                    a
+                }
             } else if y < 1 << 16 {
                 -b
             } else {
@@ -2263,7 +2464,10 @@ mod tests {
         let (_, maps) = earth_maps();
         let s = &maps.stats;
         eprintln!("{s:?}");
-        assert!(s.ocean * 4 > s.texels && s.ocean * 4 < s.texels * 3, "{s:?}");
+        assert!(
+            s.ocean * 4 > s.texels && s.ocean * 4 < s.texels * 3,
+            "{s:?}"
+        );
         assert!(s.rivers > 500, "{s:?}");
         assert!(s.largest > 50.0, "{s:?}");
         assert!(s.clipped * 100 <= s.rivers, "{s:?}");

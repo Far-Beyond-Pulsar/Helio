@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use crate::{
-    Camera, Renderer, RendererBuilder, RendererConfig, required_experimental_features,
-    required_wgpu_features, required_wgpu_limits, usable_adapter_features,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits,
+    usable_adapter_features, Camera, Renderer, RendererBuilder, RendererConfig,
 };
 
 /// Controls Helio's optional automatic XR discovery during graphics startup.

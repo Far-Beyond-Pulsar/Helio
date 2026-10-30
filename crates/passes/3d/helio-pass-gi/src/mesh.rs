@@ -149,7 +149,11 @@ impl GiMeshTracePass {
             device,
             "GI mesh rays",
             &mesh_trace_source(binding),
-            &[crate::GI_COMMON_SNIPPET, SUN_OCCLUSION_SNIPPET, CLOUD_SHADOW_SNIPPET],
+            &[
+                crate::GI_COMMON_SNIPPET,
+                SUN_OCCLUSION_SNIPPET,
+                CLOUD_SHADOW_SNIPPET,
+            ],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GI mesh rays"),

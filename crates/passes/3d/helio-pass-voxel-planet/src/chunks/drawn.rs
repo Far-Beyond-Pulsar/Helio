@@ -303,7 +303,10 @@ impl DrawnSet {
     }
 
     fn top_level(&self, volume: u16) -> u32 {
-        self.top_levels.get(usize::from(volume)).copied().unwrap_or(0)
+        self.top_levels
+            .get(usize::from(volume))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Changes whenever the drawn chunks do.
@@ -520,7 +523,11 @@ impl DrawnSet {
 
     /// Drawn nodes of volume `volume`.
     pub fn nodes_of(&self, volume: u16) -> Vec<NodeKey> {
-        self.drawn.keys().filter(|k| k.volume == volume).copied().collect()
+        self.drawn
+            .keys()
+            .filter(|k| k.volume == volume)
+            .copied()
+            .collect()
     }
 
     /// Drawn Solid and Buried nodes.
@@ -598,10 +605,8 @@ impl DrawnSet {
     /// Recompute the touched entries, finest first, and their ancestors
     /// while they change; an entry with nothing drawn under it leaves.
     fn settle_entries(&mut self) {
-        let mut by_level: Vec<FxHashSet<NodeKey>> = vec![
-            Default::default();
-            self.top_levels.iter().max().map_or(0, |t| *t as usize) + 1
-        ];
+        let mut by_level: Vec<FxHashSet<NodeKey>> =
+            vec![Default::default(); self.top_levels.iter().max().map_or(0, |t| *t as usize) + 1];
         for key in std::mem::take(&mut self.touched) {
             by_level[key.level as usize].insert(key);
         }

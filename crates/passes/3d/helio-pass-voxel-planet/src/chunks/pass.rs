@@ -4,7 +4,9 @@
 //! deferred lighting, its sun shadowed by walks through the chunk trees
 //! (`directional_visibility`).
 
-use super::{residency, ChunkWorld, EditSync, FrameTimings, ResidencyConfig, UpdateStats, VolumeId};
+use super::{
+    ChunkWorld, EditSync, FrameTimings, ResidencyConfig, UpdateStats, VolumeId, residency,
+};
 use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
 use glam::{DVec3, Mat4, Vec2, Vec3};
 use helio_core::Result as HelioResult;
@@ -254,7 +256,18 @@ impl ChunkPass {
             s.budget,
             s.coarse_share,
             s.worst_px,
-            s.worst.map_or("-".to_string(), |w| format!("{}/{}/{}/{}/{}/exact{}/guess{}/kids{}of{}", w.key.face, w.key.level, w.key.cx, w.key.cy, w.key.cz, u8::from(w.exact), w.guess, w.generated, w.children)),
+            s.worst.map_or("-".to_string(), |w| format!(
+                "{}/{}/{}/{}/{}/exact{}/guess{}/kids{}of{}",
+                w.key.face,
+                w.key.level,
+                w.key.cx,
+                w.key.cy,
+                w.key.cz,
+                u8::from(w.exact),
+                w.guess,
+                w.generated,
+                w.children
+            )),
             s.plan_age,
             s.plan_ms,
             s.switch_px,
@@ -276,6 +289,9 @@ const READS: &[&str] = &[
     "gbuffer_extra",
     "gbuffer_velocity",
     "material_textures",
+    // Shared coast/travel field read by the terrain scene-material swash.
+    "water_shore_fields",
+    "water_shore_params",
     "tile_light_lists",
     "tile_light_counts",
     helio_pass_gi::GI_FRAME,
@@ -603,8 +619,7 @@ impl ChunkPass {
         // and each eye's offset). PlanetFrame.eye can be an older input sample;
         // it remains useful for residency, but cannot anchor the traced view.
         let at = Vec3::from_slice(&camera.position_near[..3]);
-        let (trace_eye, view_proj, prev_view_proj) =
-            trace_camera(camera, ctx.world_origin);
+        let (trace_eye, view_proj, prev_view_proj) = trace_camera(camera, ctx.world_origin);
         let proj = Mat4::from_cols_array(&camera.proj);
         let jitter = Vec2::from_slice(&camera.jitter_frame[..2]);
         let jitter = [
@@ -798,7 +813,10 @@ fn primary_volume<'a>(
 /// mesh projection which accepts geometry relative to any origin. Pair that
 /// eye-relative matrix with the active camera's absolute position: the
 /// frame's world origin plus the camera's position in the frame.
-fn trace_camera(camera: &helio_core::GpuCameraUniforms, world_origin: DVec3) -> (DVec3, Mat4, Mat4) {
+fn trace_camera(
+    camera: &helio_core::GpuCameraUniforms,
+    world_origin: DVec3,
+) -> (DVec3, Mat4, Mat4) {
     let at = Vec3::from_slice(&camera.position_near[..3]);
     let eye = world_origin + at.as_dvec3();
     let from_eye = Mat4::from_translation(at);
@@ -915,7 +933,6 @@ mod stereo_tests {
         let expected = old_vp.project_point3((landmark - old_origin).as_vec3());
         let actual = previous.project_point3((landmark - eye).as_vec3());
         assert!(actual.distance(expected) < 1e-5);
-
     }
 
     #[test]

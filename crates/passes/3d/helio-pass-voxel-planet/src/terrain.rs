@@ -222,7 +222,15 @@ pub trait TerrainRegions: Send + Sync {
     /// The regions the field reads at the columns `[i0, i1] x [j0, j1]` of
     /// `face` at grid level `level` of `grid` (and a margin around them of
     /// at least the program's reach at that level), appended to `out`.
-    fn keys(&self, grid: &Grid, face: u8, level: u32, i: [i32; 2], j: [i32; 2], out: &mut Vec<[u32; 2]>);
+    fn keys(
+        &self,
+        grid: &Grid,
+        face: u8,
+        level: u32,
+        i: [i32; 2],
+        j: [i32; 2],
+        out: &mut Vec<[u32; 2]>,
+    );
     /// The words of region `key` into `out` (`words()` of them).
     fn region(&self, key: [u32; 2], out: &mut [u32]);
 }

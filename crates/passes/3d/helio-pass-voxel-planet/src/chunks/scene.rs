@@ -55,6 +55,13 @@ pub struct SceneMaterialInputs<'a> {
     /// The descriptor-indexed texture table, `texture_capacity` long.
     pub texture_views: &'a [&'a wgpu::TextureView],
     pub samplers: &'a [&'a wgpu::Sampler],
+    /// Shared Ultra-Water terrain fields; optional when no authored shore map
+    /// is active. The texture is a two-layer `shore`/`travel` RGBA32F array.
+    pub water_shore_fields: Option<&'a wgpu::TextureView>,
+    /// WaterSim's 32-byte shore uniform. `state.zw` is the map center relative
+    /// to the current eye for chunk hit positions; `state.x` disables sampling
+    /// when the map is absent.
+    pub water_shore_params: Option<&'a wgpu::Buffer>,
     /// Changes whenever the buffer or any table entry does (a bind group is
     /// rebuilt only then).
     pub version: (u64, u64),
@@ -85,6 +92,11 @@ pub fn texture_capacity(device: &wgpu::Device) -> Option<u32> {
         #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "android")))]
         const PLATFORM_MAX: u32 = 256;
         let limits = device.limits();
+        // The publish shader uses groups 0..=3; without four groups the
+        // textured/swash path cannot be created even if arrays are supported.
+        if limits.max_bind_groups < 4 {
+            return None;
+        }
         Some(
             PLATFORM_MAX
                 .min(limits.max_sampled_textures_per_shader_stage)
@@ -94,7 +106,7 @@ pub fn texture_capacity(device: &wgpu::Device) -> Option<u32> {
 }
 
 /// The line of chunk_draw.wgsl the scene materials replace: no scene surface.
-pub(crate) const STUB: &str = "fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32, slant: f32) -> SceneSurface {\n    return SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, false);\n}";
+pub(crate) const STUB: &str = "fn scene_surface(m: u32, axis: u32, sign: u32, level: u32, cell: vec3<i32>, in_cell: vec3<f32>, pixel_m: f32, slant: f32, world_xz_from_eye: vec2<f32>) -> SceneSurface {\n    return SceneSurface(vec3<f32>(0.0), 0.0, vec3<f32>(0.0), vec3<f32>(0.0, 0.0, 1.0), 1.0, vec3<f32>(0.0), false);\n}";
 
 /// chunk_draw.wgsl with the scene materials spliced in for a texture table
 /// of `capacity` entries, and Helio's specular anti-aliasing, which they
@@ -149,5 +161,33 @@ pub(crate) fn layout_entries(capacity: u32) -> Vec<wgpu::BindGroupLayoutEntry> {
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count,
         },
+        wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        },
     ]
+}
+
+/// Water's frame parameters use a separate group because WGPU forbids a
+/// bind group from combining binding arrays with uniform-buffer bindings.
+pub(crate) fn shore_params_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("chunk water shore parameters"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
 }

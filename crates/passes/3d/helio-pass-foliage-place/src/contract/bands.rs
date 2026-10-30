@@ -153,7 +153,11 @@ impl Default for FoliageRange {
 
 /// Share of the tufts drawn at `d` metres (`foliage_keep` in the shaders).
 pub fn keep(bands: &GpuFoliageBands, d: f32) -> f32 {
-    let near = |d: f32| (bands.keep_distance / d.max(1.0e-3)).powf(bands.keep_power).min(1.0);
+    let near = |d: f32| {
+        (bands.keep_distance / d.max(1.0e-3))
+            .powf(bands.keep_power)
+            .min(1.0)
+    };
     if d <= bands.keep_knee {
         return near(d);
     }

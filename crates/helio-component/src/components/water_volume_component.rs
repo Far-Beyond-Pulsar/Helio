@@ -193,18 +193,22 @@ impl Default for WaterVolumeComponent {
             wave_spring: 1.2,
             wave_damping: 0.985,
             wave_scale: 1.0,
+            // Ultra-Water's 9 m/s sea is the volume's own wind (used by levels
+            // with no global wind): whitecaps and sun glitter assume a real
+            // wind, so a calm default reads as glass.
             use_global_wind: true,
-            wind_direction_x: 0.0,
-            wind_direction_z: 0.0,
-            wind_strength: 0.0,
-            water_color: [0.0, 0.2, 0.4],
-            extinction: [0.1, 0.05, 0.02],
-            foam_threshold: 0.8,
-            foam_amount: 0.6,
+            wind_direction_x: 0.939_692_6,
+            wind_direction_z: 0.342_020_15,
+            wind_strength: 9.0,
+            water_color: [0.0, 0.05, 0.08],
+            extinction: [0.42, 0.075, 0.048],
+            // Jacobian bias / scale of Ultra-Water's whitecap term.
+            foam_threshold: 0.05,
+            foam_amount: 1.3,
             reflection_strength: 0.8,
-            refraction_strength: 1.0,
+            refraction_strength: 0.06,
             fresnel_power: 5.0,
-            fresnel_min: 0.1,
+            fresnel_min: 0.02,
             ior: 1.333,
             ssr_enabled: true,
             ssr_steps: 32,
@@ -259,7 +263,8 @@ impl WaterVolumeComponent {
                 self.reflection_strength,
                 self.refraction_strength,
                 self.fresnel_power,
-                0.0,
+                // Foam brightness (Ultra-Water default).
+                0.85,
             ],
             caustics_params: [
                 self.caustics_enabled as u32 as f32,

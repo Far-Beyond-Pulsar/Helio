@@ -1,15 +1,27 @@
 pub mod pipeline;
 pub mod simulation;
 
+use bytemuck::Zeroable;
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_pass_voxel_planet::{Planet, VolumeTransform};
 use std::f32::consts::PI;
 use wgpu::util::DeviceExt;
 
 pub mod components;
 pub mod gpu_types;
+pub mod ocean_fft;
+mod reflection_capture;
+pub mod shoreline;
+pub mod surface_query;
 pub use components::{WaterHitboxComponent, WaterVolumeComponent};
 pub use gpu_types::*;
+pub use ocean_fft::{OceanSpectrum, CASCADE_LENGTHS as OCEAN_CASCADE_LENGTHS};
+pub use shoreline::{WaterShoreMap, WaterTerrainProvider, SHORE_MAP_SIZE};
+pub use surface_query::{
+    WaterSurfaceQueries, WaterSurfaceQueryConsumer, WaterSurfaceQueryPoint,
+    WaterSurfaceQueryResult, MAX_WATER_SURFACE_QUERIES,
+};
 
 use pulsar_scenedb::gpu::BufferKey;
 
@@ -29,8 +41,17 @@ struct V { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
 ";
 
 const SIM_SIZE: u32 = 256;
-const CAUSTICS_SIZE: u32 = 256;
+const CAUSTICS_SIZE: u32 = 512;
+const CAUSTICS_DEEP_SIZE: u32 = 256;
+const CAUSTICS_NEAR_MIPS: u32 = 10;
+const CAUSTICS_DEEP_MIPS: u32 = 9;
+const FOAM_TEXTURE_SIZE: u32 = 512;
+const FOAM_MIP_LEVELS: u32 = 10;
 const MAX_DROPS_BUFFERED: usize = 16;
+const MAX_WATER_SPRAY_IMPACTS: usize = 16;
+const MAX_WATER_SPRAY_IMPACT_AGE: f32 = 1.6;
+const MAX_WATER_SPRAY_EMITTERS: u32 = 150_000;
+const WATER_SPRAY_EMITTER_STRIDE: u64 = 16;
 pub(crate) const CASCADE_COUNT: usize = 3;
 pub const MAX_SIM_VOLUMES: u32 = 8;
 /// Fixed capacity for the `"water_hitboxes"` SceneDB buffer, mirroring
@@ -40,11 +61,8 @@ pub const MAX_SIM_VOLUMES: u32 = 8;
 /// drive this pass's dispatch/draw bounds.
 pub const MAX_WATER_HITBOXES: u32 = 32;
 pub(crate) const CASCADE_PATCH_SIZES: [f32; 3] = [30.0, 90.0, 270.0];
-/// The distance, in metres, after which every cascade's tiling repeats (the
-/// largest patch, a multiple of the others). A camera-relative frame writes
-/// each water volume's world phase, the frame's world origin modulo this, in
-/// the row's last vec4 (`world_phase`, `xy` = X and Z), so the waves stay
-/// fixed in the world when the origin moves.
+/// Legacy interaction/caustics phase period. Ultra-Water's FFT surface uses
+/// independent f64-reduced phases for each patch instead of this shared period.
 pub const WATER_WORLD_PERIOD: f64 = 270.0;
 /// One simulation step, in seconds of the renderer's frame clock: the
 /// simulation steps at a fixed 120 Hz, so a 60 Hz frame takes two steps and
@@ -54,150 +72,33 @@ pub(crate) const SIM_STEP_SECONDS: f32 = 1.0 / 120.0;
 /// Steps one frame takes at most, so a long frame does not stall the next.
 pub(crate) const MAX_SIM_STEPS_PER_FRAME: u32 = 8;
 
-// ---- Clipmap ring structure --------------------------------------------------------
-
-const CLIPMAP_GRID_SNAP: f32 = 0.25;
-const MAX_CLIPMAP_VERTS: u64 = 2048;
-const MAX_CLIPMAP_INDICES: u64 = 12288;
-
-struct ClipmapRingDef {
-    inner_radius: f32,
-    outer_radius: f32,
-    inner_divs: u32,
-    outer_divs: u32,
-    level_divs: u32,
-}
-
-const CLIPMAP_RINGS: [ClipmapRingDef; 5] = [
-    ClipmapRingDef {
-        inner_radius: 0.0,
-        outer_radius: 3.0,
-        inner_divs: 1,
-        outer_divs: 12,
-        level_divs: 4,
-    },
-    ClipmapRingDef {
-        inner_radius: 3.0,
-        outer_radius: 10.0,
-        inner_divs: 12,
-        outer_divs: 16,
-        level_divs: 4,
-    },
-    ClipmapRingDef {
-        inner_radius: 10.0,
-        outer_radius: 30.0,
-        inner_divs: 16,
-        outer_divs: 24,
-        level_divs: 3,
-    },
-    ClipmapRingDef {
-        inner_radius: 30.0,
-        outer_radius: 90.0,
-        inner_divs: 24,
-        outer_divs: 32,
-        level_divs: 3,
-    },
-    ClipmapRingDef {
-        inner_radius: 90.0,
-        outer_radius: 250.0,
-        inner_divs: 32,
-        outer_divs: 48,
-        level_divs: 2,
-    },
-];
-
 // ---- Mesh helpers ----------------------------------------------------------------
 
-/// Static box: 5 side/bottom faces (4×4 each, w = 1).  No top face — the top
-/// is provided each frame by the camera-centred clipmap.
-fn make_static_box_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
-    const FACE_DETAIL: u32 = 4;
-    let fn1 = FACE_DETAIL + 1;
-    let side_vert_count = (fn1 * fn1) as usize;
-    let side_idx_count = (FACE_DETAIL * FACE_DETAIL * 6) as usize;
-    let total_verts = 4 * side_vert_count;
-    let total_indices = 4 * side_idx_count;
-
-    let mut verts: Vec<[f32; 4]> = Vec::with_capacity(total_verts);
-    let mut indices: Vec<u32> = Vec::with_capacity(total_indices);
-
-    let mut add_face =
-        |verts: &mut Vec<[f32; 4]>, indices: &mut Vec<u32>, make_vert: fn(u32, u32) -> [f32; 4]| {
-            let voffset = verts.len() as u32;
-            for j in 0..fn1 {
-                for i in 0..fn1 {
-                    verts.push(make_vert(i, j));
-                }
-            }
-            for j in 0..FACE_DETAIL {
-                for i in 0..FACE_DETAIL {
-                    let tl = voffset + j * fn1 + i;
-                    let tr = voffset + j * fn1 + (i + 1);
-                    let bl = voffset + (j + 1) * fn1 + i;
-                    let br = voffset + (j + 1) * fn1 + (i + 1);
-                    indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
-                }
-            }
-        };
-
-    // Front face (z = -1)
-    add_face(&mut verts, &mut indices, |i, j| {
-        let x = i as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        let y = j as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        [x, y, -1.0, 1.0]
-    });
-    // Back face (z = 1)
-    add_face(&mut verts, &mut indices, |i, j| {
-        let x = i as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        let y = j as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        [x, y, 1.0, 1.0]
-    });
-    // Left face (x = -1)
-    add_face(&mut verts, &mut indices, |i, j| {
-        let z = i as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        let y = j as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        [-1.0, y, z, 1.0]
-    });
-    // Right face (x = 1)
-    add_face(&mut verts, &mut indices, |i, j| {
-        let z = i as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        let y = j as f32 / FACE_DETAIL as f32 * 2.0 - 1.0;
-        [1.0, y, z, 1.0]
-    });
-
-    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Water Static Box VB"),
-        contents: bytemuck::cast_slice(&verts),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Water Static Box IB"),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    (vbuf, ibuf, indices.len() as u32)
-}
-
-/// Small static grid for the caustics projection pass (uses the old normalized
-/// [-1,1] coordinate convention that the caustics vertex shader expects).
-fn make_caustics_grid(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
-    const DETAIL: u32 = 32;
-    let n = DETAIL + 1;
+/// Tessellated source-water grid for one area-ratio caustics splat. The grid
+/// extends beyond the 12 m tile by `margin` source cells so refracted triangles
+/// from outside the tile can land inside its edges without drawing 3x3 tiles.
+fn make_caustics_grid(
+    device: &wgpu::Device,
+    cells: u32,
+    margin: u32,
+) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+    let span = cells + margin * 2;
+    let n = span + 1;
     let total_verts = (n * n) as usize;
-    let total_indices = (DETAIL * DETAIL * 6) as usize;
+    let total_indices = (span * span * 6) as usize;
 
     let mut verts: Vec<[f32; 4]> = Vec::with_capacity(total_verts);
     let mut indices: Vec<u32> = Vec::with_capacity(total_indices);
 
     for j in 0..n {
         for i in 0..n {
-            let x = i as f32 / DETAIL as f32 * 2.0 - 1.0;
-            let y = j as f32 / DETAIL as f32 * 2.0 - 1.0;
+            let x = i as f32 - span as f32 * 0.5;
+            let y = j as f32 - span as f32 * 0.5;
             verts.push([x, y, 0.0, 0.0]);
         }
     }
-    for j in 0..DETAIL {
-        for i in 0..DETAIL {
+    for j in 0..span {
+        for i in 0..span {
             let tl = j * n + i;
             let tr = j * n + (i + 1);
             let bl = (j + 1) * n + i;
@@ -219,27 +120,60 @@ fn make_caustics_grid(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32
     (vbuf, ibuf, indices.len() as u32)
 }
 
-/// Static top-face grid in normalized [-1,1] space.
-/// The vertex shader maps these to world XZ via water_sim_uv_to_world_xz.
+/// Static camera-centred polar grid. Rings grow geometrically so their cells
+/// stay close to square; the last ring is a flat far-field skirt. Vertex z
+/// carries the local cell diameter for per-cascade FFT band limiting.
 fn make_top_grid(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
-    const DETAIL: u32 = 128;
-    let n = DETAIL + 1;
-    let mut verts: Vec<[f32; 4]> = Vec::with_capacity((n * n) as usize);
-    let mut indices: Vec<u32> = Vec::with_capacity((DETAIL * DETAIL * 6) as usize);
-    for j in 0..n {
-        for i in 0..n {
-            let x = i as f32 / DETAIL as f32 * 2.0 - 1.0;
-            let y = j as f32 / DETAIL as f32 * 2.0 - 1.0;
-            verts.push([x, y, 0.0, 0.0]);
-        }
+    const ANGULAR: u32 = 384;
+    const INNER: f32 = 1.0;
+    const OUTER: f32 = 3_000.0;
+    const SKIRT: f32 = 60_000.0;
+
+    let ratio = 1.0 + (2.0 * PI) / ANGULAR as f32;
+    let mut radii = Vec::new();
+    let mut r = INNER / 16.0;
+    while r < INNER * 0.99 {
+        radii.push(r);
+        r *= 1.12;
     }
-    for j in 0..DETAIL {
-        for i in 0..DETAIL {
-            let tl = j * n + i;
-            let tr = j * n + (i + 1);
-            let bl = (j + 1) * n + i;
-            let br = (j + 1) * n + (i + 1);
-            indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
+    r = INNER;
+    while r < OUTER {
+        radii.push(r);
+        r *= ratio;
+    }
+    radii.push(SKIRT);
+
+    let mut verts = Vec::<[f32; 4]>::with_capacity(1 + radii.len() * ANGULAR as usize);
+    verts.push([0.0, 0.0, INNER / 16.0, 0.0]);
+    let mut previous_radius = 0.0;
+    for radius in &radii {
+        let radial_step = *radius - previous_radius;
+        let cell = radial_step.max(*radius * (2.0 * PI / ANGULAR as f32));
+        for a in 0..ANGULAR {
+            let angle = a as f32 * (2.0 * PI / ANGULAR as f32);
+            verts.push([radius * angle.cos(), radius * angle.sin(), cell, 0.0]);
+        }
+        previous_radius = *radius;
+    }
+
+    let mut indices =
+        Vec::<u32>::with_capacity((radii.len() * ANGULAR as usize * 6) + (ANGULAR as usize * 3));
+    for a in 0..ANGULAR {
+        indices.extend_from_slice(&[0, 1 + (a + 1) % ANGULAR, 1 + a]);
+    }
+    for ring in 0..radii.len().saturating_sub(1) {
+        let inner = 1 + ring as u32 * ANGULAR;
+        let outer = inner + ANGULAR;
+        for a in 0..ANGULAR {
+            let next = (a + 1) % ANGULAR;
+            indices.extend_from_slice(&[
+                inner + a,
+                inner + next,
+                outer + a,
+                inner + next,
+                outer + next,
+                outer + a,
+            ]);
         }
     }
     let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -253,101 +187,6 @@ fn make_top_grid(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
         usage: wgpu::BufferUsages::INDEX,
     });
     (vbuf, ibuf, indices.len() as u32)
-}
-
-/// Build one concentric ring of the clipmap, connecting adjacent levels with
-/// triangles.  Level 0 uses `inner_divs` (to match the previous ring's outer
-/// edge); all remaining levels use `outer_divs`.
-fn generate_ring(
-    verts: &mut Vec<[f32; 4]>,
-    indices: &mut Vec<u32>,
-    ring: &ClipmapRingDef,
-    cx: f32,
-    cz: f32,
-) {
-    let n_levels = ring.level_divs + 1;
-    let mut level_starts: Vec<u32> = Vec::with_capacity(n_levels as usize);
-    let mut level_div_counts: Vec<u32> = Vec::with_capacity(n_levels as usize);
-
-    for level in 0..n_levels {
-        level_starts.push(verts.len() as u32);
-        let t = level as f32 / ring.level_divs as f32;
-        let radius = ring.inner_radius + (ring.outer_radius - ring.inner_radius) * t;
-
-        let divs = if level == 0 {
-            if ring.inner_divs == 1 {
-                verts.push([cx, cz, 0.0, 0.0]);
-                level_div_counts.push(1);
-                continue;
-            }
-            ring.inner_divs
-        } else {
-            ring.outer_divs
-        };
-
-        for s in 0..divs {
-            let angle = s as f32 / divs as f32 * 2.0 * PI;
-            let x = cx + radius * angle.cos();
-            let z = cz + radius * angle.sin();
-            verts.push([x, z, 0.0, 0.0]);
-        }
-        level_div_counts.push(divs);
-    }
-
-    for level in 0..ring.level_divs {
-        let next = level + 1;
-        let start_a = level_starts[level as usize];
-        let start_b = level_starts[next as usize];
-        let divs_a = level_div_counts[level as usize];
-        let divs_b = level_div_counts[next as usize];
-
-        if divs_a == 1 {
-            // Center point → first circle: triangle fan
-            for s in 0..divs_b {
-                let s_next = (s + 1) % divs_b;
-                indices.extend_from_slice(&[start_a, start_b + s, start_b + s_next]);
-            }
-        } else if divs_a == divs_b {
-            // Same vertex count on both levels: regular quads
-            for s in 0..divs_a {
-                let s_next = (s + 1) % divs_a;
-                let tl = start_a + s;
-                let tr = start_a + s_next;
-                let bl = start_b + s;
-                let br = start_b + s_next;
-                indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
-            }
-        } else {
-            // Different vertex counts: generalised triangulation that walks
-            // both circles simultaneously, advancing whichever is "behind" in
-            // angular space.
-            let mut i = 0u32;
-            let mut j = 0u32;
-            while i < divs_a || j < divs_b {
-                if i >= divs_a {
-                    j += 1;
-                } else if j >= divs_b {
-                    i += 1;
-                } else {
-                    let next_ang_i = (i + 1) as f64 / divs_a as f64;
-                    let next_ang_j = (j + 1) as f64 / divs_b as f64;
-
-                    if next_ang_i <= next_ang_j + 1e-10 {
-                        indices.push(start_a + i % divs_a);
-                        indices.push(start_a + (i + 1) % divs_a);
-                        indices.push(start_b + j % divs_b);
-                        i += 1;
-                    }
-                    if next_ang_j <= next_ang_i + 1e-10 {
-                        indices.push(start_a + i % divs_a);
-                        indices.push(start_b + (j + 1) % divs_b);
-                        indices.push(start_b + j % divs_b);
-                        j += 1;
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn vec4_vbl() -> wgpu::VertexBufferLayout<'static> {
@@ -365,6 +204,25 @@ fn vec4_vbl() -> wgpu::VertexBufferLayout<'static> {
 // ---- Pass struct ----------------------------------------------------------------
 
 pub struct WaterSimPass {
+    /// Ultra-Water's four-cascade spectral ocean. Its output is published for
+    /// the surface stage and remains independent of volume-local hitbox data.
+    pub(crate) ocean_fft: ocean_fft::OceanFft,
+    /// Sparse asynchronous queries sample this pass's current rendered
+    /// spectrum, shoreline and localized interaction fields.
+    pub(crate) surface_queries: WaterSurfaceQueries,
+    /// Secondary mirrored opaque view, rendered before the surface shade and
+    /// retained across frames so its HDR target and graph survive resize.
+    pub(crate) reflection_capture: Option<reflection_capture::PlanarReflectionCapture>,
+    /// Absolute-world rest plane for planar capture, in sync with the authored
+    /// water volume's `bounds_max.w` value.
+    pub(crate) ocean_rest_height: f64,
+    /// Explicit terrain-derived shore inputs; absent by default because generic
+    /// Helio scenes do not expose a terrain height query to render passes.
+    pub(crate) shore_map: Option<WaterShoreMap>,
+    pub(crate) shore_map_dirty: bool,
+    pub(crate) _shore_texture: wgpu::Texture,
+    pub(crate) shore_view: wgpu::TextureView,
+    pub(crate) shore_params: wgpu::Buffer,
     pub(crate) sim_bgl: wgpu::BindGroupLayout,
     pub(crate) update_bgl: wgpu::BindGroupLayout,
     pub(crate) hitbox_bgl: wgpu::BindGroupLayout,
@@ -403,22 +261,46 @@ pub struct WaterSimPass {
     pub(crate) pending_drops: std::collections::VecDeque<simulation::DropUniform>,
     pub(crate) drop_staged: bool,
 
-    /// Static box: 5 side/bottom faces (unchanging AABB walls, w = 1)
-    pub(crate) static_box_vbuf: wgpu::Buffer,
-    pub(crate) static_box_ibuf: wgpu::Buffer,
-    pub(crate) static_box_index_count: u32,
-
     /// Static grid top face (normalized [-1,1] mapped to world by vertex shader)
     pub(crate) top_vbuf: wgpu::Buffer,
     pub(crate) top_ibuf: wgpu::Buffer,
     pub(crate) top_index_count: u32,
 
-    /// Small static grid for the caustics projection pass (normalized coords)
-    pub(crate) caustics_vbuf: wgpu::Buffer,
-    pub(crate) caustics_ibuf: wgpu::Buffer,
-    pub(crate) caustics_index_count: u32,
+    /// Three tessellated source grids at the Ultra-Water cell budgets.
+    pub(crate) caustics_vbufs: [wgpu::Buffer; 3],
+    pub(crate) caustics_ibufs: [wgpu::Buffer; 3],
+    pub(crate) caustics_index_counts: [u32; 3],
+    /// Static near/mid/deep splat parameters, one uniform per depth slice.
+    pub(crate) caustics_slice_params: [wgpu::Buffer; 3],
+    /// 4x raster targets resolve into independent near and deep tile textures.
+    pub(crate) _caustics_near_msaa_tex: wgpu::Texture,
+    pub(crate) caustics_near_msaa_view: wgpu::TextureView,
+    pub(crate) _caustics_deep_msaa_tex: wgpu::Texture,
+    pub(crate) caustics_deep_msaa_view: wgpu::TextureView,
+    pub(crate) _caustics_near_tex: wgpu::Texture,
+    pub(crate) caustics_near_view: wgpu::TextureView,
+    pub(crate) caustics_near_mip_views: Vec<wgpu::TextureView>,
+    pub(crate) _caustics_deep_tex: wgpu::Texture,
+    pub(crate) caustics_deep_view: wgpu::TextureView,
+    pub(crate) caustics_deep_mip_views: Vec<wgpu::TextureView>,
+    pub(crate) caustics_mip_pipeline: wgpu::RenderPipeline,
 
     pub(crate) caustics_sampler: wgpu::Sampler,
+    /// Zeroed atmosphere frame / sky table, bound until a sky publishes.
+    pub(crate) fallback_atmosphere: wgpu::Buffer,
+    pub(crate) fallback_sky_table: wgpu::Buffer,
+    pub(crate) _fallback_sky_view_tex: wgpu::Texture,
+    pub(crate) fallback_sky_view: wgpu::TextureView,
+
+    /// Startup-baked, tileable RGBA foam material and its mip chain.
+    pub(crate) _foam_texture: wgpu::Texture,
+    pub(crate) foam_view: wgpu::TextureView,
+    pub(crate) foam_mip_views: Vec<wgpu::TextureView>,
+    pub(crate) foam_sampler: wgpu::Sampler,
+    pub(crate) foam_bake_pipeline: wgpu::RenderPipeline,
+    pub(crate) foam_mip_bgl: wgpu::BindGroupLayout,
+    pub(crate) foam_mip_pipeline: wgpu::RenderPipeline,
+    pub(crate) foam_baked: bool,
 
     pub(crate) caustics_render_bgl: wgpu::BindGroupLayout,
     pub(crate) render_bgl: wgpu::BindGroupLayout,
@@ -470,15 +352,38 @@ pub struct WaterSimPass {
     /// startup state when water appears.
     pub(crate) sim_live: bool,
 
-    pub(crate) caustics_bg_key: Option<(wgpu::Buffer, wgpu::TextureView)>,
-    pub(crate) caustics_bg: Option<wgpu::BindGroup>,
+    pub(crate) caustics_bg_keys: [Option<(wgpu::Buffer, wgpu::TextureView)>; 3],
+    pub(crate) caustics_bgs: [Option<wgpu::BindGroup>; 3],
 
     pub(crate) _tint_scratch_tex: wgpu::Texture,
+    /// The surface's own depth (see `pipeline::water_depth_target`).
+    pub(crate) _water_depth_tex: wgpu::Texture,
+    pub(crate) water_depth_view: wgpu::TextureView,
     pub(crate) tint_scratch_view: wgpu::TextureView,
     /// Samples `tint_scratch_view` for the blit back; rebuilt with it on resize.
     pub(crate) tint_blit_bg: Option<wgpu::BindGroup>,
     pub(crate) underwater_tint_bgl: wgpu::BindGroupLayout,
     pub(crate) underwater_tint_pipeline: wgpu::RenderPipeline,
+    pub(crate) _shafts_scratch_tex: wgpu::Texture,
+    pub(crate) shafts_view: wgpu::TextureView,
+    pub(crate) shafts_bgl: wgpu::BindGroupLayout,
+    pub(crate) shafts_pipeline: wgpu::RenderPipeline,
+    pub(crate) shafts_bg: helio_core::CachedBindGroup,
+
+    /// Shore-breaker spray and bounded impact-crown droplets.
+    pub(crate) spray_bgl: wgpu::BindGroupLayout,
+    pub(crate) spray_breaker_pipeline: wgpu::RenderPipeline,
+    pub(crate) spray_impact_pipeline: wgpu::RenderPipeline,
+    pub(crate) spray_bg: helio_core::CachedBindGroup,
+    pub(crate) spray_impacts_buf: wgpu::Buffer,
+    pub(crate) spray_params_buf: wgpu::Buffer,
+    pub(crate) spray_emitters_buf: wgpu::Buffer,
+    pub(crate) spray_emitters_pending: Vec<[f32; 4]>,
+    pub(crate) spray_emitters_dirty: bool,
+    pub(crate) spray_live_emitter_count: u32,
+    pub(crate) spray_settings: WaterSpraySettings,
+    pub(crate) spray_impacts: std::collections::VecDeque<WaterSprayImpact>,
+    pub(crate) spray_live_impact_count: u32,
 
     /// Pass-wide dynamics, for rows that leave their own at zero (see
     /// [`GpuWaterVolume::sim_dynamics`]).
@@ -497,9 +402,205 @@ pub struct WaterSimPass {
     pub(crate) steps_this_frame: u32,
 }
 
+/// Controls the water spray port. Breaker spray is active only when an
+/// authored [`WaterShoreMap`] is installed. The default grid evaluates 128²
+/// candidate emitters; each is culled in the vertex shader before rasterization.
+#[derive(Debug, Clone, Copy)]
+pub struct WaterSpraySettings {
+    pub enabled: bool,
+    /// Scales alpha for both breaker spray and impact droplets.
+    pub amount: f32,
+    /// Scales billboard size in metres.
+    pub size: f32,
+    /// Maximum camera distance for breaker emitters in metres.
+    pub max_distance: f32,
+    /// Requested valid surf-zone emitter count, clamped to 0..150,000.
+    /// Device buffer limits can reduce the effective count.
+    pub emitter_count: u32,
+}
+
+impl Default for WaterSpraySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            amount: 1.0,
+            size: 1.0,
+            max_distance: 350.0,
+            emitter_count: MAX_WATER_SPRAY_EMITTERS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WaterSprayImpact {
+    absolute_position: glam::DVec3,
+    age: f32,
+    radius: f32,
+    strength: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GpuWaterSprayImpact {
+    pub(crate) position_age: [f32; 4],
+    pub(crate) radius_strength: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub(crate) struct GpuWaterSprayParams {
+    pub(crate) amount: f32,
+    pub(crate) size: f32,
+    pub(crate) max_distance: f32,
+    pub(crate) emitter_count: u32,
+}
+
+/// Pack shore-zone candidates using Ultra-Water's valid emitter bounds. The
+/// valid-texel scan happens once per authored map/count change; deterministic
+/// uniform sampling with replacement keeps a sparse beach as dense as the
+/// requested target without a potentially unbounded rejection loop.
+fn pack_shore_spray_emitters(map: &WaterShoreMap, target_count: u32) -> Vec<[f32; 4]> {
+    if target_count == 0 {
+        return Vec::new();
+    }
+    let size = SHORE_MAP_SIZE as usize;
+    let mut eligible = Vec::<u32>::new();
+    eligible.reserve(map.shore.len() / 16);
+    for (idx, field) in map.shore.iter().enumerate() {
+        let depth = -field[0];
+        if (0.3..=3.2).contains(&depth) && field[1] <= 150.0 {
+            eligible.push(idx as u32);
+        }
+    }
+    if eligible.is_empty() {
+        return Vec::new();
+    }
+
+    struct Lcg(u32);
+    impl Lcg {
+        fn next_f64(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            f64::from(self.0) / 4_294_967_296.0
+        }
+    }
+    let mut rng = Lcg(11);
+    let mut packed = Vec::with_capacity(target_count as usize);
+    for _ in 0..target_count {
+        let selected = (rng.next_f64() * eligible.len() as f64) as usize;
+        let idx = eligible[selected.min(eligible.len() - 1)] as usize;
+        let (i, j) = (idx % size, idx / size);
+        let jitter_x = rng.next_f64();
+        let jitter_z = rng.next_f64();
+        let x = ((i as f64 + jitter_x) / size as f64 - 0.5) * f64::from(map.extent_xz[0]);
+        let z = ((j as f64 + jitter_z) / size as f64 - 0.5) * f64::from(map.extent_xz[1]);
+        packed.push([
+            x as f32,
+            z as f32,
+            rng.next_f64() as f32,
+            rng.next_f64() as f32,
+        ]);
+    }
+    packed
+}
+
 // ---- Public API ----------------------------------------------------------------
 
 impl WaterSimPass {
+    /// Replace the bounded request set for the next rendered frame. Each
+    /// point supplies its current world position and the water-volume row
+    /// whose rest plane/local interaction layer the rendered surface uses.
+    pub fn set_surface_queries(
+        &mut self,
+        points: impl IntoIterator<Item = WaterSurfaceQueryPoint>,
+    ) {
+        self.surface_queries.set_requests(points);
+    }
+
+    /// Drain results whose staged GPU readback has completed. This never
+    /// blocks and each result carries its dispatch frame/time for staleness
+    /// handling in physics.
+    pub fn take_surface_query_results(&mut self) -> Vec<WaterSurfaceQueryResult> {
+        self.surface_queries.take_completed()
+    }
+
+    /// Drain completed results into an engine-side adapter without coupling
+    /// Helio to a particular physics crate or stepping backend.
+    pub fn publish_surface_query_results(&mut self, consumer: &mut impl WaterSurfaceQueryConsumer) {
+        let mut results = self.take_surface_query_results();
+        results.sort_by_key(|result| result.sampled_frame);
+        let mut start = 0;
+        while start < results.len() {
+            let frame = results[start].sampled_frame;
+            let time = results[start].sampled_time;
+            let end = results[start..]
+                .iter()
+                .position(|result| result.sampled_frame != frame)
+                .map_or(results.len(), |relative| start + relative);
+            consumer.publish_water_surface_queries(frame, time, &results[start..end]);
+            start = end;
+        }
+    }
+
+    /// Release a body's pending request and velocity history on teardown.
+    pub fn remove_surface_query_body(&mut self, body_key: u64) {
+        self.surface_queries.remove_body(body_key);
+    }
+
+    /// Set or clear the authored terrain-derived shoreline field. Setting a
+    /// map is opt-in; this pass never guesses coastlines from water-volume AABBs.
+    pub fn set_shore_map(&mut self, map: Option<WaterShoreMap>) {
+        if let Some(map) = map.as_ref() {
+            self.ocean_rest_height = map.rest_y;
+        }
+        self.spray_emitters_pending = map
+            .as_ref()
+            .map(|map| pack_shore_spray_emitters(map, self.spray_settings.emitter_count))
+            .unwrap_or_default();
+        self.spray_emitters_dirty = true;
+        self.spray_bg.clear();
+        self.shore_map = map;
+        self.shore_map_dirty = self.shore_map.is_some();
+        self.render_bg.clear();
+    }
+
+    /// Set the absolute-world ocean rest height used by mirrored captures.
+    /// Keep this equal to `bounds_max.w` on the live `WaterVolumeComponent`
+    /// rows; Ultra-Water's global ocean has one rest plane.
+    pub fn set_ocean_rest_height(&mut self, rest_y: f64) -> Result<(), &'static str> {
+        if !rest_y.is_finite() {
+            return Err("ocean rest height must be finite");
+        }
+        self.ocean_rest_height = rest_y;
+        Ok(())
+    }
+
+    /// Bake and install a shoreline directly from Helio voxel terrain. Call
+    /// after authoring or updating the terrain/ocean rest plane; sampling is a
+    /// one-time CPU bake and does not run in the render loop.
+    pub fn set_shore_map_from_voxel_planet(
+        &mut self,
+        center_xz: [f64; 2],
+        extent_xz: [f32; 2],
+        rest_y: f64,
+        planet: &Planet,
+        transform: VolumeTransform,
+    ) -> Result<(), &'static str> {
+        let map =
+            WaterShoreMap::from_voxel_planet(center_xz, extent_xz, rest_y, planet, transform)?;
+        self.set_shore_map(Some(map));
+        Ok(())
+    }
+
+    /// Set the authored ocean spectrum; defaults match Ultra-Water's README
+    /// scene and parameter panel.
+    pub fn set_ocean_spectrum(&mut self, spectrum: OceanSpectrum) {
+        self.ocean_fft.set_spectrum(spectrum);
+    }
+
+    pub fn ocean_spectrum(&self) -> OceanSpectrum {
+        self.ocean_fft.spectrum()
+    }
+
     /// Pass-wide spring and damping, for volumes whose row leaves its own
     /// dynamics at zero (hosts that write pass rows themselves). A volume
     /// with its own (`sim_dynamics.x` > 0) simulates with those.
@@ -546,6 +647,75 @@ impl WaterSimPass {
                 strength,
             });
         }
+    }
+
+    /// Configure shoreline breaker spray and impact droplets. Invalid values
+    /// are replaced with defaults. The requested emitter count is bounded to
+    /// `0..=150_000`; the effective count may be lower for device limits.
+    pub fn set_spray_settings(&mut self, mut settings: WaterSpraySettings) {
+        let defaults = WaterSpraySettings::default();
+        if !settings.amount.is_finite() {
+            settings.amount = defaults.amount;
+        }
+        if !settings.size.is_finite() {
+            settings.size = defaults.size;
+        }
+        if !settings.max_distance.is_finite() {
+            settings.max_distance = defaults.max_distance;
+        }
+        settings.amount = settings.amount.clamp(0.0, 4.0);
+        settings.size = settings.size.clamp(0.05, 8.0);
+        settings.max_distance = settings.max_distance.clamp(10.0, 2000.0);
+        settings.emitter_count = settings.emitter_count.min(MAX_WATER_SPRAY_EMITTERS);
+        let emitter_count_changed = settings.emitter_count != self.spray_settings.emitter_count;
+        self.spray_settings = settings;
+        if emitter_count_changed {
+            self.spray_emitters_pending = self
+                .shore_map
+                .as_ref()
+                .map(|map| pack_shore_spray_emitters(map, settings.emitter_count))
+                .unwrap_or_default();
+            self.spray_emitters_dirty = true;
+        }
+        self.spray_bg.clear();
+    }
+
+    /// Number of valid shore emitters currently bound for rendering, after
+    /// requested count and device storage limits are applied.
+    pub fn effective_spray_emitter_count(&self) -> u32 {
+        self.spray_live_emitter_count
+    }
+
+    /// Enqueue a short-lived impact splash at an absolute-world point on the
+    /// water surface. Up to 16 events are retained; when full, the oldest
+    /// event is dropped so recent impacts remain visible. Radius is metres and
+    /// strength is relative event energy. Invalid positions or nonpositive
+    /// values return an error without changing the queue.
+    pub fn add_spray_impact(
+        &mut self,
+        absolute_position: glam::DVec3,
+        radius: f32,
+        strength: f32,
+    ) -> Result<(), &'static str> {
+        if !absolute_position.is_finite() || !radius.is_finite() || !strength.is_finite() {
+            return Err("spray impact position, radius, and strength must be finite");
+        }
+        if radius <= 0.0 || strength <= 0.0 {
+            return Err("spray impact radius and strength must be positive");
+        }
+        if !self.spray_settings.enabled {
+            return Ok(());
+        }
+        if self.spray_impacts.len() == MAX_WATER_SPRAY_IMPACTS {
+            self.spray_impacts.pop_front();
+        }
+        self.spray_impacts.push_back(WaterSprayImpact {
+            absolute_position,
+            age: 0.0,
+            radius: radius.clamp(0.05, 8.0),
+            strength: strength.clamp(0.001, 10.0),
+        });
+        Ok(())
     }
 
     /// Clears every simulation layer back to the zeroed startup state.
@@ -605,7 +775,28 @@ impl WaterSimPass {
             pipeline::tint_scratch(device, tint_w, tint_h, self.surface_format);
         self.tint_scratch_view = tint_scratch_view;
         self._tint_scratch_tex = tint_scratch_tex;
+        let (water_depth_tex, water_depth_view) =
+            pipeline::water_depth_target(device, tint_w, tint_h);
+        self._water_depth_tex = water_depth_tex;
+        self.water_depth_view = water_depth_view;
         self.tint_blit_bg = None;
+        let (shafts_tex, shafts_view) = pipeline::shafts_scratch(
+            device,
+            if self.content_allocated {
+                width.div_ceil(2)
+            } else {
+                1
+            },
+            if self.content_allocated {
+                height.div_ceil(2)
+            } else {
+                1
+            },
+        );
+        self._shafts_scratch_tex = shafts_tex;
+        self.shafts_view = shafts_view;
+        self.shafts_bg.clear();
+        self.spray_bg.clear();
 
         self.viewport_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Water Viewport"),
@@ -671,14 +862,10 @@ impl RenderPass for WaterSimPass {
             ResourceSize::MatchSurface,
         );
         builder.publish_alias("water_output", "pre_aa");
-        builder.write_color_raw(
-            "water_caustics",
-            wgpu::TextureFormat::Rgba16Float,
-            ResourceSize::Absolute {
-                width: CAUSTICS_SIZE,
-                height: CAUSTICS_SIZE,
-            },
-        );
+        // The pass owns these mipmapped outputs; the graph tracks producer/
+        // consumer ordering without allocating one-mip placeholder textures.
+        builder.write_buffer("water_caustics");
+        builder.write_buffer("water_caustics_deep");
     }
 
     fn reads(&self) -> &'static [&'static str] {
@@ -686,17 +873,27 @@ impl RenderPass for WaterSimPass {
             "gbuffer",
             "depth",
             "pre_aa",
-            "water_caustics",
             // Min-reduced depth pyramid, marched for water reflections. Built
             // by HiZBuildPass from `depth` alone, so it is available here.
             "hiz_nearest",
+            // The sky the sea reflects and scatters.
+            helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE,
+            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
         ]
     }
     fn writes(&self) -> &'static [&'static str] {
         &[
             "water_sim_texture",
             "water_sim_sampler",
+            "water_ocean_displacement",
+            "water_ocean_slopes",
+            "water_shore_fields",
+            "water_shore_params",
             "water_caustics",
+            "water_caustics_deep",
+            "water_planar_reflection",
+            "water_planar_reflection_camera",
             "pre_aa",
         ]
     }
@@ -727,6 +924,55 @@ impl RenderPass for WaterSimPass {
             sampler,
             "WaterSim",
         );
+        if let Some(capture) = self.reflection_capture.as_ref() {
+            let reflection: &'a wgpu::TextureView =
+                unsafe { std::mem::transmute(capture.reflection_view()) };
+            frame.write(
+                reflection_capture::REFLECTION_RESOURCE,
+                reflection,
+                "WaterSim",
+            );
+            let camera: &'a wgpu::Buffer = unsafe { std::mem::transmute(capture.camera_buffer()) };
+            frame.write(
+                helio_core::ResourceKey::new("water_planar_reflection_camera"),
+                camera,
+                "WaterSim",
+            );
+        }
+        let displacement: &'a wgpu::TextureView =
+            unsafe { std::mem::transmute(self.ocean_fft.displacement_view()) };
+        frame.write(
+            helio_core::ResourceKey::new("water_ocean_displacement"),
+            displacement,
+            "WaterSim",
+        );
+        let slopes: &'a wgpu::TextureView =
+            unsafe { std::mem::transmute(self.ocean_fft.slopes_view()) };
+        frame.write(
+            helio_core::ResourceKey::new("water_ocean_slopes"),
+            slopes,
+            "WaterSim",
+        );
+        let caustics_near: &'a wgpu::TextureView =
+            unsafe { std::mem::transmute(&self.caustics_near_view) };
+        frame.write(
+            helio_core::ResourceKey::new("water_caustics"),
+            caustics_near,
+            "WaterSim",
+        );
+        let caustics_deep: &'a wgpu::TextureView =
+            unsafe { std::mem::transmute(&self.caustics_deep_view) };
+        frame.write(
+            helio_core::ResourceKey::new("water_caustics_deep"),
+            caustics_deep,
+            "WaterSim",
+        );
+        // Shared with voxel terrain's optional scene-material path: the terrain
+        // evaluates the same travel-time field for beach run-up and wet sand.
+        let shore_fields: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.shore_view) };
+        frame.write_texture_binding("water_shore_fields", shore_fields, "WaterSim");
+        let shore_params: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.shore_params) };
+        frame.write_buffer_binding("water_shore_params", shore_params, "WaterSim");
         if let Some(view) = self
             .water_output_view
             .as_ref()
@@ -754,6 +1000,18 @@ impl RenderPass for WaterSimPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        self.surface_queries.prepare();
+        let reflection_size = (ctx.width.max(1).div_ceil(2), ctx.height.max(1).div_ceil(2));
+        if let Some(capture) = self.reflection_capture.as_mut() {
+            capture.resize(reflection_size.0, reflection_size.1);
+        } else {
+            self.reflection_capture = Some(reflection_capture::PlanarReflectionCapture::new(
+                ctx.device,
+                ctx.queue,
+                reflection_size.0,
+                reflection_size.1,
+            ));
+        }
         if !self.content_allocated {
             self.set_content_allocated(ctx.device, true);
         }
@@ -766,6 +1024,128 @@ impl RenderPass for WaterSimPass {
         self.step_clock =
             (self.step_clock - steps as f32 * SIM_STEP_SECONDS).clamp(0.0, SIM_STEP_SECONDS);
         self.sim_time += self.steps_this_frame as f32 * SIM_STEP_SECONDS;
+        self.ocean_fft
+            .prepare(ctx.queue, ctx.time_delta.max(0.0), ctx.world_origin);
+        if self.spray_emitters_dirty {
+            let limits = ctx.device.limits();
+            let binding_limit =
+                u64::from(limits.max_storage_buffer_binding_size).min(limits.max_buffer_size);
+            let capacity = (binding_limit / WATER_SPRAY_EMITTER_STRIDE) as usize;
+            let count = self.spray_emitters_pending.len().min(capacity);
+            let packed = &self.spray_emitters_pending[..count];
+            let dummy = [[0.0f32; 4]; 1];
+            let contents = if packed.is_empty() {
+                bytemuck::cast_slice(&dummy)
+            } else {
+                bytemuck::cast_slice(packed)
+            };
+            self.spray_emitters_buf =
+                ctx.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Packed Water Breaker Emitters"),
+                        contents,
+                        usage: wgpu::BufferUsages::STORAGE,
+                    });
+            self.spray_live_emitter_count = count as u32;
+            self.spray_emitters_dirty = false;
+            self.spray_bg.clear();
+        }
+        let spray_dt = ctx.time_delta.max(0.0);
+        for impact in &mut self.spray_impacts {
+            impact.age += spray_dt;
+        }
+        self.spray_impacts
+            .retain(|impact| impact.age <= MAX_WATER_SPRAY_IMPACT_AGE);
+        self.spray_live_impact_count = self.spray_impacts.len() as u32;
+        let spray_origin =
+            glam::DVec3::new(ctx.world_origin.x, ctx.world_origin.y, ctx.world_origin.z);
+        let mut gpu_impacts = vec![GpuWaterSprayImpact::zeroed(); MAX_WATER_SPRAY_IMPACTS];
+        for (gpu, impact) in gpu_impacts.iter_mut().zip(self.spray_impacts.iter()) {
+            let p = impact.absolute_position - spray_origin;
+            gpu.position_age = [p.x as f32, p.y as f32, p.z as f32, impact.age];
+            gpu.radius_strength = [impact.radius, impact.strength, 0.0, 0.0];
+        }
+        ctx.write_buffer(
+            &self.spray_impacts_buf,
+            0,
+            bytemuck::cast_slice(&gpu_impacts),
+        );
+        let spray = &self.spray_settings;
+        ctx.write_buffer(
+            &self.spray_params_buf,
+            0,
+            bytemuck::bytes_of(&GpuWaterSprayParams {
+                amount: if spray.enabled { spray.amount } else { 0.0 },
+                size: spray.size,
+                max_distance: spray.max_distance,
+                emitter_count: self.spray_live_emitter_count,
+            }),
+        );
+        let (center, extent, enabled) = if let Some(map) = self.shore_map.as_ref() {
+            if self.shore_map_dirty {
+                let row_bytes = SHORE_MAP_SIZE * 4 * 4;
+                for (layer, data) in [&map.shore, &map.travel].into_iter().enumerate() {
+                    ctx.queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &self._shore_texture,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: layer as u32,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        bytemuck::cast_slice(data),
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(row_bytes),
+                            rows_per_image: Some(SHORE_MAP_SIZE),
+                        },
+                        wgpu::Extent3d {
+                            width: SHORE_MAP_SIZE,
+                            height: SHORE_MAP_SIZE,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                }
+                self.shore_map_dirty = false;
+            }
+            (
+                [
+                    (map.center_xz[0] - ctx.world_origin.x) as f32,
+                    (map.center_xz[1] - ctx.world_origin.z) as f32,
+                ],
+                map.extent_xz,
+                1.0f32,
+            )
+        } else {
+            ([0.0; 2], [1.0; 2], 0.0f32)
+        };
+        let center_eye = self.shore_map.as_ref().map_or([0.0; 2], |map| {
+            [
+                (map.center_xz[0]
+                    - ctx.world_origin.x
+                    - f64::from(ctx.camera_data.position_near[0])) as f32,
+                (map.center_xz[1]
+                    - ctx.world_origin.z
+                    - f64::from(ctx.camera_data.position_near[2])) as f32,
+            ]
+        });
+        let shore_params = [
+            center[0],
+            center[1],
+            extent[0],
+            extent[1],
+            enabled,
+            self.ocean_fft.time(),
+            // Terrain hit positions are eye-relative, while surface shading
+            // uses frame-relative coordinates. This spare pair carries the
+            // same map center relative to the current eye for terrain swash.
+            center_eye[0],
+            center_eye[1],
+        ];
+        ctx.write_buffer(&self.shore_params, 0, bytemuck::cast_slice(&shore_params));
         let step_dt = SIM_STEP_SECONDS;
         for ci in 0..CASCADE_COUNT {
             let delta = simulation::DeltaUniform {
@@ -823,6 +1203,16 @@ impl RenderPass for WaterSimPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if let Some(capture) = self.reflection_capture.as_mut() {
+            capture.render_from_context(ctx, self.ocean_rest_height)?;
+        }
+        // Spectral ocean is the primary wave source. The legacy simulation
+        // remains a localized hitbox/drop interaction adapter; it no longer
+        // supplies wind-sea waves.
+        {
+            let mut encoder = ctx.graphics_cmds();
+            self.ocean_fft.execute(&mut encoder);
+        }
         // `"water_volumes"`/`"water_hitboxes"` are resolved fresh from the
         // SceneDB mirror by key every frame -- no Renderer method, no
         // Scene-owned arena, no CPU-tracked dirty range. Both buffers are
@@ -1199,64 +1589,203 @@ impl RenderPass for WaterSimPass {
             }
         }
 
-        // ---- 5. Caustics projection (cascade 0, volume 0) -----------------
+        // ---- 5. Global FFT caustics by area-ratio triangle splats ------------
         if volume_count > 0 {
             if let Some(vols_buf) = water_volumes_buf {
-                let new_key = (vols_buf.clone(), self.sim_array_view_a.clone());
-
-                if self.caustics_bg_key.as_ref() != Some(&new_key) {
-                    self.caustics_bg =
-                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: Some("Water Caustics BG"),
-                            layout: &self.caustics_render_bgl,
-                            entries: &[
-                                wgpu::BindGroupEntry {
-                                    binding: 0,
-                                    resource: vols_buf.as_entire_binding(),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 1,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        &self.sim_array_view_a,
-                                    ),
-                                },
-                                wgpu::BindGroupEntry {
-                                    binding: 2,
-                                    resource: wgpu::BindingResource::Sampler(&self.output_sampler),
-                                },
-                            ],
-                        }));
-                    self.caustics_bg_key = Some(new_key);
+                let new_key = (vols_buf.clone(), self.ocean_fft.slopes_view().clone());
+                for slice in 0..3 {
+                    if self.caustics_bg_keys[slice].as_ref() != Some(&new_key) {
+                        self.caustics_bgs[slice] =
+                            Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("Water Caustics BG"),
+                                layout: &self.caustics_render_bgl,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: vols_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            self.ocean_fft.slopes_view(),
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 2,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            &self.output_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 3,
+                                        resource:
+                                            self.caustics_slice_params[slice].as_entire_binding(),
+                                    },
+                                ],
+                            }));
+                        self.caustics_bg_keys[slice] = Some(new_key.clone());
+                    }
                 }
 
-                let caustics_view = ctx
-                    .registry
-                    .read(helio_core::ResourceKey::new("water_caustics"), "WaterSim")
-                    .unwrap();
-                let cau_attachments = [Some(wgpu::RenderPassColorAttachment {
-                    view: caustics_view,
-                    resolve_target: None,
+                let near_attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: &self.caustics_near_msaa_view,
+                    resolve_target: Some(&self.caustics_near_mip_views[0]),
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },
                 })];
-                let desc = wgpu::RenderPassDescriptor {
-                    label: Some("Water Caustics"),
-                    color_attachments: &cau_attachments,
+                let near_desc = wgpu::RenderPassDescriptor {
+                    label: Some("Water Near Caustics Area Splat"),
+                    color_attachments: &near_attachments,
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
                 };
-                let mut pass = ctx.begin_render_pass(&desc);
-                pass.set_pipeline(&self.caustics_pipeline);
-                pass.set_bind_group(0, self.caustics_bg.as_ref().unwrap(), &[]);
-                pass.set_vertex_buffer(0, self.caustics_vbuf.slice(..));
-                pass.set_index_buffer(self.caustics_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.caustics_index_count, 0, 0..1);
-                drop(pass);
+                {
+                    let mut pass = ctx.begin_render_pass(&near_desc);
+                    pass.set_pipeline(&self.caustics_pipeline);
+                    pass.set_viewport(
+                        0.0,
+                        0.0,
+                        CAUSTICS_SIZE as f32,
+                        CAUSTICS_SIZE as f32,
+                        0.0,
+                        1.0,
+                    );
+                    pass.set_scissor_rect(0, 0, CAUSTICS_SIZE, CAUSTICS_SIZE);
+                    pass.set_bind_group(0, self.caustics_bgs[0].as_ref().unwrap(), &[]);
+                    pass.set_vertex_buffer(0, self.caustics_vbufs[0].slice(..));
+                    pass.set_index_buffer(
+                        self.caustics_ibufs[0].slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    pass.draw_indexed(0..self.caustics_index_counts[0], 0, 0..1);
+                }
+
+                let deep_attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: &self.caustics_deep_msaa_view,
+                    resolve_target: Some(&self.caustics_deep_mip_views[0]),
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
+                let deep_desc = wgpu::RenderPassDescriptor {
+                    label: Some("Water Deep Caustics Area Splat"),
+                    color_attachments: &deep_attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                };
+                {
+                    let mut pass = ctx.begin_render_pass(&deep_desc);
+                    pass.set_pipeline(&self.caustics_pipeline);
+                    pass.set_viewport(
+                        0.0,
+                        0.0,
+                        CAUSTICS_DEEP_SIZE as f32,
+                        CAUSTICS_DEEP_SIZE as f32,
+                        0.0,
+                        1.0,
+                    );
+                    pass.set_scissor_rect(0, 0, CAUSTICS_DEEP_SIZE, CAUSTICS_DEEP_SIZE);
+                    for slice in 1..3 {
+                        pass.set_bind_group(0, self.caustics_bgs[slice].as_ref().unwrap(), &[]);
+                        pass.set_vertex_buffer(0, self.caustics_vbufs[slice].slice(..));
+                        pass.set_index_buffer(
+                            self.caustics_ibufs[slice].slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..self.caustics_index_counts[slice], 0, 0..1);
+                    }
+                }
+
+                // Generate independent repeatable mip chains. Keeping near
+                // and deep data in separate textures avoids bilinear/mip
+                // bleeding between packed depth slices.
+                for mip in 1..self.caustics_near_mip_views.len() {
+                    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Water Near Caustics Mip BG"),
+                        layout: &self.foam_mip_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.caustics_near_mip_views[mip - 1],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
+                            },
+                        ],
+                    });
+                    let attachments = [Some(wgpu::RenderPassColorAttachment {
+                        view: &self.caustics_near_mip_views[mip],
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })];
+                    let desc = wgpu::RenderPassDescriptor {
+                        label: Some("Water Near Caustics Mip"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    };
+                    let mut pass = ctx.begin_render_pass(&desc);
+                    pass.set_pipeline(&self.caustics_mip_pipeline);
+                    pass.set_bind_group(0, &bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                for mip in 1..self.caustics_deep_mip_views.len() {
+                    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Water Deep Caustics Mip BG"),
+                        layout: &self.foam_mip_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.caustics_deep_mip_views[mip - 1],
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
+                            },
+                        ],
+                    });
+                    let attachments = [Some(wgpu::RenderPassColorAttachment {
+                        view: &self.caustics_deep_mip_views[mip],
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })];
+                    let desc = wgpu::RenderPassDescriptor {
+                        label: Some("Water Deep Caustics Mip"),
+                        color_attachments: &attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    };
+                    let mut pass = ctx.begin_render_pass(&desc);
+                    pass.set_pipeline(&self.caustics_mip_pipeline);
+                    pass.set_bind_group(0, &bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
             }
         }
 
@@ -1322,6 +1851,73 @@ impl RenderPass for WaterSimPass {
             pass.draw(0..3, 0..1);
         }
 
+        // Bake the 512² tileable foam lace/billow map once, then downsample
+        // every level explicitly so the distant foam remains stable.
+        if !self.foam_baked {
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: &self.foam_mip_views[0],
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let bake_desc = wgpu::RenderPassDescriptor {
+                label: Some("Water Foam Material Bake"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            };
+            let mut pass = ctx.begin_render_pass(&bake_desc);
+            pass.set_pipeline(&self.foam_bake_pipeline);
+            pass.draw(0..3, 0..1);
+            drop(pass);
+
+            for mip in 1..FOAM_MIP_LEVELS as usize {
+                let source = &self.foam_mip_views[mip - 1];
+                let target = &self.foam_mip_views[mip];
+                let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Water Foam Mip BG"),
+                    layout: &self.foam_mip_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(source),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.foam_sampler),
+                        },
+                    ],
+                });
+                let attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
+                let mip_desc = wgpu::RenderPassDescriptor {
+                    label: Some("Water Foam Mip"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                };
+                let mut pass = ctx.begin_render_pass(&mip_desc);
+                pass.set_pipeline(&self.foam_mip_pipeline);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            self.foam_baked = true;
+        }
+
         // ---- 7. Water surface render -> water_output --------------------------
         if volume_count > 0 {
             if let Some(vols_buf) = water_volumes_buf {
@@ -1339,9 +1935,29 @@ impl RenderPass for WaterSimPass {
                             "WaterSim reflections require hiz_nearest; HiZBuildPass must run \
                              before WaterSim in the graph"
                                 .to_string(),
-                        ))
+                        ));
                     }
                 };
+
+                let atmosphere_buf = ctx
+                    .registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
+                        helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+                    ))
+                    .unwrap_or(&self.fallback_atmosphere);
+                let sky_table_buf = ctx
+                    .registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
+                        helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE,
+                    ))
+                    .unwrap_or(&self.fallback_sky_table);
+
+                let sky_view_tex = ctx
+                    .registry
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                        helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
+                    ))
+                    .unwrap_or(&self.fallback_sky_view);
 
                 // Rebuilt whenever anything it binds changes.
                 let render_bg = self
@@ -1363,7 +1979,7 @@ impl RenderPass for WaterSimPass {
                                 wgpu::BindGroupEntry {
                                     binding: 2,
                                     resource: wgpu::BindingResource::TextureView(
-                                        &self.sim_array_view_a,
+                                        self.ocean_fft.displacement_view(),
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
@@ -1373,19 +1989,12 @@ impl RenderPass for WaterSimPass {
                                 wgpu::BindGroupEntry {
                                     binding: 4,
                                     resource: wgpu::BindingResource::TextureView(
-                                        ctx.registry
-                                            .read(
-                                                helio_core::ResourceKey::new("water_caustics"),
-                                                "WaterSim",
-                                            )
-                                            .unwrap(),
+                                        &self.caustics_near_view,
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 5,
-                                    resource: wgpu::BindingResource::Sampler(
-                                        &self.caustics_sampler,
-                                    ),
+                                    resource: wgpu::BindingResource::Sampler(&self.sampler),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 6,
@@ -1413,6 +2022,80 @@ impl RenderPass for WaterSimPass {
                                     binding: 11,
                                     resource: wgpu::BindingResource::TextureView(&hiz_nearest_view),
                                 },
+                                wgpu::BindGroupEntry {
+                                    binding: 12,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        self.ocean_fft.slopes_view(),
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 13,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.sim_array_view_a,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 14,
+                                    resource: self.ocean_fft.phase_binding().as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 15,
+                                    resource: wgpu::BindingResource::TextureView(&self.shore_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 16,
+                                    resource: self.shore_params.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 17,
+                                    resource: wgpu::BindingResource::TextureView(&self.foam_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 18,
+                                    resource: wgpu::BindingResource::Sampler(&self.foam_sampler),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 19,
+                                    resource: self
+                                        .reflection_capture
+                                        .as_ref()
+                                        .expect("reflection capture created in prepare")
+                                        .camera_buffer()
+                                        .as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 20,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        self.reflection_capture
+                                            .as_ref()
+                                            .expect("reflection capture created in prepare")
+                                            .reflection_view(),
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 23,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.caustics_deep_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 24,
+                                    resource: wgpu::BindingResource::Sampler(
+                                        &self.caustics_sampler,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 25,
+                                    resource: atmosphere_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 26,
+                                    resource: sky_table_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 27,
+                                    resource: wgpu::BindingResource::TextureView(sky_view_tex),
+                                },
                             ],
                         },
                     )
@@ -1433,38 +2116,283 @@ impl RenderPass for WaterSimPass {
                     },
                 })];
 
-                // Multi-volume surface: draw each volume as an instance.
-                // The vertex shader uses @builtin(instance_index) as the
-                // volume index for per-volume parameter lookups and sim
-                // texture layer selection.
+                // Ultra-Water is one continuous ocean. The first authored
+                // volume supplies its height and optical properties; its old
+                // AABB no longer bounds the ocean surface.
                 {
                     let mut cmds = ctx.graphics_cmds();
                     let mut pass = cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Surface"),
                         color_attachments: &color_attachments,
-                        depth_stencil_attachment: Some(depth_attachment.clone()),
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.water_depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(helio_core::depth::CLEAR),
+                                store: wgpu::StoreOp::Discard,
+                            }),
+                            stencil_ops: None,
+                        }),
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,
                     });
                     pass.set_pipeline(&self.surface_pipeline);
                     pass.set_bind_group(0, &render_bg, &[]);
-                    // Top face: instance_count = water_volume_count
                     pass.set_vertex_buffer(0, self.top_vbuf.slice(..));
                     pass.set_index_buffer(self.top_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..self.top_index_count, 0, 0..volume_count);
+                    pass.draw_indexed(0..self.top_index_count, 0, 0..1);
+                }
 
-                    // Static box sides/bottom
-                    pass.set_vertex_buffer(0, self.static_box_vbuf.slice(..));
-                    pass.set_index_buffer(
-                        self.static_box_ibuf.slice(..),
-                        wgpu::IndexFormat::Uint32,
+                // Shore-breaker puffs and bounded user-submitted impact
+                // crowns share the ocean depth test and blend over the
+                // completed water surface. Their source events are already
+                // rebased and aged in prepare().
+                if self.spray_settings.enabled {
+                    let spray_bg = self
+                        .spray_bg
+                        .get_or_create(
+                            ctx.device,
+                            &wgpu::BindGroupDescriptor {
+                                label: Some("Water Spray BG"),
+                                layout: &self.spray_bgl,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: ctx.camera.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: self.spray_emitters_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 2,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.shore_view,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 3,
+                                        resource: self.shore_params.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 4,
+                                        resource: self.spray_impacts_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 5,
+                                        resource: vols_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 6,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            self.ocean_fft.displacement_view(),
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 7,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            &self.output_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 8,
+                                        resource: self
+                                            .ocean_fft
+                                            .phase_binding()
+                                            .as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 9,
+                                        resource: self.spray_params_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 10,
+                                        resource: wgpu::BindingResource::TextureView(depth_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 11,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.sim_array_view_a,
+                                        ),
+                                    },
+                                ],
+                            },
+                        )
+                        .clone();
+                    let attachments = [Some(wgpu::RenderPassColorAttachment {
+                        view: water_output_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })];
+                    let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        depth_ops: None,
+                        stencil_ops: None,
+                    };
+                    let mut spray_cmds = ctx.graphics_cmds();
+                    let mut spray_pass =
+                        spray_cmds.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Water Breaker and Impact Spray"),
+                            color_attachments: &attachments,
+                            depth_stencil_attachment: Some(depth_attachment),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                    spray_pass.set_bind_group(0, &spray_bg, &[]);
+                    if self.spray_live_emitter_count > 0 {
+                        spray_pass.set_pipeline(&self.spray_breaker_pipeline);
+                        spray_pass.draw(0..6, 0..self.spray_live_emitter_count);
+                    }
+                    if self.spray_live_impact_count > 0 {
+                        spray_pass.set_pipeline(&self.spray_impact_pipeline);
+                        spray_pass.draw(0..6, 0..self.spray_live_impact_count * 64);
+                    }
+                }
+
+                // Sample the same finished textures and shared surface
+                // functions used above. The copy/map is bounded and async;
+                // if all staging generations are occupied this frame's
+                // request batch is dropped without delaying rendering.
+                if let Some(vols_buf) = water_volumes_buf {
+                    let mut cmds = ctx.graphics_cmds();
+                    self.surface_queries.encode(
+                        ctx.device,
+                        ctx.queue,
+                        ctx.world_origin,
+                        ctx.frame_num,
+                        &mut cmds,
+                        vols_buf,
+                        self.ocean_fft.displacement_view(),
+                        &self.output_sampler,
+                        self.ocean_fft.slopes_view(),
+                        &self.sim_array_view_a,
+                        self.ocean_fft.phase_binding(),
+                        &self.shore_view,
+                        &self.shore_params,
+                        f64::from(self.ocean_fft.time()),
                     );
-                    pass.draw_indexed(0..self.static_box_index_count, 0, 0..volume_count);
                 }
 
                 // 3. Underwater effect
                 {
+                    let shafts_bg = self
+                        .shafts_bg
+                        .get_or_create(
+                            ctx.device,
+                            &wgpu::BindGroupDescriptor {
+                                label: Some("Water Half-Resolution Shafts BG"),
+                                layout: &self.shafts_bgl,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: ctx.camera.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: vols_buf.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 2,
+                                        resource: wgpu::BindingResource::TextureView(depth_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 4,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.caustics_near_view,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 5,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            &self.caustics_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 6,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            self.ocean_fft.displacement_view(),
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 7,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            &self.output_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 8,
+                                        resource: self
+                                            .ocean_fft
+                                            .phase_binding()
+                                            .as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 9,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.caustics_deep_view,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 10,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.sim_array_view_a,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 15,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.shore_view,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 16,
+                                        resource: self.shore_params.as_entire_binding(),
+                                    },
+                                ],
+                            },
+                        )
+                        .clone();
+                    let shafts_attachments = [Some(wgpu::RenderPassColorAttachment {
+                        view: &self.shafts_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })];
+                    let shafts_desc = wgpu::RenderPassDescriptor {
+                        label: Some("Water Half-Resolution Caustic Shafts"),
+                        color_attachments: &shafts_attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    };
+                    let mut shafts_pass = ctx.begin_render_pass(&shafts_desc);
+                    shafts_pass.set_pipeline(&self.shafts_pipeline);
+                    shafts_pass.set_bind_group(0, &shafts_bg, &[]);
+                    shafts_pass.draw(0..3, 0..1);
+                    drop(shafts_pass);
+
+                    let tint_atmosphere = ctx
+                        .registry
+                        .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
+                            helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+                        ))
+                        .unwrap_or(&self.fallback_atmosphere);
+                    let tint_sky_view = ctx
+                        .registry
+                        .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
+                        ))
+                        .unwrap_or(&self.fallback_sky_view);
+
                     // Rebuilt whenever anything it binds changes.
                     let tint_bg = self
                         .underwater_tint_bg
@@ -1517,14 +2445,42 @@ impl RenderPass for WaterSimPass {
                                         ),
                                     },
                                     wgpu::BindGroupEntry {
-                                        binding: 8,
+                                        binding: 9,
                                         resource: wgpu::BindingResource::TextureView(
-                                            ctx.registry
-                                                .read(
-                                                    helio_core::ResourceKey::new("water_caustics"),
-                                                    "WaterSim",
-                                                )
-                                                .unwrap(),
+                                            self.ocean_fft.displacement_view(),
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 10,
+                                        resource: self
+                                            .ocean_fft
+                                            .phase_binding()
+                                            .as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 11,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.shafts_view,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 15,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &self.shore_view,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 16,
+                                        resource: self.shore_params.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 20,
+                                        resource: tint_atmosphere.as_entire_binding(),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 21,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            tint_sky_view,
                                         ),
                                     },
                                 ],

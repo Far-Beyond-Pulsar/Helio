@@ -141,7 +141,11 @@ impl<K: std::hash::Hash + Eq + Copy, V: Clone> Cache<K, V> {
         &self.shards[(h >> 58) as usize]
     }
     fn get(&self, key: &K) -> Option<V> {
-        self.shard(key).lock().unwrap_or_else(|e| e.into_inner()).get(key).cloned()
+        self.shard(key)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(key)
+            .cloned()
     }
     fn insert(&self, key: K, value: V) {
         let mut shard = self.shard(&key).lock().unwrap_or_else(|e| e.into_inner());
@@ -173,7 +177,12 @@ pub struct Streams {
 impl Streams {
     /// The streams of `maps` (baked with rivers `rivers`) over the terrain
     /// `k`, `levels` levels below the texels (at most [`MAX_LEVELS`]).
-    pub fn new(maps: Arc<PlanetMaps>, k: &LandformConstants, rivers: &RiverSpec, levels: u32) -> Self {
+    pub fn new(
+        maps: Arc<PlanetMaps>,
+        k: &LandformConstants,
+        rivers: &RiverSpec,
+        levels: u32,
+    ) -> Self {
         let g = maps.cube();
         let mut header = maps.header;
         header[0][0] &= !FLAG_RIVERS;
@@ -183,7 +192,8 @@ impl Streams {
                 // Columns of about an eighth of a cell: wavelengths of half
                 // a cell resolved, finer ones left out (they route nothing).
                 let cell_du = g.texel_du() / f64::from(SPLIT.pow(r));
-                let level = (64 - ((cell_du / 2.0) as u64).max(1).leading_zeros()).saturating_sub(5);
+                let level =
+                    (64 - ((cell_du / 2.0) as u64).max(1).leading_zeros()).saturating_sub(5);
                 SingleRate::new(k, level)
             })
             .collect();
@@ -216,7 +226,10 @@ impl Streams {
         let at = |p: IVec3| {
             let (_, x, y) = planet_maps::coords_on(header, p, u32::from(c.slot));
             let unit = f64::from(1u32 << shift);
-            (f64::from(x - (c.i << shift)) / unit * 32.0, f64::from(y - (c.j << shift)) / unit * 32.0)
+            (
+                f64::from(x - (c.i << shift)) / unit * 32.0,
+                f64::from(y - (c.j << shift)) / unit * 32.0,
+            )
         };
         let (a, b) = (at(s.node), at(s.target));
         let side = self.cell_reach(c) * 256.0 / f64::from(REACH_Q8);
@@ -271,14 +284,23 @@ impl Streams {
     pub fn real(&self, r: u8, slot: u8, i: i32, j: i32) -> Option<Cell> {
         let n = self.side(r);
         if (0..n).contains(&i) && (0..n).contains(&j) {
-            return Some(Cell { level: r, slot, i, j });
+            return Some(Cell {
+                level: r,
+                slot,
+                i,
+                j,
+            });
         }
         let g = self.grid();
         if g.is_plane() {
             return None;
         }
         let per = f64::from(SPLIT.pow(u32::from(r)));
-        let d = g.local(slot as usize, (f64::from(i) + 0.5) / per, (f64::from(j) + 0.5) / per);
+        let d = g.local(
+            slot as usize,
+            (f64::from(i) + 0.5) / per,
+            (f64::from(j) + 0.5) / per,
+        );
         let (s, x, y) = g.locate(d);
         Some(Cell {
             level: r,
@@ -296,7 +318,9 @@ impl Streams {
             return planet_maps::texel_node(g, self.seed, c.slot as usize, c.i, c.j);
         }
         let salt = u32::from(c.level) << 3 | u32::from(c.slot);
-        let j = |s: u32| f64::from(hash3(c.i, c.j, salt as i32, self.seed ^ s) & 0xffff) / 65_536.0 * 0.5 - 0.25;
+        let j = |s: u32| {
+            f64::from(hash3(c.i, c.j, salt as i32, self.seed ^ s) & 0xffff) / 65_536.0 * 0.5 - 0.25
+        };
         let per = f64::from(SPLIT.pow(u32::from(c.level)));
         let x = (f64::from(c.i) + 0.5 + j(0x2b7e_1516)) / per;
         let y = (f64::from(c.j) + 0.5 + j(0x28ae_d2a6)) / per;
@@ -356,7 +380,11 @@ impl Streams {
         let Some(owner) = self.owner(c) else {
             return Stream::NONE;
         };
-        self.flood(owner).streams.get(&c).copied().unwrap_or(Stream::NONE)
+        self.flood(owner)
+            .streams
+            .get(&c)
+            .copied()
+            .unwrap_or(Stream::NONE)
     }
 
     /// A texel's stem: from its node to its downstream texel's.
@@ -372,12 +400,22 @@ impl Streams {
             u32::MAX => (node, d.bed),
             down => {
                 let (s, x, y) = g.at(down as usize);
-                let t = Cell { level: 0, slot: s as u8, i: x, j: y };
+                let t = Cell {
+                    level: 0,
+                    slot: s as u8,
+                    i: x,
+                    j: y,
+                };
                 (self.node(t), self.maps.drains()[down as usize].bed)
             }
         };
         let river = d.flags & (planet_maps::DRAINS_RIVER | planet_maps::DRAINS_LAKE) as u8 != 0;
-        let mut s = self.geometry(self.cell_reach(c), f64::from(d.discharge), self.height(c), d.bed);
+        let mut s = self.geometry(
+            self.cell_reach(c),
+            f64::from(d.discharge),
+            self.height(c),
+            d.bed,
+        );
         s.kind = if river { Kind::River } else { Kind::Stream };
         s.node = node;
         s.target = target;
@@ -402,13 +440,15 @@ impl Streams {
         let incision = rv.incision_m * ratio.sqrt().sqrt();
         let run = (reach - floodplain * 4.0 / 3.0).max(reach * 0.25);
         let rise = f64::from(ground - bed).max(0.0) / 1000.0 + incision;
-        let wall = ((rise / (run * crate::grid::DOMAIN_UNIT * 0.5)).max(rv.wall) * 64.0).ceil() as i32;
+        let wall =
+            ((rise / (run * crate::grid::DOMAIN_UNIT * 0.5)).max(rv.wall) * 64.0).ceil() as i32;
         Stream {
             floodplain: floodplain.round() as i32,
             channel: channel.round() as i32,
             reach: reach.round() as i32,
             depth: ((depth * 1000.0).round() as i32).min(32_767),
-            cap: (((incision * 3.0 + depth) * 1000.0).min(reach * crate::grid::DOMAIN_UNIT * 500.0)).round() as i32,
+            cap: (((incision * 3.0 + depth) * 1000.0).min(reach * crate::grid::DOMAIN_UNIT * 500.0))
+                .round() as i32,
             wall: wall.clamp(1, MAX_WALL_Q6),
             discharge: q as f32,
             ..Stream::NONE
@@ -470,21 +510,37 @@ impl Streams {
                     continue;
                 };
                 // Cells in the sea are no stream's.
-                if seen.insert(c) && self.owner(c) == Some(p) && (!self.maps.ocean() || self.height(c) >= 0) {
+                if seen.insert(c)
+                    && self.owner(c) == Some(p)
+                    && (!self.maps.ocean() || self.height(c) >= 0)
+                {
                     members.push(c);
                 }
             }
         }
         members.sort();
-        let index: FxHashMap<Cell, usize> = members.iter().enumerate().map(|(n, &c)| (c, n)).collect();
+        let index: FxHashMap<Cell, usize> =
+            members.iter().enumerate().map(|(n, &c)| (c, n)).collect();
         let nodes: Vec<IVec3> = members.iter().map(|&c| self.node(c)).collect();
         let heights: Vec<i32> = members.iter().map(|&c| self.height(c)).collect();
         let around: Vec<Vec<usize>> = members
             .iter()
             .map(|&c| {
                 let mut out = Vec::with_capacity(8);
-                for (di, dj) in [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)] {
-                    if let Some(&m) = self.real(r, c.slot, c.i + di, c.j + dj).and_then(|n| index.get(&n)) {
+                for (di, dj) in [
+                    (-1, -1),
+                    (0, -1),
+                    (1, -1),
+                    (-1, 0),
+                    (1, 0),
+                    (-1, 1),
+                    (0, 1),
+                    (1, 1),
+                ] {
+                    if let Some(&m) = self
+                        .real(r, c.slot, c.i + di, c.j + dj)
+                        .and_then(|n| index.get(&n))
+                    {
                         if !out.contains(&m) {
                             out.push(m);
                         }
@@ -502,17 +558,25 @@ impl Streams {
                 if !self.maps.ocean() || h > SEA_NEAR {
                     return None;
                 }
-                [(0, -1), (-1, 0), (1, 0), (0, 1)].iter().find_map(|&(di, dj)| {
-                    let n = self.real(r, c.slot, c.i + di, c.j + dj)?;
-                    (self.height(n) < 0).then(|| self.node(n))
-                })
+                [(0, -1), (-1, 0), (1, 0), (0, 1)]
+                    .iter()
+                    .find_map(|&(di, dj)| {
+                        let n = self.real(r, c.slot, c.i + di, c.j + dj)?;
+                        (self.height(n) < 0).then(|| self.node(n))
+                    })
             })
             .collect();
         let cell = self.cell_du(r);
         let near: Vec<f64> = nodes.iter().map(|n| distance(n.as_dvec3(), a, b)).collect();
-        let mut seeds: Vec<usize> = (0..members.len()).filter(|&m| near[m] <= 0.6 * cell || sea[m].is_some()).collect();
+        let mut seeds: Vec<usize> = (0..members.len())
+            .filter(|&m| near[m] <= 0.6 * cell || sea[m].is_some())
+            .collect();
         if seeds.is_empty() && !members.is_empty() {
-            seeds.push((0..members.len()).min_by(|&x, &y| near[x].total_cmp(&near[y]).then(x.cmp(&y))).unwrap());
+            seeds.push(
+                (0..members.len())
+                    .min_by(|&x, &y| near[x].total_cmp(&near[y]).then(x.cmp(&y)))
+                    .unwrap(),
+            );
         }
         // Priority flood from the seeds; cells it cannot reach (cut off
         // among the members) drain to the stem themselves.
@@ -535,7 +599,10 @@ impl Streams {
                     }
                 }
             }
-            seeds = (0..members.len()).filter(|&m| filled[m] == i32::MIN).take(1).collect();
+            seeds = (0..members.len())
+                .filter(|&m| filled[m] == i32::MIN)
+                .take(1)
+                .collect();
             if seeds.is_empty() {
                 break;
             }
@@ -550,7 +617,8 @@ impl Streams {
                 let mut best: Option<(f64, usize)> = None;
                 for &n in &around[m] {
                     if filled[n] < filled[m] {
-                        let slope = f64::from(filled[m] - filled[n]) / (nodes[m] - nodes[n]).as_dvec3().length().max(1.0);
+                        let slope = f64::from(filled[m] - filled[n])
+                            / (nodes[m] - nodes[n]).as_dvec3().length().max(1.0);
                         if best.map_or(true, |(s, b)| slope > s || (slope == s && n < b)) {
                             best = Some((slope, n));
                         }
@@ -584,11 +652,22 @@ impl Streams {
                 (None, None) => {
                     let (foot, t) = closest(nodes[m].as_dvec3(), a, b);
                     let length = (b - a).length();
-                    let pull = if length > 0.0 { (near[m] * 0.3 / length).min(1.0 - t) } else { 0.0 };
+                    let pull = if length > 0.0 {
+                        (near[m] * 0.3 / length).min(1.0 - t)
+                    } else {
+                        0.0
+                    };
                     let t = t + pull;
                     let foot = foot + (b - a) * pull;
                     let lerp = f64::from(stem.bed[0]) + f64::from(stem.bed[1] - stem.bed[0]) * t;
-                    (IVec3::new(foot.x.round() as i32, foot.y.round() as i32, foot.z.round() as i32), lerp.round() as i32)
+                    (
+                        IVec3::new(
+                            foot.x.round() as i32,
+                            foot.y.round() as i32,
+                            foot.z.round() as i32,
+                        ),
+                        lerp.round() as i32,
+                    )
                 }
             };
             let rv = &self.rivers;
@@ -634,7 +713,10 @@ impl Streams {
                         let (key, record) = if r == 0 {
                             (region_key(0, slot, ci, cj), 16)
                         } else {
-                            (region_key(r - 1, slot, ci >> 2, cj >> 2), ((ci & 3) + 4 * (cj & 3)) as usize)
+                            (
+                                region_key(r - 1, slot, ci >> 2, cj >> 2),
+                                ((ci & 3) + 4 * (cj & 3)) as usize,
+                            )
                         };
                         if last.as_ref().map_or(true, |l| l.0 != key) {
                             last = Some((key, self.region_words(key)));
@@ -642,7 +724,9 @@ impl Streams {
                         let words = &last.as_ref().unwrap().1;
                         let w = &words[record * RECORD_WORDS..][..RECORD_WORDS];
                         // The record's box first: one word, most cells' last.
-                        if w[10] == 0 || !in_box(w[12], xq - (ci << shift), yq - (cj << shift), shift) {
+                        if w[10] == 0
+                            || !in_box(w[12], xq - (ci << shift), yq - (cj << shift), shift)
+                        {
                             continue;
                         }
                         let s = unpack(w);
@@ -655,7 +739,8 @@ impl Streams {
                         }
                         let carved = smooth_min(h, at.z, s.cap / 8);
                         let cut = (h - carved).min(s.cap);
-                        let w = mul_shr_signed(weight(at.dist, s.reach), resolved(s.reach, cell), 8);
+                        let w =
+                            mul_shr_signed(weight(at.dist, s.reach), resolved(s.reach, cell), 8);
                         let lowered = h - mul_shr_signed(cut, w, 16);
                         if lowered < out {
                             out = lowered;
@@ -713,10 +798,16 @@ struct At {
 fn surface(s: &Stream, p: IVec3, bent: &mut Option<[IVec3; 3]>, seed: u32, cell: i32) -> At {
     let span = s.target - s.node;
     let e = unit_q30(span);
-    let length = mul_shr_signed(span.x, e.x, 30) + mul_shr_signed(span.y, e.y, 30) + mul_shr_signed(span.z, e.z, 30);
+    let length = mul_shr_signed(span.x, e.x, 30)
+        + mul_shr_signed(span.y, e.y, 30)
+        + mul_shr_signed(span.z, e.z, 30);
     let m = planet_maps::meander_amplitudes(s.floodplain, s.channel);
     let (dist, a) = planet_maps::axis(p, s.node, e, length);
-    let t = if length > 0 { ratio_q16(a, length.max(a)) } else { 0 };
+    let t = if length > 0 {
+        ratio_q16(a, length.max(a))
+    } else {
+        0
+    };
     let bed = s.bed[0] - mul_shr_signed(s.bed[0] - s.bed[1], t, 16);
     let mut z = bed + planet_maps::wall_rise((dist - s.floodplain).max(0), s.floodplain, s.wall);
     let mut inside = false;
@@ -756,7 +847,11 @@ pub fn level_reach(header: &[[i32; 4]; planet_maps::MAP_HEADER], r: u8) -> i32 {
 /// Domain point `p` on its face and on the faces it lies within a
 /// level-`r` cell of (near edges and corners): slot and texel coordinates
 /// (Q16) there.
-fn cells_around(header: &[[i32; 4]; planet_maps::MAP_HEADER], p: IVec3, r: u8) -> Vec<(u8, i32, i32)> {
+fn cells_around(
+    header: &[[i32; 4]; planet_maps::MAP_HEADER],
+    p: IVec3,
+    r: u8,
+) -> Vec<(u8, i32, i32)> {
     let shift = 16 - 2 * u32::from(r);
     let n = header[0][1] << (2 * u32::from(r));
     let (slot, xq, yq) = planet_maps::coords(header, p);
@@ -765,7 +860,15 @@ fn cells_around(header: &[[i32; 4]; planet_maps::MAP_HEADER], p: IVec3, r: u8) -
         return out;
     }
     let margin = 1 << shift;
-    let edge = |q: i32| if q < margin { -1 } else if q >= (n << shift) - margin { 1 } else { 0 };
+    let edge = |q: i32| {
+        if q < margin {
+            -1
+        } else if q >= (n << shift) - margin {
+            1
+        } else {
+            0
+        }
+    };
     let [_, a, b] = crate::grid::FACE_BASIS[slot as usize].map(IVec3::from_array);
     for (side, axis) in [(edge(xq), a), (edge(yq), b)] {
         if side != 0 {
@@ -797,7 +900,10 @@ fn in_box(b: u32, du: i32, dv: i32, shift: u32) -> bool {
 
 /// A region's key: its parent cell (`map_stream_key` in WGSL).
 pub fn region_key(level: u8, slot: u8, i: i32, j: i32) -> [u32; 2] {
-    [u32::from(level) | u32::from(slot) << 2 | (i as u32) << 5, j as u32]
+    [
+        u32::from(level) | u32::from(slot) << 2 | (i as u32) << 5,
+        j as u32,
+    ]
 }
 
 fn pack(s: &Stream, b: u32, out: &mut [u32]) {
@@ -843,11 +949,25 @@ impl crate::terrain::TerrainRegions for Streams {
         (Arc::as_ptr(&self.maps) as u64) ^ u64::from(self.levels) << 56
     }
 
-    fn keys(&self, grid: &crate::grid::Grid, face: u8, level: u32, i: [i32; 2], j: [i32; 2], out: &mut Vec<[u32; 2]>) {
+    fn keys(
+        &self,
+        grid: &crate::grid::Grid,
+        face: u8,
+        level: u32,
+        i: [i32; 2],
+        j: [i32; 2],
+        out: &mut Vec<[u32; 2]>,
+    ) {
         let header = &self.maps.header;
         let cell = 8i32 << (level + grid.level_offset()).min(24);
-        let corners = [(i[0], j[0]), (i[1], j[0]), (i[0], j[1]), (i[1], j[1]), ((i[0] + i[1]) / 2, (j[0] + j[1]) / 2)]
-            .map(|(a, b)| grid.domain_point(face, a, b, level));
+        let corners = [
+            (i[0], j[0]),
+            (i[1], j[0]),
+            (i[0], j[1]),
+            (i[1], j[1]),
+            ((i[0] + i[1]) / 2, (j[0] + j[1]) / 2),
+        ]
+        .map(|(a, b)| grid.domain_point(face, a, b, level));
         let start = out.len();
         for r in 0..=self.levels as u8 {
             if resolved(self.reach(r), cell) == 0 {
@@ -861,7 +981,14 @@ impl crate::terrain::TerrainRegions for Streams {
                 for (slot, xq, yq) in cells_around(header, p, r) {
                     let (ci, cj) = (xq >> shift, yq >> shift);
                     match boxes.iter_mut().find(|b| b.0 == slot) {
-                        Some(b) => b.1 = [b.1[0].min(ci), b.1[1].min(cj), b.1[2].max(ci), b.1[3].max(cj)],
+                        Some(b) => {
+                            b.1 = [
+                                b.1[0].min(ci),
+                                b.1[1].min(cj),
+                                b.1[2].max(ci),
+                                b.1[3].max(cj),
+                            ]
+                        }
                         None => boxes.push((slot, [ci, cj, ci, cj])),
                     }
                 }
@@ -897,15 +1024,33 @@ impl crate::terrain::TerrainRegions for Streams {
         let (i, j) = ((key[0] >> 5) as i32, key[1] as i32);
         if u32::from(level) < self.levels {
             for k in 0..(SPLIT * SPLIT) as usize {
-                let c = Cell { level: level + 1, slot, i: i * SPLIT + k as i32 % SPLIT, j: j * SPLIT + k as i32 / SPLIT };
+                let c = Cell {
+                    level: level + 1,
+                    slot,
+                    i: i * SPLIT + k as i32 % SPLIT,
+                    j: j * SPLIT + k as i32 / SPLIT,
+                };
                 let s = self.stream(c);
-                pack(&s, self.record_box(c, &s), &mut out[k * RECORD_WORDS..][..RECORD_WORDS]);
+                pack(
+                    &s,
+                    self.record_box(c, &s),
+                    &mut out[k * RECORD_WORDS..][..RECORD_WORDS],
+                );
             }
         }
         if level == 0 {
-            let c = Cell { level: 0, slot, i, j };
+            let c = Cell {
+                level: 0,
+                slot,
+                i,
+                j,
+            };
             let stem = self.stream(c);
-            pack(&stem, self.record_box(c, &stem), &mut out[16 * RECORD_WORDS..][..RECORD_WORDS]);
+            pack(
+                &stem,
+                self.record_box(c, &stem),
+                &mut out[16 * RECORD_WORDS..][..RECORD_WORDS],
+            );
         }
     }
 }
@@ -920,7 +1065,11 @@ fn distance(p: DVec3, a: DVec3, b: DVec3) -> f64 {
 fn closest(p: DVec3, a: DVec3, b: DVec3) -> (DVec3, f64) {
     let ab = b - a;
     let l2 = ab.length_squared();
-    let t = if l2 > 0.0 { ((p - a).dot(ab) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if l2 > 0.0 {
+        ((p - a).dot(ab) / l2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     (a + ab * t, t)
 }
 
@@ -951,7 +1100,12 @@ mod tests {
         let (slot, x, y) = g.locate(DVec3::Y);
         for dy in -12..12 {
             for dx in -12..12 {
-                let c = Cell { level: 0, slot: slot as u8, i: x as i32 + dx, j: y as i32 + dy };
+                let c = Cell {
+                    level: 0,
+                    slot: slot as u8,
+                    i: x as i32 + dx,
+                    j: y as i32 + dy,
+                };
                 if s.stream(c).kind == Kind::Stream && out.len() < count {
                     out.push(c);
                 }
@@ -975,7 +1129,14 @@ mod tests {
             for r in 1..=s.levels() as u8 {
                 cells = cells
                     .iter()
-                    .flat_map(|c| (0..SPLIT * SPLIT).map(move |k| Cell { level: r, slot: c.slot, i: c.i * SPLIT + k % SPLIT, j: c.j * SPLIT + k / SPLIT }))
+                    .flat_map(|c| {
+                        (0..SPLIT * SPLIT).map(move |k| Cell {
+                            level: r,
+                            slot: c.slot,
+                            i: c.i * SPLIT + k % SPLIT,
+                            j: c.j * SPLIT + k / SPLIT,
+                        })
+                    })
                     .filter(|c| r < 3 || (c.i + c.j) % 7 == 0)
                     .collect();
                 for &c in &cells {
@@ -991,7 +1152,10 @@ mod tests {
             }
         }
         eprintln!("streams checked by level: {counts:?}");
-        assert!(counts[1] > 50 && counts[2] > 200 && counts[3] > 200, "{counts:?}");
+        assert!(
+            counts[1] > 50 && counts[2] > 200 && counts[3] > 200,
+            "{counts:?}"
+        );
     }
 
     /// The carved field stays continuous at every level: lines of
@@ -1002,22 +1166,34 @@ mod tests {
         let (grid, field) = earth();
         let s = field.streams().unwrap();
         let mut dry = TerrainLayers::earth();
-        dry.layers.retain(|l| l.kind != crate::layers::LayerKind::Rivers);
+        dry.layers
+            .retain(|l| l.kind != crate::layers::LayerKind::Rivers);
         let texels = land_cells(s, 6);
         let (mut worst, mut cut, mut samples) = (0, 0i64, 0usize);
         for t in &texels {
             for r in 1..=s.levels() as u8 {
                 let per = SPLIT.pow(u32::from(r));
-                let c = Cell { level: r, slot: t.slot, i: t.i * per + per / 2, j: t.j * per + per / 3 };
+                let c = Cell {
+                    level: r,
+                    slot: t.slot,
+                    i: t.i * per + per / 2,
+                    j: t.j * per + per / 3,
+                };
                 let st = s.stream(c);
                 if st.kind != Kind::Stream {
                     continue;
                 }
                 let (cell, _) = grid.locate(st.node.as_dvec3().normalize() * grid.radius());
-                let at = |i: i32, j: i32| Column { face: cell.face, i, j, level: 0 };
+                let at = |i: i32, j: i32| Column {
+                    face: cell.face,
+                    i,
+                    j,
+                    level: 0,
+                };
                 let span = (st.reach as f64 * crate::grid::DOMAIN_UNIT / 0.1) as i32 + 50;
                 for (di, dj) in [(1, 0), (0, 1)] {
-                    let h: Vec<i32> = (-span..span).step_by(((span / 400).max(1)) as usize)
+                    let h: Vec<i32> = (-span..span)
+                        .step_by(((span / 400).max(1)) as usize)
                         .map(|t| field.height(at(cell.i + di * t, cell.j + dj * t)))
                         .collect();
                     let step = (span / 400).max(1);
@@ -1046,7 +1222,11 @@ mod tests {
         let mut checked = 0;
         for level in 0..14u32 {
             let cells = grid.cells() >> level;
-            for (face, cx, cy) in [(2u8, cells / 128, cells / 128 + 3), (2, 0, cells / 64 - 1), (0, cells / 64 - 1, cells / 128)] {
+            for (face, cx, cy) in [
+                (2u8, cells / 128, cells / 128 + 3),
+                (2, 0, cells / 64 - 1),
+                (0, cells / 64 - 1, cells / 128),
+            ] {
                 let (i0, j0) = (cx * 64, cy * 64);
                 let mut keys = Vec::new();
                 s.keys(&grid, face, level, [i0, i0 + 63], [j0, j0 + 63], &mut keys);
@@ -1058,14 +1238,24 @@ mod tests {
                             continue;
                         }
                         for (slot, xq, yq) in cells_around(header, p, r) {
-                            let (i, j) = (xq >> (16 - 2 * u32::from(r)), yq >> (16 - 2 * u32::from(r)));
-                            for (ci, cj) in (-1..=1).flat_map(|b| (-1..=1).map(move |a| (i + a, j + b))) {
+                            let (i, j) =
+                                (xq >> (16 - 2 * u32::from(r)), yq >> (16 - 2 * u32::from(r)));
+                            for (ci, cj) in
+                                (-1..=1).flat_map(|b| (-1..=1).map(move |a| (i + a, j + b)))
+                            {
                                 let n = s.side(r);
                                 if !(0..n).contains(&ci) || !(0..n).contains(&cj) {
                                     continue;
                                 }
-                                let key = if r == 0 { region_key(0, slot, ci, cj) } else { region_key(r - 1, slot, ci >> 2, cj >> 2) };
-                                assert!(keys.binary_search(&key).is_ok(), "level {level} face {face} r {r}: {key:?} missing");
+                                let key = if r == 0 {
+                                    region_key(0, slot, ci, cj)
+                                } else {
+                                    region_key(r - 1, slot, ci >> 2, cj >> 2)
+                                };
+                                assert!(
+                                    keys.binary_search(&key).is_ok(),
+                                    "level {level} face {face} r {r}: {key:?} missing"
+                                );
                                 checked += 1;
                             }
                         }
@@ -1092,11 +1282,25 @@ mod tests {
             }
         }
         let rivers_only = stack.field(&grid, 7).unwrap();
-        for (n, d) in [DVec3::Y, DVec3::new(0.3, 1.0, -0.2), DVec3::new(1.0, 0.1, 0.4)].iter().enumerate() {
+        for (n, d) in [
+            DVec3::Y,
+            DVec3::new(0.3, 1.0, -0.2),
+            DVec3::new(1.0, 0.1, 0.4),
+        ]
+        .iter()
+        .enumerate()
+        {
             let (cell, _) = grid.locate(d.normalize() * grid.radius());
             let started = std::time::Instant::now();
             let mut keys = Vec::new();
-            s.keys(&grid, cell.face, 0, [cell.i, cell.i + 63], [cell.j, cell.j + 63], &mut keys);
+            s.keys(
+                &grid,
+                cell.face,
+                0,
+                [cell.i, cell.i + 63],
+                [cell.j, cell.j + 63],
+                &mut keys,
+            );
             let mut words = vec![0u32; REGION_WORDS];
             for &k in &keys {
                 s.region(k, &mut words);
@@ -1104,13 +1308,23 @@ mod tests {
             let cold = started.elapsed().as_secs_f64() * 1e3;
             let started = std::time::Instant::now();
             for t in 0..10_000 {
-                let at = Column { face: cell.face, i: cell.i + t % 100, j: cell.j + t / 100, level: 0 };
+                let at = Column {
+                    face: cell.face,
+                    i: cell.i + t % 100,
+                    j: cell.j + t / 100,
+                    level: 0,
+                };
                 std::hint::black_box(field.height(at));
             }
             let warm = started.elapsed().as_secs_f64() * 1e6 / 10_000.0;
             let started = std::time::Instant::now();
             for t in 0..10_000 {
-                let at = Column { face: cell.face, i: cell.i + t % 100, j: cell.j + t / 100, level: 0 };
+                let at = Column {
+                    face: cell.face,
+                    i: cell.i + t % 100,
+                    j: cell.j + t / 100,
+                    level: 0,
+                };
                 std::hint::black_box(rivers_only.height(at));
             }
             let without = started.elapsed().as_secs_f64() * 1e6 / 10_000.0;
@@ -1138,10 +1352,18 @@ mod tests {
         for round in 0..2 {
             let started = std::time::Instant::now();
             for _ in 0..200 {
-                let at = Column { face: cell.face, i: cell.i + next(), j: cell.j + next(), level: 0 };
+                let at = Column {
+                    face: cell.face,
+                    i: cell.i + next(),
+                    j: cell.j + next(),
+                    level: 0,
+                };
                 std::hint::black_box(field.height(at));
             }
-            eprintln!("round {round}: {:.2} ms a cold column", started.elapsed().as_secs_f64() * 1e3 / 200.0);
+            eprintln!(
+                "round {round}: {:.2} ms a cold column",
+                started.elapsed().as_secs_f64() * 1e3 / 200.0
+            );
         }
     }
 
@@ -1159,18 +1381,31 @@ mod tests {
         let mut keys = Vec::new();
         for level in 0..16u32 {
             let (ci, cj) = ((cell.i >> level) / 64, (cell.j >> level) / 64);
-            let read = if level < crate::features::NEAR_LEVELS { 0 } else { level };
+            let read = if level < crate::features::NEAR_LEVELS {
+                0
+            } else {
+                level
+            };
             let up = level - read;
             for dj in -3..=3 {
                 for di in -3..=3 {
                     let (fx, fy) = (ci + di, cj + dj);
-                    s.keys(&grid, cell.face, read, [fx * 64 << up, ((fx * 64 + 64) << up) - 1], [fy * 64 << up, ((fy * 64 + 64) << up) - 1], &mut keys);
+                    s.keys(
+                        &grid,
+                        cell.face,
+                        read,
+                        [fx * 64 << up, ((fx * 64 + 64) << up) - 1],
+                        [fy * 64 << up, ((fy * 64 + 64) << up) - 1],
+                        &mut keys,
+                    );
                 }
             }
         }
         keys.sort_unstable();
         keys.dedup();
-        let by_level: Vec<usize> = (0..4).map(|l| keys.iter().filter(|k| k[0] & 3 == l).count()).collect();
+        let by_level: Vec<usize> = (0..4)
+            .map(|l| keys.iter().filter(|k| k[0] & 3 == l).count())
+            .collect();
         let started = std::time::Instant::now();
         let n = keys
             .par_iter()

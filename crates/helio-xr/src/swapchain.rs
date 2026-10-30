@@ -262,8 +262,8 @@ pub fn wrap_vk_image(
 /// Map a user-facing `TextureUsages` bitmask onto the hal `TextureUses`
 /// bitmask (the same mapping wgpu-core's `conv::map_texture_usage` performs).
 pub fn map_texture_usage_to_hal(usage: wgpu::TextureUsages) -> wgpu::wgt::TextureUses {
-    use wgpu::TextureUsages as U;
     use wgpu::wgt::TextureUses as H;
+    use wgpu::TextureUsages as U;
 
     let mut hal = H::empty();
     if usage.contains(U::COPY_SRC) {
