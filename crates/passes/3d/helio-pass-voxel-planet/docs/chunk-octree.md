@@ -54,13 +54,23 @@ One `ChunkWorld` holds them all (`ChunkWorld::add_volume`,
 - **Shading per volume.** Every shading kernel runs a dispatch a volume
   and takes the hits of its pass's volume (`ours`; the pixels no volume
   hits, the first pass's): sun, sky and local lights walk the hit's own
-  volume (a volume shadows itself exactly; one volume's shadow on another
-  is not cast yet, except through the sun's occlusion maps, which every
-  volume draws into). Normals leave in the world's axes (`to_world`); the
-  denoiser runs once in the world's frame, reprojecting each hit by its
-  volume's motion (`motions`).
-- **The primary volume** (the frame's first) is the one foliage grows on
-  and GI probes trace.
+  volume (a volume shadows itself exactly). Normals leave in the world's
+  axes (`to_world`); the denoiser runs once in the world's frame,
+  reprojecting each hit by its volume's motion (`motions`).
+- **Lighting across volumes.** Any ray can walk any volume from where it
+  enters it (`enter_volume`: a sphere's ceiling ball, a plane's band
+  between its edges; placed by the volume's anchor chunk, else a sphere's
+  exact levels). Each volume that can matter adds a pass in its own
+  pipelines (`ChunkWorld::cross_volumes`): its sun shadow on the others'
+  hits and the meshes, ANDed in, over the rectangle the shadow can fall in
+  (`shadow_cross`; pixels the sun's occlusion pages lit are left: every
+  volume is traced into them); the GI probes' rays, the nearer hit kept
+  (`gi_trace_cross`); foliage's probes, where it stands on the ground
+  found or holds it (`ground_probe_cross`). Single-volume worlds run and
+  build none of them.
+- **The primary volume** is the one whose ground the eye is nearest
+  (`follow_eye`): foliage is tiled on it and GI probes are placed in its
+  cells.
 
 CPU queries take world positions: `Volumes` (exact casts and solid tests
 over every volume a ray or point meets, nearest hit first) and

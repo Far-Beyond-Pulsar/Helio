@@ -90,6 +90,10 @@ impl GenPipelines {
 pub(super) struct VolumeViews {
     pub camera: wgpu::Buffer,
     pub sun: wgpu::Buffer,
+    /// The camera's view again for the passes in which it lights another
+    /// volume's points (`ChunkWorld::draw`: shadows across volumes over its
+    /// shadow's rectangle, GI rays, foliage probes).
+    pub cross: wgpu::Buffer,
 }
 
 /// One placed world of a [`ChunkWorld`].
@@ -610,9 +614,15 @@ pub(super) struct DrawPipelines {
     pub local_gate: wgpu::ComputePipeline,
     pub local_temporal: wgpu::ComputePipeline,
     pub local_filter: wgpu::ComputePipeline,
-    /// The GI probes' rays and foliage ground probes.
+    /// The GI probes' rays and foliage ground probes (the primary
+    /// volume's, from where they are).
     pub gi_trace: wgpu::ComputePipeline,
     pub ground_probe: wgpu::ComputePipeline,
+    /// The passes of a volume lighting the others' points (`cross`), built
+    /// once more than one volume is held (`ensure_cross`): their walks are
+    /// long kernels to compile, which a world of one volume never runs.
+    pub cross: Option<CrossPipelines>,
+    module: wgpu::ShaderModule,
     pub feedback: wgpu::ComputePipeline,
     pub publish: wgpu::RenderPipeline,
     /// Opens rects of an orthographic view's exits (`trace_view`'s `open`).
@@ -910,8 +920,53 @@ impl DrawPipelines {
             publish,
             exits_open,
             publish_scene,
+            cross: None,
+            module,
         }
     }
+
+    /// The passes that light other volumes' points, built once.
+    pub fn ensure_cross(&mut self, device: &wgpu::Device, layouts: &DrawLayouts) {
+        if self.cross.is_some() {
+            return;
+        }
+        let compute = |label: &str, second: &wgpu::BindGroupLayout, entry: &str| {
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: None,
+                bind_group_layouts: &[Some(&layouts.draw), Some(second)],
+                immediate_size: 0,
+            });
+            helio_core::shader::create_compute_pipeline(
+                device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&layout),
+                    module: &self.module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
+        };
+        self.cross = Some(CrossPipelines {
+            shadow: compute("chunk shadows across volumes", &layouts.shadow_fallback, "shadow_cross"),
+            gi_trace: compute("chunk GI rays across volumes", &layouts.gi, "gi_trace_cross"),
+            ground_probe: compute(
+                "chunk ground probes across volumes",
+                &layouts.ground,
+                "ground_probe_cross",
+            ),
+        });
+    }
+}
+
+/// A volume's passes lighting the other volumes' points: its sun shadow on
+/// their hits and the meshes, the GI probes' rays and foliage's probes
+/// entering it (`ChunkWorld::cross_volumes`).
+pub(super) struct CrossPipelines {
+    pub shadow: wgpu::ComputePipeline,
+    pub gi_trace: wgpu::ComputePipeline,
+    pub ground_probe: wgpu::ComputePipeline,
 }
 
 /// Footprints a world of `grid` has at every level (its pool never needs
@@ -1103,6 +1158,7 @@ impl ChunkWorld {
             views: VolumeViews {
                 camera: params("chunk draw params"),
                 sun: params("chunk sun params"),
+                cross: params("chunk cross params"),
             },
             tile_data: buffer("chunk footprint columns", pool_size as u64 * TILE_COLUMNS * 16, g),
             tile_cave_data: buffer("chunk footprint caves", pool_size as u64 * CAVE_SLOT_BYTES, g),
@@ -1149,6 +1205,12 @@ impl ChunkWorld {
         if self.primary.is_none() {
             self.primary = Some(index16);
         }
+        // More than one volume: each form's passes lighting the others.
+        if self.volumes.iter().flatten().count() > 1 {
+            for pipelines in self.pipelines.iter_mut().flatten() {
+                pipelines.ensure_cross(&self.device, &self.layouts);
+            }
+        }
         VolumeId(index16)
     }
 
@@ -1186,6 +1248,7 @@ impl ChunkWorld {
         if self.primary == Some(vol.index) {
             self.primary = self.volumes.iter().flatten().map(|v| v.index).next();
         }
+        self.ground_placed.remove(&vol.index);
     }
 
     /// Place volume `id` by `transform` (from the next draw; its hits' motion
@@ -1229,11 +1292,52 @@ impl ChunkWorld {
             .collect()
     }
 
-    /// The volume whose ground foliage grows on and whose GI probes trace
-    /// (the first added that is still held, unless set).
-    pub fn set_primary(&mut self, id: VolumeId) {
-        if self.volume(id).is_some() {
-            self.primary = Some(id.0);
+    /// The volume foliage tiles and GI probes are placed in (in f64, its
+    /// cells): the one whose surface is nearest the eye (`follow_eye`), the
+    /// first added before an update has seen the eye. The others light
+    /// them where they reach (`ChunkWorld::draw`, `probe_ground`).
+    pub fn primary(&self) -> Option<VolumeId> {
+        self.primary.map(VolumeId)
+    }
+
+    /// The primary volume for an eye at `eye` (world): the volume whose
+    /// ground the eye is nearest (the distance from its terrain's height
+    /// range, `height_layers`; past a plane's edges, from them too), kept
+    /// until another's is nearer by half (no switching back and forth
+    /// between two about as near; an eye in two volumes' ranges keeps the
+    /// one it had).
+    pub(super) fn follow_eye(&mut self, eye: DVec3) {
+        let surface = |v: &Volume| {
+            let local = v.transform.to_local(eye);
+            let h = v.grid.height(local);
+            let voxel = v.grid.voxel_size();
+            let (lo, hi) = (
+                f64::from(v.height_layers.0) * voxel,
+                f64::from(v.height_layers.1) * voxel,
+            );
+            let height = (lo - h).max(h - hi).max(0.0);
+            if v.grid.shape() != crate::grid::Shape::Plane {
+                return height;
+            }
+            let half = f64::from(v.grid.cells()) * v.grid.voxel_size() * 0.5;
+            let out = (local.x.abs() - half).max(0.0).hypot((local.z.abs() - half).max(0.0));
+            height.hypot(out)
+        };
+        let Some((best, nearest)) = self
+            .volumes
+            .iter()
+            .flatten()
+            .map(|v| (v.index, surface(v)))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+        else {
+            return;
+        };
+        let current = self
+            .primary
+            .and_then(|p| self.volumes[usize::from(p)].as_ref())
+            .map(surface);
+        if current.is_none_or(|c| nearest < 0.5 * c) {
+            self.primary = Some(best);
         }
     }
 
