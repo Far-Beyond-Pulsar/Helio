@@ -825,6 +825,7 @@ pub(crate) fn mesh_asset_from_part(
         })
         .collect();
     let remapped = helio_asset_compat::ConvertedSectionedMesh {
+        skin: part.skin,
         name: part.name.clone(),
         vertices: part.vertices.clone(),
         sections: part
@@ -1040,6 +1041,17 @@ pub fn write_mesh_parts(
         return Err("model contained no sectioned mesh geometry".to_string());
     }
     Ok(written)
+}
+
+/// Write one source part at a host-selected path, retaining its default materials.
+pub fn write_mesh_part(
+    scene: &helio_asset_compat::ConvertedScene,
+    part: &helio_asset_compat::ConvertedSectionedMesh,
+    path: &Path,
+) -> Result<PathBuf, String> {
+    let (upload, _) = mesh_asset_from_part(&scene.materials, part)
+        .ok_or_else(|| "mesh part has no geometry".to_string())?;
+    write_mesh_asset(upload, path)
 }
 
 fn sanitize_file_name(name: &str) -> String {

@@ -1,6 +1,6 @@
 //! The skeleton, skin weights and animations of a rigged source.
 //!
-//! [`extract_rig`] reads what the static conversion ignores (the scene's
+//! [`extract_rigs`] reads what the static conversion ignores (the scene's
 //! `Skin`, each vertex's `skin_weights`, the node animations) into plain
 //! arrays, so a host can build its own skeletal assets without depending on
 //! SolidRS or on this crate's math types. Nothing here knows an asset format.
@@ -17,6 +17,8 @@ use solid_rs::Scene;
 /// A rigged model: one skeleton, the mesh skinned to it, and its animations.
 #[derive(Clone, Debug)]
 pub struct ImportedRig {
+    /// Index in the source skin table; independent of names and node traversal order.
+    pub source_skin: usize,
     pub name: String,
     /// Parents come before their children.
     pub bones: Vec<ImportedBone>,
@@ -70,7 +72,7 @@ pub struct RigVertex {
 
 #[derive(Clone, Debug)]
 pub struct RigSection {
-    /// Triangle list, absolute into [`ImportedRig::vertices`].
+    /// Triangle list, absolute into [`ImportedLod::vertices`].
     pub indices: Vec<u32>,
     pub material_index: Option<usize>,
 }
@@ -120,32 +122,51 @@ pub enum ImportedInterpolation {
     CubicSpline,
 }
 
-/// The rig of `scene`, or `None` when it has no skinned mesh (a static source).
-/// Only the first skin that a mesh uses is imported.
-pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<ImportedRig> {
-    // The skin a mesh node uses, and every mesh node using it.
-    let skin_index = scene
-        .nodes
-        .iter()
-        .find(|n| n.mesh.is_some() && n.skin.is_some_and(|s| s < scene.skins.len()))?
-        .skin?;
-    let skin = &scene.skins[skin_index];
-    if skin.joints.is_empty() {
-        return None;
-    }
-    let mut mesh_indices: Vec<usize> = Vec::new();
+/// One rig per skin used by a mesh node, in order of first use.
+/// Geometry can be shared by nodes with the same mesh and skin, but never by
+/// different skin palettes or inverse bind tables.
+pub fn extract_rigs(scene: &Scene, config: &crate::LoadConfig) -> crate::Result<Vec<ImportedRig>> {
+    let mut skins = Vec::new();
     for node in &scene.nodes {
         if let (Some(mesh), Some(skin)) = (node.mesh, node.skin) {
-            if skin == skin_index && mesh < scene.meshes.len() && !mesh_indices.contains(&mesh) {
-                mesh_indices.push(mesh);
+            if mesh >= scene.meshes.len() || skin >= scene.skins.len() {
+                return Err(crate::AssetError::InvalidData(format!(
+                    "mesh node '{}' has an invalid mesh or skin",
+                    node.name
+                )));
+            }
+            if !skins.contains(&skin) {
+                skins.push(skin);
             }
         }
     }
-    if scene.skins.len() > 1 {
-        log::warn!(
-            "Source has {} skins; only the first one a mesh uses is imported",
-            scene.skins.len()
-        );
+    skins
+        .into_iter()
+        .map(|skin| extract_skin_rig(scene, config, skin))
+        .collect()
+}
+
+fn extract_skin_rig(
+    scene: &Scene,
+    config: &crate::LoadConfig,
+    skin_index: usize,
+) -> crate::Result<ImportedRig> {
+    let skin = &scene.skins[skin_index];
+    if skin.joints.is_empty() {
+        return Err(crate::AssetError::InvalidData(format!(
+            "skin {skin_index} has an invalid joint count: {}",
+            skin.joints.len()
+        )));
+    }
+    let mut mesh_indices = Vec::new();
+    for node in &scene.nodes {
+        if node.skin == Some(skin_index) {
+            if let Some(mesh) = node.mesh {
+                if !mesh_indices.contains(&mesh) {
+                    mesh_indices.push(mesh);
+                }
+            }
+        }
     }
 
     // Unit scale is applied to positions and translations (see LoadConfig).
@@ -187,7 +208,11 @@ pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<Imported
         };
         let t = &node.transform;
         let index = bones.len();
-        bone_of.insert(id, index);
+        if bone_of.insert(id, index).is_some() {
+            return Err(crate::AssetError::InvalidData(format!(
+                "cycle or repeated node in skin {skin_index}"
+            )));
+        }
         bones.push(ImportedBone {
             name: node.name.clone(),
             parent,
@@ -204,6 +229,12 @@ pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<Imported
         }
     }
 
+    if skin.joints.iter().any(|joint| !bone_of.contains_key(joint)) {
+        return Err(crate::AssetError::InvalidData(format!(
+            "skin {skin_index} references missing or cyclic joint nodes"
+        )));
+    }
+
     // ── Joints ─────────────────────────────────────────────────────────────
     let joints: Vec<ImportedJoint> = skin
         .joints
@@ -216,13 +247,31 @@ pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<Imported
                 *t *= scale;
             }
             ImportedJoint {
-                bone: bone_of.get(id).copied().unwrap_or(0),
+                bone: bone_of[id],
                 inverse_bind: m,
             }
         })
         .collect();
 
-    // ── Geometry ───────────────────────────────────────────────────────────
+    let lods = extract_geometry(scene, config, mesh_indices, skin.joints.len())?;
+    Ok(ImportedRig {
+        source_skin: skin_index,
+        name: skin.name.clone(),
+        animations: extract_animations(scene, &bones, &bone_of, scale),
+        bones,
+        joints,
+        lods,
+        material_names: scene.materials.iter().map(|m| m.name.clone()).collect(),
+    })
+}
+
+fn extract_geometry(
+    scene: &Scene,
+    config: &crate::LoadConfig,
+    mesh_indices: Vec<usize>,
+    joint_count: usize,
+) -> crate::Result<Vec<ImportedLod>> {
+    let scale = config.import_scale.x;
     let mut mesh_lods: std::collections::BTreeMap<usize, Vec<usize>> =
         std::collections::BTreeMap::new();
     for mesh_index in mesh_indices {
@@ -239,7 +288,13 @@ pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<Imported
         let mut sections: Vec<RigSection> = Vec::new();
         for mesh_index in mesh_indices {
             let mesh = &scene.meshes[mesh_index];
-            let base = vertices.len() as u32;
+            let base = u32::try_from(vertices.len())
+                .map_err(|_| crate::AssetError::InvalidData("too many skinned vertices".into()))?;
+            let count = u32::try_from(mesh.vertices.len())
+                .map_err(|_| crate::AssetError::InvalidData("too many skinned vertices".into()))?;
+            base.checked_add(count).ok_or_else(|| {
+                crate::AssetError::InvalidData("too many skinned vertices".into())
+            })?;
             for v in &mesh.vertices {
                 let normal = v.normal.map_or([0.0, 1.0, 0.0], |n| [n.x, n.y, n.z]);
                 let uv = v.uvs[0].map_or([0.0, 0.0], |uv| {
@@ -252,7 +307,7 @@ pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<Imported
                 let (vertex_joints, weights) = v
                     .skin_weights
                     .as_ref()
-                    .and_then(|sw| clean_weights(sw.joints, sw.weights, skin.joints.len()))
+                    .and_then(|sw| clean_weights(sw.joints, sw.weights, joint_count))
                     .unwrap_or_else(|| {
                         unweighted += 1;
                         ([0; 4], [1.0, 0.0, 0.0, 0.0])
@@ -277,6 +332,12 @@ pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<Imported
                     );
                     continue;
                 }
+                if primitive.indices.iter().any(|&index| index >= count) {
+                    return Err(crate::AssetError::InvalidData(format!(
+                        "mesh '{}' has an invalid vertex index",
+                        mesh.name
+                    )));
+                }
                 let indices = primitive.indices.iter().map(|i| base + i);
                 match sections
                     .iter_mut()
@@ -296,17 +357,12 @@ pub fn extract_rig(scene: &Scene, config: &crate::LoadConfig) -> Option<Imported
         log::warn!("{unweighted} skinned vertices had no usable weights and were bound to joint 0");
     }
     if lods.iter().all(|lod| lod.vertices.is_empty()) {
-        return None;
+        return Err(crate::AssetError::InvalidData(
+            "skin has no mesh vertices".into(),
+        ));
     }
 
-    Some(ImportedRig {
-        name: scene.name.clone(),
-        animations: extract_animations(scene, &bones, &bone_of, scale),
-        bones,
-        joints,
-        lods,
-        material_names: scene.materials.iter().map(|m| m.name.clone()).collect(),
-    })
+    Ok(lods)
 }
 
 /// Common DCC naming convention, case-insensitive. The first numeric `LOD`
@@ -351,12 +407,12 @@ fn clean_weights(
             out_weights[k] = weights[k];
         }
     }
-    let sum: f32 = out_weights.iter().sum();
+    let sum: f64 = out_weights.iter().map(|&weight| f64::from(weight)).sum();
     if sum <= 0.0 {
         return None;
     }
     for w in &mut out_weights {
-        *w /= sum;
+        *w = (f64::from(*w) / sum) as f32;
     }
     Some((out_joints, out_weights))
 }

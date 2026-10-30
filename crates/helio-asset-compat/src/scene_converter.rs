@@ -214,7 +214,7 @@ pub struct ConvertedScene {
     /// The skeleton, skin weights and animations, when the source has a skinned
     /// mesh. The static `meshes` / `sectioned_mesh` above are produced as
     /// before either way.
-    pub rig: Option<crate::ImportedRig>,
+    pub rigs: Vec<crate::ImportedRig>,
 }
 
 /// One material section of a sectioned (multi-material) merged mesh.
@@ -231,6 +231,8 @@ pub struct ConvertedMeshSection {
 /// Use [`helio::Scene::insert_sectioned_mesh`] + [`helio::Scene::insert_sectioned_object`]
 /// to submit this to the GPU.
 pub struct ConvertedSectionedMesh {
+    /// Skin on the source mesh node; `None` for unskinned instances.
+    pub skin: Option<usize>,
     pub name: String,
     /// Shared vertex array — all sections index into this.
     pub vertices: Vec<PackedVertex>,
@@ -239,6 +241,7 @@ pub struct ConvertedSectionedMesh {
 }
 
 pub struct ConvertedMesh {
+    pub skin: Option<usize>,
     pub name: String,
     pub vertices: Vec<PackedVertex>,
     pub indices: Vec<u32>,
@@ -261,6 +264,7 @@ pub fn convert_scene(
     base_dir: &std::path::Path,
     config: &crate::LoadConfig,
 ) -> Result<ConvertedScene> {
+    let rigs = crate::extract_rigs(scene, config)?;
     log::info!(
         "Converting SolidRS scene '{}' with {} meshes, {} materials, {} textures",
         scene.name,
@@ -340,7 +344,8 @@ pub fn convert_scene(
     // Walk the scene node DAG to compute per-mesh world-space transforms.
     // A mesh may be referenced by multiple nodes (instancing); we collect all
     // transforms so each instance becomes its own ConvertedMesh entry.
-    let mut mesh_world_transforms: HashMap<usize, Vec<glam::Mat4>> = HashMap::new();
+    let mut mesh_world_transforms: HashMap<usize, Vec<(glam::Mat4, Option<usize>)>> =
+        HashMap::new();
     {
         // Iterative DFS: (node_id, parent_world_mat)
         let mut stack: Vec<(solid_rs::scene::NodeId, glam::Mat4)> = scene
@@ -361,7 +366,7 @@ pub fn convert_scene(
                 mesh_world_transforms
                     .entry(mesh_idx)
                     .or_default()
-                    .push(world);
+                    .push((world, node.skin));
             }
             for &child_id in &node.children {
                 stack.push((child_id, world));
@@ -381,7 +386,7 @@ pub fn convert_scene(
         let world_transforms = mesh_world_transforms
             .get(&mesh_idx)
             .map(|v| v.as_slice())
-            .unwrap_or(&[glam::Mat4::IDENTITY]);
+            .unwrap_or(&[(glam::Mat4::IDENTITY, None)]);
 
         if world_transforms.len() > 1 {
             log::debug!(
@@ -389,7 +394,10 @@ pub fn convert_scene(
                 mesh.name,
                 world_transforms.len()
             );
-        } else if !world_transforms[0].abs_diff_eq(glam::Mat4::IDENTITY, 1e-6) {
+        } else if !world_transforms[0]
+            .0
+            .abs_diff_eq(glam::Mat4::IDENTITY, 1e-6)
+        {
             log::debug!("Mesh '{}' has non-identity node transform", mesh.name);
         }
 
@@ -402,7 +410,7 @@ pub fn convert_scene(
         } else {
             mesh.name.clone()
         };
-        for (instance, &raw_node_transform) in world_transforms.iter().enumerate() {
+        for (instance, &(raw_node_transform, skin)) in world_transforms.iter().enumerate() {
             let node_transform = scale_mat * raw_node_transform;
             for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
                 let (vertices, indices) =
@@ -421,6 +429,7 @@ pub fn convert_scene(
                 };
 
                 meshes.push(ConvertedMesh {
+                    skin,
                     name: mesh_name,
                     vertices,
                     indices,
@@ -434,13 +443,7 @@ pub fn convert_scene(
         }
     }
 
-    // Merge all sub-meshes into a single flat mesh when requested.
-    // Each mesh's node_transform is baked into its vertex positions/normals/
-    // tangents so the merged result can live at IDENTITY.
-    if config.merge_meshes && !meshes.is_empty() {
-        let all: Vec<&ConvertedMesh> = meshes.iter().collect();
-        let sectioned = merge_sectioned(scene.name.clone(), &all);
-
+    let parts = if config.merge_meshes || !rigs.is_empty() {
         // The same geometry per source mesh and node instance, in the order
         // they first appear.
         let mut groups: Vec<((usize, usize), Vec<&ConvertedMesh>)> = Vec::new();
@@ -451,7 +454,7 @@ pub fn convert_scene(
                 None => groups.push((key, vec![sub])),
             }
         }
-        let parts: Vec<ConvertedSectionedMesh> = groups
+        groups
             .iter()
             .map(|(_, subs)| {
                 let first = subs[0];
@@ -460,9 +463,21 @@ pub fn convert_scene(
                 } else {
                     format!("{}_{}", first.source_name, first.instance + 1)
                 };
-                merge_sectioned(name, subs)
+                let mut part = merge_sectioned(name, subs);
+                part.skin = first.skin;
+                part
             })
-            .collect();
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Merge all sub-meshes into a single flat mesh when requested.
+    // Each mesh's node_transform is baked into its vertex positions/normals/
+    // tangents so the merged result can live at IDENTITY.
+    if config.merge_meshes && !meshes.is_empty() {
+        let all: Vec<&ConvertedMesh> = meshes.iter().collect();
+        let sectioned = merge_sectioned(scene.name.clone(), &all);
 
         let lights = scene
             .lights
@@ -485,7 +500,7 @@ pub fn convert_scene(
             cameras,
             sectioned_mesh: Some(sectioned),
             parts,
-            rig: crate::extract_rig(scene, config),
+            rigs,
         });
     }
 
@@ -509,8 +524,8 @@ pub fn convert_scene(
         lights,
         cameras,
         sectioned_mesh: None,
-        parts: Vec::new(),
-        rig: crate::extract_rig(scene, config),
+        parts,
+        rigs,
     })
 }
 
@@ -582,6 +597,7 @@ fn merge_sectioned(name: String, subs: &[&ConvertedMesh]) -> ConvertedSectionedM
         });
     }
     ConvertedSectionedMesh {
+        skin: None,
         name,
         vertices: shared_vertices,
         sections,

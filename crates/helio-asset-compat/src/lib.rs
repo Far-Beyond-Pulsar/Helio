@@ -28,7 +28,7 @@ pub use material_converter::{
 };
 pub use mesh_converter::{convert_primitive, convert_vertex};
 pub use rig_converter::{
-    extract_rig, ImportedBone, ImportedClip, ImportedInterpolation, ImportedJoint, ImportedKey,
+    extract_rigs, ImportedBone, ImportedClip, ImportedInterpolation, ImportedJoint, ImportedKey,
     ImportedLod, ImportedRig, ImportedTrack, RigSection, RigVertex,
 };
 pub use scene_converter::{
