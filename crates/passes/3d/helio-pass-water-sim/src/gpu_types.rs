@@ -112,8 +112,8 @@ impl GpuWaterVolume {
             reflection_refraction: [0.8, 0.2, 5.0, 0.85],
             caustics_params: [1.0, 1.5, 5.0, 0.5],
             fog_params: [0.03, 1.0, 0.0, 0.0],
-            // ior=1.333, caustic_intensity=1.5, fresnel_min=0.1, density=0.03
-            sim_params: [1.333, 1.5, 0.1, 0.03],
+            // ior=1.333, caustic_intensity=1.5, fresnel_min=0.02 (water's F0), density=0.03
+            sim_params: [1.333, 1.5, 0.02, 0.03],
             // rim=1.0, hitbox_shadow=0.0, ao=1.0
             shadow_params: [1.0, 0.0, 1.0, 0.0],
             // normalized sun direction
