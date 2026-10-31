@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{AnyElement, App, SharedString, WeakEntity, Window, prelude::*};
 use pulsar_reflection::{
+    VirtualRows,
     BoundPropertyEditor, EngineClass, PropertyEditorArgs, PropertyEditorFactory, PropertyMetadata,
     PropertyWriteBack,
 };
@@ -36,7 +37,7 @@ pub(crate) fn editor_factory(type_id: std::any::TypeId) -> Option<PropertyEditor
 /// Properties without a registered editor (lists, nested structs) and those
 /// `shows` hides are skipped.
 pub(crate) struct FieldRows {
-    editors: Vec<(usize, BoundPropertyEditor)>,
+    pub(crate) editors: Vec<(usize, BoundPropertyEditor)>,
     /// Pushes the current value into every editor.
     refresh: Arc<dyn Fn(&[(usize, BoundPropertyEditor)], &mut Window, &mut App) + Send + Sync>,
 }
@@ -135,6 +136,7 @@ pub fn apply_list_edit<T>(items: &mut Vec<T>, edit: ListEdit, new: impl FnOnce()
 
 /// One list item: its title with move and remove buttons, then its rows.
 /// `edit` applies a button's [`ListEdit`] to the owning view.
+#[allow(dead_code)]
 pub(crate) fn item_card<V: 'static>(
     id: &str,
     index: usize,
@@ -246,10 +248,6 @@ fn fingerprint<T: serde::Serialize>(value: &[T]) -> u64 {
     writer.0.finish()
 }
 
-/// Longer lists than this are drawn through a windowed list in a viewport of
-/// their own, so only the cards in view exist as elements.
-const WINDOWED_MIN_ITEMS: usize = 24;
-const VIEWPORT_HEIGHT: f32 = 360.0;
 
 /// A collapsible list item: a header (chevron, title, move and remove
 /// buttons) and, when `expanded`, its rows.
@@ -263,7 +261,7 @@ pub(crate) fn collapsible_item_card<V: 'static>(
     expanded: bool,
     rows: impl IntoIterator<Item = AnyElement>,
     edit: impl Fn(&mut V, ListEdit, &mut Window, &mut gpui::Context<V>) + Clone + 'static,
-    toggle: impl Fn(&mut V, usize, &mut gpui::Context<V>) + Clone + 'static,
+    toggle: impl Fn(&mut V, usize, &mut Window, &mut gpui::Context<V>) + Clone + 'static,
     cx: &mut gpui::Context<V>,
 ) -> AnyElement {
     let mut button = |name: &str, icon: IconName, tooltip: &str, list_edit: ListEdit| {
@@ -300,7 +298,7 @@ pub(crate) fn collapsible_item_card<V: 'static>(
         .gap_1()
         .items_center()
         .cursor_pointer()
-        .on_click(cx.listener(move |this, _, _, cx| toggle(this, index, cx)))
+        .on_click(cx.listener(move |this, _, window, cx| toggle(this, index, window, cx)))
         .child(
             ui::Icon::new(if expanded {
                 IconName::ChevronDown
@@ -324,14 +322,30 @@ pub(crate) fn collapsible_item_card<V: 'static>(
         .into_any_element()
 }
 
+/// One row of the list's flattened layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Entry {
+    /// The card header of item `0`.
+    Header(usize),
+    /// Field editor `k` of item `i`.
+    Field(usize, usize),
+    /// Row `ix` of the rows offered by field editor `k` of item `i` (a nested
+    /// list).
+    Nested(usize, usize, usize),
+}
+
 /// A `Vec<T>` property as an ordered list of cards: move up and down,
 /// remove, add, and every shown field of each item edited in place. The
 /// whole list writes back as one value, so undo is one step.
 ///
-/// Built to stay cheap on long lists of heavy items: cards start collapsed,
-/// an item's field editors are created only when its card is first opened,
-/// a change check is a streaming hash rather than a JSON copy, and a list
-/// past [`WINDOWED_MIN_ITEMS`] is drawn through a windowed list.
+/// Built to stay cheap on long lists of heavy items:
+/// - the editor's own row is only the title and the add button; the item
+///   cards, their fields and any nested lists are offered to the panel as
+///   [`VirtualRows`], so the panel's single list draws only what is in view,
+///   with no scroll area of its own;
+/// - cards start collapsed, and an item's field editors are created only when
+///   its card is first opened;
+/// - telling whether the list changed is a streaming hash, not a JSON copy.
 pub struct ReflectedListEditor<T: ReflectedListItem> {
     label: String,
     id: String,
@@ -345,15 +359,27 @@ pub struct ReflectedListEditor<T: ReflectedListItem> {
     /// Fingerprint of `current`, shared with the rows' write path so the
     /// value pushed back after a local edit is recognised as already shown.
     fingerprint: Arc<std::sync::atomic::AtomicU64>,
-    list_state: gpui::ListState,
-    scroll_state: ui::scroll::ScrollbarState,
+    /// Set by the host (via `VirtualRows::mark_stale`) when it re-read the
+    /// value; with the address check it keeps `set_value` from hashing a
+    /// huge list every frame.
+    stale: Arc<std::sync::atomic::AtomicBool>,
+    last_ptr: usize,
+    /// The rows offered to the panel, in order.
+    layout: Vec<Entry>,
+    /// The panel's wake-up (see [`VirtualRows::on_change`]).
+    wake: ListWake,
     this: WeakEntity<Self>,
 }
+
+/// Where the panel's wake-up callback is kept, shared by the editor and its
+/// [`VirtualRows`] handle.
+pub(crate) type ListWake = Arc<Mutex<Option<Arc<dyn Fn(&mut App) + Send + Sync>>>>;
 
 impl<T: ReflectedListItem> ReflectedListEditor<T> {
     pub fn new(
         args: &PropertyEditorArgs<'_>,
-        _window: &mut Window,
+        wake: ListWake,
+        stale: Arc<std::sync::atomic::AtomicBool>,
         cx: &mut gpui::Context<Self>,
     ) -> Self {
         let value = args
@@ -363,7 +389,7 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
             .unwrap_or_default();
         let hash = fingerprint(&value);
         let len = value.len();
-        Self {
+        let mut editor = Self {
             label: args.display_name.to_string(),
             id: format!(
                 "list-{}-{}-{}",
@@ -374,10 +400,14 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
             items: (0..len).map(|_| None).collect(),
             expanded: Default::default(),
             fingerprint: Arc::new(std::sync::atomic::AtomicU64::new(hash)),
-            list_state: gpui::ListState::new(len, gpui::ListAlignment::Top, gpui::px(300.0)),
-            scroll_state: Default::default(),
+            stale,
+            last_ptr: args.current_value as *const dyn Any as *const () as usize,
+            layout: Vec::new(),
+            wake,
             this: cx.weak_entity(),
-        }
+        };
+        editor.relayout(cx);
+        editor
     }
 
     fn value(&self) -> Vec<T> {
@@ -394,7 +424,7 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
         let write_back = self.write_back.clone();
         let this = self.this.clone();
         let fingerprint_slot = self.fingerprint.clone();
-        FieldRows::new(
+        let rows = FieldRows::new(
             item,
             &format!("{}-{i}", self.id),
             T::CLASS_NAME,
@@ -421,14 +451,28 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
                     window.defer(cx, move |window, cx| {
                         let _ = this.update(cx, |this, cx| {
                             this.refresh(window, cx);
-                            cx.notify();
+                            this.changed(cx);
                         });
                     });
                 }
             },
             window,
             cx,
-        )
+        );
+        // A nested list changing its own rows reshapes ours.
+        let this = self.this.clone();
+        let nested_changed: Arc<dyn Fn(&mut App) + Send + Sync> = Arc::new(move |cx: &mut App| {
+            let _ = this.update(cx, |this, cx| {
+                this.relayout(cx);
+                this.changed(cx);
+            });
+        });
+        for (_, editor) in &rows.editors {
+            if let Some(nested) = &editor.rows {
+                nested.on_change(nested_changed.clone());
+            }
+        }
+        rows
     }
 
     /// Build the rows of item `i` if it is open and they are missing or were
@@ -455,22 +499,52 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
         }
     }
 
-    /// Match the per-item slots to the list: a different length drops every
-    /// built row (rows follow indices).
-    fn sync_len(&mut self) {
+    /// Recompute the rows offered to the panel from the open cards and the
+    /// row counts of their nested editors.  Cheap enough to run on every
+    /// structural change; the panel only reads the result.
+    fn relayout(&mut self, cx: &App) {
         let len = self.len();
         if self.items.len() != len {
             self.items = (0..len).map(|_| None).collect();
-            let old = self.list_state.item_count();
-            self.list_state.splice(0..old, len);
+        }
+        let mut layout = Vec::new();
+        for i in 0..len {
+            layout.push(Entry::Header(i));
+            if !self.expanded.contains(&i) {
+                continue;
+            }
+            let Some(Some((rows, _))) = self.items.get(i) else {
+                continue;
+            };
+            for (k, (_, editor)) in rows.editors.iter().enumerate() {
+                layout.push(Entry::Field(i, k));
+                if let Some(nested) = &editor.rows {
+                    layout.extend(
+                        (0..nested.row_count(cx)).map(|ix| Entry::Nested(i, k, ix)),
+                    );
+                }
+            }
+        }
+        self.layout = layout;
+    }
+
+    /// Repaint, and wake the panel so it re-reads the row count.  The wake is
+    /// deferred: a change can arrive while the panel is mid-render.
+    fn changed(&mut self, cx: &mut gpui::Context<Self>) {
+        cx.notify();
+        let wake = self.wake.lock().ok().and_then(|slot| slot.clone());
+        if let Some(wake) = wake {
+            cx.defer(move |cx| wake(cx));
         }
     }
 
     /// Push the current value into the rows that exist, and drop those whose
-    /// shown fields changed (they rebuild when next drawn).
+    /// shown fields changed (they rebuild straight away if their card is open).
     fn refresh(&mut self, window: &mut Window, cx: &mut App) {
-        self.sync_len();
         let value = self.value();
+        if self.items.len() != value.len() {
+            self.items = (0..value.len()).map(|_| None).collect();
+        }
         for (i, item) in value.iter().enumerate() {
             let mask = shown(item);
             let stale = self
@@ -483,8 +557,11 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
             }
             if let Some(Some((rows, _))) = self.items.get(i) {
                 rows.refresh(window, cx);
+            } else {
+                self.ensure_rows(i, window, cx);
             }
         }
+        self.relayout(cx);
     }
 
     fn edit_list(&mut self, edit: ListEdit, window: &mut Window, cx: &mut gpui::Context<Self>) {
@@ -503,25 +580,34 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
         if let Ok(mut current) = self.current.lock() {
             *current = items.clone();
         }
-        // Rows follow indices: every built item starts again.
+        // Rows follow indices: every item's rows start again.
         self.items = (0..items.len()).map(|_| None).collect();
-        let old = self.list_state.item_count();
-        self.list_state.splice(0..old, items.len());
+        for i in 0..items.len() {
+            self.ensure_rows(i, window, cx);
+        }
+        self.relayout(cx);
         (self.write_back)(Box::new(items), window, cx);
-        cx.notify();
+        self.changed(cx);
     }
 
-    fn toggle(&mut self, index: usize, cx: &mut gpui::Context<Self>) {
+    /// Open or close item `index`'s card.
+    pub fn toggle(&mut self, index: usize, window: &mut Window, cx: &mut gpui::Context<Self>) {
         if !self.expanded.remove(&index) {
             self.expanded.insert(index);
+            self.ensure_rows(index, window, cx);
         }
-        // The card changes height; the windowed list measures what it shows.
-        self.list_state.remeasure();
-        cx.notify();
+        self.relayout(cx);
+        self.changed(cx);
     }
 
     /// Accept a value that changed elsewhere (undo, a preset, a blueprint).
     fn set_value(&mut self, value: &Vec<T>, window: &mut Window, cx: &mut gpui::Context<Self>) {
+        let ptr = value as *const Vec<T> as usize;
+        let stale = self.stale.swap(false, std::sync::atomic::Ordering::AcqRel);
+        if ptr == self.last_ptr && !stale {
+            return;
+        }
+        self.last_ptr = ptr;
         let hash = fingerprint(value);
         if hash == self.fingerprint.load(std::sync::atomic::Ordering::Acquire) {
             return;
@@ -532,38 +618,80 @@ impl<T: ReflectedListItem> ReflectedListEditor<T> {
             *current = value.clone();
         }
         self.refresh(window, cx);
-        cx.notify();
+        self.changed(cx);
     }
 
-    /// One card: its header, and its rows when open.
-    fn card(
+    /// Row `ix` of the layout.
+    fn render_entry(
         &mut self,
-        i: usize,
-        item: &T,
+        ix: usize,
         window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> AnyElement {
-        self.ensure_rows(i, window, cx);
-        let open = self.expanded.contains(&i);
-        let rows: Vec<AnyElement> = match self.items.get(i) {
-            Some(Some((rows, _))) if open => rows.views().collect(),
-            _ => Vec::new(),
+        let Some(entry) = self.layout.get(ix).copied() else {
+            return gpui::div().into_any_element();
         };
-        collapsible_item_card(
-            &self.id,
-            i,
-            item.title(i),
-            open,
-            rows,
-            |this: &mut Self, edit, window, cx| this.edit_list(edit, window, cx),
-            |this: &mut Self, index, cx| this.toggle(index, cx),
-            cx,
-        )
+        let field_view = |view: gpui::AnyView| {
+            gpui::div()
+                .w_full()
+                .pl(gpui::px(12.))
+                .child(view.cached_auto_height(
+                    gpui::StyleRefinement::default().w_full().flex_shrink_0(),
+                ))
+                .into_any_element()
+        };
+        match entry {
+            Entry::Header(i) => {
+                // The title is read in place: cloning the item to read it would
+                // copy every nested list for each header drawn.
+                let title = self
+                    .current
+                    .lock()
+                    .ok()
+                    .and_then(|v| v.get(i).map(|item| item.title(i)));
+                let Some(title) = title else {
+                    return gpui::div().into_any_element();
+                };
+                collapsible_item_card(
+                    &self.id,
+                    i,
+                    title,
+                    self.expanded.contains(&i),
+                    std::iter::empty(),
+                    |this: &mut Self, edit, window, cx| this.edit_list(edit, window, cx),
+                    |this: &mut Self, index, window, cx| this.toggle(index, window, cx),
+                    cx,
+                )
+            }
+            Entry::Field(i, k) => match self.items.get(i) {
+                Some(Some((rows, _))) => match rows.editors.get(k) {
+                    Some((_, editor)) => field_view(editor.view.clone()),
+                    None => gpui::div().into_any_element(),
+                },
+                _ => gpui::div().into_any_element(),
+            },
+            Entry::Nested(i, k, n) => {
+                let nested = match self.items.get(i) {
+                    Some(Some((rows, _))) => {
+                        rows.editors.get(k).and_then(|(_, editor)| editor.rows.clone())
+                    }
+                    _ => None,
+                };
+                match nested {
+                    Some(nested) => gpui::div()
+                        .w_full()
+                        .pl(gpui::px(12.))
+                        .child(nested.render_row(n, window, cx))
+                        .into_any_element(),
+                    None => gpui::div().into_any_element(),
+                }
+            }
+        }
     }
 }
 
 /// Where the open cards sit after `edit` of a list that held `len` items.
-fn remap_expanded(
+pub(crate) fn remap_expanded(
     expanded: &std::collections::HashSet<usize>,
     edit: ListEdit,
     len: usize,
@@ -595,57 +723,15 @@ fn remap_expanded(
         .collect()
 }
 
+/// The editor's own row: the title with its count, and the add button.  The
+/// item cards are the panel's rows ([`VirtualRows`]).
 impl<T: ReflectedListItem> gpui::Render for ReflectedListEditor<T> {
     fn render(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
-        self.sync_len();
         let len = self.len();
-        let cards: Option<Vec<AnyElement>> = (len <= WINDOWED_MIN_ITEMS).then(|| {
-            let value = self.value();
-            value
-                .iter()
-                .enumerate()
-                .map(|(i, item)| self.card(i, item, window, cx))
-                .collect()
-        });
-        let windowed = cards.is_none().then(|| {
-            let items = gpui::list(
-                self.list_state.clone(),
-                cx.processor(|this: &mut Self, i: usize, window, cx| {
-                    let item = this.current.lock().ok().and_then(|v| v.get(i).cloned());
-                    match item {
-                        Some(item) => gpui::div()
-                            .w_full()
-                            .pb_1()
-                            .child(this.card(i, &item, window, cx))
-                            .into_any_element(),
-                        None => gpui::div().into_any_element(),
-                    }
-                }),
-            )
-            .size_full();
-            gpui::div()
-                .id(SharedString::from(format!("{}-viewport", self.id)))
-                .relative()
-                .w_full()
-                .h(gpui::px(VIEWPORT_HEIGHT))
-                .child(items)
-                .child(
-                    gpui::div()
-                        .absolute()
-                        .top_0()
-                        .right_0()
-                        .bottom_0()
-                        .w(gpui::px(12.))
-                        .child(ui::scroll::Scrollbar::vertical(
-                            &self.scroll_state,
-                            &self.list_state,
-                        )),
-                )
-        });
         let add = (len < T::MAX_ITEMS).then(|| {
             Button::new(SharedString::from(format!("{}-add", self.id)))
                 .icon(IconName::Plus)
@@ -670,9 +756,36 @@ impl<T: ReflectedListItem> gpui::Render for ReflectedListEditor<T> {
                     .text_color(cx.theme().foreground)
                     .child(count),
             )
-            .children(cards.into_iter().flatten())
-            .children(windowed)
             .children(add)
+    }
+}
+
+/// The panel's handle on a list's rows.
+struct ListRows<T: ReflectedListItem> {
+    stale: Arc<std::sync::atomic::AtomicBool>,
+    editor: gpui::Entity<ReflectedListEditor<T>>,
+    wake: ListWake,
+}
+
+impl<T: ReflectedListItem> VirtualRows for ListRows<T> {
+    fn row_count(&self, cx: &App) -> usize {
+        self.editor.read(cx).layout.len()
+    }
+
+    fn render_row(&self, index: usize, window: &mut Window, cx: &mut App) -> AnyElement {
+        self.editor
+            .update(cx, |editor, cx| editor.render_entry(index, window, cx))
+    }
+
+    fn on_change(&self, wake: Arc<dyn Fn(&mut App) + Send + Sync>) {
+        if let Ok(mut slot) = self.wake.lock() {
+            *slot = Some(wake);
+        }
+    }
+
+    fn mark_stale(&self) {
+        self.stale
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -682,13 +795,21 @@ pub fn reflected_list_editor<T: ReflectedListItem>(
     window: &mut Window,
     cx: &mut App,
 ) -> BoundPropertyEditor {
-    let entity = cx.new(|cx| ReflectedListEditor::<T>::new(args, window, cx));
+    let _ = window;
+    let wake: ListWake = Default::default();
+    let stale = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let entity = cx.new(|cx| ReflectedListEditor::<T>::new(args, wake.clone(), stale.clone(), cx));
     BoundPropertyEditor::new(
-        entity,
+        entity.clone(),
         |editor: &mut ReflectedListEditor<T>, value: &Vec<T>, window, cx| {
             editor.set_value(value, window, cx)
         },
     )
+    .with_rows(Arc::new(ListRows {
+        stale,
+        editor: entity,
+        wake,
+    }))
 }
 
 /// Register [`ReflectedListEditor`] as the inspector editor of `Vec<$item>`.
