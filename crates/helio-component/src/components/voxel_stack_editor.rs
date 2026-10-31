@@ -83,7 +83,6 @@ enum Entry {
     Field(Slot, usize),
     /// Row `ix` offered by field editor `k` of a slot (a nested list).
     Nested(Slot, usize, usize),
-    Add(List),
 }
 
 pub struct VoxelTerrainStackEditor {
@@ -403,7 +402,6 @@ impl VoxelTerrainStackEditor {
                             fields(&mut layout, Slot::Layer(i));
                         }
                     }
-                    layout.push(Entry::Add(List::Layers));
                 }
                 Section::Rules => {
                     for i in 0..n_rules {
@@ -412,7 +410,6 @@ impl VoxelTerrainStackEditor {
                             fields(&mut layout, Slot::Rule(i));
                         }
                     }
-                    layout.push(Entry::Add(List::Rules));
                 }
                 Section::Materials => fields(&mut layout, Slot::Materials),
                 Section::Caves => fields(&mut layout, Slot::Caves),
@@ -605,6 +602,23 @@ impl VoxelTerrainStackEditor {
                 .into_any_element(),
             Entry::Heading(section) => {
                 let open = self.open_sections.contains(&section);
+                // Lists add their items from the heading row, top right.
+                let list = match section {
+                    Section::Layers => Some((List::Layers, "Add layer")),
+                    Section::Rules => Some((List::Rules, "Add rule")),
+                    _ => None,
+                };
+                let add = list.map(|(list, tooltip)| {
+                    Button::new(SharedString::from(format!("{}-add-{section:?}", self.id)))
+                        .icon(IconName::Plus)
+                        .xsmall()
+                        .ghost()
+                        .tooltip(tooltip)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.edit_list(list, ListEdit::Add, window, cx)
+                        }))
+                });
                 gpui::div()
                     .id(SharedString::from(format!("{}-{section:?}", self.id)))
                     .pt_2()
@@ -626,7 +640,8 @@ impl VoxelTerrainStackEditor {
                         .xsmall()
                         .text_color(cx.theme().muted_foreground),
                     )
-                    .child(section.title())
+                    .child(gpui::div().flex_1().child(section.title()))
+                    .children(add)
                     .into_any_element()
             }
             Entry::Header(list, i) => {
@@ -676,21 +691,6 @@ impl VoxelTerrainStackEditor {
                     Some(nested) => indented(nested.render_row(n, window, cx), 12.0),
                     None => gpui::div().into_any_element(),
                 }
-            }
-            Entry::Add(list) => {
-                let (tag, label) = match list {
-                    List::Layers => ("layer", "Add layer"),
-                    List::Rules => ("rule", "Add rule"),
-                };
-                Button::new(SharedString::from(format!("{}-add-{tag}", self.id)))
-                    .icon(IconName::Plus)
-                    .label(label.to_string())
-                    .xsmall()
-                    .ghost()
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.edit_list(list, ListEdit::Add, window, cx)
-                    }))
-                    .into_any_element()
             }
         }
     }

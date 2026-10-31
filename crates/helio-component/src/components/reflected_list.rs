@@ -735,7 +735,7 @@ impl<T: ReflectedListItem> gpui::Render for ReflectedListEditor<T> {
         let add = (len < T::MAX_ITEMS).then(|| {
             Button::new(SharedString::from(format!("{}-add", self.id)))
                 .icon(IconName::Plus)
-                .label(format!("Add {}", T::NOUN))
+                .tooltip(format!("Add {}", T::NOUN))
                 .xsmall()
                 .ghost()
                 .on_click(
@@ -747,8 +747,10 @@ impl<T: ReflectedListItem> gpui::Render for ReflectedListEditor<T> {
         } else {
             format!("{} ({}/{})", self.label, len, T::MAX_ITEMS)
         };
-        v_flex()
+        h_flex()
             .w_full()
+            .items_center()
+            .justify_between()
             .gap_1()
             .child(
                 gpui::div()
