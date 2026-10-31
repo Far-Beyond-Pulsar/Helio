@@ -5414,3 +5414,55 @@ fn sun_rays_from_walls_on_chunk_sides_match_cpu_rays() {
     let failed = sun_rays_against_cpu(gpu, &planet, &view, &suns);
     assert!(failed.is_empty(), "sun rays off the CPU's: {failed:?}");
 }
+
+/// Smoothing changes how a hit is lit, not where it is: a dug bowl in the
+/// ground (edited cells, no natural steps) drawn blocky and then smooth hits
+/// the same cells at the same distances, and its sun stays a valid
+/// visibility that smoothing changes somewhere (the shading normals).
+#[test]
+fn smooth_surfaces_are_lit_not_moved() {
+    let Some(gpu) = gpu() else { return };
+    let mut planet = Planet::new(PlanetRecipe::default()).unwrap();
+    let view = ground_view(&planet, land(&planet, 4, 0.37, 0.61), [320, 180]);
+    let bowl = view.eye + view.forward.as_dvec3() * 8.0;
+    planet
+        .apply(Brush {
+            center: bowl.to_array(),
+            radius: 3.0,
+            shape: BrushShape::Sphere,
+            op: BrushOp::Remove,
+            material: 0,
+            height: 0.0,
+        })
+        .unwrap();
+    let mut world = World::new(gpu, &planet);
+    world.chunks.set_steady_shadows(true);
+    let blocky = world.settle(gpu, &planet, &view);
+    let blocky_sun = read_sun_visibility(gpu, &world);
+
+    let smooth_look = helio_pass_voxel_planet::engine::TerrainAppearance {
+        smoothing: 1.0,
+        ..Default::default()
+    };
+    world.chunks.set_appearance(VolumeId(0), &smooth_look);
+    for _ in 0..4 {
+        world.frame(gpu, &planet, &view, None);
+    }
+    let smooth = world.settle(gpu, &planet, &view);
+    let smooth_sun = read_sun_visibility(gpu, &world);
+
+    assert_eq!(blocky.len(), smooth.len());
+    let moved = blocky.iter().zip(&smooth).filter(|(a, b)| a != b).count();
+    assert_eq!(moved, 0, "smoothing moved {moved} hits");
+    assert!(
+        smooth_sun.iter().all(|v| v.is_finite() && (-1e-3..=1.001).contains(v)),
+        "smooth sun visibility is not a visibility"
+    );
+    let relit = blocky_sun
+        .iter()
+        .zip(&smooth_sun)
+        .filter(|(a, b)| (*a - *b).abs() > 1e-3)
+        .count();
+    eprintln!("smoothing relit {relit} of {} pixels", smooth_sun.len());
+    assert!(relit > 0, "smoothing changed no pixel's light");
+}

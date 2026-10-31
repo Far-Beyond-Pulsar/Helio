@@ -393,6 +393,20 @@ materials by style, or by up to 16 ordered `MaterialRule`s (height, slope,
 depth, moisture, erosion, noise patches, strata, specks), so a game's biomes
 change without recompiling shaders.
 
+**Smooth surfaces.** `ChunkPass::set_smoothing(0..1)` (the voxel component's
+`smoothness`) lights every hit by the normal of the smooth surface its voxels
+approximate: minus the gradient of a separable quadratic B-spline density
+over the 3x3x3 cells around the hit (`smooth_normal` in `chunk_draw.wgsl`),
+continuous across cells, the face's own on a flat wall, rounding edges, steps
+and corners over about a cell. It applies to edits, caves, overhangs and
+features; natural heightfield steps keep their exact stored slope. The voxel
+pigment mosaic and edge darkening fade with it, and a sun ray's skip over the
+steps scales with how far the smooth normal leans from the face. It is
+shading only: cells, hits, collision, ray casts and edits are unchanged
+(`smooth_surfaces_are_lit_not_moved`), so silhouettes stay voxel-stepped at
+voxel scale. `TerrainAppearance::smoothing` carries it (not part of an
+appearance file).
+
 **Appearance.** `ChunkPass::set_appearance` updates the material table and
 detail weights without regenerating terrain. RGB is sRGB; roughness is
 linear. When it returns `true`, reset temporal history to show the change
