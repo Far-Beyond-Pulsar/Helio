@@ -205,7 +205,7 @@ impl Cache {
         }
         let index_bytes = match &index {
             CachedSpatialIndex::Bvh(bvh) => bvh.estimated_bytes,
-            CachedSpatialIndex::LinearFallback(_) => 0,
+            CachedSpatialIndex::LinearFallback => 0,
         };
         if index_bytes > MAX_CACHE_BYTES {
             return;
@@ -215,7 +215,7 @@ impl Cache {
             self.lru.retain(|entry| *entry != key);
         }
         while self.entries.len() >= MAX_CACHE_ENTRIES
-            || self.bytes.saturating_add(bvh.estimated_bytes) > MAX_CACHE_BYTES
+            || self.bytes.saturating_add(index_bytes) > MAX_CACHE_BYTES
         {
             let Some(old_key) = self.lru.pop_front() else {
                 break;
