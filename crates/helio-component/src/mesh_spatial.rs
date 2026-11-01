@@ -32,6 +32,14 @@ struct MeshBvh {
     estimated_bytes: usize,
 }
 
+#[derive(Clone)]
+enum CachedSpatialIndex {
+    Bvh(Arc<MeshBvh>),
+    /// The BVH exceeds the memory budget. Remember this by content key so a
+    /// viewport query does not rebuild and discard the same large tree.
+    LinearFallback,
+}
+
 impl MeshBvh {
     fn build(vertices: &[PackedVertex], indices: &[u32]) -> Self {
         let mut triangles = Vec::new();
@@ -178,25 +186,32 @@ impl MeshBvh {
 
 #[derive(Default)]
 struct Cache {
-    entries: HashMap<MeshGeometryKey, Arc<MeshBvh>>,
+    entries: HashMap<MeshGeometryKey, CachedSpatialIndex>,
     lru: VecDeque<MeshGeometryKey>,
     bytes: usize,
 }
 
 impl Cache {
-    fn get(&mut self, key: MeshGeometryKey) -> Option<Arc<MeshBvh>> {
+    fn get(&mut self, key: MeshGeometryKey) -> Option<CachedSpatialIndex> {
         let value = self.entries.get(&key)?.clone();
         self.lru.retain(|entry| *entry != key);
         self.lru.push_back(key);
         Some(value)
     }
 
-    fn insert(&mut self, key: MeshGeometryKey, bvh: Arc<MeshBvh>) {
-        if key == MeshGeometryKey::NONE || bvh.estimated_bytes > MAX_CACHE_BYTES {
+    fn insert(&mut self, key: MeshGeometryKey, index: CachedSpatialIndex) {
+        if key == MeshGeometryKey::NONE {
+            return;
+        }
+        let index_bytes = match &index {
+            CachedSpatialIndex::Bvh(bvh) => bvh.estimated_bytes,
+            CachedSpatialIndex::LinearFallback(_) => 0,
+        };
+        if index_bytes > MAX_CACHE_BYTES {
             return;
         }
         if let Some(old) = self.entries.remove(&key) {
-            self.bytes = self.bytes.saturating_sub(old.estimated_bytes);
+            self.bytes = self.bytes.saturating_sub(cached_index_bytes(&old));
             self.lru.retain(|entry| *entry != key);
         }
         while self.entries.len() >= MAX_CACHE_ENTRIES
@@ -206,12 +221,19 @@ impl Cache {
                 break;
             };
             if let Some(old) = self.entries.remove(&old_key) {
-                self.bytes = self.bytes.saturating_sub(old.estimated_bytes);
+                self.bytes = self.bytes.saturating_sub(cached_index_bytes(&old));
             }
         }
-        self.bytes = self.bytes.saturating_add(bvh.estimated_bytes);
-        self.entries.insert(key, bvh);
+        self.bytes = self.bytes.saturating_add(index_bytes);
+        self.entries.insert(key, index);
         self.lru.push_back(key);
+    }
+}
+
+fn cached_index_bytes(index: &CachedSpatialIndex) -> usize {
+    match index {
+        CachedSpatialIndex::Bvh(bvh) => bvh.estimated_bytes,
+        CachedSpatialIndex::LinearFallback => 0,
     }
 }
 
@@ -262,23 +284,28 @@ fn cache_key(key: MeshGeometryKey, vertices: &[PackedVertex], indices: &[u32]) -
 /// fingerprint so generated geometry can also be retained.
 pub fn prewarm_mesh_bvh(key: MeshGeometryKey, vertices: &[PackedVertex], indices: &[u32]) -> bool {
     let key = cache_key(key, vertices, indices);
-    if cache()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(key)
-        .is_some()
-    {
-        return true;
+    let mut cache = cache().lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(index) = cache.get(key) {
+        return matches!(index, CachedSpatialIndex::Bvh(_));
     }
+    drop(cache);
     let bvh = Arc::new(MeshBvh::build(vertices, indices));
-    if bvh.triangles.is_empty() || bvh.estimated_bytes > MAX_CACHE_BYTES {
+    if bvh.triangles.is_empty() {
         return false;
     }
+    let fits = bvh.estimated_bytes <= MAX_CACHE_BYTES;
     cache()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .insert(key, bvh);
-    true
+        .insert(
+            key,
+            if fits {
+                CachedSpatialIndex::Bvh(bvh)
+            } else {
+            CachedSpatialIndex::LinearFallback
+            },
+        );
+    fits
 }
 
 /// Return the nearest forward ray hit in mesh-local units.
@@ -297,25 +324,41 @@ pub fn raycast_mesh(
         return None;
     }
     let key = cache_key(key, vertices, indices);
-    let bvh = if key != MeshGeometryKey::NONE {
+    let cached = if key != MeshGeometryKey::NONE {
         cache()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .get(key)
     } else {
         None
-    }
-    .unwrap_or_else(|| {
-        let bvh = Arc::new(MeshBvh::build(vertices, indices));
-        if key != MeshGeometryKey::NONE {
-            cache()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .insert(key, bvh.clone());
+    };
+    match cached {
+        Some(CachedSpatialIndex::Bvh(bvh)) => bvh.raycast(vertices, origin, direction),
+        Some(CachedSpatialIndex::LinearFallback) => {
+            raycast_linear(vertices, indices, origin, direction)
         }
-        bvh
-    });
-    bvh.raycast(vertices, origin, direction)
+        None => {
+            let bvh = Arc::new(MeshBvh::build(vertices, indices));
+            if key != MeshGeometryKey::NONE {
+                let fits = bvh.estimated_bytes <= MAX_CACHE_BYTES;
+                cache()
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .insert(
+                        key,
+                        if fits {
+                            CachedSpatialIndex::Bvh(bvh.clone())
+                        } else {
+                            CachedSpatialIndex::LinearFallback
+                        },
+                    );
+                if !fits {
+                    return raycast_linear(vertices, indices, origin, direction);
+                }
+            }
+            bvh.raycast(vertices, origin, direction)
+        }
+    }
 }
 
 fn triangle_bounds(triangles: &[Triangle], vertices: &[PackedVertex]) -> (Vec3, Vec3) {
@@ -331,6 +374,45 @@ fn triangle_bounds(triangles: &[Triangle], vertices: &[PackedVertex]) -> (Vec3, 
         }
     }
     (min, max)
+}
+
+fn raycast_linear(
+    vertices: &[PackedVertex],
+    indices: &[u32],
+    origin: Vec3,
+    direction: Vec3,
+) -> Option<f32> {
+    let mut nearest = f32::INFINITY;
+    let mut test = |a: u32, b: u32, c: u32| {
+        let (Some(a), Some(b), Some(c)) = (
+            vertices.get(a as usize),
+            vertices.get(b as usize),
+            vertices.get(c as usize),
+        ) else {
+            return;
+        };
+        let triangle = [a, b, c].map(|vertex| Vec3::from_array(vertex.position));
+        if let Some(hit) = ray_triangle(origin, direction, triangle) {
+            nearest = nearest.min(hit);
+        }
+    };
+    if indices.is_empty() {
+        for first in (0..vertices.len().saturating_sub(2)).step_by(3) {
+            let (Ok(a), Ok(b), Ok(c)) = (
+                u32::try_from(first),
+                u32::try_from(first + 1),
+                u32::try_from(first + 2),
+            ) else {
+                break;
+            };
+            test(a, b, c);
+        }
+    } else {
+        for [a, b, c] in indices.chunks_exact(3).map(|chunk| [chunk[0], chunk[1], chunk[2]]) {
+            test(a, b, c);
+        }
+    }
+    nearest.is_finite().then_some(nearest)
 }
 
 fn ray_aabb(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
