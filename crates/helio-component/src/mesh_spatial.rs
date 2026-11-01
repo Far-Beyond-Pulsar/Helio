@@ -284,11 +284,11 @@ fn cache_key(key: MeshGeometryKey, vertices: &[PackedVertex], indices: &[u32]) -
 /// fingerprint so generated geometry can also be retained.
 pub fn prewarm_mesh_bvh(key: MeshGeometryKey, vertices: &[PackedVertex], indices: &[u32]) -> bool {
     let key = cache_key(key, vertices, indices);
-    let mut cache = cache().lock().unwrap_or_else(|poison| poison.into_inner());
-    if let Some(index) = cache.get(key) {
+    let mut spatial_cache = cache().lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(index) = spatial_cache.get(key) {
         return matches!(index, CachedSpatialIndex::Bvh(_));
     }
-    drop(cache);
+    drop(spatial_cache);
     let triangle_count = if indices.is_empty() {
         vertices.len() / 3
     } else {
