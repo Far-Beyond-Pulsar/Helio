@@ -289,6 +289,18 @@ pub fn prewarm_mesh_bvh(key: MeshGeometryKey, vertices: &[PackedVertex], indices
         return matches!(index, CachedSpatialIndex::Bvh(_));
     }
     drop(cache);
+    let triangle_count = if indices.is_empty() {
+        vertices.len() / 3
+    } else {
+        indices.len() / 3
+    };
+    if estimated_bvh_bytes(triangle_count) > MAX_CACHE_BYTES {
+        cache()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(key, CachedSpatialIndex::LinearFallback);
+        return false;
+    }
     let bvh = Arc::new(MeshBvh::build(vertices, indices));
     if bvh.triangles.is_empty() {
         return false;
@@ -306,6 +318,21 @@ pub fn prewarm_mesh_bvh(key: MeshGeometryKey, vertices: &[PackedVertex], indices
             },
         );
     fits
+}
+
+fn estimated_bvh_bytes(triangle_count: usize) -> usize {
+    if triangle_count == 0 {
+        return 0;
+    }
+    // Each leaf holds at most eight triangles; each split adds one internal
+    // node. This upper bound avoids building a huge tree only to discard it.
+    let max_nodes = triangle_count
+        .div_ceil(8)
+        .saturating_mul(2)
+        .saturating_sub(1);
+    triangle_count
+        .saturating_mul(std::mem::size_of::<Triangle>())
+        .saturating_add(max_nodes.saturating_mul(std::mem::size_of::<Node>()))
 }
 
 /// Return the nearest forward ray hit in mesh-local units.
