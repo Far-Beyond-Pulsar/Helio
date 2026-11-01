@@ -12,6 +12,7 @@ pub mod material_assets;
 pub mod material_graph;
 pub mod material_textures;
 pub mod mesh_cache;
+pub mod mesh_spatial;
 pub mod mesh_thumbnail;
 mod motion_gate;
 mod static_move_watch;

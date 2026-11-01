@@ -51,6 +51,13 @@ struct ScreenSize {
     _pad1: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct PortalGlobals {
+    time: f32,
+    _pad: [f32; 3],
+}
+
 type PortalBindGroupKey = ([wgpu::Buffer; 10], wgpu::TextureView);
 
 pub struct PortalInstancePass {
@@ -75,6 +82,7 @@ pub struct PortalInstancePass {
     bind_group_layout_1: wgpu::BindGroupLayout,
 
     screen_buf: wgpu::Buffer,
+    globals_buf: wgpu::Buffer,
 
     /// Shared with `PortalCullPass` — this pass only reads them.
     portal_indirect_buf: Arc<wgpu::Buffer>,
@@ -114,6 +122,12 @@ impl PortalInstancePass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PortalInstance/Globals"),
+            size: std::mem::size_of::<PortalGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let bind_group_layout_0 =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -141,6 +155,7 @@ impl PortalInstancePass {
                     storage_entry(10, wgpu::ShaderStages::VERTEX_FRAGMENT, true), // chain portal IDs
                     storage_entry(11, wgpu::ShaderStages::VERTEX, true), // skeletal skin stream
                     storage_entry(12, wgpu::ShaderStages::VERTEX, true), // current + previous palettes
+                    uniform_entry(13, wgpu::ShaderStages::FRAGMENT, false), // frame globals
                 ],
             });
         let bind_group_layout_1 = helio_pass_gbuffer::create_material_bgl(device, material_binding);
@@ -166,6 +181,7 @@ impl PortalInstancePass {
             bind_group_layout_0,
             bind_group_layout_1,
             screen_buf,
+            globals_buf,
             portal_indirect_buf,
             portal_compacted_indices_buf,
             portal_compacted_chains_buf,
@@ -571,6 +587,14 @@ impl RenderPass for PortalInstancePass {
             _pad1: 0.0,
         };
         ctx.write_buffer(&self.screen_buf, 0, bytemuck::bytes_of(&screen));
+        ctx.write_buffer(
+            &self.globals_buf,
+            0,
+            bytemuck::bytes_of(&PortalGlobals {
+                time: ctx.time,
+                _pad: [0.0; 3],
+            }),
+        );
         Ok(())
     }
 
@@ -721,6 +745,10 @@ impl RenderPass for PortalInstancePass {
                     wgpu::BindGroupEntry {
                         binding: 12,
                         resource: key.0[9].as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 13,
+                        resource: self.globals_buf.as_entire_binding(),
                     },
                 ],
             }));

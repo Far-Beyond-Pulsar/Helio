@@ -13,8 +13,9 @@
 //! The v3 format also stores mesh sections and imported scalar PBR material
 //! values. Source texture payloads are still not copied into native assets.
 //!
-//! v4 adds an optional length-delimited VG chunk after the metadata. It does
-//! not change the source-geometry content id or discard the classic mesh.
+//! v4 adds an optional length-delimited VG chunk after the metadata. v5 adds
+//! validated local-space bounds in the header before geometry; neither changes
+//! the source-geometry content id or discards the classic mesh.
 //!
 //! # v2: content-id provenance (Pulsar-Native#632/#658)
 //!
@@ -29,8 +30,8 @@
 //!
 //! v1 files (no id in the header) decode fine — [`decode`] computes the
 //! same hash on the fly and [`crate::subsystems::load_mesh_upload`]
-//! opportunistically rewrites the file as v2 so the NEXT load is a direct
-//! header read, not a repeated hash. A failed rewrite (read-only project
+//! opportunistically rewrites the file as the current format (v5) so the NEXT
+//! load reads the content id and local bounds directly. A failed rewrite (read-only project
 //! dir, etc.) never fails the load itself; the in-memory id from that one
 //! call is still correct, just not persisted.
 
@@ -56,6 +57,8 @@ const VERSION_WITH_SECTIONS: u32 = 3;
 /// after the original geometry and metadata. Geometry identity remains based
 /// only on the classic vertex/index bytes, so adding VG is non-destructive.
 const VERSION_WITH_VGEO: u32 = 4;
+/// Version 5 adds the authoritative local-space AABB after the v4 lengths.
+const VERSION_WITH_BOUNDS: u32 = 5;
 const HEADER: usize = 4 + 4 + 8 + 8; // magic + version + vertex_count + index_count
 /// v2 only: `HEADER` bytes plus a trailing 16-byte `content_id: u128`,
 /// BEFORE the vertex/index payload (so a v1 reader that somehow ignored the
@@ -64,6 +67,8 @@ const HEADER: usize = 4 + 4 + 8 + 8; // magic + version + vertex_count + index_c
 const HEADER_V2: usize = HEADER + 16;
 const HEADER_V3: usize = HEADER_V2 + 8; // metadata byte length
 const HEADER_V4: usize = HEADER_V3 + 8; // embedded vgeo byte length
+const BOUNDS_BYTES: usize = 1 + 6 * 4; // empty flag, min xyz, max xyz
+const HEADER_V5: usize = HEADER_V4 + BOUNDS_BYTES;
 
 /// One imported material slot on a static mesh asset. `source_material` is
 /// the material index assigned by the source format (for example FBX); the
@@ -124,6 +129,60 @@ pub struct MeshAssetUpload {
     pub geometry: MeshUpload,
     pub sections: Vec<MeshSection>,
     pub material_slots: Vec<MeshMaterialSlot>,
+    /// Authoritative local-space bounds. Imports derive this from final geometry;
+    /// legacy files derive it once during decode.
+    pub bounds: MeshLocalBounds,
+}
+
+/// A validated local-space axis-aligned bound. Empty geometry is represented
+/// explicitly and has no meaningful min/max values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshLocalBounds {
+    pub min: [f32; 3],
+    pub max: [f32; 3],
+    pub is_empty: bool,
+}
+
+impl MeshLocalBounds {
+    pub const EMPTY: Self = Self {
+        min: [0.0; 3],
+        max: [0.0; 3],
+        is_empty: true,
+    };
+
+    pub fn from_geometry(geometry: &MeshUpload) -> Option<Self> {
+        let mut bounds = Self::EMPTY;
+        for vertex in &geometry.vertices {
+            let p = vertex.position;
+            if !p.iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            if bounds.is_empty {
+                bounds = Self {
+                    min: p,
+                    max: p,
+                    is_empty: false,
+                };
+            } else {
+                for axis in 0..3 {
+                    bounds.min[axis] = bounds.min[axis].min(p[axis]);
+                    bounds.max[axis] = bounds.max[axis].max(p[axis]);
+                }
+            }
+        }
+        Some(bounds)
+    }
+
+    pub fn is_valid(self) -> bool {
+        (self.is_empty && self.min == [0.0; 3] && self.max == [0.0; 3])
+            || (!self.is_empty
+                && self
+                    .min
+                    .iter()
+                    .chain(self.max.iter())
+                    .all(|v| v.is_finite())
+                && (0..3).all(|i| self.min[i] <= self.max[i]))
+    }
 }
 
 impl Default for MeshAssetUpload {
@@ -135,6 +194,7 @@ impl Default for MeshAssetUpload {
             },
             sections: Vec::new(),
             material_slots: Vec::new(),
+            bounds: MeshLocalBounds::EMPTY,
         }
     }
 }
@@ -417,7 +477,11 @@ pub fn content_id_for_path(abs_path: &Path) -> Option<u128> {
         if let Ok(bytes) = std::fs::read(abs_path) {
             if bytes.len() >= HEADER_V2 && &bytes[0..4] == MAGIC {
                 if let Ok(version) = bytes[4..8].try_into().map(u32::from_le_bytes) {
-                    if version == VERSION || version == VERSION_WITH_SECTIONS || version == VERSION_WITH_VGEO {
+                    if version == VERSION
+                        || version == VERSION_WITH_SECTIONS
+                        || version == VERSION_WITH_VGEO
+                        || version == VERSION_WITH_BOUNDS
+                    {
                         if let Ok(id_bytes) = bytes[HEADER..HEADER_V2].try_into() {
                             return Some(u128::from_le_bytes(id_bytes));
                         }
@@ -504,6 +568,33 @@ pub fn content_id_for_bytes(mesh: &MeshUpload) -> u128 {
     twox_hash::XxHash3_128::oneshot(&buf)
 }
 
+fn write_bounds(out: &mut Vec<u8>, bounds: MeshLocalBounds) {
+    out.push(u8::from(bounds.is_empty));
+    for value in bounds.min.into_iter().chain(bounds.max) {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+fn read_bounds(bytes: &[u8]) -> Option<MeshLocalBounds> {
+    if bytes.len() != BOUNDS_BYTES {
+        return None;
+    }
+    let is_empty = match bytes[0] {
+        0 => false,
+        1 => true,
+        _ => return None,
+    };
+    let mut values = [0.0f32; 6];
+    for (i, chunk) in bytes[1..].chunks_exact(4).enumerate() {
+        values[i] = f32::from_le_bytes(chunk.try_into().ok()?);
+    }
+    Some(MeshLocalBounds {
+        min: [values[0], values[1], values[2]],
+        max: [values[3], values[4], values[5]],
+        is_empty,
+    })
+}
+
 /// Serialise a [`MeshUpload`] into the native `.mesh` byte format (always
 /// v2 — see the module doc). `content_id` is the identity to store in the
 /// header; callers that don't already have one on hand (a fresh import)
@@ -531,18 +622,26 @@ pub fn encode_asset(asset: &MeshAssetUpload, content_id: u128) -> Vec<u8> {
         serde_json::to_vec(&(asset.sections.as_slice(), asset.material_slots.as_slice()))
             .expect("mesh section metadata is serializable");
     let mesh = &asset.geometry;
+    let geometry_is_empty = asset.geometry.vertices.is_empty();
+    let bounds = if asset.bounds.is_valid() && asset.bounds.is_empty == geometry_is_empty {
+        asset.bounds
+    } else {
+        MeshLocalBounds::from_geometry(&asset.geometry).unwrap_or(MeshLocalBounds::EMPTY)
+    };
     let mut out = Vec::with_capacity(
-        HEADER_V3
+        HEADER_V5
             + mesh.vertices.len() * std::mem::size_of::<PackedVertex>()
             + mesh.indices.len() * 4
             + metadata.len(),
     );
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION_WITH_SECTIONS.to_le_bytes());
+    out.extend_from_slice(&VERSION_WITH_BOUNDS.to_le_bytes());
     out.extend_from_slice(&(mesh.vertices.len() as u64).to_le_bytes());
     out.extend_from_slice(&(mesh.indices.len() as u64).to_le_bytes());
     out.extend_from_slice(&content_id.to_le_bytes());
     out.extend_from_slice(&(metadata.len() as u64).to_le_bytes());
+    out.extend_from_slice(&0u64.to_le_bytes()); // optional vgeo length, populated by vgeo writer
+    write_bounds(&mut out, bounds);
     out.extend_from_slice(bytemuck::cast_slice(&mesh.vertices));
     out.extend_from_slice(bytemuck::cast_slice(&mesh.indices));
     out.extend_from_slice(&metadata);
@@ -550,8 +649,8 @@ pub fn encode_asset(asset: &MeshAssetUpload, content_id: u128) -> Vec<u8> {
 }
 
 /// Serialize a mesh with an optional baked virtual-geometry payload. The
-/// classic geometry, sections and material metadata remain byte-for-byte
-/// equivalent to a normal v3 mesh; the VG payload is a separate trailing
+/// classic geometry, sections and material metadata remain equivalent to a
+/// normal v5 mesh; the VG payload is a separate trailing
 /// chunk and can be discarded/rebuilt without reimporting the source model.
 pub fn encode_asset_with_vgeo(
     asset: &MeshAssetUpload,
@@ -560,20 +659,20 @@ pub fn encode_asset_with_vgeo(
 ) -> Vec<u8> {
     let mut out = encode_asset(asset, content_id);
     let vgeo = vgeo.unwrap_or_default();
-    out[4..8].copy_from_slice(&VERSION_WITH_VGEO.to_le_bytes());
-    out.splice(HEADER_V3..HEADER_V3, (vgeo.len() as u64).to_le_bytes());
+    out[4..8].copy_from_slice(&VERSION_WITH_BOUNDS.to_le_bytes());
+    out[HEADER_V3..HEADER_V4].copy_from_slice(&(vgeo.len() as u64).to_le_bytes());
     out.extend_from_slice(vgeo);
     out
 }
 
-/// Borrow the embedded VG chunk from a v4 `.mesh`, if present and the
+/// Borrow the embedded VG chunk from a v4/v5 `.mesh`, if present and the
 /// enclosing asset has a valid structure. Legacy mesh formats have no chunk.
 pub fn embedded_vgeo(bytes: &[u8]) -> Option<&[u8]> {
     if bytes.len() < HEADER_V4 || &bytes[0..4] != MAGIC {
         return None;
     }
     let version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    if version != VERSION_WITH_VGEO {
+    if version != VERSION_WITH_VGEO && version != VERSION_WITH_BOUNDS {
         return None;
     }
     let vcount = usize::try_from(u64::from_le_bytes(bytes[8..16].try_into().ok()?)).ok()?;
@@ -586,7 +685,18 @@ pub fn embedded_vgeo(bytes: &[u8]) -> Option<&[u8]> {
         bytes[HEADER_V3..HEADER_V4].try_into().ok()?,
     ))
     .ok()?;
-    let geometry_end = HEADER_V4
+    let vstart = if version == VERSION_WITH_BOUNDS {
+        HEADER_V5
+    } else {
+        HEADER_V4
+    };
+    if version == VERSION_WITH_BOUNDS {
+        let bounds = read_bounds(bytes.get(HEADER_V4..HEADER_V5)?)?;
+        if !bounds.is_valid() || bounds.is_empty != (vcount == 0) {
+            return None;
+        }
+    }
+    let geometry_end = vstart
         .checked_add(vcount.checked_mul(std::mem::size_of::<PackedVertex>())?)?
         .checked_add(icount.checked_mul(4)?)?;
     let metadata_end = geometry_end.checked_add(metadata_len)?;
@@ -632,8 +742,8 @@ pub fn decode(bytes: &[u8]) -> Option<(MeshUpload, u128)> {
     Some((asset.geometry, id))
 }
 
-/// Decode legacy geometry-only assets (v1/v2), sectioned v3 assets and v4
-/// assets with an optional trailing VG chunk. Legacy assets become a single
+/// Decode legacy geometry-only assets (v1/v2), sectioned v3 assets, v4 assets
+/// with an optional trailing VG chunk, and v5 assets with bounds. Legacy assets become a single
 /// section and one unnamed material slot so downstream has one representation.
 pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
     if bytes.len() < HEADER || &bytes[0..4] != MAGIC {
@@ -644,11 +754,12 @@ pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
         && version != VERSION
         && version != VERSION_WITH_SECTIONS
         && version != VERSION_WITH_VGEO
+        && version != VERSION_WITH_BOUNDS
     {
         return None;
     }
-    let vcount = u64::from_le_bytes(bytes[8..16].try_into().ok()?) as usize;
-    let icount = u64::from_le_bytes(bytes[16..24].try_into().ok()?) as usize;
+    let vcount = usize::try_from(u64::from_le_bytes(bytes[8..16].try_into().ok()?)).ok()?;
+    let icount = usize::try_from(u64::from_le_bytes(bytes[16..24].try_into().ok()?)).ok()?;
     let vbytes = vcount.checked_mul(std::mem::size_of::<PackedVertex>())?;
     let ibytes = icount.checked_mul(4)?;
     let (vstart, stored_id, metadata_len) = match version {
@@ -675,13 +786,19 @@ pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
                 .ok()?,
             )
         }
-        VERSION_WITH_VGEO => {
+        VERSION_WITH_VGEO | VERSION_WITH_BOUNDS => {
             if bytes.len() < HEADER_V4 {
                 return None;
             }
             (
-                HEADER_V4,
-                Some(u128::from_le_bytes(bytes[HEADER..HEADER_V2].try_into().ok()?)),
+                if version == VERSION_WITH_BOUNDS {
+                    HEADER_V5
+                } else {
+                    HEADER_V4
+                },
+                Some(u128::from_le_bytes(
+                    bytes[HEADER..HEADER_V2].try_into().ok()?,
+                )),
                 usize::try_from(u64::from_le_bytes(
                     bytes[HEADER_V2..HEADER_V3].try_into().ok()?,
                 ))
@@ -693,7 +810,7 @@ pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
     let istart = vstart.checked_add(vbytes)?;
     let geometry_end = istart.checked_add(ibytes)?;
     let end = geometry_end.checked_add(metadata_len)?;
-    let end = if version == VERSION_WITH_VGEO {
+    let end = if version == VERSION_WITH_VGEO || version == VERSION_WITH_BOUNDS {
         end.checked_add(
             usize::try_from(u64::from_le_bytes(
                 bytes[HEADER_V3..HEADER_V4].try_into().ok()?,
@@ -720,7 +837,10 @@ pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
         None => content_id_for_bytes(&geometry),
     };
     let metadata_end = geometry_end.checked_add(metadata_len)?;
-    let (sections, material_slots) = if version == VERSION_WITH_SECTIONS || version == VERSION_WITH_VGEO {
+    let (sections, material_slots) = if version == VERSION_WITH_SECTIONS
+        || version == VERSION_WITH_VGEO
+        || version == VERSION_WITH_BOUNDS
+    {
         serde_json::from_slice(&bytes[geometry_end..metadata_end]).ok()?
     } else if geometry.indices.is_empty() {
         (Vec::new(), Vec::new())
@@ -734,11 +854,21 @@ pub fn decode_asset(bytes: &[u8]) -> Option<(MeshAssetUpload, u128)> {
             vec![MeshMaterialSlot::default()],
         )
     };
+    let bounds = if version == VERSION_WITH_BOUNDS {
+        let bounds = read_bounds(bytes.get(HEADER_V4..HEADER_V5)?)?;
+        if !bounds.is_valid() || bounds.is_empty != geometry.vertices.is_empty() {
+            return None;
+        }
+        bounds
+    } else {
+        MeshLocalBounds::from_geometry(&geometry)?
+    };
     Some((
         MeshAssetUpload {
             geometry,
             sections,
             material_slots,
+            bounds,
         },
         id,
     ))
@@ -774,7 +904,10 @@ pub(crate) fn mesh_asset_from_converted_scene(
 }
 
 /// The mesh material slot for source material `index`.
-fn material_slot(materials: &[helio_asset_compat::ConvertedMaterial], index: usize) -> MeshMaterialSlot {
+fn material_slot(
+    materials: &[helio_asset_compat::ConvertedMaterial],
+    index: usize,
+) -> MeshMaterialSlot {
     MeshMaterialSlot {
         source_material: Some(index as u32),
         name: format!("Material {}", index + 1),
@@ -878,10 +1011,12 @@ fn sectioned_asset(
         indices,
     };
     ensure_uv0(&mut geometry);
+    let bounds = MeshLocalBounds::from_geometry(&geometry)?;
     Some(MeshAssetUpload {
         geometry,
         sections,
         material_slots: std::mem::take(material_slots),
+        bounds,
     })
 }
 
@@ -1026,7 +1161,10 @@ pub fn write_mesh_parts(
         let mut file = format!("{stem}_{}", sanitize_file_name(&part.name));
         // Distinct meshes can share a name; the file must not.
         let mut suffix = 1;
-        while written.iter().any(|w| w.path == dir.join(format!("{file}.mesh"))) {
+        while written
+            .iter()
+            .any(|w| w.path == dir.join(format!("{file}.mesh")))
+        {
             suffix += 1;
             file = format!("{stem}_{}_{suffix}", sanitize_file_name(&part.name));
         }
@@ -1057,9 +1195,19 @@ pub fn write_mesh_part(
 fn sanitize_file_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    if cleaned.is_empty() { "mesh".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "mesh".to_string()
+    } else {
+        cleaned
+    }
 }
 
 fn write_mesh_asset(mut upload: MeshAssetUpload, native: &Path) -> Result<PathBuf, String> {
@@ -1140,6 +1288,10 @@ mod tests {
         let (decoded, id) = decode(&v1).expect("v1 must still decode");
         assert_eq!(decoded.indices, mesh.indices);
         assert_eq!(id, content_id_for_bytes(&mesh));
+        let (legacy_asset, _) = decode_asset(&v1).expect("v1 asset bounds are derived");
+        assert_eq!(legacy_asset.bounds.min, [0.0; 3]);
+        assert_eq!(legacy_asset.bounds.max, [0.0; 3]);
+        assert!(!legacy_asset.bounds.is_empty);
 
         let v2 = encode(&mesh, id);
         let (_, id2) = decode(&v2).expect("v2 decode");
@@ -1222,6 +1374,7 @@ mod tests {
                 material_slot: 0,
             }],
             material_slots: vec![MeshMaterialSlot::default()],
+            bounds: MeshLocalBounds::EMPTY,
         };
         std::fs::write(&path, encode_asset(&asset, 7)).unwrap();
         set_default_materials(&path, &["materials/A.mat".to_owned()]).unwrap();
@@ -1230,5 +1383,139 @@ mod tests {
         assert_eq!(decoded.material_slots[0].material_asset, "materials/A.mat");
         assert_eq!(decoded.geometry.indices, vec![0, 1, 2]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v5_round_trips_exact_bounds_and_vgeo() {
+        let mesh = MeshUpload {
+            vertices: vec![
+                PackedVertex {
+                    position: [-3.0, 2.0, 1.0],
+                    ..PackedVertex::zeroed()
+                },
+                PackedVertex {
+                    position: [4.0, -5.0, 8.0],
+                    ..PackedVertex::zeroed()
+                },
+            ],
+            indices: vec![0, 1],
+        };
+        let asset = MeshAssetUpload {
+            bounds: MeshLocalBounds::from_geometry(&mesh).unwrap(),
+            geometry: mesh,
+            sections: vec![],
+            material_slots: vec![],
+        };
+        let bytes = encode_asset_with_vgeo(&asset, 123, Some(b"vg"));
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            VERSION_WITH_BOUNDS
+        );
+        let (decoded, id) = decode_asset(&bytes).unwrap();
+        assert_eq!(id, 123);
+        assert_eq!(
+            decoded.bounds,
+            MeshLocalBounds {
+                min: [-3.0, -5.0, 1.0],
+                max: [4.0, 2.0, 8.0],
+                is_empty: false
+            }
+        );
+        assert_eq!(embedded_vgeo(&bytes), Some(b"vg".as_slice()));
+    }
+
+    #[test]
+    fn v5_rejects_malformed_bounds_and_legacy_derives_bounds() {
+        let mesh = MeshUpload {
+            vertices: vec![PackedVertex {
+                position: [1.0, 2.0, 3.0],
+                ..PackedVertex::zeroed()
+            }],
+            indices: vec![],
+        };
+        let asset = MeshAssetUpload {
+            bounds: MeshLocalBounds::from_geometry(&mesh).unwrap(),
+            geometry: mesh,
+            sections: vec![],
+            material_slots: vec![],
+        };
+        let bytes = encode_asset(&asset, 9);
+        let mut malformed = bytes.clone();
+        malformed[HEADER_V4] = 2; // unknown empty flag
+        assert!(decode_asset(&malformed).is_none());
+        let mut contradictory_nonempty = bytes.clone();
+        contradictory_nonempty[HEADER_V4] = 1;
+        assert!(decode_asset(&contradictory_nonempty).is_none());
+        assert!(embedded_vgeo(&contradictory_nonempty).is_none());
+
+        let empty_asset = MeshAssetUpload {
+            geometry: MeshUpload {
+                vertices: vec![],
+                indices: vec![],
+            },
+            sections: vec![],
+            material_slots: vec![],
+            bounds: MeshLocalBounds::EMPTY,
+        };
+        let mut contradictory_empty = encode_asset(&empty_asset, 10);
+        contradictory_empty[HEADER_V4] = 0;
+        assert!(decode_asset(&contradictory_empty).is_none());
+        assert!(embedded_vgeo(&contradictory_empty).is_none());
+
+        let mut legacy = encode(&asset.geometry, 9);
+        legacy[4..8].copy_from_slice(&VERSION.to_le_bytes());
+        // Geometry-only v2 header is 40 bytes; decode supplies transient bounds.
+        let (decoded, _) = decode_asset(&legacy).unwrap();
+        assert_eq!(decoded.bounds.min, [1.0, 2.0, 3.0]);
+        assert_eq!(decoded.bounds.max, [1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn v3_and_v4_derive_bounds_and_v4_keeps_embedded_vgeo() {
+        let geometry = MeshUpload {
+            vertices: vec![
+                PackedVertex {
+                    position: [-2.0, 1.0, 3.0],
+                    ..PackedVertex::zeroed()
+                },
+                PackedVertex {
+                    position: [5.0, 7.0, -4.0],
+                    ..PackedVertex::zeroed()
+                },
+            ],
+            indices: vec![0, 1],
+        };
+        let asset = MeshAssetUpload {
+            bounds: MeshLocalBounds::from_geometry(&geometry).unwrap(),
+            geometry,
+            sections: vec![MeshSection {
+                first_index: 0,
+                index_count: 2,
+                material_slot: 0,
+            }],
+            material_slots: vec![MeshMaterialSlot {
+                name: "legacy slot".into(),
+                ..MeshMaterialSlot::default()
+            }],
+        };
+        let v5 = encode_asset_with_vgeo(&asset, 17, Some(b"legacy-vgeo"));
+
+        let mut v4 = v5.clone();
+        v4.drain(HEADER_V4..HEADER_V5);
+        v4[4..8].copy_from_slice(&VERSION_WITH_VGEO.to_le_bytes());
+        let (decoded_v4, _) = decode_asset(&v4).unwrap();
+        assert_eq!(decoded_v4.bounds, asset.bounds);
+        assert_eq!(decoded_v4.material_slots, asset.material_slots);
+        assert_eq!(embedded_vgeo(&v4), Some(b"legacy-vgeo".as_slice()));
+
+        let mut v3 = encode_asset(&asset, 17);
+        v3.drain(HEADER_V4..HEADER_V5);
+        v3.drain(HEADER_V3..HEADER_V4);
+        v3[4..8].copy_from_slice(&VERSION_WITH_SECTIONS.to_le_bytes());
+        let (decoded_v3, _) = decode_asset(&v3).unwrap();
+        assert_eq!(decoded_v3.bounds, asset.bounds);
+        assert_eq!(decoded_v3.sections, asset.sections);
+        assert_eq!(decoded_v3.material_slots, asset.material_slots);
+        assert!(embedded_vgeo(&v3).is_none());
     }
 }

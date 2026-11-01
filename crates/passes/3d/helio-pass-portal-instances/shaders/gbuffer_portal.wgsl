@@ -65,6 +65,13 @@ struct ScreenSize {
     _pad1:  f32,
 }
 
+struct Globals {
+    time: f32, // RADIANT_GLOBALS_TIME: host-driven frame clock
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+}
+
 /// GPU material (112 bytes, matches libhelio::GpuMaterial) — identical to gbuffer.wgsl.
 struct GpuMaterial {
     base_color:         vec4<f32>,
@@ -138,6 +145,7 @@ struct GpuPortalChainHandle {
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1) var<uniform>       screen:  ScreenSize;
+@group(0) @binding(13) var<uniform>      globals: Globals;
 @group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read> coordinate_spaces:      array<mat4x4<f32>>;
 @group(0) @binding(4) var<storage, read> coordinate_spaces_prev: array<mat4x4<f32>>;
@@ -428,7 +436,7 @@ fn material_texture_data(material: GpuMaterial, id: u32) -> MaterialTextureData 
 // with the material the real object does: the default PBR path, or this
 // pipeline's material template and Radiant graph (`radiant_eval_surface` and
 // its override markers are filled in per material key, like the G-buffer's).
-// Graph `time` nodes read 0 here: this pass has no globals.
+// Graph `time` nodes read the host-driven frame clock from Globals.
 
 struct SurfaceData {
     albedo:              vec4<f32>,

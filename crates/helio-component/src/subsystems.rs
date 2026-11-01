@@ -95,12 +95,12 @@ pub fn load_mesh_asset_upload(path: &Path) -> Option<crate::mesh_cache::MeshAsse
 
         // Content-id provenance (Pulsar-Native#658): prime the memoization
         // cache now, from the id `decode` just produced (read directly for
-        // v2, computed on the fly for v1) — so `MeshAssetPath::content_id`'s
+        // v2-v5, computed on the fly for v1) — so `MeshAssetPath::content_id`'s
         // later resolve, driven by SceneDB's GPU-mirror write dispatch, is
         // a warm hit instead of a second cold hash of this same file.
         crate::mesh_cache::prime_content_id_cache(path, id);
 
-        // v1 backfill: a file with no header id gets upgraded to v2 in
+        // v1 backfill: a file with no header id gets upgraded to v5 in
         // place, atomically (write to a sibling temp file, then rename —
         // never a partial/torn write visible to a concurrent reader) so
         // the NEXT load reads the id straight from the header instead of

@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use crate::asset_component::AssetComponentRegistration;
 use crate::mesh_cache::{MeshAssetUpload, MeshMaterialSlot, MeshSection};
 use crate::subsystems::{load_mesh_asset_upload, resolve_asset_path};
-use pulsar_scenedb::{AssetId, AssetPayload, AssetView, Prefetch, Residency};
 use pulsar_scenedb::gpu::{BufferKey, GpuMirrorHandle, InternedGpuLease};
 use pulsar_scenedb::handle_ledger::HandleId;
+use pulsar_scenedb::{AssetId, AssetPayload, AssetView, Prefetch, Residency};
 use std::sync::{Mutex, OnceLock};
 
 pulsar_reflection::inventory::submit! {
@@ -84,7 +84,7 @@ const GENERATED_MESH_PREFIX: &str = "generated-mesh:";
 /// what [`MeshGeometryKey::for_path`] keys geometry by. Resolution: an empty
 /// path is `HandleId::ZERO` (no asset); otherwise resolves the
 /// project-relative path and defers to `mesh_cache::content_id_for_path`
-/// (native `.mesh` v2: a header read; anything else: a canonical-path +
+/// (native `.mesh` v2-v5: a header read; anything else: a canonical-path +
 /// mtime/size memoized hash — see that fn's own doc for why this converges
 /// path aliases onto one id and mints a new one on a real edit). No project
 /// path available, or the file can't be read at all, ALSO falls back to
@@ -200,6 +200,7 @@ impl LoadedMesh {
             .sum::<usize>();
         geometry
             .saturating_add(sections)
+            .saturating_add(std::mem::size_of::<crate::mesh_cache::MeshLocalBounds>())
             .saturating_add(material_metadata)
     }
 }
@@ -306,7 +307,10 @@ pub fn acquire_mesh_asset_gpu_lease(
     let vertices = vertex_pool
         .acquire_shared(mirror.queue(), identity, &mesh.upload.geometry.vertices)
         .map_err(|error| format!("could not allocate LOD vertices: {error}"))?;
-    store.sync_var_len_pool(BufferKey::of("builtin_mesh_vertex"), vertex_pool.underlying());
+    store.sync_var_len_pool(
+        BufferKey::of("builtin_mesh_vertex"),
+        vertex_pool.underlying(),
+    );
     let index_pool = store
         .interned_var_len_pool::<u32>(BufferKey::of("builtin_mesh_index"))
         .ok_or_else(|| "SceneDB mesh index pool is not registered".to_owned())?;
@@ -363,6 +367,17 @@ fn load_mesh_asset_data(source: &str) -> Result<LoadedMesh, String> {
     let path = std::path::Path::new(source);
     let upload =
         load_mesh_asset_upload(path).ok_or_else(|| format!("could not load mesh '{source}'"))?;
+    let content_id = crate::mesh_cache::content_id_for_path(path).unwrap_or(0);
+    // The SceneDB asset loader runs this on an asset worker. Build the CPU
+    // spatial index before publishing the payload so the first viewport pick
+    // never has to build a BVH on the render thread.
+    if content_id != 0 {
+        crate::mesh_spatial::prewarm_mesh_bvh(
+            MeshGeometryKey(content_id),
+            &upload.geometry.vertices,
+            &upload.geometry.indices,
+        );
+    }
     tracing::info!(
         "StaticMeshComponent: loaded '{}' ({} vertices, {} indices, {} material sections)",
         source,
@@ -371,8 +386,8 @@ fn load_mesh_asset_data(source: &str) -> Result<LoadedMesh, String> {
         upload.sections.len()
     );
     Ok(LoadedMesh {
-        bounds_local: local_bounding_sphere(&upload.geometry.vertices),
-        content_id: crate::mesh_cache::content_id_for_path(path).unwrap_or(0),
+        bounds_local: local_bounding_sphere_from_bounds(upload.bounds),
+        content_id,
         upload,
     })
 }
@@ -681,7 +696,7 @@ impl gpui::Render for MeshAssetEditor {
     ) -> impl gpui::IntoElement {
         use gpui::prelude::*;
         use ui::button::{Button, ButtonVariants as _};
-        use ui::{h_flex, popover::Popover, ActiveTheme, Sizable};
+        use ui::{ActiveTheme, Sizable, h_flex, popover::Popover};
 
         let display = if self.path.is_empty() {
             "No mesh selected".to_string()
@@ -997,7 +1012,7 @@ impl gpui::Render for StaticMeshMaterialSlotsEditor {
     ) -> impl gpui::IntoElement {
         use gpui::prelude::*;
         use ui::button::{Button, ButtonVariants as _};
-        use ui::{h_flex, popover::Popover, v_flex, ActiveTheme, Sizable};
+        use ui::{ActiveTheme, Sizable, h_flex, popover::Popover, v_flex};
 
         let mut rows = v_flex().w_full().gap_1().child(
             gpui::div()
@@ -1203,8 +1218,8 @@ pub struct StaticMeshComponent {
     #[serde(skip)]
     pub mesh_sections: Vec<MeshSection>,
 
-    /// Local-space bounding sphere (xyz = center, w = radius) computed once
-    /// from `vertices`' actual positions when the mesh asset loads. Uploaded with the derived draw rows
+    /// Conservative local-space bounding sphere (xyz = center, w = radius),
+    /// derived from the mesh asset's canonical AABB. Uploaded with the derived draw rows
     /// ([`super::StaticMeshDraw`]); the renderer's scene join transforms it
     /// by the owner's transform for culling. Not derived from
     /// `transform.scale` -- a thin mesh at scale 1.0 and a cube at scale 1.0
@@ -1308,30 +1323,24 @@ fn static_mesh_property_written(component: &mut StaticMeshComponent, property: O
     }
 }
 
-/// Local-space bounding sphere (xyz = center, w = radius) from a mesh's
-/// actual vertex positions: center = AABB midpoint, radius = distance from
-/// that center to the farthest AABB corner (conservative, cheap -- no need
-/// for a tighter Ritter-style fit here). Falls back to the same 0.5 default
-/// as "no mesh loaded" if `vertices` is empty.
-fn local_bounding_sphere(vertices: &[PackedVertex]) -> [f32; 4] {
-    let Some(first) = vertices.first() else {
+/// Derive the legacy GPU sphere from the mesh asset's authoritative AABB.
+/// PMSH v5 stores this metadata; older formats have the same AABB derived
+/// once by `decode_asset`, so hydration never rescans the vertex payload.
+fn local_bounding_sphere_from_bounds(bounds: crate::mesh_cache::MeshLocalBounds) -> [f32; 4] {
+    if bounds.is_empty || !bounds.is_valid() {
         return [0.0, 0.0, 0.0, 0.5];
-    };
-    let mut min = first.position;
-    let mut max = first.position;
-    for v in &vertices[1..] {
-        for axis in 0..3 {
-            min[axis] = min[axis].min(v.position[axis]);
-            max[axis] = max[axis].max(v.position[axis]);
-        }
     }
     let center = [
-        (min[0] + max[0]) * 0.5,
-        (min[1] + max[1]) * 0.5,
-        (min[2] + max[2]) * 0.5,
+        (bounds.min[0] + bounds.max[0]) * 0.5,
+        (bounds.min[1] + bounds.max[1]) * 0.5,
+        (bounds.min[2] + bounds.max[2]) * 0.5,
     ];
-    let extent = [max[0] - center[0], max[1] - center[1], max[2] - center[2]];
-    let radius = (extent[0] * extent[0] + extent[1] * extent[1] + extent[2] * extent[2]).sqrt();
+    let extent = [
+        bounds.max[0] - center[0],
+        bounds.max[1] - center[1],
+        bounds.max[2] - center[2],
+    ];
+    let radius = extent[0].hypot(extent[1]).hypot(extent[2]);
     [center[0], center[1], center[2], radius.max(0.001)]
 }
 

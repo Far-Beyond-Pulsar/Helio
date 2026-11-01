@@ -195,6 +195,11 @@ mod tests {
                 },
                 ..Default::default()
             }],
+            bounds: crate::mesh_cache::MeshLocalBounds::from_geometry(&MeshUpload {
+                vertices: vec![vertex(-1.0, -1.0), vertex(1.0, -1.0), vertex(0.0, 1.0)],
+                indices: vec![0, 1, 2],
+            })
+            .unwrap(),
         };
         let dir = std::env::temp_dir().join(format!("mesh-thumb-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
