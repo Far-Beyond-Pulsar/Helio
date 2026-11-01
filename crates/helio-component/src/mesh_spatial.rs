@@ -314,7 +314,7 @@ pub fn prewarm_mesh_bvh(key: MeshGeometryKey, vertices: &[PackedVertex], indices
             if fits {
                 CachedSpatialIndex::Bvh(bvh)
             } else {
-            CachedSpatialIndex::LinearFallback
+                CachedSpatialIndex::LinearFallback
             },
         );
     fits
@@ -435,7 +435,10 @@ fn raycast_linear(
             test(a, b, c);
         }
     } else {
-        for [a, b, c] in indices.chunks_exact(3).map(|chunk| [chunk[0], chunk[1], chunk[2]]) {
+        for [a, b, c] in indices
+            .chunks_exact(3)
+            .map(|chunk| [chunk[0], chunk[1], chunk[2]])
+        {
             test(a, b, c);
         }
     }
@@ -534,21 +537,11 @@ mod tests {
         let vertices = triangle_mesh();
         let indices = [0, 1, 2, 3, 4, 5];
         assert_eq!(
-            raycast_linear(
-                &vertices,
-                &indices,
-                Vec3::new(0.0, 0.0, 3.0),
-                -Vec3::Z
-            ),
+            raycast_linear(&vertices, &indices, Vec3::new(0.0, 0.0, 3.0), -Vec3::Z),
             Some(3.0)
         );
         assert_eq!(
-            raycast_linear(
-                &vertices,
-                &indices,
-                Vec3::new(0.95, 0.95, 3.0),
-                -Vec3::Z
-            ),
+            raycast_linear(&vertices, &indices, Vec3::new(0.95, 0.95, 3.0), -Vec3::Z),
             None
         );
     }
