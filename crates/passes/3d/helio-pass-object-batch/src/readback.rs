@@ -108,7 +108,7 @@ impl Generation {
         };
         Self {
             // [group_count, bucket_opaque, bucket_transparent, bucket_forward, shadow_static, shadow_movable, instance_count, shadow_transmissive] -- 8 u32s.
-            counts_staging: make("ObjBatch Counts Staging", 8 * 4),
+            counts_staging: make("ObjBatch Counts Staging", 10 * 4),
             opaque_staging: make("ObjBatch Opaque Staging", range_bytes),
             transparent_staging: make("ObjBatch Transparent Staging", range_bytes),
             forward_staging: make("ObjBatch Forward Staging", range_bytes),
@@ -143,17 +143,12 @@ pub struct RangeReadback {
     shadow_static: u32,
     shadow_movable: u32,
     shadow_transmissive: u32,
+    shadow_membership_fingerprint: (u32, u32),
     instance_count: u32,
-    /// Bumped whenever a freshly-harvested generation's `shadow_static`
-    /// count differs from the previous one -- `helio-pass-shadow`'s static-
-    /// atlas cache invalidation signal, matching what `Scene::
-    /// rebuild_shadow_partition_buffers`'s `static_objects_generation`
-    /// used to track (increment on Static/Stationary object add/remove).
-    /// An add+remove that nets to the same count in one frame is missed
-    /// (a stale static atlas for one frame, self-correcting the moment the
-    /// count next changes) -- the same category of approximation `Scene`'s
-    /// own dirty-flag tracking made no stronger guarantee about either
-    /// (nothing here ever tracked object *identity*, only set membership).
+    /// Bumped whenever a freshly-harvested generation's static caster
+    /// membership fingerprint changes. Counts alone are insufficient: a
+    /// same-frame static/movable swap can preserve counts while changing the
+    /// cached shadow atlas contents.
     shadow_static_generation: u64,
 }
 
@@ -170,6 +165,7 @@ impl RangeReadback {
             shadow_static: 0,
             shadow_movable: 0,
             shadow_transmissive: 0,
+            shadow_membership_fingerprint: (0, 0),
             instance_count: 0,
             shadow_static_generation: 0,
         }
@@ -282,7 +278,7 @@ impl RangeReadback {
                     gen.pending = None;
                     continue;
                 }
-                let prev_shadow_static = (self.shadow_static, self.shadow_transmissive);
+                let prev_shadow_membership = self.shadow_membership_fingerprint;
                 read_generation_into(
                     gen,
                     &mut self.opaque,
@@ -292,9 +288,10 @@ impl RangeReadback {
                     &mut self.shadow_static,
                     &mut self.shadow_movable,
                     &mut self.shadow_transmissive,
+                    &mut self.shadow_membership_fingerprint,
                     &mut self.instance_count,
                 );
-                if (self.shadow_static, self.shadow_transmissive) != prev_shadow_static {
+                if self.shadow_membership_fingerprint != prev_shadow_membership {
                     self.shadow_static_generation = self.shadow_static_generation.wrapping_add(1);
                 }
                 gen.counts_staging.unmap();
@@ -332,6 +329,7 @@ impl RangeReadback {
             // instance count (see `FrameUniformGpu`'s doc in `src/lib.rs`).
             encoder.copy_buffer_to_buffer(&scratch.frame_uniform, 0, &gen.counts_staging, 24, 4);
             encoder.copy_buffer_to_buffer(&scratch.shadow_counts, 8, &gen.counts_staging, 28, 4);
+            encoder.copy_buffer_to_buffer(&scratch.shadow_counts, 12, &gen.counts_staging, 32, 8);
             let range_bytes = gen.range_capacity_bytes();
             encoder.copy_buffer_to_buffer(
                 &scratch.opaque_ranges,
@@ -429,6 +427,7 @@ fn read_generation_into(
     shadow_static: &mut u32,
     shadow_movable: &mut u32,
     shadow_transmissive: &mut u32,
+    shadow_membership_fingerprint: &mut (u32, u32),
     instance_count: &mut u32,
 ) {
     let counts_view = gen
@@ -445,6 +444,7 @@ fn read_generation_into(
     let n_shadow_movable = counts[5];
     let live_instance_count = counts[6];
     let n_shadow_transmissive = counts[7];
+    *shadow_membership_fingerprint = (counts[8], counts[9]);
     drop(counts_view);
 
     *draw_count = group_count;

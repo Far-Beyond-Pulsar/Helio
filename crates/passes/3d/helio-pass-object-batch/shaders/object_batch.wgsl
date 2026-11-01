@@ -853,6 +853,13 @@ const INSTANCE_FLAG_MOVABLE: u32 = 1u << 3u; // mirrors libhelio::INSTANCE_FLAG_
 @group(0) @binding(6) var<storage, read> materials_sp: array<GpuMaterial>;
 @group(0) @binding(7) var<storage, read_write> shadow_transmissive_indirect: array<DrawIndexedIndirectArgsOut>;
 
+fn shadow_membership_hash(value: u32, salt: u32) -> u32 {
+    var x = value ^ salt;
+    x = (x ^ (x >> 16u)) * 0x7feb352du;
+    x = (x ^ (x >> 15u)) * 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+
 @compute @workgroup_size(WG)
 fn cs_shadow_partition(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -872,6 +879,9 @@ fn cs_shadow_partition(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Moving glass casts no coloured shadow (the transmittance layer is
         // cached with the static atlas); it never casts an opaque one.
         if (row.flags & INSTANCE_FLAG_MOVABLE) == 0u {
+            let identity = sorted_indices_sp[i];
+            atomicXor(&shadow_counts[3], shadow_membership_hash(identity, 0x9e3779b9u));
+            atomicXor(&shadow_counts[4], shadow_membership_hash(identity, 0x85ebca6bu));
             let slot = atomicAdd(&shadow_counts[2], 1u);
             shadow_transmissive_indirect[slot] = entry;
         }
@@ -879,6 +889,9 @@ fn cs_shadow_partition(@builtin(global_invocation_id) gid: vec3<u32>) {
         let slot = atomicAdd(&shadow_counts[1], 1u);
         shadow_movable_indirect[slot] = entry;
     } else {
+        let identity = sorted_indices_sp[i];
+        atomicXor(&shadow_counts[3], shadow_membership_hash(identity, 0x9e3779b9u));
+        atomicXor(&shadow_counts[4], shadow_membership_hash(identity, 0x85ebca6bu));
         let slot = atomicAdd(&shadow_counts[0], 1u);
         shadow_static_indirect[slot] = entry;
     }
