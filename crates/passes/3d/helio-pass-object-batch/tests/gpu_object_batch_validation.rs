@@ -212,6 +212,7 @@ struct GpuResult {
     shadow_static_count: u32,
     shadow_movable_count: u32,
     shadow_transmissive_count: u32,
+    shadow_membership_fingerprint: (u32, u32),
     group_count: u32,
 }
 
@@ -308,6 +309,7 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
     let shadow_counts: &[u32] = bytemuck::cast_slice(&shadow_bytes);
     let (shadow_static_count, shadow_movable_count, shadow_transmissive_count) =
         (shadow_counts[0], shadow_counts[1], shadow_counts[2]);
+    let shadow_membership_fingerprint = (shadow_counts[3], shadow_counts[4]);
 
     let instances_bytes = read_buf(pass.instances_buffer(), "instances readback");
     // GpuInstanceDataOut: 192-byte transform payload, 4 base words and 4 skin words.
@@ -410,8 +412,30 @@ async fn run_gpu(rows: &[StaticObjectComponent], materials: &[TestMaterial]) -> 
         shadow_static_count,
         shadow_movable_count,
         shadow_transmissive_count,
+        shadow_membership_fingerprint,
         group_count,
     })
+}
+
+#[test]
+fn same_count_static_caster_swap_changes_membership_fingerprint() {
+    let mut rng = Rng(0x51AD_0B1E);
+    let row = make_row(&mut rng, 1, 1, &[(0, 0)]);
+    let materials = [TestMaterial::zeroed()];
+    let mut rows = vec![row.clone(), row];
+    rows[0].flags = 0;
+    rows[1].flags = INSTANCE_FLAG_MOVABLE;
+    let before = pollster::block_on(run_gpu(&rows, &materials)).expect("GPU required");
+
+    rows[0].flags = INSTANCE_FLAG_MOVABLE;
+    rows[1].flags = 0;
+    let after = pollster::block_on(run_gpu(&rows, &materials)).expect("GPU required");
+
+    assert_eq!(before.shadow_static_count, after.shadow_static_count);
+    assert_ne!(
+        before.shadow_membership_fingerprint, after.shadow_membership_fingerprint,
+        "same-count caster identity swap must invalidate the static shadow atlas"
+    );
 }
 
 #[test]

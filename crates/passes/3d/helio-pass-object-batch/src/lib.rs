@@ -418,7 +418,9 @@ impl ScratchBuffers {
                 "ObjBatch ShadowTransmissiveIndirect",
                 n * INDIRECT_ARGS_BYTES,
             ),
-            shadow_counts: create_storage_buffer(device, "ObjBatch ShadowCounts", 16),
+            // Counts plus two commutative fingerprints of static caster row
+            // membership. Counts alone miss same-count static/movable swaps.
+            shadow_counts: create_storage_buffer(device, "ObjBatch ShadowCounts", 24),
             prev_rows: create_storage_buffer(device, "ObjBatch PrevRows", n * PREV_ROW_BYTES),
             sorted_position: create_storage_buffer(device, "ObjBatch SortedPosition", n * 4),
             moved_args: create_indirect_buffer(device, "ObjBatch MovedArgs", 16),
