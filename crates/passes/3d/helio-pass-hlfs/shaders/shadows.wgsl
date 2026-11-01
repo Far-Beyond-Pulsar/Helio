@@ -105,6 +105,11 @@ fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world
     if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
         return 1.0;
     }
+    // LessEqual comparison samplers treat a receiver slightly nearer to the
+    // light as lit. Keep this depth-space bias per cascade so coarse cascades
+    // can compensate for their lower depth precision without moving the
+    // receiver far enough in world space to detach its shadow.
+    let receiver_depth = max(0.0, ndc.z - shadow_config.cascades[cascade_idx].depth_bias);
     let theta = hash22(frag_coord) * 6.28318530718;
 
     // OPTIMIZATION: Adaptive PCF sample count based on cascade distance
@@ -120,8 +125,8 @@ fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world
     var lit_sum = 0.0;
     for (var i = 0u; i < pcf_count; i++) {
         let offset = vogel_disk_sample(i, pcf_count, theta) * (cascade_scale / budget_resolution(layer));
-        lit_sum += min(budget_compare_dynamic(shadow_uv + offset, u32(i32(layer)), ndc.z),
-                       budget_compare_static(shadow_uv + offset, u32(i32(layer)), ndc.z));
+        lit_sum += min(budget_compare_dynamic(shadow_uv + offset, u32(i32(layer)), receiver_depth),
+                       budget_compare_static(shadow_uv + offset, u32(i32(layer)), receiver_depth));
     }
 
     return lit_sum / f32(pcf_count);
@@ -140,26 +145,27 @@ fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>
         return 1.0;
     }
 
-    let receiver_depth = ndc.z;
+    let blocker_receiver_depth = ndc.z;
+    let compare_depth = max(0.0, ndc.z - config.depth_bias);
     let theta = hash22(frag_coord) * 6.28318530718;
 
     // Blocker search uses unbiased depth so nearby occluders are correctly identified.
     let search_radius = config.pcss_light_size / budget_resolution(layer);
-    let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius, shadow_config.pcss_blocker_samples, theta);
+    let blocker = pcss_blocker_search(layer, shadow_uv, blocker_receiver_depth, search_radius, shadow_config.pcss_blocker_samples, theta);
 
     if blocker.y < 0.5 {
         return 1.0;
     }
 
-    let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
+    let penumbra = pcss_penumbra_size(blocker_receiver_depth, blocker.x, config.pcss_light_size);
     let filter_radius = clamp(penumbra / budget_resolution(layer), config.filter_radius / budget_resolution(layer), config.filter_radius * 3.0 / budget_resolution(layer));
 
     var lit_sum = 0.0;
 
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
-        lit_sum += min(budget_compare_dynamic(shadow_uv + offset, u32(i32(layer)), receiver_depth),
-                       budget_compare_static(shadow_uv + offset, u32(i32(layer)), receiver_depth));
+        lit_sum += min(budget_compare_dynamic(shadow_uv + offset, u32(i32(layer)), compare_depth),
+                       budget_compare_static(shadow_uv + offset, u32(i32(layer)), compare_depth));
     }
 
     return lit_sum / f32(shadow_config.pcss_filter_samples);

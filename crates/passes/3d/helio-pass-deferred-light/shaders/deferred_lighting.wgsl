@@ -435,6 +435,8 @@ fn sample_cascade_shadow(
         return 1.0;
     }
 
+    let receiver_depth = max(0.0, ndc.z - shadow_config.cascades[cascade_idx].depth_bias);
+
     let filter_radius = (2.0 / budget_resolution(layer)) * cascade_scale;
 
     // Per-pixel rotation to break up banding (stable hash — no frame counter)
@@ -457,7 +459,7 @@ fn sample_cascade_shadow(
         let offset = vogel_disk_sample(i, pcf_count, theta) * filter_radius;
         // Minimum of both atlases — pixel is lit only if neither occludes it.
         // This is the Unreal-style static/dynamic shadow combine for mixed mobility scenes.
-        lit_sum += compare_shadow_atlases(shadow_uv + offset, layer, ndc.z);
+        lit_sum += compare_shadow_atlases(shadow_uv + offset, layer, receiver_depth);
     }
 
     return lit_sum / f32(pcf_count);
@@ -539,13 +541,16 @@ fn sample_cascade_shadow_pcss(
         return 1.0;
     }
 
-    let receiver_depth = ndc.z;
+    // Keep blocker detection and the penumbra estimate unbiased; apply the
+    // per-cascade depth bias only to the final visibility comparisons.
+    let blocker_receiver_depth = ndc.z;
+    let compare_depth = max(0.0, ndc.z - config.depth_bias);
     let theta = hash22(frag_coord) * 6.28318530718;
 
     // Step 1: Blocker search (average occluder depth)
     // Uses unbiased depth so nearby occluders are correctly identified.
     let search_radius = config.pcss_light_size / budget_resolution(layer);
-    let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius,
+    let blocker = pcss_blocker_search(layer, shadow_uv, blocker_receiver_depth, search_radius,
                                        shadow_config.pcss_blocker_samples, theta);
 
     if blocker.y < 0.5 {
@@ -553,7 +558,7 @@ fn sample_cascade_shadow_pcss(
     }
 
     // Step 2: Compute penumbra size (distance-based filter width)
-    let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
+    let penumbra = pcss_penumbra_size(blocker_receiver_depth, blocker.x, config.pcss_light_size);
     let filter_radius = clamp(penumbra / budget_resolution(layer),
                                 config.filter_radius / budget_resolution(layer),
                                 config.filter_radius * 3.0 / budget_resolution(layer));
@@ -563,7 +568,7 @@ fn sample_cascade_shadow_pcss(
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
         // Combine dynamic and static atlases: shadowed by either
-        lit_sum += compare_shadow_atlases(shadow_uv + offset, layer, receiver_depth);
+        lit_sum += compare_shadow_atlases(shadow_uv + offset, layer, compare_depth);
     }
 
     return lit_sum / f32(shadow_config.pcss_filter_samples);
