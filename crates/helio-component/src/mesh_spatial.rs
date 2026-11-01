@@ -503,6 +503,30 @@ mod tests {
     }
 
     #[test]
+    fn memory_bounded_linear_fallback_keeps_exact_triangle_semantics() {
+        let vertices = triangle_mesh();
+        let indices = [0, 1, 2, 3, 4, 5];
+        assert_eq!(
+            raycast_linear(
+                &vertices,
+                &indices,
+                Vec3::new(0.0, 0.0, 3.0),
+                -Vec3::Z
+            ),
+            Some(3.0)
+        );
+        assert_eq!(
+            raycast_linear(
+                &vertices,
+                &indices,
+                Vec3::new(0.95, 0.95, 3.0),
+                -Vec3::Z
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn unindexed_meshes_and_back_faces_are_pickable() {
         let vertices = triangle_mesh();
         assert!(prewarm_mesh_bvh(MeshGeometryKey::NONE, &vertices[..3], &[]));
