@@ -25,15 +25,15 @@ use helio_graph_asset::{BuildEnv, MarkerFn, NodeBuild, NodeDescriptor, ParamDesc
 use helio_pass_perf_overlay::PerfOverlayShared;
 
 use crate::{
-    scene_buffer_or_dummy, AtmosphereCompositePass, AtmospherePass, BackgroundPass, BillboardPass,
-    CoronaPass, DecalPass, DeferredLightPass, FogCompositePass, FoliageGBufferPass,
-    FoliagePlacePass, FoliageQuality, ForwardLitPass, FxaaPass, GBufferPass, HiZBuildPass,
-    IndirectDispatchPass, LensFlarePass, LensPass, LightCullPass, ObjectBatchPass,
-    OcclusionCullPass, PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass,
-    PlanarReflectionPass, PortalCullPass, PortalEditorOverlayPass, PortalInstancePass,
-    PortalMaskPass, PostProcessPass, PostProcessVolumeBlendPass, ShadowDirtyPass, ShadowMatrixPass,
-    ShadowPass, SpriteBatchPass, SpriteCullPass, SsrPass, TsrPass, VolumetricFogPass, WaterSimPass,
-    FOGGED_HDR, FOGGED_HDR_FORMAT, LENS_COLOR, MAX_VISIBLE_SPRITES, SPOTLIGHT_PNG,
+    scene_buffer_or_dummy, AtmosphereCompositePass, BackgroundPass, BillboardPass, CoronaPass,
+    DecalPass, DeferredLightPass, FogCompositePass, FoliageGBufferPass, ForwardLitPass, FxaaPass,
+    GBufferPass, HiZBuildPass, IndirectDispatchPass, LensFlarePass, LensPass, LightCullPass,
+    ObjectBatchPass, OcclusionCullPass, PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass,
+    PerfOverlayPass, PlanarReflectionPass, PortalCullPass, PortalEditorOverlayPass,
+    PortalInstancePass, PortalMaskPass, PostProcessPass, PostProcessVolumeBlendPass,
+    ShadowDirtyPass, ShadowMatrixPass, ShadowPass, SpriteBatchPass, SpriteCullPass, SsrPass,
+    TsrPass, VolumetricFogPass, WaterSimPass, FOGGED_HDR, FOGGED_HDR_FORMAT, LENS_COLOR,
+    MAX_VISIBLE_SPRITES, SPOTLIGHT_PNG,
 };
 
 /// Resources the renderer supplies every frame. Each has a host node that
@@ -154,6 +154,9 @@ fn tsr_quality(name: &str) -> helio::TsrQuality {
 /// features to this set.
 pub fn default_features() -> FeatureSet {
     FeatureSet::new()
+        .with(helio_pass_sky::SkyFeature)
+        .with(helio_pass_gi::GiFeature)
+        .with(helio_pass_voxel_planet::VoxelFeature)
         .with(Stage("helio.scene_prep", register_scene_prep))
         .with(Stage("helio.geometry", register_geometry))
         .with(Stage("helio.lighting", register_lighting))
@@ -228,18 +231,6 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
             build
                 .graph
                 .add_pass(Box::new(ObjectBatchPass::new(c.device)));
-            Ok(())
-        },
-    ));
-
-    registry.node(pass_node(
-        "atmosphere",
-        "Sky: Atmosphere Tables",
-        CATEGORY,
-        "Atmosphere lookup tables and the resolved sky frame. Idle without an atmosphere component.",
-        |build| {
-            let c = ctx(build.env)?;
-            build.graph.add_pass(Box::new(AtmospherePass::new(c.device)));
             Ok(())
         },
     ));
@@ -459,6 +450,21 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
 }
 
 fn register_geometry(registry: &mut FeatureRegistrar<'_>) {
+    // Foliage grows on the first ground a terrain offered while the graph
+    // was built (the voxel terrain's, say); with none, on its built-in one.
+    registry.finish(Arc::new(|env, graph| {
+        let ground = env
+            .shared_existing::<helio_pass_foliage_place::OfferedGrounds>()
+            .and_then(|offered| offered.0.first().cloned());
+        if let (Some(ground), Some(place)) = (
+            ground,
+            graph.find_pass_mut::<helio_pass_foliage_place::FoliagePlacePass>(),
+        ) {
+            place.set_ground(ground);
+        }
+        Ok(())
+    }));
+
     const CATEGORY: &str = "Passes: Geometry";
 
     registry.node(pass_node(

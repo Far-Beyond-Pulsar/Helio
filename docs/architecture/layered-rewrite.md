@@ -561,6 +561,32 @@ As built (2026-11-02): layer violations 9 → 0.
   the central registration.
 - `helio-default-passes` disappears.
 
+As built, step 1 (2026-11-02): features place their own nodes.
+- Feature API: `Slot` (extension points of preset graphs: `Geometry`,
+  after the spine's G-buffer; `LightingInputs`, before deferred lighting)
+  with `NodeDescriptor::in_slot(slot, order)`, and **finishers**
+  (`FeatureRegistrar::finish`): steps run once every node is built, where
+  features that meet are joined.
+- The deferred preset is passes by name plus slots; `deferred_graph_asset`
+  expands each slot to what the registry holds there.
+- `GiFeature` (helio-pass-gi): update and mesh rays at `Geometry`, resolve
+  at `LightingInputs`; `GiSettings` (probe spacing, `terrain_traced`)
+  replaces `RendererConfig::gi_probe_spacing`.
+- `SkyFeature` (helio-pass-sky): the atmosphere tables, and the clouds'
+  trace at `LightingInputs`, which the node graph lacked.
+- `VoxelFeature` (helio-pass-voxel-planet): the chunk terrain at `Geometry`
+  from a host's `VoxelTerrain` setting (its pass makers). It offers its
+  ground through `helio_foliage_api::OfferedGrounds`, and a foliage
+  finisher grows placement on it. `helio_default_passes::with_voxel_terrain`
+  sets the terrain and GI's `terrain_traced` together.
+- `graph_parity` compares the whole pass list now (GI and clouds were
+  filtered out), and with voxel terrain: same passes and declarations as
+  the legacy factory, foliage on the terrain's ground.
+- Next: hosts build from node graphs (voxel_craft, voxel_flight, Pulsar's
+  scene renderer through `with_voxel_terrain`); forward, HLFS, FXAA and
+  simple presets as graphs; then the `build_*_graph*` functions and
+  `VoxelPassFactory` go.
+
 ### Phase 6: repo split
 - Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
   without a breaking change. Pulsar pins tags.

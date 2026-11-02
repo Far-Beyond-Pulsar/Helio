@@ -87,6 +87,15 @@ pub(crate) fn build_graph(
         }
         observe(node, &graph, first_pass..graph.pass_count());
     }
+    for finish in registry.finishers() {
+        finish(env, &mut graph).map_err(|message| {
+            vec![Diagnostic {
+                severity: Severity::Error,
+                node: None,
+                message,
+            }]
+        })?;
+    }
 
     if lock {
         graph.lock_sized(env.frame.render_size());

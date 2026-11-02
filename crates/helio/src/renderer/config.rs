@@ -359,12 +359,6 @@ pub struct RendererConfig {
     /// unlike sublevels they get an actual off switch: a scene that never
     /// authors no SceneDB `portal_views` column can skip paying for it by setting this `false`.
     pub enable_portals: bool,
-
-    /// The world-space GI probes' finest spacing (metres; each coarser
-    /// level doubles it). `None` (default): the graph's choice, 1 m over
-    /// voxel terrain and 0.5 m in mesh scenes, whose rooms, pillars and
-    /// furniture are a few metres apart.
-    pub gi_probe_spacing: Option<f32>,
 }
 
 impl RendererConfig {
@@ -390,7 +384,6 @@ impl RendererConfig {
             render_mode: RenderMode::Deferred,
             enable_xr: false,
             enable_portals: true,
-            gi_probe_spacing: None,
         }
     }
 
@@ -403,12 +396,6 @@ impl RendererConfig {
     /// Enable/disable environment-cubemap indirect specular.
     pub fn with_environment_reflections(mut self, enabled: bool) -> Self {
         self.enable_environment_reflections = enabled;
-        self
-    }
-
-    /// The GI probes' finest spacing (metres; [`Self::gi_probe_spacing`]).
-    pub fn with_gi_probe_spacing(mut self, metres: f32) -> Self {
-        self.gi_probe_spacing = Some(metres);
         self
     }
 

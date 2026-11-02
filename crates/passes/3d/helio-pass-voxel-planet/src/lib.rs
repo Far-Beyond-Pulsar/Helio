@@ -7,9 +7,13 @@
 //! * `engine` — what hosts share with the pass (frames, picks) and the
 //!   terrain half of the shaders, checked against the CPU field.
 //! * `meadow` — the terrain's foliage types.
+//! * [`VoxelFeature`] — the node that adds a host's [`VoxelTerrain`] to preset graphs.
 pub mod chunks;
 pub mod engine;
+mod feature;
 pub mod meadow;
+
+pub use feature::{ChunkPassMaker, VoxelFeature, VoxelTerrain};
 
 pub use helio_voxel_world::{
     edit_store, edit_yield, edits, feature_recipe, features, flora, grid, landform, layers, noise,

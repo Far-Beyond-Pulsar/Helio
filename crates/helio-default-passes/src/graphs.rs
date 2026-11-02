@@ -19,51 +19,76 @@ use std::collections::HashMap;
 
 use helio_graph_asset::{
     auto_layout, core_nodes, probe, BuildEnv, Connection, GraphAsset, NodeDescriptor, NodeInstance,
-    NodeRegistry, PinDesc, PinKind, PinRef, PinType, Probe, SCENEDB_PREFIX,
+    NodeRegistry, PinDesc, PinKind, PinRef, PinType, Probe, Slot, SCENEDB_PREFIX,
 };
 
 use crate::graph_nodes::{self, host_kind, kind, HOST_INPUTS};
 
 /// The default deferred pipeline's passes, in the order they execute. This is the
 /// order the `add_pass` builders used; it is the execution chain of the graph.
-const DEFERRED: &[&str] = &[
-    "object_batch",
-    "atmosphere",
-    "shadow_matrix",
-    "shadow_dirty",
-    "shadow",
-    "background",
-    "indirect_dispatch",
-    "hiz",
-    "occlusion_cull",
-    "portal_cull",
-    "light_cull",
-    "foliage_place",
-    "gbuffer",
-    "portal_mask",
-    "portal_instance",
-    "foliage_gbuffer",
-    "decal",
-    "deferred_light",
-    "atmosphere_composite",
-    "corona",
-    "portal_editor_overlay",
-    "water_sim",
-    "debug_draw_scene",
-    "billboard",
-    "post_process_volume_blend",
-    "volumetric_fog",
-    "fog_composite",
-    "transparent",
-    "fxaa",
-    "lens",
-    "lens_flare",
-    "post_process",
-    "buffer_view",
-    "sprite_overlay",
-    "perf_overlay",
-    "debug_draw",
+/// A step of the default pipeline: a pass by name, or an extension point
+/// where the nodes features registered for it go (by order, then kind).
+enum Step {
+    Pass(&'static str),
+    Slot(Slot),
+}
+
+const DEFERRED: &[Step] = &[
+    Step::Pass("object_batch"),
+    Step::Pass("atmosphere"),
+    Step::Pass("shadow_matrix"),
+    Step::Pass("shadow_dirty"),
+    Step::Pass("shadow"),
+    Step::Pass("background"),
+    Step::Pass("indirect_dispatch"),
+    Step::Pass("hiz"),
+    Step::Pass("occlusion_cull"),
+    Step::Pass("portal_cull"),
+    Step::Pass("light_cull"),
+    Step::Pass("foliage_place"),
+    Step::Pass("gbuffer"),
+    Step::Pass("portal_mask"),
+    Step::Pass("portal_instance"),
+    Step::Pass("foliage_gbuffer"),
+    Step::Slot(Slot::Geometry),
+    Step::Pass("decal"),
+    Step::Slot(Slot::LightingInputs),
+    Step::Pass("deferred_light"),
+    Step::Pass("atmosphere_composite"),
+    Step::Pass("corona"),
+    Step::Pass("portal_editor_overlay"),
+    Step::Pass("water_sim"),
+    Step::Pass("debug_draw_scene"),
+    Step::Pass("billboard"),
+    Step::Pass("post_process_volume_blend"),
+    Step::Pass("volumetric_fog"),
+    Step::Pass("fog_composite"),
+    Step::Pass("transparent"),
+    Step::Pass("fxaa"),
+    Step::Pass("lens"),
+    Step::Pass("lens_flare"),
+    Step::Pass("post_process"),
+    Step::Pass("buffer_view"),
+    Step::Pass("sprite_overlay"),
+    Step::Pass("perf_overlay"),
+    Step::Pass("debug_draw"),
 ];
+
+/// The default pipeline's nodes in execution order, as (id, kind): its passes
+/// and, at each slot, the nodes registered for it.
+fn deferred_nodes(registry: &NodeRegistry) -> Vec<(String, String)> {
+    let mut nodes = Vec::new();
+    for step in DEFERRED {
+        match step {
+            Step::Pass(name) => nodes.push((name.to_string(), kind(name))),
+            Step::Slot(slot) => nodes.extend(registry.slotted(*slot).into_iter().map(|d| {
+                let id = d.kind.trim_start_matches("helio.pass.").replace('.', "_");
+                (id, d.kind.clone())
+            })),
+        }
+    }
+    nodes
+}
 
 /// Core nodes plus everything `features` register.
 pub fn registry_for(features: &helio_feature_api::FeatureSet) -> NodeRegistry {
@@ -125,9 +150,9 @@ fn probe_asset(registry: &NodeRegistry) -> GraphAsset {
         add_node(&mut asset, &format!("host_{name}"), &host_kind(name));
     }
     let mut placed: Vec<String> = Vec::new();
-    for &name in DEFERRED {
-        add_node(&mut asset, name, &kind(name));
-        placed.push(kind(name));
+    for (id, kind) in deferred_nodes(registry) {
+        add_node(&mut asset, &id, &kind);
+        placed.push(kind);
     }
     let mut others = pass_kinds(registry);
     others.retain(|k| !placed.contains(k));
@@ -202,20 +227,21 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
         ..Default::default()
     };
 
+    let nodes = deferred_nodes(registry);
     add_node(&mut asset, "start", core_nodes::ON_FRAME_START);
-    for &name in DEFERRED {
-        add_node(&mut asset, name, &kind(name));
+    for (id, kind) in &nodes {
+        add_node(&mut asset, id, kind);
     }
     add_node(&mut asset, "output", core_nodes::OUTPUT);
 
     // The execution chain.
-    connect(&mut asset, ("start", "out"), (DEFERRED[0], "in"));
-    for pair in DEFERRED.windows(2) {
-        connect(&mut asset, (pair[0], "out"), (pair[1], "in"));
+    connect(&mut asset, ("start", "out"), (&nodes[0].0, "in"));
+    for pair in nodes.windows(2) {
+        connect(&mut asset, (&pair[0].0, "out"), (&pair[1].0, "in"));
     }
     connect(
         &mut asset,
-        (DEFERRED[DEFERRED.len() - 1], "out"),
+        (&nodes[nodes.len() - 1].0, "out"),
         ("output", "in"),
     );
 
@@ -229,19 +255,19 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
     }
 
     // Pins of each pass.
-    let pins: HashMap<&str, helio_graph_asset::NodePins> = DEFERRED
+    let pins: HashMap<&str, helio_graph_asset::NodePins> = nodes
         .iter()
-        .filter_map(|name| {
+        .filter_map(|(id, kind)| {
             registry
-                .get(&kind(name))
-                .map(|descriptor| (*name, descriptor.pins(&Default::default())))
+                .get(kind)
+                .map(|descriptor| (id.as_str(), descriptor.pins(&Default::default())))
         })
         .collect();
 
     // Every resource some pass reads: only those need a Set where they are written.
-    let read_somewhere: std::collections::HashSet<String> = DEFERRED
+    let read_somewhere: std::collections::HashSet<String> = nodes
         .iter()
-        .filter_map(|name| pins.get(name))
+        .filter_map(|(id, _)| pins.get(id.as_str()))
         .flat_map(|node_pins| node_pins.inputs.iter())
         .filter(|pin| pin.ty.kind != PinKind::Flow)
         .map(|pin| pin.resource.clone())
@@ -251,7 +277,8 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
     // and writes what others read through Set Buffer nodes on its right. A buffer
     // is a variable: the Gets read the latest Set before the pass using them, so no
     // wire runs between passes.
-    for &name in DEFERRED {
+    for (name, _) in &nodes {
+        let name = name.as_str();
         let Some(node_pins) = pins.get(name) else {
             continue;
         };
@@ -305,11 +332,13 @@ mod tests {
     #[test]
     fn every_default_pass_is_registered() {
         let registry = base_registry();
-        for name in DEFERRED {
-            assert!(
-                registry.get(&kind(name)).is_some(),
-                "no node for pass `{name}`"
-            );
+        for step in DEFERRED {
+            if let Step::Pass(name) = step {
+                assert!(
+                    registry.get(&kind(name)).is_some(),
+                    "no node for pass `{name}`"
+                );
+            }
         }
         for host in HOST_INPUTS {
             assert!(registry.get(&host_kind(host)).is_some());

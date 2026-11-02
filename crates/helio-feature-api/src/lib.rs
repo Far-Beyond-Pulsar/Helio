@@ -14,7 +14,7 @@ mod settings;
 pub use feature::{ContractUse, Feature, FeatureRegistrar, FeatureSet};
 pub use pins::{PinDesc, PinKind, PinShape, PinType};
 pub use registry::{
-    BuildEnv, BuildFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry,
-    ParamDesc, ParamType, Params, PinTable, PinsFn,
+    BuildEnv, BuildFn, FinishFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins,
+    NodeRegistry, ParamDesc, ParamType, Params, PinTable, PinsFn, Slot,
 };
 pub use settings::FeatureSettings;

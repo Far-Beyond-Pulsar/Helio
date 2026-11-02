@@ -2,10 +2,11 @@
 //! one pass declares and sits exactly where the code that used to be this graph
 //! put it, the swap policy and lock size agree, and host inputs agree.
 //!
-//! Known gaps this harness scopes out (Phase 1+): the voxel and GI passes are
-//! not nodes yet, so the graph has none and the legacy list is filtered to the
-//! passes both declare. Forward, HLFS and simple pipelines are not graphs at
-//! all, so there is nothing to compare them with.
+//! Features join the graph at its slots (GI's update, tracer and resolve, the
+//! clouds' trace), as the legacy builder adds them. Voxel terrain is in
+//! neither here: its node needs a host's `VoxelTerrain`. Forward, HLFS and
+//! simple pipelines are not graphs yet, so there is nothing to compare them
+//! with.
 //!
 //! Everything needs a device: both pipelines build their passes for real
 //! (pipelines, buffers, bind group layouts). Without one the device-gated
@@ -230,22 +231,12 @@ fn the_graph_pipeline_matches_the_legacy_default() {
     graph_inputs.sort_unstable();
     assert_eq!(legacy_inputs, graph_inputs, "host inputs differ");
 
-    // The graph has no voxel or GI nodes yet, so the legacy passes those
-    // factories add are scoped out (see this file's doc comment).
-    let scoped_out: HashSet<&'static str> = HashSet::from([
-        helio_core::graph::type_name_of::<helio_pass_gi::GiPass>(),
-        helio_core::graph::type_name_of::<helio_pass_gi::GiMeshTracePass>(),
-        helio_core::graph::type_name_of::<helio_pass_gi::GiResolvePass>(),
-        helio_core::graph::type_name_of::<helio_pass_sky::CloudTracePass>(),
-    ]);
-    let legacy_passes: Vec<PassDeclaration> = passes(&legacy)
-        .into_iter()
-        .filter(|pass| !scoped_out.contains(pass.type_name))
-        .collect();
-    let graph_passes = passes(&graph);
+    // GI and the clouds' trace join through their slots; neither side has
+    // voxel terrain (the voxel node builds nothing without a `VoxelTerrain`).
     assert_eq!(
-        legacy_passes, graph_passes,
-        "pass list or declarations differ (legacy minus GI/cloud vs graph)"
+        passes(&legacy),
+        passes(&graph),
+        "pass list or declarations differ (legacy vs graph)"
     );
 }
 
@@ -305,6 +296,52 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
             stochastic,
             "the stochastic-mask parameter decides {}",
             helio_pass_tsr::STOCHASTIC_MASK
+        );
+    }
+}
+
+#[test]
+fn voxel_terrain_joins_the_graph_like_the_legacy_factory() {
+    use helio_pass_voxel_planet::chunks::pass::ChunkPass;
+    use helio_pass_voxel_planet::engine::SharedPlanetFrame;
+
+    let Some(mut fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: voxel terrain node");
+        return;
+    };
+    let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
+    let legacy_source = source.clone();
+    let legacy = helio_default_passes::build_default_graph_external_with_voxel_passes(
+        fixtures.context(),
+        vec![Arc::new(move |_, _, _, _| {
+            Box::new(ChunkPass::new(legacy_source.clone()))
+        })],
+    );
+
+    fixtures.config = helio_default_passes::with_voxel_terrain(
+        fixtures.config.clone(),
+        helio_pass_voxel_planet::VoxelTerrain::new(move || ChunkPass::new(source.clone())),
+    );
+    let mut pipelines = RenderPipelineRegistry::new();
+    helio_default_passes::pipelines::register_builtin_pipelines(&mut pipelines);
+    let graph = pipelines
+        .create(Some(DEFERRED_GRAPH))
+        .expect("graph pipeline registered")
+        .into_graph(fixtures.context());
+
+    assert_eq!(
+        passes(&legacy),
+        passes(&graph),
+        "pass list or declarations differ with voxel terrain (legacy vs graph)"
+    );
+    for (name, g) in [("legacy", &legacy), ("graph", &graph)] {
+        let chunks = g.find_pass::<ChunkPass>().expect("the terrain's pass");
+        let place = g
+            .find_pass::<helio_pass_foliage_place::FoliagePlacePass>()
+            .expect("foliage placement");
+        assert!(
+            Arc::ptr_eq(place.ground(), &chunks.foliage_ground()),
+            "{name}: foliage does not grow on the terrain's ground"
         );
     }
 }

@@ -52,7 +52,7 @@ use helio_pass_postprocess::{
 };
 use helio_pass_shadow::ShadowPass;
 
-use helio_pass_gi::{GiConfig, GiMeshTracePass, GiPass, GiResolvePass};
+use helio_pass_gi::{GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
@@ -421,25 +421,16 @@ fn add_gi_tracers(
     config: &RendererConfig,
     voxel_passes: &[VoxelPassFactory],
 ) -> bool {
-    let voxel = !voxel_passes.is_empty();
+    let settings = helio_pass_gi::GiSettings {
+        terrain_traced: !voxel_passes.is_empty(),
+        ..config
+            .features
+            .get_or_default::<helio_pass_gi::GiSettings>()
+    };
     let mesh_rays = GiMeshTracePass::new(device);
-    let gi = voxel || mesh_rays.is_some();
+    let gi = settings.active(device);
     if gi {
-        let finest_spacing = config.gi_probe_spacing.map_or(
-            if voxel {
-                helio_pass_gi::DEFAULT_FINEST_SPACING
-            } else {
-                0.5
-            },
-            f64::from,
-        );
-        graph.add_pass(Box::new(GiPass::new(
-            device,
-            GiConfig {
-                finest_spacing,
-                needs_tlas: !voxel,
-            },
-        )));
+        graph.add_pass(Box::new(GiPass::new(device, settings.config())));
     }
     for factory in voxel_passes {
         graph.add_pass(factory(device, queue, iw, ih));
@@ -2291,6 +2282,20 @@ fn build_forward_graph_internal(
     graph
 }
 
+/// Draws `terrain` in the graphs `config` builds: the voxel node adds its
+/// chunk passes, and GI traces its probes against it (without a TLAS).
+pub fn with_voxel_terrain(
+    mut config: RendererConfig,
+    terrain: helio_pass_voxel_planet::VoxelTerrain,
+) -> RendererConfig {
+    config.features.insert(terrain);
+    config
+        .features
+        .edit::<helio_pass_gi::GiSettings>()
+        .terrain_traced = true;
+    config
+}
+
 /// A renderer config with a host's [`helio::helio_settings::RENDERER`]
 /// values: the renderer's own, and the default features' settings
 /// (foliage). Engines build their config with this rather than
@@ -2305,5 +2310,9 @@ pub fn config_with_host_settings(
         .get_or_default::<helio_pass_foliage_place::FoliageSettings>()
         .with_host_settings(settings);
     config.features.insert(foliage);
+    config
+        .features
+        .edit::<helio_pass_gi::GiSettings>()
+        .probe_spacing = settings.optional("gi_probe_spacing").map(|m| m as f32);
     config
 }

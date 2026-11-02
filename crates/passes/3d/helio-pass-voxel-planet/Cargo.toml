@@ -18,6 +18,7 @@ rayon = "1.12"
 helio-settings = { workspace = true }
 wgpu = { version = "30.0.1" }
 helio-core = { workspace = true }
+helio-feature-api = { path = "../../../helio-feature-api" }
 # Specular anti-aliasing for the scene materials' normal maps.
 helio-mats = { workspace = true }
 helio-gi-api = { path = "../../../api/helio-gi-api" }
