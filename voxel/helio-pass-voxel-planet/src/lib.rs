@@ -15,6 +15,7 @@ mod feature;
 mod water_shore;
 pub use water_shore::VoxelShoreTerrain;
 pub mod meadow;
+pub mod settings;
 
 pub use feature::{VoxelFeature, VoxelSettings};
 

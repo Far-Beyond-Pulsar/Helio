@@ -52,7 +52,6 @@ helio-pass-tsr = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-lens = { workspace = true }
-helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
 helio-vg-format = { path = "../helio-vg-format" }
 helio-vg-stream = { path = "../helio-vg-stream" }
 

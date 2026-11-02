@@ -2,7 +2,7 @@
 //! (helio-pass-voxel-planet's docs/chunk-octree.md): held views with GPU
 //! timings, streaming flights, digging, picks and captures.
 //!
-//! cargo run -p examples --release --bin voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
+//! cargo run -p helio-voxel-examples --release --bin voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
 //! Modes (environment):
 //! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|overhang|feature|eye|altitude`
@@ -261,7 +261,10 @@ impl Flight {
         let config = config.with_feature(terrain);
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
             .with_external_device()
-            .with_graph(Preset::Deferred)
+            // The voxel world is a feature Helio's presets do not list.
+            .with_graph(Preset::Deferred.with_features(
+                &helio_feature_api::FeatureSet::new().with(helio_pass_voxel_planet::VoxelFeature),
+            ))
             .build(
                 device.clone(),
                 queue.clone(),

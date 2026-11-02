@@ -18,6 +18,11 @@ use helio_pass_voxel_planet::{Planet, PlanetRecipe};
 use helio_presets::Preset;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
+/// The engine's features over Helio's: the voxel terrain's.
+fn voxel_features() -> helio_feature_api::FeatureSet {
+    helio_feature_api::FeatureSet::new().with(helio_pass_voxel_planet::VoxelFeature)
+}
+
 struct View {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
@@ -83,7 +88,7 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.0; 3], 0.0)
         .with_external_device()
-        .with_graph(Preset::Deferred)
+        .with_graph(Preset::Deferred.with_features(&voxel_features()))
         .build(
             Arc::clone(&device),
             Arc::clone(&queue),

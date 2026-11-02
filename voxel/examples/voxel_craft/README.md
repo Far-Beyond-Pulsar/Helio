@@ -7,7 +7,7 @@ and pyramids to find, and a blocky character you can see in third person.
 Every voxel's colour is procedural: nothing is textured.
 
 ```
-cargo run -p examples --release --bin voxel_craft
+cargo run -p helio-voxel-examples --release --bin voxel_craft
 ```
 
 The native demo detects a connected OpenXR headset at startup, using the same
@@ -86,7 +86,7 @@ anti-aliasing to converge), or after 900 frames regardless
 (`VOXEL_CRAFT_WAIT_MAX`).
 
 ```
-VOXEL_CRAFT_SHOTS=shots cargo run -p examples --release --bin voxel_craft
+VOXEL_CRAFT_SHOTS=shots cargo run -p helio-voxel-examples --release --bin voxel_craft
 ```
 
 * `VOXEL_CRAFT_POSES=<n>`: shoot only the first `n` poses.

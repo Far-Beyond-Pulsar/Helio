@@ -1,10 +1,10 @@
 //! Ultra-Water integrated with Helio's voxel terrain, meadow foliage, sky and haze.
 //!
 //! Run from the Helio workspace root:
-//! `cargo run -p examples --release --bin water_world -- coast`
+//! `cargo run -p helio-voxel-examples --release --bin water_world -- coast`
 //! A deterministic one-shot capture (after voxel streaming warms up) can be
 //! rendered and closed with:
-//! `cargo run -p examples --bin water_world -- shoreline --capture-and-exit`
+//! `cargo run -p helio-voxel-examples --bin water_world -- shoreline --capture-and-exit`
 //!
 //! Presets: `coast` (wide island-and-ocean view), `shoreline` (low camera at
 //! the breakers), and `underwater` (looking through the
@@ -315,7 +315,10 @@ impl Showcase {
         let renderer_config = renderer_config.with_feature(terrain);
         let mut renderer = RendererBuilder::new(renderer_config.clone(), mirror)
             .with_external_device()
-            .with_graph(Preset::Deferred)
+            // The voxel world is a feature Helio's presets do not list.
+            .with_graph(Preset::Deferred.with_features(
+                &helio_feature_api::FeatureSet::new().with(helio_pass_voxel_planet::VoxelFeature),
+            ))
             .build(
                 device.clone(),
                 queue.clone(),

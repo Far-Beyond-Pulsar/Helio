@@ -7,8 +7,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-pass-tsr = { workspace = true }
-helio-water-api = { path = "../../../api/helio-water-api" }
-helio-voxel-world = { path = "../../../helio-voxel-world" }
+helio-water-api = { path = "../../crates/api/helio-water-api" }
+helio-voxel-world = { workspace = true }
 glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,12 +20,12 @@ rayon = "1.12"
 helio-settings = { workspace = true }
 wgpu = { version = "30.0.1" }
 helio-core = { workspace = true }
-helio-feature-api = { path = "../../../helio-feature-api" }
+helio-feature-api = { path = "../../crates/helio-feature-api" }
 # Specular anti-aliasing for the scene materials' normal maps.
 helio-mats = { workspace = true }
-helio-gi-api = { path = "../../../api/helio-gi-api" }
+helio-gi-api = { path = "../../crates/api/helio-gi-api" }
 # Foliage grows on the terrain (`chunks::ground`).
-helio-foliage-api = { path = "../../../api/helio-foliage-api" }
+helio-foliage-api = { path = "../../crates/api/helio-foliage-api" }
 helio-pass-shadow-matrix = { workspace = true }
 image = { workspace = true }
 # Kept chunks in edit snapshots (`ChunkWorld::kept_snapshot`).
@@ -36,3 +36,13 @@ pollster = "0.4"
 # examples/shader_stats.rs: driver statistics of the compute pipelines.
 ash = "0.38"
 naga = { version = "30.0.1", features = ["wgsl-in", "spv-out"] }
+# The terrain in Helio's presets, as an engine adds it (tests/presets.rs,
+# voxel_pass_graph.rs, foliage_on_voxels.rs, clouds.rs); dev-only, as the
+# layer gate requires of a feature crate.
+helio = { workspace = true }
+helio-presets = { workspace = true }
+helio-components = { workspace = true }
+helio-pass-foliage-place = { workspace = true }
+helio-pass-forward-lit = { workspace = true }
+helio-pass-sky = { workspace = true }
+pulsar_scenedb = { workspace = true }

@@ -2023,12 +2023,12 @@ impl Default for ResidencyConfig {
 }
 
 impl ResidencyConfig {
-    /// A host's [`helio_settings::VOXEL_RESIDENCY`] values (the pixel
+    /// A host's [`crate::settings::VOXEL_RESIDENCY`] values (the pixel
     /// angle is the pass's: it follows the view).
     pub fn from_settings(settings: &helio_settings::Resolved) -> Self {
         debug_assert!(std::ptr::eq(
             settings.group(),
-            &helio_settings::VOXEL_RESIDENCY
+            &crate::settings::VOXEL_RESIDENCY
         ));
         let n = |key| settings.number(key);
         let defaults = Self::default();
@@ -2059,7 +2059,7 @@ impl ResidencyConfig {
 #[cfg(test)]
 #[test]
 fn default_settings_are_the_default_residency() {
-    let configured = ResidencyConfig::from_settings(&helio_settings::VOXEL_RESIDENCY.defaults());
+    let configured = ResidencyConfig::from_settings(&crate::settings::VOXEL_RESIDENCY.defaults());
     assert_eq!(
         format!("{configured:?}"),
         format!("{:?}", ResidencyConfig::default())
@@ -2868,7 +2868,7 @@ fn create_uv_grid(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> (wgpu::TextureView, wgpu::Sampler) {
-    const UV_GRID_BYTES: &[u8] = include_bytes!("../../../../../../assets/UV_Grid_Sm.jpg");
+    const UV_GRID_BYTES: &[u8] = include_bytes!("../../../../assets/UV_Grid_Sm.jpg");
     let decoded = image::load_from_memory(UV_GRID_BYTES)
         .expect("embedded UV reference image is valid")
         .to_rgba8();

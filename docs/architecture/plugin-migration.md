@@ -100,7 +100,7 @@ Helio core and on other plugins' api crates only.
 | `pulsar.lens` | CameraLens | lens, flare (reads `light_list` via lights api) | `lens_color` names in the spine |
 | `pulsar.water` | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | water reads in deferred light |
 | `pulsar.foliage` | Foliage, Wind | placement, drawers | — |
-| `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | (in progress: layered-rewrite step 6) |
+| `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Helio-Voxel in `voxel/`; editor sculpt tool still in `ui_level_editor` |
 | `pulsar.decals` | Decal | decal drawer (after GBuffer) | — |
 | `pulsar.particles` | ParticleEmitter | corona | `corona_emitters` host input |
 | `pulsar.sprites` | Sprite | sprite cull/batch/simulate, 2D radiance cascades | — |

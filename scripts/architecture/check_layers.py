@@ -6,6 +6,8 @@ Reads architecture/layers.toml and `cargo metadata`, and fails when:
 - a normal/build dependency breaks the layer rules and is not in
   architecture/layer-violations.txt (new coupling);
 - a recorded violation no longer exists (shrink the list with --update);
+- a crate outside a sealed group ([sealed_groups]) depends on one of its
+  crates (normal/build; never recordable);
 - a budget in [budgets] is exceeded, or has slack (lower it).
 
 Usage: python scripts/architecture/check_layers.py [--update]
@@ -43,6 +45,7 @@ def workspace():
 
 def violations(config, deps):
     layers, crates = config["layers"], config["crates"]
+    sealed = config.get("sealed_groups", {})
     errors, found = [], []
     for name in sorted(deps):
         if name not in crates:
@@ -55,6 +58,11 @@ def violations(config, deps):
                 continue  # reported above
             same_group = a.get("group") and a.get("group") == b.get("group")
             if same_group:
+                continue
+            if b.get("group") in sealed:
+                errors.append(f"{name} -> {dep}: {dep} is in the sealed group "
+                              f"'{b['group']}' ({sealed[b['group']]}); only its own "
+                              f"crates may depend on it")
                 continue
             if b["layer"] not in layers[a["layer"]]["may_use"]:
                 found.append(f"{name} -> {dep}  ({a['layer']} -> {b['layer']})")
@@ -70,7 +78,7 @@ def scene_store_derives(config, dirs):
     package (a host) and are not counted."""
     by_depth = sorted(dirs.items(), key=lambda kv: len(kv[1].parts), reverse=True)
     count, sites = 0, []
-    for top in ("crates", "crates_other", "src"):
+    for top in ("crates", "crates_other", "voxel", "src"):
         for path in sorted((ROOT / top).resolve().rglob("*.rs")):
             if "target" in path.parts:
                 continue

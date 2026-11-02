@@ -2,12 +2,12 @@
 //! materials, the character), the voxel planet pass wired to the world, and
 //! drawing a frame for the player's camera.
 
-use crate::palette;
-use crate::player::avatar::Avatar;
-use crate::v3_demo_common::{
+use crate::common::{
     directional_light, flush_scene_db, new_scene_db_with_gpu_mirror, scene_db_handle,
     set_camera_postprocess, spawn_light, update_light, SceneRays,
 };
+use crate::palette;
+use crate::player::avatar::Avatar;
 use glam::{DMat4, DVec3, Vec3};
 use helio::{
     Camera, HelioGraphicsConfig, HelioGraphicsContext, HelioXrInput, Renderer, RendererBuilder,
@@ -450,7 +450,12 @@ impl Gfx {
         let renderer_config = renderer_config.with_feature(terrain);
         let handle = scene_db_handle(&scene);
         let builder =
-            RendererBuilder::new(renderer_config.clone(), handle).with_graph(Preset::Deferred);
+            RendererBuilder::new(renderer_config.clone(), handle).with_graph(
+                // The voxel world is a feature Helio's presets do not list.
+                Preset::Deferred.with_features(
+                    &helio_feature_api::FeatureSet::new().with(helio_pass_voxel_planet::VoxelFeature),
+                ),
+            );
         let (mut renderer, xr_input) = graphics
             .build_renderer(builder, renderer_config)
             .expect("Helio renderer");

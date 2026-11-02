@@ -21,14 +21,17 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CRATE_DIR = re.compile(r"^(?:crates/passes/[23]d|crates|crates_other)/([^/]+)/")
+CRATE_DIR = re.compile(r"^(?:crates/passes/[23]d|crates|crates_other|voxel)/([^/]+)/")
+# Folders whose name is not their crate's.
+DIR_CRATE = {"voxel/examples/": "helio-voxel-examples"}
 
 
 def unit_of(path, crates, renamed, include_hosts):
     m = CRATE_DIR.match(path)
     if not m:
         return None
-    name = renamed.get(m.group(1), m.group(1))
+    name = next((c for d, c in DIR_CRATE.items() if path.startswith(d)), m.group(1))
+    name = renamed.get(name, name)
     entry = crates.get(name)
     if entry is None:
         return name

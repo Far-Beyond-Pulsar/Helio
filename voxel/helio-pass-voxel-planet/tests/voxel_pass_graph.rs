@@ -16,6 +16,11 @@ use helio_pass_voxel_planet::{Planet, PlanetRecipe};
 use helio_presets::Preset;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
+/// The engine's features over Helio's: the voxel terrain's.
+fn voxel_features() -> helio_feature_api::FeatureSet {
+    helio_feature_api::FeatureSet::new().with(helio_pass_voxel_planet::VoxelFeature)
+}
+
 struct FinalResourceConsumer {
     expected: [u32; 2],
     observed: Arc<Mutex<Vec<[u32; 2]>>>,
@@ -136,6 +141,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         let observed = Arc::new(Mutex::new(Vec::new()));
         let nodes = helio_presets::graphs::registry_for(
             &helio_presets::features::default_features()
+                .extended(&voxel_features())
                 .with(FinalConsumerFeature(observed.clone())),
         );
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
@@ -421,7 +427,7 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
-        .with_graph(Preset::Deferred)
+        .with_graph(Preset::Deferred.with_features(&voxel_features()))
         .build(
             Arc::clone(&device),
             Arc::clone(&queue),

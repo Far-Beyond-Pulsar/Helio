@@ -21,6 +21,11 @@ use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRe
 use helio_presets::Preset;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
+/// The engine's features over Helio's: the voxel terrain's.
+fn voxel_features() -> helio_feature_api::FeatureSet {
+    helio_feature_api::FeatureSet::new().with(helio_pass_voxel_planet::VoxelFeature)
+}
+
 const SIZE: [u32; 2] = [640, 360];
 
 struct Harness {
@@ -119,7 +124,7 @@ impl Harness {
             let mirror = scene.world.gpu_mirror().cloned().unwrap();
             let renderer = RendererBuilder::new(config.clone(), mirror)
                 .with_external_device()
-                .with_graph(Preset::Deferred)
+                .with_graph(Preset::Deferred.with_features(&voxel_features()))
                 .build(
                     device.clone(),
                     queue.clone(),

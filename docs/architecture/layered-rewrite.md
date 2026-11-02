@@ -799,6 +799,48 @@ renderer, the cameras and the editor only through its component.
   renderer a generic `ToolRay` (a closure the render thread calls with the
   frame camera's pointer ray and the scene), which calls `sculpt`.
 
+As built, step 6.6 (2026-11-02): voxel is the `pulsar.voxel` plugin; Helio,
+its presets, `helio_component` and `engine_backend` keep no voxel code.
+- **Helio-Voxel** is the top-level `voxel/` folder (its own repo at phase
+  6): `helio-voxel-data`, `helio-voxel-world`, `helio-pass-voxel-planet`,
+  and `helio-voxel-examples` (voxel_craft, voxel_flight, water_world, with
+  the scene helpers voxel_craft used copied into `voxel/examples/common.rs`).
+  The voxel tests that need presets live there (`tests/presets.rs` is
+  graph_parity's voxel case); `helio-pass-voxel-planet/tests/wgsl.rs`
+  validates its shaders, and helio-core's WGSL test skips `voxel/`.
+  Why there and not inside the Pulsar plugin: the voxel world and its
+  passes are engine tech with their own hosts and GPU tests that need no
+  editor (open decision 1), and splitting them into their own repo later is
+  a folder move; meanwhile they share Helio's workspace and target dir.
+  The plugin owns them in the sense the rule asks: nothing else depends on
+  them, and Pulsar reaches them only through the plugin.
+- **Engines add features**: `default_features` has no voxel;
+  `Preset::with_features(&FeatureSet)` / `with_registry(Arc<NodeRegistry>)`
+  make a `PresetGraph`, `graphs::registry_with(extra)` the node registry,
+  and `pipelines::register_builtin_pipelines(registry, extra)` builds every
+  shipped pipeline over them (`FeatureSet::extended`). The voxel settings
+  group is `helio_pass_voxel_planet::settings::VOXEL_RESIDENCY`;
+  `helio_settings::GROUPS` is the renderer's alone.
+- **Layer gate**: `[sealed_groups]` in `architecture/layers.toml`; a crate
+  of a sealed group (`voxel`) may only be depended on (normal/build) by
+  crates of that group. An error, never recorded.
+- **Pulsar** (`plugins/vendor/voxel_plugin`, id `pulsar.voxel`): the
+  components, runtime, sync, sculpting, world queries, generator and stack
+  editors, and ready-made worlds (`presets`) moved in; the sky and haze a
+  world's air derives are the plugin's (`sync::sky_for_air`,
+  `haze_for_air`). Generic seams it registers with: `engine_backend`'s
+  `RenderFeatureRegistration` (features + config; the scene renderer, the
+  pipeline registry and the render-graph node registry build over them),
+  `pulsar_settings`' `SettingsGroupRegistration` (project settings and the
+  graph-settings cache cover every registered group),
+  `helio_component::GroundMaterialNames` (foliage's `grows_on` is a
+  `GroundMaterialList`; the plugin names the terrain's materials). The
+  editor (`ui_core`), the game (`pulsar_game`) and `scene_inventory` link
+  it.
+- Not moved: the sculpt tool and terrain panel stay in `ui_level_editor`
+  and act through the plugin's methods; moving them needs generic tool
+  state, undo entries and commands in the level editor first.
+
 Later steps apply the same pattern to every other kind (meshes + VG,
 water, foliage, decals, lights, sky, portals, sprites), one plugin per
 kind, each removing that kind from Helio, the presets, the scene

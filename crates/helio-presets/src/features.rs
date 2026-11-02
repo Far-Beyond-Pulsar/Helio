@@ -20,13 +20,14 @@ pub use helio_spine::{host_kind, HOST_INPUTS};
 
 /// Helio's features, in registration order: the spine, then every feature
 /// whose nodes the presets place, then the renderer's own nodes. An engine
-/// adds its features to this set.
+/// adds its features to this set ([`crate::Preset::with_features`]): the
+/// features of object kinds Helio does not know (a voxel world) come from
+/// the plugin that owns the kind.
 pub fn default_features() -> FeatureSet {
     FeatureSet::new()
         .with(helio_spine::SpineFeature)
         .with(helio_pass_sky::SkyFeature)
         .with(helio_pass_gi::GiFeature)
-        .with(helio_pass_voxel_planet::VoxelFeature)
         .with(helio_pass_decal::DecalFeature)
         .with(helio_pass_ssr::SsrFeature)
         .with(helio_pass_planar_reflection::PlanarReflectionFeature)

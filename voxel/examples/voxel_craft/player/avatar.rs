@@ -4,7 +4,7 @@
 
 use super::Player;
 use crate::blocks::Block;
-use crate::v3_demo_common::{
+use crate::common::{
     box_mesh, make_material, spawn_material, spawn_mesh, spawn_object_with_movability,
     update_object_transform,
 };

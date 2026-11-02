@@ -9,7 +9,7 @@
 //! and patch by patch): nothing is textured.
 //!
 //! ```text
-//! cargo run -p examples --release --bin voxel_craft
+//! cargo run -p helio-voxel-examples --release --bin voxel_craft
 //! ```
 //!
 //! Controls: WASD move, Space jump (tap twice, or F, to fly), Ctrl sprint,
@@ -33,9 +33,8 @@
 //! `palette.rs` the blocks' look, `player/` movement, interaction and the
 //! character, `gfx.rs` the renderer, `game.rs` one frame.
 
-#[path = "../v3_demo_common.rs"]
-#[allow(dead_code)]
-mod v3_demo_common;
+#[path = "../common.rs"]
+mod common;
 
 mod app;
 mod blocks;
