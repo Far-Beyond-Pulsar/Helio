@@ -9,6 +9,7 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-feature-api = { path = "../../../helio-feature-api" }
 helio-core = { workspace = true }
 helio-mats = { workspace = true }

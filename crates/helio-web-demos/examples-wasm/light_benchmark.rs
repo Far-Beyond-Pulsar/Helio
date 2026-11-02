@@ -90,7 +90,10 @@ impl HelioWasmApp for Demo {
             world,
             directional_light([0.2, -0.9, 0.4], [0.8, 0.85, 1.0], 0.002),
         );
-        renderer.set_ambient([0.1, 0.1, 0.15], 0.01);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.1, 0.1, 0.15],
+            intensity: 0.01,
+        });
         renderer.set_clear_color([0.01, 0.01, 0.02, 1.0]);
 
         Self {

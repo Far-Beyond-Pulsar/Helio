@@ -107,7 +107,10 @@ impl ApplicationHandler for App {
         .build_with_graphics_context(&mut graphics)
         .expect("Helio renderer");
         let surface = graphics.surface;
-        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.05, 0.05, 0.08],
+            intensity: 1.0,
+        });
         let acceleration = if rt {
             crate::hlfs_capture::enable_ray_shadows(&mut scene_db.world);
             Some(helio_components::ray_tracing::SceneDbRayTracing::new(

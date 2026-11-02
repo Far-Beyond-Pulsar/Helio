@@ -127,7 +127,7 @@ impl HelioWasmApp for Demo {
         let settings_entity = scene_db.world.spawn();
         scene_db.world.insert(
             settings_entity,
-            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
                 0,
                 &helio_pass_postprocess::PostProcessSettings::default(),
             )),
@@ -237,7 +237,7 @@ impl HelioWasmApp for Demo {
         }
 
         let resolved = renderer
-            .find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+            .find_pass_mut::<helio_pass_post_volumes::PostProcessVolumeBlendPass>()
             .expect("postprocess blend pass")
             .resolved_uniforms()
             .clone();
@@ -248,15 +248,20 @@ impl HelioWasmApp for Demo {
                 &resolved,
                 self.lut_generation,
             );
-            if rebuilt || renderer.color_grading_lut().is_none() {
+            // One texture, rewritten in place: given to the tone map once.
+            let _ = rebuilt;
+            if renderer
+                .feature::<helio_pass_postprocess::ColorGradingLut>()
+                .is_none()
+            {
                 let view = builder.lut_view().clone();
-                renderer.set_color_grading_lut(Some(view));
+                renderer.set_feature(helio_pass_postprocess::ColorGradingLut(view));
             }
         }
 
         self.scene_db.world.insert(
             self.settings_entity,
-            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
                 camera.view_id,
                 &settings,
             )),

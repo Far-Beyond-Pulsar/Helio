@@ -22,6 +22,7 @@ default = []
 editor_demo_mini = []
 
 [dependencies]
+helio-mesh-api = { workspace = true }
 helio               = { workspace = true }
 helio-wasm          = { path = "../helio-wasm" }
 helio-presets = { workspace = true }

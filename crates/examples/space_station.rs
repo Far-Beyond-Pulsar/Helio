@@ -111,7 +111,10 @@ impl ApplicationHandler for App {
             .expect("Helio renderer");
         let surface = graphics.surface;
 
-        renderer.set_ambient([0.08, 0.10, 0.18], 0.035);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.08, 0.10, 0.18],
+            intensity: 0.035,
+        });
 
         // Single material for the whole station (cool grey metal)
         let mat = spawn_material(

@@ -429,7 +429,10 @@ impl ApplicationHandler for App {
         // room has its own themed light for that reason, but ambient is
         // still pushed up well past a typical scene's default so every room
         // reads clearly regardless of camera position, same as `portal_cube`.
-        renderer.set_ambient([0.5, 0.52, 0.58], 0.3);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.5, 0.52, 0.58],
+            intensity: 0.3,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         // Editor mode (Tab to toggle) starts on so the portal-opening

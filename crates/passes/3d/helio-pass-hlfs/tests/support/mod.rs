@@ -305,7 +305,7 @@ impl Fixture {
             "Fixture",
         );
         resources.write(
-            helio_core::resource_keys::shadow_matrices(),
+            helio_pass_shadow_matrix::shadow_matrices(),
             helio_pass_shadow_matrix::ShadowMatricesFrameData {
                 desired_matrices: None,
                 residency: None,

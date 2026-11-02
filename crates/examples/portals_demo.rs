@@ -368,7 +368,10 @@ impl ApplicationHandler for App {
             b: pose_near,
         };
 
-        renderer.set_ambient([0.85, 0.9, 1.0], 0.04);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.85, 0.9, 1.0],
+            intensity: 0.04,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         self.state = Some(AppState {

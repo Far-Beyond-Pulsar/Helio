@@ -4,16 +4,16 @@ use helio_core::{
     DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, PassContext, PrepareContext,
     RenderPass, Result as HelioResult,
 };
-use helio_sky_api::{
+use helio_frame_api::lighting::sky::{
     ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
     ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET,
 };
+use helio_frame_api::lighting::{
+    DIRECTIONAL_VISIBILITY, ENVIRONMENT_CUBES, ENVIRONMENT_CUBES_SAMPLER, ENVIRONMENT_PROBES,
+    INDIRECT_DIFFUSE, INDIRECT_SPECULAR_LAYERS, LIGHT_LIST, SUN_VISIBILITY, TRANSMISSION,
+    VIEW_REMAPS, VIEW_REMAPS_BYTES, VIEW_REMAP_SNIPPET,
+};
 use pulsar_scenedb::gpu::BufferKey;
-use wgpu::util::DeviceExt;
-
-/// The chain unmap table (`portal_unmap`): 256 chains of one `mat4x4<f32>`, a
-/// uniform because the fragment stage is at its storage-buffer limit.
-const PORTAL_UNMAP_BYTES: u64 = 256 * 64;
 
 mod components;
 pub mod gpu_types;
@@ -21,12 +21,19 @@ pub use components::REFLECTION_CAPTURES;
 pub use components::{ReflectionCaptureRow, MAX_REFLECTION_CAPTURES};
 pub use gpu_types::*;
 
+/// The lights' IES profiles (a renderer config's `features`): a texture array
+/// (`R8Unorm`, `D2Array`, one layer per profile; a light's
+/// `ies_profile_index` selects the layer). Without it lights sample a
+/// built-in fallback. See `examples/ies_demo.rs`.
+#[derive(Clone, Debug)]
+pub struct IesProfiles(pub wgpu::TextureView);
+
 /// Sampled textures visible to each deferred-light fragment entry point
 /// (their pipeline layouts; a test counts them).
 ///
-/// Base lighting uses ten G-buffer inputs (voxel sun visibility included) and
-/// five scene textures. Reflection composition uses six G-buffer inputs, three
-/// reflection textures and the water caustics.
+/// Base lighting uses ten G-buffer inputs (the sun's visibility included) and
+/// five scene textures. Reflection composition uses six G-buffer inputs, the
+/// environment cubes, two indirect-specular layers and the transmission.
 pub const BASE_SAMPLED_TEXTURE_COUNT: u32 = 15;
 pub const REFLECTION_SAMPLED_TEXTURE_COUNT: u32 = 10;
 const _: () = assert!(BASE_SAMPLED_TEXTURE_COUNT <= 16);
@@ -70,16 +77,14 @@ pub struct DeferredLightPass {
     reflection_pipeline: wgpu::RenderPipeline,
     reflection_debug_pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
-    /// World-origin phase reduced in f64 to the shared 12 m FFT caustics tile.
-    caustics_phase_buf: wgpu::Buffer,
     shadow_config_buf: wgpu::Buffer,
     bgl_0: wgpu::BindGroupLayout,
     fallback_shadow_caster_counts: wgpu::Buffer,
     /// A zeroed `AtmosphereFrame`: no atmosphere, bound until one publishes.
     fallback_atmosphere: wgpu::Buffer,
     fallback_sky_table: wgpu::Buffer,
-    fallback_portal_unmap: wgpu::Buffer,
-    /// `(camera, shadow caster counts, atmosphere, sky table, portal unmap)` `bind_group_0` was
+    fallback_view_remaps: wgpu::Buffer,
+    /// `(camera, shadow caster counts, atmosphere, sky table, view remaps)` `bind_group_0` was
     /// built against.
     bind_group_0_key: Option<[wgpu::Buffer; 5]>,
     bgl_1: wgpu::BindGroupLayout,
@@ -105,17 +110,13 @@ pub struct DeferredLightPass {
     )>,
     bind_group_3_key: Option<[wgpu::Buffer; 4]>,
     reflection_bind_group_1_key: Option<Vec<wgpu::TextureView>>,
-    reflection_bind_group_2_key: Option<(
-        [wgpu::TextureView; 5],
-        [wgpu::Sampler; 2],
-        [wgpu::Buffer; 3],
-    )>,
+    reflection_bind_group_2_key: Option<([wgpu::TextureView; 4], wgpu::Sampler, wgpu::Buffer)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
     /// One word, every light seen: no terrain shadows local lights.
     fallback_local_visibility: wgpu::Buffer,
-    /// One pixel's `gi_irradiance` (none held): no GI pass in the graph.
-    fallback_gi_irradiance: wgpu::Buffer,
+    /// One pixel's indirect diffuse (none held): nothing publishes it.
+    fallback_indirect_diffuse: wgpu::Buffer,
     pre_aa_format: wgpu::TextureFormat,
     fallback_shadow_view: wgpu::TextureView,
     fallback_static_shadow_view: wgpu::TextureView,
@@ -125,9 +126,8 @@ pub struct DeferredLightPass {
     shadow_depth_sampler: wgpu::Sampler,
     fallback_env_view: wgpu::TextureView,
     fallback_env_sampler: wgpu::Sampler,
-    fallback_caustics_view: wgpu::TextureView,
-    caustics_sampler: wgpu::Sampler,
-    fallback_water_volumes: wgpu::Buffer,
+    /// 1×1 black Rgba16Float: nothing adds transmission.
+    fallback_transmission_view: wgpu::TextureView,
     /// Bound in place of `"reflection_captures"` when no
     /// `ReflectionCaptureRow` has ever been inserted -- SceneDB is the
     /// only source this pass reads. `reflection_capture_count` is 0
@@ -141,11 +141,13 @@ pub struct DeferredLightPass {
     fallback_lightmap_sampler: wgpu::Sampler,
     /// 1×1 black Rg16Float fallback for lightmap UVs when not available.
     fallback_lightmap_uv_view: wgpu::TextureView,
-    /// 1×1 black Rgba16Float fallback for SSR when not available.
+    /// 1×1 black Rgba16Float stand-ins for the indirect-specular layers
+    /// (no coverage) and the sun's visibility.
     fallback_ssr_view: wgpu::TextureView,
-    /// 1×1 black Rgba16Float fallback for planar reflections when not available.
     fallback_planar_view: wgpu::TextureView,
     fallback_ies_view: wgpu::TextureView,
+    /// The lights' IES profiles ([`IesProfiles`]); the fallback without.
+    ies_profiles: Option<wgpu::TextureView>,
     ies_sampler: wgpu::Sampler,
     pub debug_mode: u32,
     /// Most recently completed GPU duration for this pass.
@@ -186,8 +188,8 @@ impl DeferredLightPass {
             .expect("mapped at creation")
             .copy_from_slice(&u32::MAX.to_le_bytes());
         fallback_local_visibility.unmap();
-        let fallback_gi_irradiance = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Deferred Fallback GI Irradiance"),
+        let fallback_indirect_diffuse = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Fallback Indirect Diffuse"),
             size: 8,
             usage: wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
@@ -202,6 +204,7 @@ impl DeferredLightPass {
                 helio_mats::PBR_EVAL_SNIPPET,
                 ATMOSPHERE_SNIPPET,
                 ATMOSPHERE_SKY_TABLE_SNIPPET,
+                VIEW_REMAP_SNIPPET,
             ],
         );
 
@@ -211,12 +214,6 @@ impl DeferredLightPass {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let caustics_phase_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Deferred Water Caustics Phase"),
-            contents: bytemuck::cast_slice(&[0.0f32; 4]),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
         let shadow_config_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow Config"),
             size: std::mem::size_of::<helio_pass_shadow_matrix::ShadowConfig>() as u64,
@@ -297,25 +294,25 @@ impl DeferredLightPass {
                     },
                     count: None,
                 },
-                // Per portal chain: host world -> the world of the content it
-                // shows (`portal_unmap` in the shader).
+                // Per remap chain: host world -> the world its pixels show
+                // (`view_remaps` in the shader).
                 wgpu::BindGroupLayoutEntry {
                     binding: 11,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(PORTAL_UNMAP_BYTES),
+                        min_binding_size: wgpu::BufferSize::new(VIEW_REMAPS_BYTES),
                     },
                     count: None,
                 },
             ],
         });
-        // Bound until portals publish their chains; never read then, because only
-        // portal pixels index it.
-        let fallback_portal_unmap = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("DeferredLight Portal Unmap Fallback"),
-            size: PORTAL_UNMAP_BYTES,
+        // Bound until view remaps are published; never read then, because only
+        // remapped pixels index it.
+        let fallback_view_remaps = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DeferredLight No View Remaps"),
+            size: VIEW_REMAPS_BYTES,
             usage: wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
@@ -362,7 +359,7 @@ impl DeferredLightPass {
                 storage_entry(0), // tile_light_lists
                 storage_entry(1), // tile_light_counts
                 storage_entry(2), // local_visibility (terrain shadows of the tile's lights)
-                storage_entry(3), // gi_irradiance (the GI probes' irradiance a pixel)
+                storage_entry(3), // indirect diffuse a pixel
             ],
         });
 
@@ -408,7 +405,7 @@ impl DeferredLightPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 11,
-                    resource: fallback_portal_unmap.as_entire_binding(),
+                    resource: fallback_view_remaps.as_entire_binding(),
                 },
             ],
         });
@@ -568,21 +565,8 @@ impl DeferredLightPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        // Fallback caustics texture (black 1x1 RGBA16Float)
-        let (_fallback_caustics_texture, fallback_caustics_view) =
-            black_2d_texture(device, queue, "Deferred Fallback Caustics");
-
-        // Caustics sampler
-        let caustics_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Caustics Sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            address_mode_w: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Linear,
-            ..Default::default()
-        });
+        let (_fallback_transmission_texture, fallback_transmission_view) =
+            black_2d_texture(device, queue, "Deferred No Transmission");
 
         // IES fallback: 32×32, 2 layers.
         // Layer 0 = spotlight gradient (bright centre, gaussian falloff) — for IES profiles
@@ -675,13 +659,6 @@ impl DeferredLightPass {
             ..Default::default()
         });
 
-        // Fallback water volumes buffer (empty)
-        let fallback_water_volumes = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Fallback Water Volumes"),
-            size: 256, // Minimum size for empty buffer
-            usage: wgpu::BufferUsages::STORAGE,
-            mapped_at_creation: false,
-        });
         let fallback_reflection_captures = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fallback Reflection Captures"),
             size: std::mem::size_of::<crate::GpuReflectionCapture>() as u64,
@@ -798,11 +775,10 @@ impl DeferredLightPass {
             reflection_pipeline,
             reflection_debug_pipeline,
             globals_buf,
-            caustics_phase_buf,
             shadow_config_buf,
             bgl_0,
             fallback_shadow_caster_counts,
-            fallback_portal_unmap,
+            fallback_view_remaps,
             fallback_atmosphere,
             fallback_sky_table,
             bind_group_0_key: None,
@@ -825,7 +801,7 @@ impl DeferredLightPass {
             fallback_tile_lists,
             fallback_tile_counts,
             fallback_local_visibility,
-            fallback_gi_irradiance,
+            fallback_indirect_diffuse,
             pre_aa_format,
             fallback_shadow_view,
             fallback_static_shadow_view,
@@ -834,9 +810,7 @@ impl DeferredLightPass {
             shadow_depth_sampler,
             fallback_env_view,
             fallback_env_sampler,
-            fallback_caustics_view,
-            caustics_sampler,
-            fallback_water_volumes,
+            fallback_transmission_view,
             fallback_reflection_captures,
             fallback_ao_view,
             fallback_ao_sampler,
@@ -846,6 +820,7 @@ impl DeferredLightPass {
             fallback_ssr_view,
             fallback_planar_view,
             fallback_ies_view,
+            ies_profiles: None,
             ies_sampler,
             debug_mode: 0,
             measured_lighting_ms: 0.0,
@@ -867,13 +842,9 @@ impl DeferredLightPass {
         self.debug_mode = mode;
     }
 
-    pub fn set_measured_lighting_ms(&mut self, milliseconds: f32) -> bool {
-        let milliseconds = milliseconds.max(0.0);
-        if (self.measured_lighting_ms - milliseconds).abs() < 0.001 {
-            return false;
-        }
-        self.measured_lighting_ms = milliseconds;
-        true
+    /// Lights with an IES profile sample `profiles`' layers.
+    pub fn set_ies_profiles(&mut self, profiles: Option<wgpu::TextureView>) {
+        self.ies_profiles = profiles;
     }
 
     /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
@@ -889,16 +860,21 @@ impl DeferredLightPass {
 
 impl RenderPass for DeferredLightPass {
     fn scene_buffers(&self) -> &'static [&'static str] {
-        &[
-            "portal_chain_unmap",
-            "reflection_captures",
-            "scene_lights",
-            "water_volumes",
-        ]
+        &[VIEW_REMAPS, ENVIRONMENT_PROBES, LIGHT_LIST]
     }
 
     fn name(&self) -> &'static str {
         "DeferredLight"
+    }
+
+    /// Its cost view (debug mode 34) shows its own measured time.
+    fn set_measured_gpu_ms(&mut self, milliseconds: f32) -> bool {
+        let milliseconds = milliseconds.max(0.0);
+        if (self.measured_lighting_ms - milliseconds).abs() < 0.001 {
+            return false;
+        }
+        self.measured_lighting_ms = milliseconds;
+        true
     }
 
     fn reads(&self) -> &'static [&'static str] {
@@ -915,26 +891,23 @@ impl RenderPass for DeferredLightPass {
             "shadow_caster_counts",
             ATMOSPHERE_FRAME,
             ATMOSPHERE_SKY_TABLE,
-            helio_sky_api::SUN_VISIBILITY,
+            SUN_VISIBILITY,
             "ssao",
             "tile_light_lists",
             "tile_light_counts",
-            helio_gi_api::GI_IRRADIANCE,
+            INDIRECT_DIFFUSE,
             "render_environment",
-            "water_caustics",
-            "water_caustics_deep",
+            TRANSMISSION,
             "pre_aa",
             "baked_lightmap",
             "baked_lightmap_sampler",
-            "ssr_trace",
-            "planar_reflection",
-            "ies_textures",
+            INDIRECT_SPECULAR_LAYERS[0],
+            INDIRECT_SPECULAR_LAYERS[1],
         ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw("pre_aa", self.pre_aa_format, ResourceSize::MatchSurface);
-        builder.read("ies_textures");
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::RenderSize) {}
@@ -942,19 +915,6 @@ impl RenderPass for DeferredLightPass {
     fn publish<'a>(&self, _frame: &mut helio_core::ResourceRegistry<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Keep the periodic caustics lookup stable across large-world origin
-        // rebases without deriving the phase through an f32 world position.
-        let caustics_phase = [
-            ctx.world_origin.x.rem_euclid(12.0) as f32,
-            ctx.world_origin.z.rem_euclid(12.0) as f32,
-            0.0,
-            0.0,
-        ];
-        ctx.write_buffer(
-            &self.caustics_phase_buf,
-            0,
-            bytemuck::cast_slice(&caustics_phase),
-        );
         let environment = ctx
             .registry
             .get::<helio_core::RenderEnvironment>(helio_core::resource_keys::render_environment());
@@ -1065,15 +1025,12 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get(helio_core::ResourceKey::new("gbuffer_extra"))
             .unwrap_or(&self.fallback_lightmap_uv_view);
-        // The sun's visibility at each pixel: the clouds' and the terrain's
-        // (`sun_visibility`), or the terrain's alone without clouds.
+        // The sun's visibility at each pixel: occluders' and media's together
+        // (`sun_visibility`), or the occluders' alone.
         let directional_visibility_view = ctx
             .registry
-            .texture_binding(helio_sky_api::SUN_VISIBILITY)
-            .or_else(|| {
-                ctx.registry
-                    .texture_binding(helio_sky_api::DIRECTIONAL_VISIBILITY)
-            })
+            .texture_binding(SUN_VISIBILITY)
+            .or_else(|| ctx.registry.texture_binding(DIRECTIONAL_VISIBILITY))
             .unwrap_or(&self.fallback_ssr_view);
 
         let gbuffer_key: Vec<wgpu::TextureView> = [
@@ -1178,70 +1135,55 @@ impl RenderPass for DeferredLightPass {
         // environment" rather than failing to bind.
         let env_view = ctx
             .registry
-            .get(helio_core::ResourceKey::new("baked_reflection"))
+            .get(helio_core::ResourceKey::new(ENVIRONMENT_CUBES))
             .unwrap_or(&self.fallback_env_view);
         let env_sampler = ctx
             .registry
-            .get(helio_core::ResourceKey::new("baked_reflection_sampler"))
+            .get(helio_core::ResourceKey::new(ENVIRONMENT_CUBES_SAMPLER))
             .unwrap_or(&self.fallback_env_sampler);
 
         // Baked lightmap atlas from bake inject pass
         let lightmap_view = ctx
             .registry
-            .get(helio_core::resource_keys::baked_lightmap())
+            .get(helio_core::ResourceKey::new(helio_bake_types::BAKED_LIGHTMAP))
             .unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx
             .registry
             .get(helio_core::ResourceKey::new("baked_lightmap_sampler"))
             .unwrap_or(&self.fallback_lightmap_sampler);
 
-        let caustics_view = ctx
+        // Radiance media add (the frame's `transmission`).
+        let transmission_view = ctx
             .registry
-            .get(helio_core::ResourceKey::new("water_caustics"))
-            .unwrap_or(&self.fallback_caustics_view);
-        let caustics_deep_view = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("water_caustics_deep"))
-            .unwrap_or(&self.fallback_caustics_view);
-        // `"water_volumes"` is resolved fresh from the SceneDB mirror by key,
-        // exactly like `"scene_lights"` in `ForwardLitPass` -- no Renderer
-        // method writes this pass's water-volume input.
-        let water_volumes = ctx
-            .scene_buffers
-            .get(BufferKey::of("water_volumes"))
-            .map(|handle| &handle.buffer)
-            .unwrap_or(&self.fallback_water_volumes);
+            .get(helio_core::ResourceKey::new(TRANSMISSION))
+            .unwrap_or(&self.fallback_transmission_view);
         // SceneDB is the only reflection-capture source, resolved fresh by
         // key every frame -- see `ReflectionCaptureRow`'s doc.
         let reflection_captures_buf = ctx
             .scene_buffers
-            .get(BufferKey::of("reflection_captures"))
+            .get(BufferKey::of(ENVIRONMENT_PROBES))
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_reflection_captures);
-        let ies_view = ctx
-            .registry
-            .get(helio_core::ResourceKey::new("ies_textures"))
-            .unwrap_or(&self.fallback_ies_view);
+        let ies_view = self.ies_profiles.as_ref().unwrap_or(&self.fallback_ies_view);
 
-        // SSR texture from SsrPass
+        // The frame's indirect-specular layers, in composite order.
         let ssr_view = ctx
             .registry
-            .get(helio_core::ResourceKey::new("ssr_trace"))
+            .get(helio_core::ResourceKey::new(INDIRECT_SPECULAR_LAYERS[0]))
             .unwrap_or(&self.fallback_ssr_view);
-        // Planar reflection texture from PlanarReflectionPass
         let planar_view = ctx
             .registry
-            .get(helio_core::ResourceKey::new("planar_reflection"))
+            .get(helio_core::ResourceKey::new(INDIRECT_SPECULAR_LAYERS[1]))
             .unwrap_or(&self.fallback_planar_view);
 
-        let lights_handle = ctx.scene_buffers.get(BufferKey::of("scene_lights"));
+        let lights_handle = ctx.scene_buffers.get(BufferKey::of(LIGHT_LIST));
         let lights_buf = lights_handle
             .map(|handle| &handle.buffer)
             .unwrap_or(ctx.camera);
         let shadow_matrices_buf = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                helio_core::resource_keys::shadow_matrices(),
+                helio_pass_shadow_matrix::shadow_matrices(),
             )
             .map(|s| s.shadow_matrices)
             .unwrap_or(ctx.camera);
@@ -1323,15 +1265,10 @@ impl RenderPass for DeferredLightPass {
                 env_view.clone(),
                 ssr_view.clone(),
                 planar_view.clone(),
-                caustics_view.clone(),
-                caustics_deep_view.clone(),
+                transmission_view.clone(),
             ],
-            [env_sampler.clone(), self.caustics_sampler.clone()],
-            [
-                reflection_captures_buf.clone(),
-                water_volumes.clone(),
-                self.caustics_phase_buf.clone(),
-            ],
+            env_sampler.clone(),
+            reflection_captures_buf.clone(),
         );
         if self.reflection_bind_group_2_key.as_ref() != Some(&reflection_scene_key) {
             self.reflection_bind_group_2 =
@@ -1350,20 +1287,7 @@ impl RenderPass for DeferredLightPass {
                             resource: reflection_captures_buf.as_entire_binding(),
                         },
                         texture_view_entry(16, planar_view),
-                        texture_view_entry(8, caustics_view),
-                        texture_view_entry(23, caustics_deep_view),
-                        wgpu::BindGroupEntry {
-                            binding: 9,
-                            resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 10,
-                            resource: water_volumes.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 22,
-                            resource: self.caustics_phase_buf.as_entire_binding(),
-                        },
+                        texture_view_entry(8, transmission_view),
                     ],
                 }));
             self.reflection_bind_group_2_key = Some(reflection_scene_key);
@@ -1384,11 +1308,11 @@ impl RenderPass for DeferredLightPass {
             .registry
             .buffer_binding("local_visibility")
             .unwrap_or(&self.fallback_local_visibility);
-        // The GI probes' irradiance a pixel (helio-pass-gi's resolve).
+        // Indirect diffuse a pixel (the frame's `indirect_diffuse`).
         let gi_irradiance = ctx
             .registry
-            .buffer_binding(helio_gi_api::GI_IRRADIANCE)
-            .unwrap_or(&self.fallback_gi_irradiance);
+            .buffer_binding(INDIRECT_DIFFUSE)
+            .unwrap_or(&self.fallback_indirect_diffuse);
         let tile_key = [
             tile_lists.clone(),
             tile_counts.clone(),
@@ -1435,11 +1359,11 @@ impl RenderPass for DeferredLightPass {
             .registry
             .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(ATMOSPHERE_SKY_TABLE))
             .unwrap_or(&self.fallback_sky_table);
-        let portal_unmap = ctx
+        let view_remaps = ctx
             .scene_buffers
-            .get(BufferKey::of("portal_chain_unmap"))
+            .get(BufferKey::of(VIEW_REMAPS))
             .map_or_else(
-                || self.fallback_portal_unmap.clone(),
+                || self.fallback_view_remaps.clone(),
                 |handle| handle.buffer.clone(),
             );
         let key_0 = [
@@ -1447,7 +1371,7 @@ impl RenderPass for DeferredLightPass {
             caster_counts.clone(),
             atmosphere.clone(),
             sky_table.clone(),
-            portal_unmap.clone(),
+            view_remaps.clone(),
         ];
         if self.bind_group_0_key.as_ref() != Some(&key_0) {
             self.bind_group_0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1480,7 +1404,7 @@ impl RenderPass for DeferredLightPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 11,
-                        resource: portal_unmap.as_entire_binding(),
+                        resource: view_remaps.as_entire_binding(),
                     },
                 ],
             });
@@ -1927,7 +1851,8 @@ fn reflection_group_1_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     ]
 }
 
-/// Reflection composition, group 2: environment, SSR, planar reflections and water caustics.
+/// Reflection composition, group 2: environment probes, the indirect-specular
+/// layers and the transmission.
 fn reflection_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
     vec![
         wgpu::BindGroupLayoutEntry {
@@ -1949,32 +1874,9 @@ fn reflection_group_2_layout() -> Vec<wgpu::BindGroupLayoutEntry> {
         texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
         storage_entry(15),
         texture_entry(16, wgpu::TextureSampleType::Float { filterable: true }),
-        // Water caustics texture, its sampler and the water volumes
-        // (`water_caustics_light`).
-        texture_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
-        texture_entry(23, wgpu::TextureSampleType::Float { filterable: true }),
-        wgpu::BindGroupLayoutEntry {
-            binding: 9,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        },
-        storage_entry(10),
-        uniform_entry(22),
+        // The frame's transmission (radiance media add).
+        texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
     ]
-}
-
-fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
-    wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: wgpu::BufferSize::new(16),
-        },
-        count: None,
-    }
 }
 
 fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

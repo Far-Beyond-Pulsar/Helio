@@ -1,3 +1,6 @@
+pub mod feature;
+pub use feature::ForwardDrawers;
+
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -545,7 +548,7 @@ impl RenderPass for ForwardLitPass {
         let Some(material_textures) = ctx
             .registry
             .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
+                helio_mats::material_textures(),
                 "ForwardLit",
             )
         else {

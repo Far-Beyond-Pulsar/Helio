@@ -98,7 +98,10 @@ impl ApplicationHandler for App {
         let mut renderer = build_default_renderer_with_context(&scene_db, &mut graphics, config);
         let surface = graphics.surface;
         renderer.set_clear_color([0.12, 0.12, 0.16, 1.0]);
-        renderer.set_ambient([0.20, 0.22, 0.30], 0.18);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.20, 0.22, 0.30],
+            intensity: 0.18,
+        });
         renderer.set_editor_mode(true);
 
         self.state = Some(AppState {

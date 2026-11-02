@@ -1,0 +1,12 @@
+[package]
+name = "helio-frame-api"
+version = "0.1.0"
+edition = "2021"
+workspace = "../../"
+description = "The frame every object kind meets at: extension points and draw phases, the G-buffer layout, the colour chain, lighting-input contracts with stand-ins, and host inputs. Knows no kind of object."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+helio-feature-api = { path = "../helio-feature-api" }
+wgpu = { workspace = true }

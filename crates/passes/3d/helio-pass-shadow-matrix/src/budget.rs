@@ -108,3 +108,32 @@ impl Default for ResidencyTable {
         Self::zeroed()
     }
 }
+
+/// The lights' shadow settings (a renderer config's `features`): the atlas
+/// budget the shadow views are fitted into and the filtering quality.
+#[derive(Clone, Copy, Debug)]
+pub struct ShadowSettings {
+    pub budget: ShadowBudget,
+    pub quality: crate::ShadowQuality,
+}
+
+impl Default for ShadowSettings {
+    fn default() -> Self {
+        Self {
+            budget: ShadowBudget::default(),
+            quality: crate::ShadowQuality::Medium,
+        }
+    }
+}
+
+impl ShadowSettings {
+    /// The validated budget and the atlas side it gives on a device whose
+    /// largest 2D texture is `device_limit` texels.
+    pub fn atlas(&self, device_limit: u32) -> Result<(ShadowBudget, u32), String> {
+        let budget = self
+            .budget
+            .validate()
+            .map_err(|_| "invalid shadow budget".to_string())?;
+        Ok((budget, budget.atlas_size(device_limit)))
+    }
+}

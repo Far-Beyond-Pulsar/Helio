@@ -90,7 +90,10 @@ impl HelioWasmApp for Demo {
             .collect();
         let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];
 
-        renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.02, 0.02, 0.03],
+            intensity: 1.0,
+        });
         let graph = helio_presets::hlfs(helio::PassBuildContext {
             device: &device,
             queue: &queue,

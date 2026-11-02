@@ -70,7 +70,10 @@ fn build(
         config = helio_presets::with_virtual_geometry(config, runtime);
     }
     RendererBuilder::new(config.clone(), mirror(device, queue))
-        .with_ambient([0.5, 0.5, 0.6], 1.0)
+        .with_feature(helio::AmbientLight {
+            color: [0.5, 0.5, 0.6],
+            intensity: 1.0,
+        })
         .with_external_device()
         .with_pass_build_context(Box::new(helio_presets::deferred))
         .build(

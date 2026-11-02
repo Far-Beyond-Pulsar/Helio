@@ -273,7 +273,10 @@ impl Flight {
                 config.surface_format,
             );
         let (ambient, intensity) = preset.ambient();
-        renderer.set_ambient(ambient, intensity);
+        renderer.set_feature(helio::AmbientLight {
+            color: ambient,
+            intensity: intensity,
+        });
         // The camera's look: voxel_craft's outdoor one (AgX punchy, exposure
         // 2, a touch of contrast), so the stress test reads like the daily
         // example; HELIO_VOXEL_FLIGHT_LOOK="exposure,contrast,saturation"
@@ -299,7 +302,7 @@ impl Flight {
             scene.world.insert(
                 camera,
                 CameraPostProcessComponent::from(
-                    helio_pass_postprocess::CameraPostProcessRow::new(0, &post),
+                    helio_pass_post_volumes::CameraPostProcessRow::new(0, &post),
                 ),
             );
             scene.world.flush_gpu_mirror(&queue);

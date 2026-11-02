@@ -201,7 +201,7 @@ pub fn helio_scene_materials() -> SceneMaterialSource {
         let textures = ctx
             .registry
             .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
+                helio_mats::material_textures(),
                 "VoxelPlanet",
             )?;
         let materials = ctx

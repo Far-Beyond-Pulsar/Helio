@@ -16,6 +16,8 @@ pub mod ocean_fft;
 mod reflection_capture;
 pub mod shoreline;
 pub mod surface_query;
+pub mod transmission;
+pub use transmission::WaterTransmissionPass;
 pub use components::WATER_HITBOXES;
 pub use components::WATER_VOLUMES;
 pub use components::{WaterHitboxRow, WaterVolumeRow};

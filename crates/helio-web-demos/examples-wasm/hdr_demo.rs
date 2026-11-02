@@ -136,7 +136,7 @@ impl HelioWasmApp for Demo {
         let settings_entity = scene_db.world.spawn();
         scene_db.world.insert(
             settings_entity,
-            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
                 0,
                 &helio_pass_postprocess::PostProcessSettings::default(),
             )),
@@ -225,7 +225,7 @@ impl HelioWasmApp for Demo {
         }
         self.scene_db.world.insert(
             self.settings_entity,
-            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
                 camera.view_id,
                 &settings,
             )),

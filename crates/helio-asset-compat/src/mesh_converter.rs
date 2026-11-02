@@ -4,7 +4,7 @@
 //! to Helio's compact PackedVertex format (32 bytes).
 
 use crate::Result;
-use helio::PackedVertex;
+use helio_mesh_api::PackedVertex;
 use solid_rs::geometry::{Topology, Vertex};
 use solid_rs::scene::Mesh;
 use std::sync::Once;

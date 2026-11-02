@@ -10,7 +10,7 @@
 //! surface, at most 32 Ki triangles), built on worker threads from the
 //! asset's bytes ([`ProxyCache`]) the first time an object uses it, shared
 //! by all its instances. Ray hits on it are shaded as the object's material
-//! (`RayInstance` rows flagged [`helio_core::RAY_INSTANCE_PROXY`], the
+//! (`RayInstance` rows flagged [`helio_mesh_api::RAY_INSTANCE_PROXY`], the
 //! face's winding as its normal); its vertices keep their uv0, so an
 //! alpha-tested material is tested on it as on a classic mesh.
 //!

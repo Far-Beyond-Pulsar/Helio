@@ -21,7 +21,7 @@ pub use camera::{follow_origin, Camera, WORLD_ORIGIN_CELL};
 pub use graphics_context::{
     HelioGraphicsConfig, HelioGraphicsContext, HelioGraphicsMode, HelioXrInput,
 };
-pub use helio_core::{wgpu_instance_descriptor, MeshUpload, PackedVertex, SectionedMeshUpload};
+pub use helio_core::wgpu_instance_descriptor;
 pub use helio_core::{
     Actor, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error,
     GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
@@ -37,6 +37,7 @@ pub use helio_pass_object_batch::{
     DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData, INSTANCE_FLAG_MOVABLE,
 };
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
+pub use helio_frame_api::lighting::AmbientLight;
 pub use helio_pass_shadow_matrix::ShadowQuality;
 pub use helio_pass_tsr::TsrQuality;
 pub use helio_settings;

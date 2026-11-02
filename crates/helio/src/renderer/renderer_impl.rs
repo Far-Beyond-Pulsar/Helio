@@ -37,7 +37,6 @@ pub type PassFactory = Arc<dyn Fn() -> Box<dyn RenderPass> + Send + Sync>;
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
 use crate::camera::Camera;
-use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 
 use super::debug::DebugDrawState;
 
@@ -54,6 +53,9 @@ pub(crate) struct MaterialBindingResources {
     pub(crate) _fallback_texture: wgpu::Texture,
     pub(crate) fallback_view: wgpu::TextureView,
     pub(crate) fallback_sampler: wgpu::Sampler,
+    /// The materials' `MaterialSampler` setting `fallback_sampler` was made
+    /// from (`None`: the default sampler).
+    pub(crate) sampler_setting: Option<helio_mats::MaterialSampler>,
     pub(crate) texture_count: usize,
     pub(crate) version: u64,
     pub(crate) scene_views: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
@@ -102,8 +104,6 @@ pub struct Renderer {
     pub(crate) debug_camera_buffer: wgpu::Buffer,
     pub(crate) cull_stats_buffer: wgpu::Buffer,
     pub(crate) material_bindings: MaterialBindingResources,
-    pub(crate) ambient_color: [f32; 3],
-    pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
     /// rebuild (a config change, shader reload) hands the graph builder, so the new
@@ -132,15 +132,6 @@ pub struct Renderer {
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
-    /// Application-authored textures handed to the graph (Helio#257).
-    ///
-    /// Same accepted exception as `template_registry`: the application
-    /// creates these once and passes them in, and the renderer only forwards
-    /// them into the frame registry (`"color_grading_lut"` for PostProcessPass,
-    /// `"ies_textures"` for DeferredLightPass). The renderer never creates,
-    /// sizes or formats them, so it holds no pass-internal state here.
-    pub(crate) color_grading_lut_view: Option<wgpu::TextureView>,
-    pub(crate) ies_texture_view: Option<wgpu::TextureView>,
     pub(crate) graph_time_ms: f32,
     /// The last frame's graph submission. See [`Self::last_submission`].
     pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
@@ -190,15 +181,7 @@ pub struct Renderer {
     /// joystick locomotion drives. Applied to the located eye poses, so it moves the
     /// cameras and nothing else.
     pub(crate) xr_stage_transform: glam::Mat4,
-    /// Templates registered by the user for the gbuffer (opaque) path.
-    /// Preserved across graph rebuilds. Shared (not cloned) with
-    /// passes and the GPU scene via `Arc<RwLock<_>>` — see
-    /// `SharedTemplateRegistry` for why cloning this must be avoided.
-    pub(crate) template_registry: SharedTemplateRegistry,
 
-    /// Templates registered by the user for the transparent path.
-    /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
-    pub(crate) transparent_template_registry: SharedTemplateRegistry,
     pub(crate) render_mode: RenderMode,
     /// Whether the render graph was built in OpenXR multiview mode. Mirrors
     /// `config.enable_xr` and is preserved across graph rebuilds so an
@@ -390,14 +373,17 @@ impl Renderer {
         }
     }
 
-    /// Change the shadow quality. The passes that use it are configured at
-    /// graph build, so this rebuilds the graph before the next frame; it
-    /// used to only take effect at the next window resize.
-    pub fn set_shadow_quality(&mut self, quality: helio_pass_shadow_matrix::ShadowQuality) {
-        if self.graph_config.shadow_quality != quality {
-            self.graph_config.shadow_quality = quality;
-            self.request_graph_rebuild();
-        }
+    /// Sets a feature's settings (one value per settings type, see
+    /// [`helio_feature_api::FeatureSettings`]). Features read their settings
+    /// when the graph builds, so this rebuilds the graph before the next frame.
+    pub fn set_feature<T: std::any::Any + Send + Sync>(&mut self, setting: T) {
+        self.graph_config.features.insert(setting);
+        self.request_graph_rebuild();
+    }
+
+    /// The feature setting of type `T` this renderer builds with, if set.
+    pub fn feature<T: std::any::Any>(&self) -> Option<&T> {
+        self.graph_config.features.get::<T>()
     }
 
     /// Rebuild the graph from [`Self::renderer_config`] before the next frame.
@@ -486,18 +472,15 @@ impl Renderer {
         }
     }
 
-    /// Pass the latest asynchronous DeferredLight timestamp to its cost view.
-    pub fn set_deferred_light_timing_ms(&mut self, milliseconds: f32) -> bool {
-        self.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>()
-            .is_some_and(|pass| pass.set_measured_lighting_ms(milliseconds))
+    /// Hands every pass its own latest GPU time (passes whose output shows
+    /// their cost use it). Returns whether any output changes, so a host that
+    /// idles between frames knows to draw one.
+    pub fn feed_measured_gpu_times(&mut self) -> bool {
+        self.graph.feed_measured_gpu_times()
     }
 
     pub fn is_editor_mode(&self) -> bool {
         self.editor_mode
-    }
-
-    pub fn shadow_quality(&self) -> helio_pass_shadow_matrix::ShadowQuality {
-        self.graph_config.shadow_quality
     }
 
     /// Return the frontend-owned SceneDB GPU projection.
@@ -649,40 +632,8 @@ impl Renderer {
         }
     }
 
-    /// Access the gbuffer template registry (preserved across graph rebuilds).
-    /// Register custom surface templates here instead of through the pass
-    /// directly to ensure they survive graph rebuilds.
-    pub fn template_registry_mut(
-        &mut self,
-    ) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
-        self.template_registry
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Access the transparent template registry for alpha-blended materials.
-    pub fn transparent_template_registry_mut(
-        &mut self,
-    ) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
-        self.transparent_template_registry
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
-    }
-
-    /// Replace the shared sampler used by SceneDB material texture slots.
-    /// Incrementing the binding version refreshes pass descriptor caches.
-    pub fn set_material_sampler(&mut self, descriptor: &wgpu::SamplerDescriptor<'_>) {
-        self.material_bindings.fallback_sampler = self.device.create_sampler(descriptor);
-        self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
-    }
-
-    pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
-        self.ambient_color = color;
-        self.ambient_intensity = intensity;
     }
 
     pub fn set_graph(&mut self, mut graph: RenderGraph) {
@@ -881,30 +832,6 @@ impl Renderer {
     /// Whether the renderer was built with the OpenXR multiview path enabled.
     pub(crate) fn xr_enabled(&self) -> bool {
         self.enable_xr
-    }
-
-    /// Set or clear the 3D colour grading LUT texture.
-    /// Call with `None` to disable LUT grading.
-    /// The LUT texture must be `Rgba16Float`, `TextureDimension::D3`.
-    pub fn set_color_grading_lut(&mut self, view: Option<wgpu::TextureView>) {
-        self.color_grading_lut_view = view;
-    }
-
-    /// Returns the current colour grading LUT view, if any.
-    pub fn color_grading_lut(&self) -> Option<&wgpu::TextureView> {
-        self.color_grading_lut_view.as_ref()
-    }
-
-    /// Returns the current IES texture array view, if any.
-    pub fn ies_texture_view(&self) -> Option<&wgpu::TextureView> {
-        self.ies_texture_view.as_ref()
-    }
-
-    /// Set the IES profile texture array view (`R8Unorm`, `D2Array`, one
-    /// layer per profile; a light's `ies_profile_index` selects the layer).
-    /// The application creates the texture; see `examples/ies_demo.rs`.
-    pub fn set_ies_texture_view(&mut self, view: wgpu::TextureView) {
-        self.ies_texture_view = Some(view);
     }
 }
 

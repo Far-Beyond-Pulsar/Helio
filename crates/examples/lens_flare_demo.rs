@@ -517,7 +517,10 @@ fn build_scene(
         },
     );
 
-    renderer.set_ambient([0.05, 0.05, 0.08], 0.02);
+    renderer.set_feature(helio::AmbientLight {
+            color: [0.05, 0.05, 0.08],
+            intensity: 0.02,
+        });
     renderer.set_clear_color([0.01, 0.01, 0.03, 1.0]);
     (scene_db, renderer)
 }

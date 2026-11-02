@@ -678,7 +678,7 @@ pub struct PostProcessVolumeComponent {
     #[gpu]
     pub lens: [f32; 16],
 }
-same_layout!(PostProcessVolumeComponent, helio_pass_postprocess::PostProcessVolumeRow, helio_pass_postprocess::POST_PROCESS_VOLUMES, "post_process_volumes"; bounds_min, bounds_max, priority, blend_radius, blend_weight, unbound, override_mask_0, override_mask_1, override_mask_2, override_mask_3, settings, lens);
+same_layout!(PostProcessVolumeComponent, helio_pass_post_volumes::PostProcessVolumeRow, helio_pass_post_volumes::POST_PROCESS_VOLUMES, "post_process_volumes"; bounds_min, bounds_max, priority, blend_radius, blend_weight, unbound, override_mask_0, override_mask_1, override_mask_2, override_mask_3, settings, lens);
 
 /// Optional per-view baseline: the camera's own post-process settings,
 /// including lens flare. The first enabled row matching the camera's view id
@@ -703,7 +703,7 @@ pub struct CameraPostProcessComponent {
     #[gpu]
     pub lens: [f32; 16],
 }
-same_layout!(CameraPostProcessComponent, helio_pass_postprocess::CameraPostProcessRow, helio_pass_postprocess::CAMERA_POSTPROCESS, "camera_postprocess"; view_id, enabled, _pad0, _pad1, settings, lens);
+same_layout!(CameraPostProcessComponent, helio_pass_post_volumes::CameraPostProcessRow, helio_pass_post_volumes::CAMERA_POSTPROCESS, "camera_postprocess"; view_id, enabled, _pad0, _pad1, settings, lens);
 
 /// The air around a planet (or above a flat world). Coefficients are per
 /// kilometre, heights and radii in kilometres. The first enabled row is
@@ -1143,13 +1143,13 @@ impl From<PortalViewComponent> for helio_pass_portal_cull::GpuPortalView {
 
 impl From<helio_pass_postprocess::GpuPostProcessVolume> for PostProcessVolumeComponent {
     fn from(value: helio_pass_postprocess::GpuPostProcessVolume) -> Self {
-        helio_pass_postprocess::PostProcessVolumeRow::from(value).into()
+        helio_pass_post_volumes::PostProcessVolumeRow::from(value).into()
     }
 }
 
 impl From<PostProcessVolumeComponent> for helio_pass_postprocess::GpuPostProcessVolume {
     fn from(value: PostProcessVolumeComponent) -> Self {
-        helio_pass_postprocess::PostProcessVolumeRow::from(value).into()
+        helio_pass_post_volumes::PostProcessVolumeRow::from(value).into()
     }
 }
 

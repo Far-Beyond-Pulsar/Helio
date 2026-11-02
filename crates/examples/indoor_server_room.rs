@@ -121,7 +121,10 @@ impl ApplicationHandler for App {
         let surface_format = format;
 
         let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra);
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::Ultra,
+                ..Default::default()
+            });
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(helio_presets::deferred))
@@ -129,7 +132,10 @@ impl ApplicationHandler for App {
             .expect("Helio renderer");
         let surface = graphics.surface;
         renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
-        renderer.set_ambient([0.6, 0.72, 1.0], 0.06);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.6, 0.72, 1.0],
+            intensity: 0.06,
+        });
 
         // ── Materials ─────────────────────────────────────────────────────────────
         let mat_floor = spawn_material(

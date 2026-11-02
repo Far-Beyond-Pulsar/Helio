@@ -466,7 +466,10 @@ impl Gfx {
         if vr {
             renderer.set_jitter_enabled(false);
         }
-        renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.45, 0.58, 0.8],
+            intensity: 0.35,
+        });
         // `VOXEL_CRAFT_DEBUG=<mode>`: one of the renderer's debug views.
         if let Some(mode) = std::env::var("VOXEL_CRAFT_DEBUG")
             .ok()

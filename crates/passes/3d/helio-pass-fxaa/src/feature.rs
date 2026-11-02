@@ -1,7 +1,7 @@
 //! FXAA as a feature: the node that anti-aliases the fogged colour.
 
 use helio_feature_api::{pass_node, Feature, FeatureRegistrar};
-use helio_pass_postprocess::FOGGED_HDR;
+use helio_frame_api::color;
 
 use crate::FxaaPass;
 
@@ -18,13 +18,14 @@ impl Feature for FxaaFeature {
             "fxaa",
             "Anti-Aliasing: FXAA",
             "Passes: Post",
-            "Fast approximate anti-aliasing of the fogged colour.",
+            "Fast approximate anti-aliasing of the scene colour.",
             |build| {
                 let format = build.env.scene_format();
                 let pass = FxaaPass::new(build.env.device, format)
-                    .with_color_input(FOGGED_HDR)
+                    .with_color_input(color::current(build.env))
                     .with_intermediate_target(format);
                 build.graph.add_pass(Box::new(pass));
+                color::advance(build.env, crate::FXAA_COLOR);
                 Ok(())
             },
         ));

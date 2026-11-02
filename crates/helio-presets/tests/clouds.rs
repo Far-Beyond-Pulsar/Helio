@@ -84,7 +84,10 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
         }));
     }
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
-        .with_ambient([0.0; 3], 0.0)
+        .with_feature(helio::AmbientLight {
+            color: [0.0; 3],
+            intensity: 0.0,
+        })
         .with_external_device()
         .with_graph(Preset::Deferred)
         .build(

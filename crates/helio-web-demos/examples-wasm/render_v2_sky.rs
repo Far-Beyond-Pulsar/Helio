@@ -77,7 +77,10 @@ impl HelioWasmApp for Demo {
             &mut scene_db.world,
             directional_light([-0.5, -0.8, -0.3], [1.0, 0.9, 0.7], 1.0),
         );
-        renderer.set_ambient([0.2, 0.25, 0.35], 0.15);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.2, 0.25, 0.35],
+            intensity: 0.15,
+        });
         renderer.set_clear_color([0.53, 0.81, 0.98, 1.0]);
 
         Self {
@@ -148,10 +151,10 @@ impl HelioWasmApp for Demo {
         let sky_g = (0.20 + sun_elev * 0.61).clamp(0.0, 1.0);
         let sky_b = (0.35 + sun_elev * 0.63).clamp(0.0, 1.0);
         renderer.set_clear_color([sky_r, sky_g, sky_b, 1.0]);
-        renderer.set_ambient(
-            [0.2 + sun_elev * 0.1, 0.25 + sun_elev * 0.05, 0.35],
-            0.1 + sun_elev * 0.1,
-        );
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.2 + sun_elev * 0.1, 0.25 + sun_elev * 0.05, 0.35],
+            intensity: 0.1 + sun_elev * 0.1,
+        });
         Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + fwd,

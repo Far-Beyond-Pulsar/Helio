@@ -7,6 +7,8 @@ description = "Scene derivations Helio's hosts run between the SceneDB snapshot 
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-mesh-api = { workspace = true }
+helio-frame-api = { path = "../helio-frame-api" }
 helio = { path = "../helio" }
 helio-core = { workspace = true }
 helio-mats = { workspace = true }

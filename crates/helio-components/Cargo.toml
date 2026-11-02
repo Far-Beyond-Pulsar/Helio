@@ -12,6 +12,8 @@ gpu = []
 bake = ["dep:helio-bake"]
 
 [dependencies]
+helio-mesh-api = { workspace = true }
+helio-pass-post-volumes = { workspace = true }
 helio = { path = "../helio" }
 helio-bake = { path = "../helio-bake", optional = true }
 helio-core = { workspace = true }

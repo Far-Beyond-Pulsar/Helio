@@ -1,14 +1,15 @@
 //! Voxel terrain as a feature: the node that adds a host's chunk pass to
 //! preset graphs.
 //!
-//! The terrain joins at [`Slot::Geometry`] between GI's probe update and its
-//! mesh rays: it writes the G-buffer over the spine's and traces the probes'
-//! rays. It offers its ground to foliage placement
+//! The terrain is a drawer of the G-buffer phase, after the other drawers:
+//! it writes the G-buffer over theirs and traces GI's probe rays (made before
+//! the phase). It offers its ground to foliage placement
 //! ([`helio_foliage_api::OfferedGrounds`]).
 
 use std::sync::Arc;
 
-use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, ParamDesc, Slot};
+use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, ParamDesc};
+use helio_frame_api::{FrameNode, Phase};
 
 use crate::chunks::pass::ChunkPass;
 
@@ -79,7 +80,7 @@ impl Feature for VoxelFeature {
             )
             .with_param(ParamDesc::boolean("enabled", "Enabled", true))
             .with_generated_pins()
-            .in_slot(Slot::Geometry, 10),
+            .drawer(Phase::GBuffer, 40),
         );
     }
 }

@@ -2,6 +2,7 @@
 //! the classic geometry.
 
 use helio_feature_api::{pass_node, Feature, FeatureRegistrar};
+use helio_frame_api::{FrameNode, Phase};
 use helio_vg_stream::VgSettings;
 
 use crate::add_virtual_geometry_passes;
@@ -34,7 +35,8 @@ impl Feature for VgFeature {
                     Ok(())
                 },
             )
-            .with_marker_after(),
+            .with_marker_after()
+            .drawer(Phase::GBuffer, 30),
         );
     }
 }

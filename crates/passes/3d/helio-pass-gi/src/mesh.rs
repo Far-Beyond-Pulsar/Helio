@@ -1,7 +1,7 @@
 //! The scene's meshes as a tracer of the probes' rays (`gi_mesh_trace.wgsl`,
 //! README.md "Tracers"): hardware ray queries against the frame's TLAS
 //! (`RenderEnvironment::tlas`), shaded from its instances' surfaces
-//! (`helio_core::RayInstance`, `ray_instances`; proxies' triangles from
+//! (`helio_mesh_api::RayInstance`, `ray_instances`; proxies' triangles from
 //! `ray_proxy_vertices` / `ray_proxy_indices`). Cut-outs' candidates are
 //! alpha-tested against the scene's `materials` and material texture
 //! table. It runs after the other tracers and before
@@ -514,7 +514,7 @@ impl RenderPass for GiMeshTracePass {
         // The material table, its bind group kept while it stays the same.
         let rows = pool("materials");
         let textures = ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(
-            helio_core::resource_keys::material_textures(),
+            helio_mats::material_textures(),
         );
         match (rows, textures) {
             (Some(rows), Some(textures)) => {

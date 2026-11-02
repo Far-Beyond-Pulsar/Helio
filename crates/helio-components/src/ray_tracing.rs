@@ -20,10 +20,8 @@
 //! glass or as opaque) still refuses them.
 use crate::ray_proxies::{Lookup, VgRayProxies, VgRayStats};
 use crate::{MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent};
-use helio_core::{
-    BlasGeometry, BlasManager, Movability, RayInstance, TlasInstanceInput, TlasManager,
-    RAY_INSTANCE_MASKED, RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED,
-};
+use helio_core::{BlasGeometry, BlasManager, Movability, TlasInstanceInput, TlasManager};
+use helio_mesh_api::{RayInstance, RAY_INSTANCE_MASKED, RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED};
 use pulsar_scenedb::{
     ChangeCursor, ChangeRead, ComponentChange, ComponentChangeKind, Entity, World,
 };
@@ -621,7 +619,7 @@ impl SceneDbRayTracing {
                                         .buffer,
                                     first_vertex: vertex_range.offset,
                                     vertex_count: vertex_range.count,
-                                    vertex_stride: std::mem::size_of::<helio_core::PackedVertex>()
+                                    vertex_stride: std::mem::size_of::<helio_mesh_api::PackedVertex>()
                                         as u64,
                                     indices: Some(
                                         &indices

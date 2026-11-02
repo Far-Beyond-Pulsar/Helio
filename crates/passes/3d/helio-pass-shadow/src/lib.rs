@@ -3,6 +3,9 @@
 //! each scheduled tile is cleared through its scissor and publishes its matrix
 //! only after the matching depth commands. Pending dirty bits survive deferral.
 
+pub mod feature;
+pub use feature::ShadowDrawers;
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{BufferKey, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
@@ -609,7 +612,7 @@ impl RenderPass for ShadowPass {
         let Some(data) = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                helio_core::resource_keys::shadow_matrices(),
+                helio_pass_shadow_matrix::shadow_matrices(),
             )
         else {
             return Ok(());

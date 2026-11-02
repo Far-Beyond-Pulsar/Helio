@@ -612,7 +612,10 @@ fn build_scene(
         LensComponent::from(helio_pass_lens::LensRow::new(0)),
     );
 
-    renderer.set_ambient([0.10, 0.12, 0.18], 0.04);
+    renderer.set_feature(helio::AmbientLight {
+            color: [0.10, 0.12, 0.18],
+            intensity: 0.04,
+        });
     renderer.set_clear_color([0.01, 0.01, 0.03, 1.0]);
     (scene_db, renderer)
 }

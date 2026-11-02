@@ -27,6 +27,9 @@
 //! This pass owns no mesh data.  The caller must bind the shared mesh vertex
 //! buffer (slot 0) and index buffer before this pass executes.
 
+pub mod feature;
+pub use feature::GBufferDrawers;
+
 use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
@@ -93,8 +96,9 @@ pub struct GBufferPass {
     /// preserving ordinary back-face culling for the capture.
     mirrored_view: bool,
     shader_cache: RadiantShaderCache,
-    /// Shared with the renderer and GPU scene — never deep-cloned (see
-    /// `SharedTemplateRegistry`). `None` until the first `execute()`.
+    /// The materials' opaque templates (`helio_mats::MaterialTemplates`),
+    /// shared, never deep-cloned (see `SharedTemplateRegistry`). `None`: the
+    /// built-in templates.
     template_registry: Option<helio_mats::radiant::SharedTemplateRegistry>,
     /// Key set as of the last sync, to detect content changes cheaply
     /// (registry identity is stable, so `Arc::ptr_eq` can't detect a
@@ -182,6 +186,16 @@ impl GBufferPass {
     }
 
     /// Create the GBuffer pass.
+    /// Compiles surfaces from `templates` (custom template classes
+    /// included) instead of the built-in templates alone.
+    pub fn with_template_registry(
+        mut self,
+        templates: helio_mats::radiant::SharedTemplateRegistry,
+    ) -> Self {
+        self.template_registry = Some(templates);
+        self
+    }
+
     pub fn new(device: &wgpu::Device) -> Self {
         let material_binding = helio_mats::MaterialBindingConfig::for_device(device);
         // ── Globals buffer ────────────────────────────────────────────────────
@@ -818,7 +832,7 @@ impl RenderPass for GBufferPass {
         let Some(material_textures) = ctx
             .registry
             .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
+                helio_mats::material_textures(),
                 "GBuffer",
             )
         else {

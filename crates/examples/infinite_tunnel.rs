@@ -431,7 +431,10 @@ impl ApplicationHandler for App {
         .expect("portal projection rows");
         helio_scene_derivations::portals::set_projection_frame(&mut renderer, &projection);
 
-        renderer.set_ambient([0.85, 0.9, 1.0], 0.05);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.85, 0.9, 1.0],
+            intensity: 0.05,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         // Editor mode (Tab to toggle) starts on so the portal-opening

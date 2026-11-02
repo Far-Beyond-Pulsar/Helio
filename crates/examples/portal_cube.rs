@@ -355,7 +355,10 @@ impl ApplicationHandler for App {
         // room; pushed up well past a typical scene's ambient so the walls
         // read clearly at every reflection depth instead of fading to black
         // a couple of bounces in.
-        renderer.set_ambient([0.6, 0.65, 0.75], 0.35);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.6, 0.65, 0.75],
+            intensity: 0.35,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         // Editor mode (Tab to toggle) starts on so the portal-opening

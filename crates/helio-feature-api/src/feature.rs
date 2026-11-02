@@ -176,23 +176,26 @@ mod tests {
     }
 
     #[test]
-    fn slotted_nodes_list_by_order_then_kind_and_finishers_keep_their_order() {
+    fn placed_nodes_list_by_order_then_kind_and_finishers_keep_their_order() {
+        use crate::ExtensionPoint;
+        const GEOMETRY: ExtensionPoint = ExtensionPoint("geometry");
+        const LIGHTING: ExtensionPoint = ExtensionPoint("lighting");
         let node = |kind: &str| NodeDescriptor::new(kind, kind, "Test", "", |_| Ok(()));
         let mut registry = NodeRegistry::new();
-        registry.register(node("late").in_slot(crate::Slot::Geometry, 20));
-        registry.register(node("b").in_slot(crate::Slot::Geometry, 0));
-        registry.register(node("a").in_slot(crate::Slot::Geometry, 0));
-        registry.register(node("lighting").in_slot(crate::Slot::LightingInputs, 0));
+        registry.register(node("late").at(GEOMETRY, 20));
+        registry.register(node("b").at(GEOMETRY, 0));
+        registry.register(node("a").at(GEOMETRY, 0));
+        registry.register(node("lighting").at(LIGHTING, 0));
         registry.register(node("named"));
-        let kinds = |slot| {
+        let kinds = |point| {
             registry
-                .slotted(slot)
+                .placed(point)
                 .iter()
                 .map(|d| d.kind.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(kinds(crate::Slot::Geometry), ["a", "b", "late"]);
-        assert_eq!(kinds(crate::Slot::LightingInputs), ["lighting"]);
+        assert_eq!(kinds(GEOMETRY), ["a", "b", "late"]);
+        assert_eq!(kinds(LIGHTING), ["lighting"]);
 
         registry.add_finisher(std::sync::Arc::new(|_, _| Ok(())));
         registry.add_finisher(std::sync::Arc::new(|_, _| Err("second".into())));

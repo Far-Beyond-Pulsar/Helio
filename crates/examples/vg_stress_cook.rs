@@ -5,7 +5,7 @@
 //! Nothing here touches the GPU or the window: the same code runs inside the
 //! loader thread and in the headless `--prepare` mode.
 
-use helio::{MeshUpload, PackedVertex};
+use helio_mesh_api::{MeshUpload, PackedVertex};
 use helio_vg_build::{BuildOptions, MeshInput};
 use helio_vg_stream::{content_words, VgeoBytes, VgeoSource};
 use std::{

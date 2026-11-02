@@ -232,7 +232,10 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             point_light([1.7, 1.85, 0.0], [1.0, 0.65, 0.3], 2.0, 4.5),
         ));
-        renderer.set_ambient([0.85, 0.9, 1.0], 0.04);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.85, 0.9, 1.0],
+            intensity: 0.04,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         self.state = Some(AppState {

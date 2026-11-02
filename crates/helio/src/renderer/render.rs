@@ -254,6 +254,26 @@ impl Renderer {
                 .transpose()?
         };
         let bind_textures_scope = helio_core::CpuScope::new("Helio: bind material textures");
+        // The materials' sampler setting changed (`Renderer::set_feature`):
+        // new sampler, and the binding version refreshes passes' caches.
+        let sampler_setting = self
+            .graph_config
+            .features
+            .get::<helio_mats::MaterialSampler>()
+            .cloned();
+        if sampler_setting != self.material_bindings.sampler_setting {
+            let default = wgpu::SamplerDescriptor {
+                label: Some("Default Material Sampler"),
+                ..Default::default()
+            };
+            self.material_bindings.fallback_sampler = self.device.create_sampler(
+                sampler_setting
+                    .as_ref()
+                    .map_or(&default, |setting| &setting.0),
+            );
+            self.material_bindings.sampler_setting = sampler_setting;
+            self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
+        }
         if texture_guard
             .as_ref()
             .is_some_and(|store| store.slot_count() as usize > self.material_bindings.texture_count)
@@ -324,7 +344,7 @@ impl Renderer {
                 coordinate_spaces_prev: &self.camera_buffer,
             });
         resource_registry.write(
-            helio_core::resource_keys::material_textures(),
+            helio_mats::material_textures(),
             helio_mats::MaterialTextureBindings {
                 material_textures: material_textures_buf,
                 texture_views: &material_texture_views,
@@ -333,12 +353,16 @@ impl Renderer {
             },
             "Renderer",
         );
+        let ambient = self
+            .graph_config
+            .features
+            .get_or_default::<helio_frame_api::lighting::AmbientLight>();
         resource_registry.write(
             helio_core::resource_keys::render_environment(),
             helio_core::RenderEnvironment {
                 clear_color: self.clear_color,
-                ambient_color: self.ambient_color,
-                ambient_intensity: self.ambient_intensity,
+                ambient_color: ambient.color,
+                ambient_intensity: ambient.intensity,
                 tlas: self.ray_frame.tlas(self.frame_count),
             },
             "Renderer",
@@ -383,20 +407,6 @@ impl Renderer {
         // Geometry, materials, lights, shadows, and transforms are SceneDB
         // component buffers. Passes resolve them by BufferKey from the
         // read-only SceneInput projection; Renderer owns none of those rows.
-        if let Some(ref lut) = self.color_grading_lut_view {
-            resource_registry.write(
-                helio_core::ResourceKey::new("color_grading_lut"),
-                lut,
-                "Renderer",
-            );
-        }
-        if let Some(ref ies) = self.ies_texture_view {
-            resource_registry.write(
-                helio_core::ResourceKey::new("ies_textures"),
-                ies,
-                "Renderer",
-            );
-        }
         #[cfg(not(target_arch = "wasm32"))]
         let depth_texture: &wgpu::Texture = if multiview {
             self.xr_depth_texture.as_ref().ok_or_else(|| {

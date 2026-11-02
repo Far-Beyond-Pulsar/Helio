@@ -4,6 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use helio_feature_api::{pass_node, BuildEnv, Feature, FeatureRegistrar, MarkerFn, NodeBuild};
+use helio_frame_api::{FrameNode, Slot};
 
 use crate::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayMode, PerfOverlayPass,
@@ -46,24 +47,30 @@ impl Feature for PerfOverlayFeature {
         });
         registrar.marker(marker);
 
-        registrar.node(pass_node(
-            "perf_overlay",
-            "Output: Performance Overlay",
-            "Passes: Output",
-            "Draws the performance overlay over the final image.",
-            |build| {
-                let shared = perf(build.env);
-                let mode = build
-                    .env
-                    .setting::<PerfOverlayMode>()
-                    .copied()
-                    .unwrap_or(PerfOverlayMode::Disabled);
-                let mut pass =
-                    PerfOverlayPass::new(build.env.device, shared, build.env.frame.surface_format);
-                pass.set_mode(mode);
-                build.graph.add_pass(Box::new(pass));
-                Ok(())
-            },
-        ));
+        registrar.node(
+            pass_node(
+                "perf_overlay",
+                "Output: Performance Overlay",
+                "Passes: Output",
+                "Draws the performance overlay over the final image.",
+                |build| {
+                    let shared = perf(build.env);
+                    let mode = build
+                        .env
+                        .setting::<PerfOverlayMode>()
+                        .copied()
+                        .unwrap_or(PerfOverlayMode::Disabled);
+                    let mut pass = PerfOverlayPass::new(
+                        build.env.device,
+                        shared,
+                        build.env.frame.surface_format,
+                    );
+                    pass.set_mode(mode);
+                    build.graph.add_pass(Box::new(pass));
+                    Ok(())
+                },
+            )
+            .in_slot(Slot::Display, 20),
+        );
     }
 }

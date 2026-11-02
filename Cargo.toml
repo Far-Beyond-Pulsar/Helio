@@ -72,6 +72,7 @@ serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
+helio-mesh-api = { path = "crates/api/helio-mesh-api" }
 helio-settings = { path = "crates/helio-settings" }
 helio-vg-format = { path = "crates/helio-vg-format" }
 helio-mats = { path = "crates/helio-mats" }
@@ -94,6 +95,7 @@ helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
 helio-pass-portal-cull = { path = "crates/passes/3d/helio-pass-portal-cull" }
 helio-pass-portal-instances = { path = "crates/passes/3d/helio-pass-portal-instances" }
 helio-pass-postprocess = { path = "crates/passes/3d/helio-pass-postprocess" }
+helio-pass-post-volumes = { path = "crates/passes/3d/helio-pass-post-volumes" }
 helio-pass-volumetric-fog = { path = "crates/passes/3d/helio-pass-volumetric-fog" }
 helio = { path = "crates/helio" }
 helio-xr = { path = "crates/helio-xr" }

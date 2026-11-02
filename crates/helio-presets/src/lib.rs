@@ -48,7 +48,8 @@ use helio_pass_perf_overlay::{
 use helio_pass_planar_reflection::PlanarReflectionPass;
 use helio_pass_portal_cull::PortalCullPass;
 use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
-use helio_pass_postprocess::{FogCompositePass, PostProcessPass, PostProcessVolumeBlendPass};
+use helio_pass_post_volumes::PostProcessVolumeBlendPass;
+use helio_pass_postprocess::PostProcessPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
@@ -57,8 +58,8 @@ use helio_pass_sprite_batch::SpriteBatchPass;
 use helio_pass_sprite_cull::SpriteCullPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
-use helio_pass_volumetric_fog::VolumetricFogPass;
-use helio_pass_water_sim::WaterSimPass;
+use helio_pass_volumetric_fog::{FogCompositePass, VolumetricFogPass};
+use helio_pass_water_sim::{WaterSimPass, WaterTransmissionPass};
 use helio_spine::BackgroundPass;
 
 /// Which of this crate's passes shader hot reload may swap on their own
@@ -115,6 +116,7 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<BillboardPass>()
         .independent::<CoronaPass>()
         .independent::<WaterSimPass>()
+        .independent::<WaterTransmissionPass>()
         .independent::<helio::DebugDrawPass>()
         .independent::<DebugOverlayPass>()
         .independent::<PostProcessVolumeBlendPass>()

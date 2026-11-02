@@ -75,7 +75,7 @@ impl HelioWasmApp for Demo {
                 for mesh_data in &scene.meshes {
                     let mesh_id = crate::common::spawn_mesh(
                         world,
-                        helio::MeshUpload {
+                        helio_mesh_api::MeshUpload {
                             vertices: mesh_data.vertices.clone(),
                             indices: mesh_data.indices.clone(),
                         },
@@ -178,7 +178,10 @@ impl HelioWasmApp for Demo {
                     world,
                     directional_light([0.15, -1.0, 0.1], [0.07, 0.09, 0.14], 0.3),
                 );
-                renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
+                renderer.set_feature(helio::AmbientLight {
+            color: [0.0, 0.0, 0.0],
+            intensity: 0.0,
+        });
 
                 cam_pos = center + Vec3::new(r * 0.55, r * 0.28, r * 1.55);
                 cam_yaw = std::f32::consts::PI + 0.1;
@@ -191,7 +194,10 @@ impl HelioWasmApp for Demo {
                     world,
                     directional_light([0.2, -1.0, 0.4], [1.0, 0.95, 0.85], 0.01),
                 );
-                renderer.set_ambient([0.1, 0.12, 0.18], 0.05);
+                renderer.set_feature(helio::AmbientLight {
+            color: [0.1, 0.12, 0.18],
+            intensity: 0.05,
+        });
                 renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
             }
         };

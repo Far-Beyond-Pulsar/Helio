@@ -447,7 +447,7 @@ impl ApplicationHandler for App {
                 // Clone the pass-owned buffer handle before borrowing the renderer again.
                 let resolved = state
                     .renderer
-                    .find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+                    .find_pass_mut::<helio_pass_post_volumes::PostProcessVolumeBlendPass>()
                     .expect("postprocess blend pass")
                     .resolved_uniforms()
                     .clone();
@@ -459,10 +459,18 @@ impl ApplicationHandler for App {
                         &resolved,
                         state.lut_generation,
                     );
-                    // If rebuilt, update the renderer's LUT view
-                    if rebuilt || state.renderer.color_grading_lut().is_none() {
+                    // The builder rewrites one texture: the tone map is given its
+                    // view once (a feature setting, so the graph rebuilds once).
+                    let _ = rebuilt;
+                    if state
+                        .renderer
+                        .feature::<helio_pass_postprocess::ColorGradingLut>()
+                        .is_none()
+                    {
                         let view = builder.lut_view().clone();
-                        state.renderer.set_color_grading_lut(Some(view));
+                        state
+                            .renderer
+                            .set_feature(helio_pass_postprocess::ColorGradingLut(view));
                     }
                 }
 

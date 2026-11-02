@@ -60,7 +60,10 @@ impl HelioWasmApp for Demo {
             world,
             point_light([3.0, 2.0, 2.0], [0.5, 0.7, 1.0], 6.0, 12.0),
         );
-        renderer.set_ambient([0.4, 0.45, 0.5], 0.15);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.4, 0.45, 0.5],
+            intensity: 0.15,
+        });
 
         Self {
             cam_pos: Vec3::new(3.0, 2.0, 5.0),

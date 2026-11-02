@@ -208,7 +208,10 @@ impl ApplicationHandler for App {
             .expect("Helio renderer");
         let surface = graphics.surface;
         renderer.set_clear_color([0.34, 0.48, 0.72, 1.0]);
-        renderer.set_ambient([0.38, 0.44, 0.50], 1.3);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.38, 0.44, 0.50],
+            intensity: 1.3,
+        });
 
         // ── Sun light ─────────────────────────────────────────────────────
         let sun_angle: f32 = 0.62; // radians above horizon
@@ -282,7 +285,7 @@ impl ApplicationHandler for App {
                         .map(|mesh| {
                             let vm_id = spawn_mesh(
                                 &mut scene_db.world,
-                                helio::MeshUpload {
+                                helio_mesh_api::MeshUpload {
                                     vertices: mesh.vertices.clone(),
                                     indices: mesh.indices.clone(),
                                 },
@@ -404,7 +407,7 @@ impl ApplicationHandler for App {
                             .fold(0.5_f32, f32::max);
                         let mesh_id = spawn_mesh(
                             &mut scene_db.world,
-                            helio::MeshUpload {
+                            helio_mesh_api::MeshUpload {
                                 vertices: mesh.vertices.clone(),
                                 indices: mesh.indices.clone(),
                             },

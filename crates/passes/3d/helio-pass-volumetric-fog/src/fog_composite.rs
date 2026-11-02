@@ -165,7 +165,7 @@ impl FogCompositePass {
         // so the medium texture's contents are never read.
         let fallback_parameters = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Fog Composite Neutral Parameters"),
-            size: std::mem::size_of::<crate::GpuFogUniforms>() as u64,
+            size: std::mem::size_of::<helio_pass_postprocess::GpuFogUniforms>() as u64,
             usage: wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
@@ -255,7 +255,7 @@ impl RenderPass for FogCompositePass {
         // or global/local media rows. Unknown row contents count as a medium.
         let mut medium = ctx
             .registry
-            .get::<bool>(ResourceKey::new(crate::FOG_SETTINGS_MAYBE_ACTIVE))
+            .get::<bool>(ResourceKey::new(helio_pass_postprocess::FOG_SETTINGS_MAYBE_ACTIVE))
             .unwrap_or(true);
         for (liveness, key) in [
             (&mut self.global_media, "global_fog_media"),

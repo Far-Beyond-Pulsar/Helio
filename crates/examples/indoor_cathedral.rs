@@ -203,7 +203,10 @@ impl ApplicationHandler for App {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
         let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra);
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::Ultra,
+                ..Default::default()
+            });
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
@@ -538,7 +541,10 @@ impl ApplicationHandler for App {
             })
             .collect();
 
-        renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.65, 0.7, 0.85],
+            intensity: 0.015,
+        });
         // `HELIO_DEBUG_MODE=<mode>`: one of the renderer's debug views.
         if let Some(mode) = std::env::var("HELIO_DEBUG_MODE")
             .ok()

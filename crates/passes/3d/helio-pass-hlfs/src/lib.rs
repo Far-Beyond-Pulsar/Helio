@@ -825,7 +825,7 @@ impl RenderPass for HlfsPass {
             // no-bake path, so use non-panicking lookups for these resources.
             surface_flags: (ctx
                 .registry
-                .get::<&wgpu::TextureView>(helio_core::resource_keys::baked_lightmap())
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(helio_bake_types::BAKED_LIGHTMAP))
                 .is_some()
                 && ctx
                     .registry
@@ -894,7 +894,7 @@ impl RenderPass for HlfsPass {
         let shadow_matrices_buf = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                helio_core::resource_keys::shadow_matrices(),
+                helio_pass_shadow_matrix::shadow_matrices(),
             )
             .map(|s| s.shadow_matrices)
             .unwrap_or(&f.empty_shadow_matrices);
@@ -934,7 +934,7 @@ impl RenderPass for HlfsPass {
                     .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_lightmap_uv"))
                     .unwrap_or(&f.lightmap_uv.view),
                 ctx.registry
-                    .get::<&wgpu::TextureView>(helio_core::resource_keys::baked_lightmap())
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(helio_bake_types::BAKED_LIGHTMAP))
                     .unwrap_or(&f.black.view),
                 pre_aa,
                 ctx.registry

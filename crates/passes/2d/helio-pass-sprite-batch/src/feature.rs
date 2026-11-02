@@ -2,6 +2,7 @@
 //! scene's sprites over the final image.
 
 use helio_feature_api::{pass_node, Feature, FeatureRegistrar};
+use helio_frame_api::{FrameNode, Slot};
 use helio_pass_sprite_cull::SpriteCullPass;
 
 use crate::SpriteBatchPass;
@@ -56,7 +57,8 @@ impl Feature for SpriteFeature {
                     Ok(())
                 },
             )
-            .with_marker_after(),
+            .with_marker_after()
+            .in_slot(Slot::Display, 10),
         );
     }
 }

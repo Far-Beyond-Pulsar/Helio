@@ -1614,7 +1614,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
                     [5.0, 100.0, -100.0],
                     [5.0, 0.0, 100.0],
                 ]
-                .map(|position| helio_core::PackedVertex {
+                .map(|position| helio_mesh_api::PackedVertex {
                     position,
                     ..Default::default()
                 })
@@ -1791,7 +1791,7 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
                     [5.0, 100.0, -100.0],
                     [5.0, 0.0, 100.0],
                 ]
-                .map(|position| helio_core::PackedVertex {
+                .map(|position| helio_mesh_api::PackedVertex {
                     position,
                     ..Default::default()
                 })

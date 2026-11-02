@@ -45,7 +45,7 @@ impl DepthMaterialBindings {
         let Some(textures) = ctx
             .registry
             .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
+                helio_mats::material_textures(),
                 "Depth materials",
             )
         else {

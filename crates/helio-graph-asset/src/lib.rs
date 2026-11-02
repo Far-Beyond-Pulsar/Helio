@@ -33,8 +33,9 @@ pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
 pub use compile::build_env;
 // A graph document is made of node types: they are part of this crate's API.
 pub use helio_feature_api::{
-    BuildEnv, BuildFn, FinishFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins,
-    NodeRegistry, ParamDesc, ParamType, PinTable, PinsFn, PrepareFn, SceneColorFormat, Slot,
+    BuildEnv, BuildFn, CheckFn, ExtensionPoint, FinishFn, FrameDesc, MarkerFn, NodeBuild,
+    NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType, PinTable, PinsFn, PrepareFn,
+    SceneColorFormat,
 };
 
 /// A registry holding the core nodes ([`core_nodes`]): resources, scene

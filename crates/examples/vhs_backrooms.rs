@@ -1027,7 +1027,10 @@ impl ApplicationHandler for App {
         let queue = graphics.queue.clone();
         let surface_format = graphics.surface_config.format;
         let mut config = RendererConfig::new(size.width, size.height, surface_format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra)
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::Ultra,
+                ..Default::default()
+            })
             .with_render_scale(1.0);
         config
             .features
@@ -1064,7 +1067,10 @@ impl ApplicationHandler for App {
             },
         );
 
-        renderer.set_ambient([0.75, 0.7, 0.6], 0.04);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.75, 0.7, 0.6],
+            intensity: 0.04,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         let renderer = Arc::new(Mutex::new(renderer));

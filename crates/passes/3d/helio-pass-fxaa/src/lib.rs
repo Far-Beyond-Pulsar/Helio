@@ -10,6 +10,10 @@
 pub mod feature;
 pub use feature::FxaaFeature;
 
+/// The anti-aliased scene colour FXAA writes when it has an intermediate
+/// target (the colour chain's next colour after it).
+pub const FXAA_COLOR: &str = "fxaa_color";
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 

@@ -389,7 +389,6 @@ pub const REFLECTIONS_SUPPORTED: bool = true;
 
 pub mod acceleration;
 pub mod actor;
-pub mod asset_types;
 pub mod camera;
 pub mod cmd;
 pub mod context;
@@ -455,7 +454,6 @@ macro_rules! cpu_scope {
 // specific pass or scene-object type. Pass-specific GPU shapes (lights,
 // materials, geometry instances, ...) live in their owning `helio-pass-*`
 // crate, never here.
-pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use camera::GpuCameraUniforms;
 pub use cmd::{CommandRecorder, ComputeCmds, RenderCmds};
 pub use movability::Movability;
@@ -464,9 +462,8 @@ pub use render_environment::RenderEnvironment;
 
 // Re-export managers
 pub use crate::acceleration::{
-    AccelerationError, BlasGeometry, BlasManager, FrameAcceleration, RayFrame, RayInstance,
-    RayProxies, TlasInstanceInput, TlasManager, RAY_INSTANCES, RAY_INSTANCE_MASKED,
-    RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED, RAY_PROXY_INDICES, RAY_PROXY_VERTEX_BYTES,
+    AccelerationError, BlasGeometry, BlasManager, FrameAcceleration, RayFrame,
+    RayProxies, TlasInstanceInput, TlasManager, RAY_INSTANCES, RAY_PROXY_INDICES, RAY_PROXY_VERTEX_BYTES,
     RAY_PROXY_VERTICES,
 };
 // Re-export core types

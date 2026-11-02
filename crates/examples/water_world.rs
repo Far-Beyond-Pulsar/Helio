@@ -329,7 +329,10 @@ impl Showcase {
                 size[1],
                 renderer_config.surface_format,
             );
-        renderer.set_ambient([0.45, 0.58, 0.8], 0.35);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.45, 0.58, 0.8],
+            intensity: 0.35,
+        });
         let mut post = helio_pass_postprocess::PostProcessSettings::default();
         post.tonemap_operator = helio::TonemapOperator::AgxPunchy;
         post.tonemap_exposure = 2.0;
@@ -337,7 +340,7 @@ impl Showcase {
         let camera = scene.world.spawn();
         scene.world.insert(
             camera,
-            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
                 0, &post,
             )),
         );

@@ -261,6 +261,8 @@ name = "vr_demo"
 path = "vr/main.rs"
 
 [dependencies]
+helio-mesh-api = { workspace = true }
+helio-pass-post-volumes = { workspace = true }
 helio-components = { path = "../helio-components", features = ["bake"] }
 profiling = { workspace = true }
 helio = { workspace = true }

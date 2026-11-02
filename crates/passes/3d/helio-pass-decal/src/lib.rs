@@ -442,7 +442,7 @@ impl RenderPass for DecalPass {
         let material_textures = match ctx
             .registry
             .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
+                helio_mats::material_textures(),
                 self.name(),
             ) {
             Some(m) => m,

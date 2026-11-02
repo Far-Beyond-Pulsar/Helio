@@ -135,7 +135,10 @@ impl ApplicationHandler for App {
             .expect("Helio renderer");
         let surface = graphics.surface;
         renderer.set_clear_color([0.03, 0.03, 0.04, 1.0]);
-        renderer.set_ambient([0.06, 0.06, 0.09], 1.0);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.06, 0.06, 0.09],
+            intensity: 1.0,
+        });
 
         let scene_path = std::env::args()
             .nth(1)
@@ -159,7 +162,7 @@ impl ApplicationHandler for App {
                         .fold(0.5, f32::max);
                     let mesh_id = spawn_mesh(
                         &mut scene_db.world,
-                        helio::MeshUpload {
+                        helio_mesh_api::MeshUpload {
                             vertices: mesh.vertices,
                             indices: mesh.indices,
                         },

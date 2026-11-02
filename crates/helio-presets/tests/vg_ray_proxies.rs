@@ -141,7 +141,7 @@ fn spawn_box(world: &mut World, centre: Vec3, half: Vec3, colour: [f32; 3]) {
         .iter()
         .zip(&normals)
         .map(|(p, n)| {
-            helio::PackedVertex::from_components(
+            helio_mesh_api::PackedVertex::from_components(
                 p.to_array(),
                 n.to_array(),
                 [0.0; 2],
@@ -242,7 +242,7 @@ fn spawn_vg(
     (content, vgeo): (u128, Arc<dyn VgeoSource>),
     material: (Entity, MaterialComponent),
 ) -> Entity {
-    let mut vertex = helio::PackedVertex::default();
+    let mut vertex = helio_mesh_api::PackedVertex::default();
     vertex.tex_coords0 = [7.0, 0.0];
     let mesh = world.spawn();
     world.insert(
@@ -712,7 +712,7 @@ fn a_cut_out_card_stops_rays_where_its_alpha_says() {
                 let vertices = positions
                     .iter()
                     .map(|p| {
-                        helio::PackedVertex::from_components(
+                        helio_mesh_api::PackedVertex::from_components(
                             p.to_array(),
                             [0.0, 0.0, 1.0],
                             [0.0; 2],
@@ -857,7 +857,7 @@ fn measure_proxy_memory_and_tlas_rebuild() {
     let mut objects = Vec::new();
     let Some(mut harness) = Harness::new(true, |world, runtime| {
         room(world, true);
-        let mut vertex = helio::PackedVertex::default();
+        let mut vertex = helio_mesh_api::PackedVertex::default();
         vertex.tex_coords0 = [9.0, 0.0];
         let mesh = world.spawn();
         world.insert(

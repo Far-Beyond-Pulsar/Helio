@@ -1167,11 +1167,67 @@ impl RenderGraph {
         (self.internal_w, self.internal_h)
     }
 
+    /// Hands each scheduled pass its own GPU time from the latest timing
+    /// snapshot ([`RenderPass::set_measured_gpu_ms`]). Returns whether any
+    /// pass's output changes, so a host idling between frames knows to draw
+    /// one.
+    pub fn feed_measured_gpu_times(&mut self) -> bool {
+        let times: Vec<(&'static str, f32)> = self
+            .profiler
+            .timing_snapshot()
+            .passes
+            .iter()
+            .filter_map(|pass| pass.gpu_ms.map(|ms| (pass.name, ms)))
+            .collect();
+        let mut changed = false;
+        for pass in &mut self.passes {
+            if let Some(&(_, ms)) = times.iter().find(|(name, _)| *name == pass.name()) {
+                changed |= pass.set_measured_gpu_ms(ms);
+            }
+        }
+        changed
+    }
+
+    /// What every pass declares, scheduled or dormant, in build order, with
+    /// whether it is a member of the current frame: a graph's whole pass
+    /// list whatever the scene holds (tools, preset snapshots).
+    pub fn build_order_declarations(&self) -> Vec<(PassDeclaration, bool)> {
+        let mut all: Vec<(usize, PassDeclaration, bool)> = self
+            .member_slots
+            .iter()
+            .zip(&self.passes)
+            .map(|(slot, pass)| (*slot, Self::declaration_of(pass.as_ref()), true))
+            .chain(
+                self.dormant
+                    .iter()
+                    .map(|(slot, pass)| (*slot, Self::declaration_of(pass.as_ref()), false)),
+            )
+            .collect();
+        all.sort_by_key(|(slot, _, _)| *slot);
+        all.into_iter()
+            .map(|(_, declaration, member)| (declaration, member))
+            .collect()
+    }
+
+    /// The resource declarations pass `index` makes in `declare_resources`,
+    /// group members one by one (contract checks compare their formats).
+    pub fn pass_resources(&self, index: usize) -> Vec<crate::graph::ResourceDecl> {
+        let Some(pass) = self.passes.get(index) else {
+            return Vec::new();
+        };
+        let mut builder = crate::graph::ResourceBuilder::new();
+        pass.declare_resources(&mut builder);
+        builder.declarations().to_vec()
+    }
+
     /// What pass `index` declares, for tools: the resources it reads and
     /// writes (from `reads()`/`writes()` and `declare_resources`) with their
     /// kind where the pass declares one, and the SceneDB buffers it consumes.
     pub fn pass_declaration(&self, index: usize) -> Option<PassDeclaration> {
-        let pass = self.passes.get(index)?;
+        Some(Self::declaration_of(self.passes.get(index)?.as_ref()))
+    }
+
+    fn declaration_of(pass: &dyn RenderPass) -> PassDeclaration {
         let mut declaration = PassDeclaration {
             pass: pass.name(),
             type_name: pass.type_name(),
@@ -1226,7 +1282,7 @@ impl RenderGraph {
                 }
             }
         }
-        Some(declaration)
+        declaration
     }
 
     pub fn dump_dependency_graph(&self) {

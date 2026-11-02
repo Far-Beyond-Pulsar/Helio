@@ -69,7 +69,10 @@ impl HelioWasmApp for Demo {
         graph.lock(config.internal_width(), config.internal_height());
         renderer.set_graph(graph);
 
-        renderer.set_ambient([0.15, 0.18, 0.28], 0.04);
+        renderer.set_feature(helio::AmbientLight {
+            color: [0.15, 0.18, 0.28],
+            intensity: 0.04,
+        });
         renderer.set_clear_color([0.4, 0.55, 0.85, 1.0]);
 
         Self {

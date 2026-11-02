@@ -6,6 +6,7 @@ description = "Helio render pass: physically based screen-space lens (thin-lens 
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-feature-api = { path = "../../../helio-feature-api" }
 helio-core = { workspace = true }
 helio-lens-optics = { path = "../../../helio-lens-optics" }

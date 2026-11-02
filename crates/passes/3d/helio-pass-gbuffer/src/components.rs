@@ -6,7 +6,7 @@
 /// Mesh vertices: a pool shared by every mesh. A [`StaticObjectRow`]'s
 /// `vertex_offset` addresses it. Engines fill it (Helio's standalone hosts use
 /// `helio_components::MeshComponent`).
-pub const MESH_VERTICES: helio_core::PoolContract<helio_core::PackedVertex> =
+pub const MESH_VERTICES: helio_core::PoolContract<helio_mesh_api::PackedVertex> =
     helio_core::PoolContract::new("builtin_mesh_vertex");
 
 /// Mesh indices: a pool shared by every mesh, addressed by a

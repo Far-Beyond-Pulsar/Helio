@@ -171,7 +171,10 @@ fn main() {
     }
     let config = RendererConfig::new(width, height, format);
     let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
-    renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
+    renderer.set_feature(helio::AmbientLight {
+            color: [1.0, 0.95, 0.85],
+            intensity: 0.05,
+        });
 
     let target = |w: u32, h: u32| {
         device

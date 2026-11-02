@@ -283,16 +283,13 @@ pub struct RendererConfig {
     /// FXAA, fog-composite and post-process passes, so `[0.0; 4]` leaves the scene background
     /// transparent for a compositor (GPUI's `paint_surface` blends the dma-buf with alpha).
     pub background_color: [f32; 4],
-    pub shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
     pub perf_overlay_mode: PerfOverlayMode,
-    /// Legacy custom-graph setting. Default graphs use `shadow_budget.max_resolution`.
+    /// Legacy custom-graph setting. Default graphs use the lights' `ShadowSettings` budget.
     pub shadow_atlas_size: u32,
-    /// Legacy custom-graph setting. Default graphs use packed residency and `shadow_budget`.
+    /// Legacy custom-graph setting. Default graphs use packed residency and the shadow budget.
     pub shadow_face_capacity: u32,
-    /// GPU tile residency, atlas memory, and per-frame rendering limits.
-    pub shadow_budget: helio_pass_shadow_matrix::ShadowBudget,
     /// Enable the screen-space reflection pass. Default `false`.
     ///
     /// SSR traces the Hi-Z buffer per pixel and is one of the most expensive
@@ -368,13 +365,11 @@ impl RendererConfig {
             height: height.max(1),
             surface_format,
             background_color: [0.0, 0.0, 0.0, 1.0],
-            shadow_quality: helio_pass_shadow_matrix::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
-            shadow_budget: helio_pass_shadow_matrix::ShadowBudget::default(),
             enable_ssr: false,
             features: helio_feature_api::FeatureSettings::new(),
             enable_planar_reflections: false,
@@ -418,11 +413,6 @@ impl RendererConfig {
         self
     }
 
-    pub fn with_shadow_quality(mut self, quality: helio_pass_shadow_matrix::ShadowQuality) -> Self {
-        self.shadow_quality = quality;
-        self
-    }
-
     pub fn with_render_scale(mut self, scale: f32) -> Self {
         self.render_scale = scale.clamp(0.25, 1.0);
         self
@@ -443,12 +433,7 @@ impl RendererConfig {
         self
     }
 
-    pub fn with_shadow_budget(mut self, budget: helio_pass_shadow_matrix::ShadowBudget) -> Self {
-        self.shadow_budget = budget;
-        self
-    }
-
-    /// Legacy custom-graph setting; use `with_shadow_budget` for default graphs.
+    /// Legacy custom-graph setting; default graphs use the lights' `ShadowSettings` budget.
     pub fn with_shadow_face_capacity(mut self, capacity: u32) -> Self {
         self.shadow_face_capacity = capacity.clamp(1, 256);
         self

@@ -145,6 +145,152 @@ frame A/B (voxel_craft, an indoor cathedral, a mesh-heavy scene).
    data); `asset_types`/`RayInstance`/kind keys to api crates.
 5. Joins split per kind (still in Helio, one derivation per feature crate).
 
+As built, A1-A3 (2026-11-02, branch `rewrite/p6-frame`):
+- **Extension points are generic in the feature API**:
+  `ExtensionPoint(&'static str)`, `NodeDescriptor::at(point, order)`,
+  `NodeRegistry::placed(point)`, and `NodeDescriptor::with_check` (a check
+  run on the passes a node added). `helio-feature-api` names no slot or
+  phase; `Slot` moved to `helio-frame-api`.
+- **`helio-frame-api`** (layer `feature_api`, beside `helio-feature-api`):
+  - `Slot`: `Prepare`, `Geometry`, `LightingInputs`, `Lighting`, `Media`,
+    `Resolved`, `Display`, `Output` (new: `Prepare` for per-frame tables,
+    `Media` for fog and the post settings, `Resolved` for effects between
+    AA and the tone map, `Display` for overlays on the final image).
+  - `Phase`: `ShadowCasters`, `DepthPrepass`, `GBuffer`, `Forward`,
+    `Transparent`, `Overlay`. A phase has three stages, each an extension
+    point: **before** (compute a drawer needs first; foliage placement, GI's
+    ray generation, portal culling), **open** (the one drawer that clears
+    the attachments) and **draw** (drawers that load them). `FrameNode`
+    places a node: `in_slot`, `before_phase`, `opens`, `drawer`. How others
+    do it: Bevy's phase node draws every queued phase item of a view in one
+    render pass; here each kind keeps its own pass (its culling, pipelines,
+    membership) and the graph's subpass fusion merges adjacent drawers whose
+    attachments match exactly, which is the same GPU work without a central
+    draw loop. Compute a drawer needs goes in the phase's before stage so it
+    never lands between two fusing drawers (the rule foliage placement
+    followed by hand).
+  - The **attachment contract** is checked when a drawer builds: every
+    attachment of its phase a drawer's pass declares must have the phase's
+    format (`Phase::attachments`; the G-buffer layout is
+    `helio_frame_api::gbuffer`). A preset panics when a phase that needs an
+    opener (shadow casters, depth prepass, G-buffer) has drawers but not
+    exactly one opener: no stale pixels, no double clear.
+  - Views: a graph is built for one camera (stereo eyes are its layers), so
+    a phase's drawer list is per view; `Phase::views` says the shadow-caster
+    phase draws for the lights' shadow faces.
+  - **Colour chain** (`color::current` / `color::advance`): a post node
+    reads the current scene colour when it builds and advances the chain to
+    what it writes. Fog composite, TSR, FXAA, lens, flare, transparency and
+    the tone map use it; no node names `lens_color`, `fxaa_color`,
+    `tsr_color` or `fogged_hdr` any more, and the tone map lost its
+    `color_input` parameter (and its pin alternatives). `ReactiveMask` is
+    the preset's request for a reactive mask from what draws after
+    lighting.
+  - **Lighting inputs** (`lighting`): `INDIRECT_DIFFUSE` (GI's resolve;
+    `helio_gi_api::GI_IRRADIANCE` is now this key), `INDIRECT_SPECULAR_LAYERS`
+    (two rgba16f layers composited over the environment in order; a
+    publisher claims the next free one when it builds, so SSR then planar
+    keep today's priority), `ENVIRONMENT_PROBES`/`ENVIRONMENT_CUBES`
+    (reflection captures and their cube array), `SUN_VISIBILITY` /
+    `DIRECTIONAL_VISIBILITY`, `TRANSMISSION` (radiance media add at a
+    surface), `sky` (atmosphere frame, sky table and their WGSL, moved from
+    `helio-sky-api`, which re-exports them), `LIGHT_LIST`, and
+    `VIEW_REMAPS` (per-chain remap matrices plus the G-buffer tag,
+    `view_remap_of` in WGSL). `SpecularLayers` says how the preset's
+    lighting takes the layers: read (deferred), composited after lighting
+    (HLFS) or none (forward).
+  - **Host inputs** are declared by the feature that reads them
+    (`host_input(name)`, placed at `HOST_INPUTS`): the spine declares
+    `material_textures` and `render_environment`, billboards and corona
+    their own. Presets add every registered host input.
+- **Phases run, drawers register from their crates** (A2): the meshes'
+  drawers are features of their own crates (`GBufferDrawers` opens the
+  G-buffer, `ShadowDrawers` opens the shadow casters, `ForwardDrawers`
+  opens the forward phase and builds only without a G-buffer phase,
+  `TransparentDrawers`); portal mask and draws, foliage, VG, voxel chunks
+  and decals are G-buffer drawers; corona, the portal editor overlay,
+  water and billboards are overlay drawers; GI's probe update, foliage
+  placement and portal culling run before the G-buffer phase. Presets name
+  only the spine's passes, the lighting model, the anti-aliasing and the
+  slots and phases. Features gate themselves: `PortalSettings`,
+  `SsrSettings`, `PlanarReflectionSettings` (and the existing
+  `FoliageSettings`) are bridged from the renderer config by the presets'
+  preparer; `ShadowSettings` (budget, quality) replaced the spine
+  settings' shadow fields.
+- **Deferred lighting reads lighting inputs only**: no water volumes, no
+  caustics textures, no `ssr_trace`/`planar_reflection`, no
+  `portal_chain_unmap`, no `helio-sky-api`/`helio-gi-api`. Water publishes
+  `transmission` from a new fullscreen pass (`WaterTransmissionPass`, at
+  `LightingInputs`, a member only with water) that evaluates the caustics
+  field the lighting used to (a fragment pass, so the field's
+  screen-space footprint is identical); the portal projection publishes
+  `view_remaps`; SSR and planar claim specular layers; under HLFS the SSR
+  node runs after lighting with its composite (`Slot::Lighting`), as
+  before.
+- **Post** (A3): the fog composite moved to `helio-pass-volumetric-fog`
+  (`Slot::Media`), post-process volumes to a new feature crate
+  `helio-pass-post-volumes` (group `post`: the blend pass, the volume and
+  camera rows, the resolver shader split from the tone map's), which
+  publishes the post-settings contract `helio_pass_postprocess::POST_SETTINGS`
+  (`GpuPostProcessUniforms`, its WGSL in `post_settings.wgsl`). The tone
+  map keeps only that contract and the colour chain, and binds
+  `PostProcessSettings::default()` when nothing publishes settings (it drew
+  nothing before).
+- **Preset snapshot** (every preset x default, TSR, voxel+TSR,
+  reflections, portals/foliage-off; all passes, dormant included): the
+  differences, all intended: GI's probe update runs before the G-buffer
+  (it reads no G-buffer; the voxel drawer traces its rays); portal culling
+  runs after light binning (no dependency); decals draw before GI's mesh
+  rays (they are G-buffer drawers; the mesh rays read no G-buffer); the
+  forward preset lost portal culling and its marker (nothing there read
+  it); `WaterTransmission` is a new (dormant without water) pass;
+  renamed contract resources (`indirect_diffuse`, `indirect_specular_*`,
+  `transmission`, `view_remaps`); moved type paths (fog composite,
+  volume blend). Performance markers stay unconditional, so with portals
+  off the scene-prep marker follows the (empty) portal-cull node.
+- Found, not fixed: the deferred lighting loads the half-resolution SSR
+  trace at full-resolution pixels (`textureLoad(layer0, pix)`), as it did
+  before; HLFS's composite reconstructs it properly. Transparency still
+  reads fog's grid (`fog_accum`/`fog_parameters`) by name to fog each
+  fragment, and six post passes keep a "the fogged colour may alias
+  `pre_aa`" special case: both want a media contract and a chain alias.
+
+As built, A4 (2026-11-02):
+- **One generic seam replaces the kind setters**: `Renderer::set_feature<T>`
+  (and `feature::<T>()`, `RendererBuilder::with_feature`) sets a feature's
+  settings in the renderer config and rebuilds the graph. Kinds own their
+  settings types:
+  - `set_shadow_quality` and `RendererConfig::{shadow_quality, shadow_budget}`
+    -> `helio_pass_shadow_matrix::ShadowSettings { budget, quality }` (host
+    settings map into it in `RendererConfig::with_settings`).
+  - `set_ambient` / `with_ambient` -> `helio_frame_api::lighting::AmbientLight`
+    (the lighting's stand-in sky light; the renderer publishes it in
+    `RenderEnvironment` every frame).
+  - `set_ies_texture_view` -> `helio_pass_deferred_light::IesProfiles`
+    (handed to the lighting node; the renderer no longer publishes
+    `ies_textures`).
+  - `set_color_grading_lut` -> `helio_pass_postprocess::ColorGradingLut`
+    (handed to the tone map node; no `color_grading_lut` resource).
+  - `set_material_sampler` -> `helio_mats::MaterialSampler` (the renderer's
+    material bindings rebuild their sampler when it changes).
+  - `template_registry_mut` / `transparent_template_registry_mut` ->
+    `helio_mats::MaterialTemplates` (shared registries; the G-buffer drawer
+    now compiles from the opaque one; before, the renderer's registries
+    reached no pass, so `radiant_demo`'s custom templates fell back to the
+    default class).
+  - `set_deferred_light_timing_ms` -> `RenderPass::set_measured_gpu_ms`,
+    which `RenderGraph::feed_measured_gpu_times` (and
+    `Renderer::feed_measured_gpu_times`) calls for every pass from the
+    timing snapshot: any pass whose output shows its own cost gets it, and
+    the host learns whether to redraw.
+- `helio-core` shed `asset_types.rs` (`PackedVertex`, `MeshUpload`,
+  `SectionedMeshUpload`) and `RayInstance` with its flags to the new api
+  crate `helio-mesh-api`; `MATERIAL_TEXTURES` to `helio-mats`,
+  `SHADOW_MATRICES` to `helio-pass-shadow-matrix`, `BAKED_LIGHTMAP` to
+  `helio-bake-types`; `PORTAL_VIEWS` was dropped (the portal crates' own
+  `PORTAL_VIEWS` contract already named it). The facade no longer
+  re-exports mesh types.
+
 **B. Plugins** (each: Pulsar plugin + its Helio crates move out of the
 Helio repo into it; component methods for every editor/game operation;
 editor moved onto those methods):

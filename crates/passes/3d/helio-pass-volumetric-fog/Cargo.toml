@@ -10,6 +10,7 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-feature-api = { path = "../../../helio-feature-api" }
 pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
@@ -21,6 +22,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }
 
 [dev-dependencies]
+helio-pass-post-volumes = { path = "../helio-pass-post-volumes" }
 helio-components = { path = "../../../helio-components" }
 pollster = { workspace = true }
 glam = { workspace = true }

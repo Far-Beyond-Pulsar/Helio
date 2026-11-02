@@ -8,7 +8,8 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
-use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, Slot};
+use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor};
+use helio_frame_api::{FrameNode, Slot};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
@@ -142,7 +143,10 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
                 .with(FinalConsumerFeature(observed.clone())),
         );
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
-            .with_ambient([0.5, 0.5, 0.6], 1.0)
+            .with_feature(helio::AmbientLight {
+            color: [0.5, 0.5, 0.6],
+            intensity: 1.0,
+        })
             .with_external_device()
             .with_graph(Preset::Deferred.pipeline_with(Arc::new(nodes)))
             .build(
@@ -415,7 +419,10 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
         ChunkPass::new(Arc::clone(&pass_source))
     }));
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
-        .with_ambient([0.5, 0.5, 0.6], 1.0)
+        .with_feature(helio::AmbientLight {
+            color: [0.5, 0.5, 0.6],
+            intensity: 1.0,
+        })
         .with_external_device()
         .with_graph(Preset::Deferred)
         .build(
@@ -990,7 +997,10 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         .renderer
         .set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Native));
     editor.renderer.set_jitter_enabled(false);
-    editor.renderer.set_ambient([1.0; 3], 1.0);
+    editor.renderer.set_feature(helio::AmbientLight {
+        color: [1.0; 3],
+        intensity: 1.0,
+    });
     let planet = Arc::new(
         Planet::new(PlanetRecipe {
             shape: helio_pass_voxel_planet::grid::Shape::Plane,
