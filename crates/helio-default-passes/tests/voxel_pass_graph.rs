@@ -46,6 +46,7 @@ impl Feature for FinalConsumerFeature {
                     Ok(())
                 },
             )
+            .with_generated_pins()
             .in_slot(Slot::Output, 0),
         );
     }

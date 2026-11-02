@@ -320,7 +320,9 @@ impl NodeDescriptor {
         }
     }
 
-    /// Joins preset graphs at `slot`, `order` among the slot's nodes.
+    /// Joins preset graphs at `slot`, `order` among the slot's nodes. A
+    /// preset chains its nodes by flow pins, so a slotted node needs them
+    /// (`with_generated_pins`).
     pub fn in_slot(mut self, slot: Slot, order: i32) -> Self {
         self.slot = Some((slot, order));
         self

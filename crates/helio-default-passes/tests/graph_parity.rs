@@ -295,12 +295,12 @@ fn hlfs_lights_in_its_format_end_to_end() {
         .clone()
         .with_tsr_quality(helio::TsrQuality::Quality);
     let graph = Preset::Hlfs.build(fixtures.context());
-    // Every pass that writes the lit colour writes it in one format.
+    // Every pass that declares the lit colour's format declares one format.
     let formats: HashSet<_> = passes(&graph)
         .iter()
         .flat_map(|pass| pass.writes.iter())
         .filter(|write| write.name == "pre_aa")
-        .map(|write| write.format)
+        .filter_map(|write| write.format)
         .collect();
     assert_eq!(formats.len(), 1, "pre_aa is written as {formats:?}");
     assert!(has::<helio_pass_hlfs::HlfsPass>(&graph));
