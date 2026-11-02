@@ -6,16 +6,17 @@
 //!   feature crate's nodes), the renderer's own nodes and the config bridge.
 //! - [`graphs`]: node registries, the editor's template, the pin probe.
 //! - [`pipelines`]: the presets as named pipelines for a host's registry.
-//! - Config helpers: [`with_voxel_terrain`], [`with_virtual_geometry`],
-//!   [`config_with_host_settings`]; and [`water_shore`], the voxel terrain's
-//!   shoreline for water.
+//! - Config helpers: [`with_virtual_geometry`], [`config_with_host_settings`].
+//!
+//! The presets name no feature beyond the feature list: each feature declares
+//! what it needs of the others (GI's terrain tracer, TSR's stochastic mask)
+//! through settings in its own preparer.
 
 pub mod features;
 pub mod graphs;
 pub mod pipelines;
 pub mod presets;
 pub mod virtual_geometry;
-pub mod water_shore;
 pub use helio_pass_vg::{
     virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
 };
@@ -152,22 +153,6 @@ pub(crate) fn convert_perf_mode(
         H::TileLightCount => P::TileLightCount,
         H::PassOutput => P::PassOutput,
     }
-}
-
-/// Draws `terrain` in the graphs `config` builds: the voxel node adds its
-/// chunk passes, and GI traces its probes against it (without a TLAS). A
-/// terrain without passes leaves GI tracing the scene's meshes.
-pub fn with_voxel_terrain(
-    mut config: RendererConfig,
-    terrain: helio_pass_voxel_planet::VoxelTerrain,
-) -> RendererConfig {
-    let traced = !terrain.passes.is_empty();
-    config.features.insert(terrain);
-    config
-        .features
-        .edit::<helio_pass_gi::GiSettings>()
-        .terrain_traced = traced;
-    config
 }
 
 /// A renderer config with a host's [`helio::helio_settings::RENDERER`]

@@ -387,6 +387,13 @@ impl RendererConfig {
         }
     }
 
+    /// Adds (or replaces) a feature's setting in [`Self::features`]: what a
+    /// feature's nodes read (a terrain to draw, a post effect's WGSL, …).
+    pub fn with_feature<T: std::any::Any + Send + Sync>(mut self, setting: T) -> Self {
+        self.features.insert(setting);
+        self
+    }
+
     /// Set the default graphs' scene clear colour. Use alpha 0 for a transparent background.
     pub fn with_background_color(mut self, color: [f32; 4]) -> Self {
         self.background_color = color;

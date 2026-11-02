@@ -16,30 +16,27 @@ pub struct GiSettings {
     /// open ground's ([`crate::DEFAULT_FINEST_SPACING`]) with a terrain
     /// tracer, half a metre (rooms, pillars, furniture) without one.
     pub probe_spacing: Option<f32>,
-    /// Whether a terrain traces the probes every frame (a voxel world): the
-    /// probes then update without a TLAS. Set by the preset that adds the
-    /// terrain.
-    pub terrain_traced: bool,
 }
 
 impl GiSettings {
-    /// The probes' configuration these settings ask for.
-    pub fn config(&self) -> GiConfig {
-        let default = if self.terrain_traced {
+    /// The probes' configuration these settings ask for, with a terrain
+    /// tracing them every frame or not ([`helio_gi_api::TerrainTracer`]).
+    pub fn config(&self, terrain_traced: bool) -> GiConfig {
+        let default = if terrain_traced {
             crate::DEFAULT_FINEST_SPACING
         } else {
             0.5
         };
         GiConfig {
             finest_spacing: self.probe_spacing.map_or(default, f64::from),
-            needs_tlas: !self.terrain_traced,
+            needs_tlas: !terrain_traced,
         }
     }
 
     /// Whether there is GI on `device`: a terrain traces it, or the meshes
     /// can (hardware ray queries).
-    pub fn active(&self, device: &wgpu::Device) -> bool {
-        self.terrain_traced || mesh_rays_supported(device)
+    pub fn active(&self, device: &wgpu::Device, terrain_traced: bool) -> bool {
+        terrain_traced || mesh_rays_supported(device)
     }
 }
 
@@ -54,6 +51,14 @@ fn settings(build: &NodeBuild<'_, '_>) -> GiSettings {
         .setting::<GiSettings>()
         .copied()
         .unwrap_or_default()
+}
+
+/// Whether a feature traces the probes against its terrain this graph.
+fn terrain_traced(build: &NodeBuild<'_, '_>) -> bool {
+    build
+        .env
+        .setting::<helio_gi_api::TerrainTracer>()
+        .is_some()
 }
 
 fn node(
@@ -83,11 +88,13 @@ impl Feature for GiFeature {
             node(
                 "gi",
                 "GI: Probe Update",
-                "Integrates last frame's hits into the probe clipmap and writes this frame's rays.                  Builds nothing where nothing can trace them.",
+                "Integrates last frame's hits into the probe clipmap and writes this frame's rays. \
+                 Builds nothing where nothing can trace them.",
                 |build| {
                     let settings = settings(build);
-                    if settings.active(build.env.device) {
-                        let pass = GiPass::new(build.env.device, settings.config());
+                    let traced = terrain_traced(build);
+                    if settings.active(build.env.device, traced) {
+                        let pass = GiPass::new(build.env.device, settings.config(traced));
                         build.graph.add_pass(Box::new(pass));
                     }
                     Ok(())
@@ -115,7 +122,7 @@ impl Feature for GiFeature {
                 "GI: Resolve",
                 "The probes' irradiance at every pixel (`gi_irradiance`) for deferred lighting.",
                 |build| {
-                    if settings(build).active(build.env.device) {
+                    if settings(build).active(build.env.device, terrain_traced(build)) {
                         build
                             .graph
                             .add_pass(Box::new(GiResolvePass::new(build.env.device)));

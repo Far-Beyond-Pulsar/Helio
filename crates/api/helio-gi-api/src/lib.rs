@@ -11,6 +11,12 @@ use glam::{DVec3, I64Vec3, Vec3};
 use helio_core::PrepareContext;
 
 /// Levels of the clipmap, each twice as far apart as the one inside it.
+/// A setting a feature inserts (in a preparer) when it traces GI's probes
+/// against its own geometry every frame, as the voxel terrain does: the
+/// probes then update without a TLAS and are spaced for open ground.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TerrainTracer;
+
 pub const LEVELS: usize = 6;
 /// Probes along a level's side.
 pub const SIDE: i64 = 24;

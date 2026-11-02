@@ -524,7 +524,12 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                 .with_color_input(FOGGED_HDR)
                 .with_intermediate_output()
                 .with_motion_vectors();
-                let tsr = if build.boolean("stochastic_mask") {
+                let stochastic = build.boolean("stochastic_mask")
+                    || build
+                        .env
+                        .setting::<helio_pass_tsr::StochasticSamples>()
+                        .is_some();
+                let tsr = if stochastic {
                     tsr.with_stochastic_mask()
                 } else {
                     tsr

@@ -41,6 +41,17 @@ impl Feature for VoxelFeature {
     }
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        // With terrain to draw, it traces GI's probes every frame and its sun
+        // samples rotate over blocks of pixels for TSR to integrate.
+        registrar.prepare(std::sync::Arc::new(|env| {
+            let drawn = env
+                .setting::<VoxelTerrain>()
+                .is_some_and(|terrain| !terrain.passes.is_empty());
+            if drawn {
+                env.insert_setting(helio_gi_api::TerrainTracer);
+                env.insert_setting(helio_pass_tsr::StochasticSamples);
+            }
+        }));
         registrar.node(
             NodeDescriptor::new(
                 "helio.pass.voxel_chunks",

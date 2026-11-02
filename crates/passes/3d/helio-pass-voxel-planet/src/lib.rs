@@ -11,6 +11,8 @@
 pub mod chunks;
 pub mod engine;
 mod feature;
+mod water_shore;
+pub use water_shore::VoxelShoreTerrain;
 pub mod meadow;
 
 pub use feature::{ChunkPassMaker, VoxelFeature, VoxelTerrain};

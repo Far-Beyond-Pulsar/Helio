@@ -261,7 +261,7 @@ impl Flight {
                 .edit::<helio_pass_foliage_place::FoliageSettings>()
                 .range = Some(meadow.range);
         }
-        let config = helio_presets::with_voxel_terrain(config, terrain);
+        let config = config.with_feature(terrain);
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
             .with_external_device()
             .with_graph(Preset::Deferred)

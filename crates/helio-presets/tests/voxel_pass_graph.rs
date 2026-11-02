@@ -8,11 +8,11 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
-use helio_presets::Preset;
 use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, Slot};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
+use helio_presets::Preset;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
 struct FinalResourceConsumer {
@@ -133,12 +133,9 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             .features
             .edit::<helio_pass_foliage_place::FoliageSettings>()
             .enabled = false;
-        let config = helio_presets::with_voxel_terrain(
-            config,
-            helio_pass_voxel_planet::VoxelTerrain::new(move || {
-                ChunkPass::new(Arc::clone(&pass_source))
-            }),
-        );
+        let config = config.with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
+            ChunkPass::new(Arc::clone(&pass_source))
+        }));
         let observed = Arc::new(Mutex::new(Vec::new()));
         let nodes = helio_presets::graphs::registry_for(
             &helio_presets::features::default_features()
@@ -414,12 +411,9 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
         .features
         .edit::<helio_pass_foliage_place::FoliageSettings>()
         .enabled = false;
-    let config = helio_presets::with_voxel_terrain(
-        config,
-        helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            ChunkPass::new(Arc::clone(&pass_source))
-        }),
-    );
+    let config = config.with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
+        ChunkPass::new(Arc::clone(&pass_source))
+    }));
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()

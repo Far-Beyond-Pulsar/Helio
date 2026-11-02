@@ -192,18 +192,12 @@ impl Preset {
         nodes.with("transparent", [("reactive_mask", Value::from(reactive))]);
         let resolved = match aa {
             Aa::Tsr => {
-                let voxel_terrain = config
-                    .features
-                    .get::<helio_pass_voxel_planet::VoxelTerrain>()
-                    .is_some_and(|terrain| !terrain.passes.is_empty());
+                // Features that rotate samples over pixels ask TSR for its
+                // stochastic mask themselves (`helio_pass_tsr::StochasticSamples`).
                 nodes.with(
                     "tsr",
                     [
                         ("quality", Value::from(tsr_quality(config))),
-                        // The voxel terrain's sun samples rotate over blocks of
-                        // pixels; where its cells are a pixel or two wide TSR
-                        // integrates them.
-                        ("stochastic_mask", Value::from(voxel_terrain)),
                         ("transparency_reactivity", Value::from(self.hlfs())),
                     ],
                 );

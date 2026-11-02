@@ -450,7 +450,7 @@ impl Gfx {
         renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().tufts_per_m2 = Some(meadow.tufts_per_m2);
         renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().blades_per_tuft = Some(meadow.blades_per_tuft);
         renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().range = Some(meadow.range);
-        let renderer_config = helio_presets::with_voxel_terrain(renderer_config, terrain);
+        let renderer_config = renderer_config.with_feature(terrain);
         let handle = scene_db_handle(&scene);
         let builder =
             RendererBuilder::new(renderer_config.clone(), handle).with_graph(Preset::Deferred);

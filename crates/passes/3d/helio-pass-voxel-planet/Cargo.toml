@@ -6,6 +6,8 @@ description = "Destructible voxel worlds, drawn: chunk-tree residency, generatio
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-pass-tsr = { workspace = true }
+helio-water-api = { path = "../../../api/helio-water-api" }
 helio-voxel-world = { path = "../../../helio-voxel-world" }
 glam = { version = "0.33", features = ["bytemuck"] }
 bytemuck = { version = "1", features = ["derive"] }

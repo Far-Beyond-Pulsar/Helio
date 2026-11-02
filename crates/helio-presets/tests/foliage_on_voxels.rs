@@ -10,7 +10,6 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::FoliageTypeComponent;
-use helio_presets::Preset;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, unpack_blade, FoliageKind, FoliagePlacePass, GpuBladeInstance,
     GpuFoliageTile, GpuFoliageType, GpuTileFrame, TileState,
@@ -19,6 +18,7 @@ use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRecipe, RayHit};
+use helio_presets::Preset;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
 const SIZE: [u32; 2] = [640, 360];
@@ -118,12 +118,10 @@ impl Harness {
                 .features
                 .edit::<helio_pass_foliage_place::FoliageSettings>()
                 .range = Some(60.0);
-            let config = helio_presets::with_voxel_terrain(
-                config,
-                helio_pass_voxel_planet::VoxelTerrain::new(move || {
+            let config =
+                config.with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
                     ChunkPass::new(pass_source.clone())
-                }),
-            );
+                }));
             let mirror = scene.world.gpu_mirror().cloned().unwrap();
             let renderer = RendererBuilder::new(config.clone(), mirror)
                 .with_external_device()

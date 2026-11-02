@@ -73,6 +73,7 @@ helio-feature-api = { layer = "feature_api" }
 helio-sky-api = { layer = "api" }
 helio-gi-api = { layer = "api" }
 helio-foliage-api = { layer = "api" }
+helio-water-api = { layer = "api" }
 
 # spine
 helio-pass-gbuffer = { layer = "spine" }

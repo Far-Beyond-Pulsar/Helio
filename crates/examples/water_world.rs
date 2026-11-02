@@ -318,7 +318,7 @@ impl Showcase {
             .features
             .edit::<helio_pass_foliage_place::FoliageSettings>()
             .range = Some(meadow.range * 1.5);
-        let renderer_config = helio_presets::with_voxel_terrain(renderer_config, terrain);
+        let renderer_config = renderer_config.with_feature(terrain);
         let mut renderer = RendererBuilder::new(renderer_config.clone(), mirror)
             .with_external_device()
             .with_graph(Preset::Deferred)
@@ -344,12 +344,15 @@ impl Showcase {
         scene.world.flush_gpu_mirror(&queue);
         if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
             sim.set_shore_map(Some(
-                helio_presets::water_shore::shore_map_from_voxel_planet(
+                helio_pass_water_sim::WaterShoreMap::from_terrain(
                     [0.0, 0.0],
                     [EXTENT * 2.0, EXTENT * 2.0],
                     REST_Y,
-                    &planet,
-                    VolumeTransform::default(),
+                    &helio_pass_voxel_planet::VoxelShoreTerrain {
+                        planet: &planet,
+                        transform: VolumeTransform::default(),
+                        rest_y: REST_Y,
+                    },
                 )
                 .expect("bake shoreline from the edited voxel terrain"),
             ));

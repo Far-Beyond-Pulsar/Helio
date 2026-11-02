@@ -1,13 +1,12 @@
-//! Water's shoreline from Helio's voxel terrain.
-//!
-//! Water bakes its shore map from any [`WaterTerrainProvider`] and names no
-//! terrain; the voxel terrain names no water. This is where the two meet: a
-//! provider answering water's elevation queries with the voxel world's
-//! canonical ground-column query.
+//! The voxel terrain as water's terrain: a [`WaterTerrainProvider`] (water's
+//! api) answering elevation queries with the voxel world's canonical
+//! ground-column query. Water bakes its shore map from it
+//! (`WaterShoreMap::from_terrain`) without naming voxel.
 
 use glam::DVec3;
-use helio_pass_voxel_planet::{Matter, Planet, VolumeTransform};
-use helio_pass_water_sim::{WaterShoreMap, WaterTerrainProvider};
+use helio_water_api::WaterTerrainProvider;
+
+use crate::{Matter, Planet, VolumeTransform};
 
 /// [`WaterTerrainProvider`] over a voxel planet. On sphere-shaped planets the
 /// query follows the voxel world's radial terrain column under each
@@ -38,26 +37,4 @@ impl WaterTerrainProvider for VoxelShoreTerrain<'_> {
         let ground = planet.surface_point_of(local, 0.0, Matter::Ground);
         Some(transform.to_world(ground).y)
     }
-}
-
-/// Bake a shore map (`center_xz`, `extent_xz` in metres) from a voxel
-/// planet's terrain with the ocean resting at `rest_y`. A one-time CPU bake:
-/// call after authoring or editing the terrain, not in the render loop.
-pub fn shore_map_from_voxel_planet(
-    center_xz: [f64; 2],
-    extent_xz: [f32; 2],
-    rest_y: f64,
-    planet: &Planet,
-    transform: VolumeTransform,
-) -> Result<WaterShoreMap, &'static str> {
-    WaterShoreMap::from_terrain(
-        center_xz,
-        extent_xz,
-        rest_y,
-        &VoxelShoreTerrain {
-            planet,
-            transform,
-            rest_y,
-        },
-    )
 }

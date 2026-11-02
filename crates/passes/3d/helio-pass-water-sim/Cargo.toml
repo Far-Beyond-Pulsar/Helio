@@ -8,6 +8,7 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
+helio-water-api = { path = "../../../api/helio-water-api" }
 helio-feature-api = { path = "../../../helio-feature-api" }
 pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }

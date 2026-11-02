@@ -1,21 +1,16 @@
 //! Terrain-derived shoreline fields for the Ultra-Water travel-time model.
 //!
 //! A map is baked from an elevation provider, never inferred from water
-//! volume bounds. A terrain feature answers [`WaterTerrainProvider`]; water
-//! names no terrain (Helio's voxel terrain's provider lives in the preset,
-//! `helio_presets::water_shore`).
+//! volume bounds. A terrain feature answers [`WaterTerrainProvider`] (water's
+//! api); water names no terrain (the voxel terrain's provider is
+//! `helio_pass_voxel_planet::VoxelShoreTerrain`).
 use rayon::prelude::*;
+
+pub use helio_water_api::WaterTerrainProvider;
 
 pub const SHORE_MAP_SIZE: u32 = 512;
 const N: usize = SHORE_MAP_SIZE as usize;
 const COUNT: usize = N * N;
-
-/// Supplies actual terrain elevations in absolute world coordinates. `None`
-/// means the requested location has no terrain data; baking then fails rather
-/// than silently treating missing data as ocean floor.
-pub trait WaterTerrainProvider: Sync {
-    fn elevation_y(&self, world_x: f64, world_z: f64) -> Option<f64>;
-}
 
 /// Baked water shoreline and shallow-water propagation fields.
 #[derive(Debug)]

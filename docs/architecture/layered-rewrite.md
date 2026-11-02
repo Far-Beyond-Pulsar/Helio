@@ -656,6 +656,64 @@ As built, steps 3 and 4 (2026-11-02): every pass node lives with its pass;
   both steps (but for the background pass's type path). Hosts and Pulsar
   name `helio_presets` / `helio_scene_derivations`.
 
+**Rule (user, 2026-11-02): components are the API.** The editor, the game
+and Helio's passes communicate only through an object's component: its
+methods, and the rows and payloads it publishes. No object-specific
+knowledge in Helio, the presets, `engine_backend`'s renderer or other
+surrounding crates; no bespoke registries, traits or mailboxes for one kind
+of object.
+
+As built, step 5 (2026-11-02): the presets name no feature pair.
+- Features declare what they need of the others in their own preparers:
+  the voxel feature, while it has terrain, inserts
+  `helio_gi_api::TerrainTracer` (GI then updates without a TLAS and spaces
+  probes for open ground) and `helio_pass_tsr::StochasticSamples` (TSR
+  reads the stochastic mask). `GiSettings::terrain_traced`,
+  `with_voxel_terrain` and the presets' voxel check are gone; a host adds a
+  feature setting with the generic `RendererConfig::with_feature`.
+- Water's terrain seam is `helio-water-api::WaterTerrainProvider`; the
+  voxel adapter is `helio_pass_voxel_planet::VoxelShoreTerrain`, and the
+  host bakes with `WaterShoreMap::from_terrain`. `helio_presets::water_shore`
+  is gone.
+
+Next, step 6: voxel through its component (replaces the earlier
+"`pulsar.voxel` plugin crate" item, which would have moved today's bespoke
+renderer API into a plugin unchanged). Today, per a survey of Pulsar:
+two CPU worlds per terrain (the component's `WORLDS` cache and the render
+backend's `CachedPlanet`); sculpting writes the journal from the renderer
+(`apply_voxel_brush_commit`), bypassing the component's `append_edits`, so
+no block events fire and the component's world goes stale; ground, lift,
+clip-range, pick and kept-chunk queries go through `VoxelRenderBackend`,
+`HelioRenderer` mailboxes and Arc channels; Helio's pass gets its world
+from host-made `VoxelTerrain` closures. Target and order:
+1. **Edits through the component.** A brush is a component method
+   (`VoxelTerrainComponent::apply_brush`, through `append_edits`): events
+   fire, the component's world stays current. The renderer only finds the
+   hit.
+2. **One world per terrain, owned by the component's runtime.** The
+   component builds and caches its `Arc<Planet>` (async, as the backend
+   does now, kept chunks included); the backend's copy and `WORLDS` go.
+3. **Queries are component methods.** Ground (up, altitude), lift out of
+   ground, clip range, focus, CPU ray hits: `VoxelTerrainComponent`
+   methods over its world. `VoxelGround`, `voxel_ground`,
+   `voxel_altitude`, `lift_out_of_ground` leave the renderer; the game's
+   free camera calls the component.
+4. **Rendering reads what the component publishes.** The component
+   publishes a volume row (entity, transform, voxel size, revision,
+   appearance, smoothing) and its world as a SceneDB asset payload keyed by
+   the entity; the voxel feature's pass reads rows and payloads from
+   SceneDB. `VoxelTerrain`/`ChunkPassMaker`, `SharedPlanetFrame`,
+   `VoxelRenderBackend`, `VoxelBackendRegistry` and the `find_pass_mut`
+   appearance calls go.
+5. **GPU answers come back as rows.** Drawn-surface picks and kept-chunk
+   exports are published by the pass into SceneDB rows the component reads
+   (`VoxelTerrainComponent::kept_chunks`, a pick method); the
+   `VoxelChunkSaves` condvar mailbox and `SharedPicks` go.
+6. Then the plugin: the voxel components, their runtime and the editor's
+   sculpt tool move into a `pulsar.voxel` plugin that registers them and
+   `VoxelFeature`; `helio_component` and `engine_backend` keep no voxel
+   code.
+
 ### Phase 6: repo split
 - Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
   without a breaking change. Pulsar pins tags.

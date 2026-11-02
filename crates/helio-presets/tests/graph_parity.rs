@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex};
 
 use helio::{DebugDrawState, PassBuildContext, RenderPipelineRegistry, RendererConfig};
 use helio_core::{GpuCameraUniforms, PassDeclaration};
+use helio_graph_asset::{Connection, GraphAsset, NodeInstance, PinRef};
 use helio_presets::pipelines::{DEFAULT, DEFERRED_GRAPH};
 use helio_presets::Preset;
 use helio_presets::{features, graphs};
-use helio_graph_asset::{Connection, GraphAsset, NodeInstance, PinRef};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
@@ -397,13 +397,13 @@ fn voxel_terrain_joins_every_preset_with_a_gbuffer() {
         return;
     };
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-    fixtures.config = helio_presets::with_voxel_terrain(
-        fixtures
-            .config
-            .clone()
-            .with_tsr_quality(helio::TsrQuality::Quality),
-        helio_pass_voxel_planet::VoxelTerrain::new(move || ChunkPass::new(source.clone())),
-    );
+    fixtures.config = fixtures
+        .config
+        .clone()
+        .with_tsr_quality(helio::TsrQuality::Quality)
+        .with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
+            ChunkPass::new(source.clone())
+        }));
     for preset in [Preset::Deferred, Preset::DeferredFxaa, Preset::Hlfs] {
         let graph = preset.build(fixtures.context());
         let chunks = graph
