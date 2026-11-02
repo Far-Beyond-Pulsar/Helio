@@ -1,0 +1,27 @@
+[package]
+name = "helio-spine"
+version = "0.1.0"
+edition = "2021"
+workspace = "../../"
+description = "Helio's spine as a feature: the core deferred and forward pipeline's nodes (scene prep, shadows, culling, G-buffer, lighting, transparency, TSR, tone map) and the settings they read."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+helio-feature-api = { path = "../helio-feature-api" }
+pulsar_scenedb = { workspace = true }
+wgpu = { workspace = true }
+helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
+helio-pass-shadow-matrix = { path = "../passes/3d/helio-pass-shadow-matrix" }
+helio-pass-shadow-dirty = { path = "../passes/3d/helio-pass-shadow-dirty" }
+helio-pass-shadow = { path = "../passes/3d/helio-pass-shadow" }
+helio-pass-indirect-dispatch = { path = "../passes/3d/helio-pass-indirect-dispatch" }
+helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
+helio-pass-occlusion-cull = { path = "../passes/3d/helio-pass-occlusion-cull" }
+helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
+helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
+helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
+helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
+helio-pass-tsr = { workspace = true }
+helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }

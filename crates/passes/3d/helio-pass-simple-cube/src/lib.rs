@@ -1,3 +1,6 @@
+pub mod feature;
+pub use feature::SimpleCubeFeature;
+
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
 

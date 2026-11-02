@@ -42,6 +42,9 @@
 //! every other pass crate. It never touches `PassContext::scene`, so it is
 //! usable inside a `RenderGraph` that carries no 3D scene data at all.
 
+pub mod feature;
+pub use feature::SpriteFeature;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result};
 use pulsar_scenedb::gpu::BufferKey;

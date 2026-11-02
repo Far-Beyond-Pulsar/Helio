@@ -6,5 +6,6 @@ description = "Helio render pass: scene depth and normal buffer debug views"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-feature-api = { path = "../../../helio-feature-api" }
 helio-core = { workspace = true }
 wgpu = { workspace = true }

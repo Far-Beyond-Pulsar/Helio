@@ -1,4 +1,3 @@
-mod background;
 pub mod environment_join;
 pub mod graph_nodes;
 pub mod graphs;
@@ -11,13 +10,11 @@ pub mod scene_join;
 pub mod texture_means;
 pub mod virtual_geometry;
 pub mod water_shore;
-pub use helio_vg_format::debug_view as vg_debug_view;
-pub use virtual_geometry::{
-    virtual_geometry_supported, with_virtual_geometry, VgInputsPass, VgStreamBeginPass,
-    VgStreamEndPass,
+pub use helio_pass_vg::{
+    virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
 };
-
-use std::sync::Arc;
+pub use helio_vg_format::debug_view as vg_debug_view;
+pub use virtual_geometry::with_virtual_geometry;
 
 use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
@@ -28,14 +25,12 @@ use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_flare::LensFlarePass;
 use helio_pass_foliage_gbuffer::FoliageGBufferPass;
 use helio_pass_foliage_place::FoliagePlacePass;
-use helio_pass_forward_lit::ForwardLitPass;
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_gbuffer::GBufferPass;
 use helio_pass_gi::{GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
-use helio_pass_lens::{LensPass, LENS_COLOR};
+use helio_pass_lens::LensPass;
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_object_batch::ObjectBatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
@@ -45,55 +40,25 @@ use helio_pass_perf_overlay::{
 use helio_pass_planar_reflection::PlanarReflectionPass;
 use helio_pass_portal_cull::PortalCullPass;
 use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
-use helio_pass_postprocess::{
-    FogCompositePass, PostProcessPass, PostProcessVolumeBlendPass, FOGGED_HDR, FOGGED_HDR_FORMAT,
-};
+use helio_pass_postprocess::{FogCompositePass, PostProcessPass, PostProcessVolumeBlendPass};
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
-use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
-
-use background::BackgroundPass;
 use helio_pass_sprite_batch::SpriteBatchPass;
 use helio_pass_sprite_cull::SpriteCullPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_water_sim::WaterSimPass;
-
-/// Spotlight icon embedded at compile time — used as the editor billboard sprite.
-static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
-
-fn scene_buffer_or_dummy(
-    scene_db: &helio::SceneDbHandle,
-    device: &wgpu::Device,
-    key: pulsar_scenedb::gpu::BufferKey,
-    label: &str,
-    fallback_size: u64,
-) -> pulsar_scenedb::gpu::BufferHandle {
-    scene_db
-        .store()
-        .resolve_buffer_handle(key)
-        .unwrap_or_else(|| pulsar_scenedb::gpu::BufferHandle {
-            buffer: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: fallback_size.max(4),
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }),
-            epoch: 0,
-            row_bytes: 0,
-            content_generation: 0,
-        })
-}
+use helio_spine::BackgroundPass;
 
 /// Which of this crate's passes shader hot reload may swap on their own
 /// (see [`helio_core::SwapPolicy`] for what a swap does and why a policy is
 /// needed).
 ///
-/// Derived by auditing every node constructor ([`graph_nodes`]) for handles
-/// the nodes create and share between passes. Those passes form a group and
+/// Derived by auditing every node constructor (the spine's and each
+/// feature's) for handles the nodes create and share between passes. Those passes form a group and
 /// are swapped together:
 ///
 /// * shadows: `ShadowMatrixPass` + `ShadowDirtyPass` (dirty-flag buffer),
@@ -168,10 +133,9 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .group_types(&[name::<SpriteCullPass>(), name::<SpriteBatchPass>()])
 }
 
-/// Most sprites the 2D overlay draws at once.
-const MAX_VISIBLE_SPRITES: u32 = 16_384;
-
-fn convert_perf_mode(mode: helio::PerfOverlayMode) -> helio_pass_perf_overlay::PerfOverlayMode {
+pub(crate) fn convert_perf_mode(
+    mode: helio::PerfOverlayMode,
+) -> helio_pass_perf_overlay::PerfOverlayMode {
     use helio::PerfOverlayMode as H;
     use helio_pass_perf_overlay::PerfOverlayMode as P;
     match mode {
@@ -181,46 +145,6 @@ fn convert_perf_mode(mode: helio::PerfOverlayMode) -> helio_pass_perf_overlay::P
         H::TileLightCount => P::TileLightCount,
         H::PassOutput => P::PassOutput,
     }
-}
-
-/// The foliage passes `config` asks for: placement, the boxes expansion (between
-/// placement and the G-buffer) and the G-buffer draw (after it), which share the
-/// placement's buffers.
-pub(crate) fn foliage_passes(
-    device: &wgpu::Device,
-    config: &RendererConfig,
-) -> (
-    FoliagePlacePass,
-    helio_pass_foliage_gbuffer::FoliageBoxesPass,
-    FoliageGBufferPass,
-) {
-    let foliage = config
-        .features
-        .get_or_default::<helio_pass_foliage_place::FoliageSettings>();
-    let defaults = helio_pass_foliage_place::FoliageRange::default();
-    let place = FoliagePlacePass::new_with(
-        device,
-        foliage.quality,
-        helio_pass_foliage_place::FoliageRange {
-            range: foliage.reach(),
-            tufts_per_m2: foliage.tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
-            blades_per_tuft: foliage.blades_per_tuft.unwrap_or(defaults.blades_per_tuft),
-            ..defaults
-        },
-    );
-    let mut draw = FoliageGBufferPass::new(
-        device,
-        Arc::clone(&place.blade_arena),
-        Arc::clone(&place.tile_table),
-        Arc::clone(&place.tile_frames),
-        Arc::clone(&place.visible_blades),
-        Arc::clone(&place.foliage_indirect),
-        Arc::clone(&place.bands_buffer),
-        Arc::clone(&place.interactors),
-    );
-    draw.quality = foliage.quality;
-    let boxes = draw.boxes_pass(device);
-    (place, boxes, draw)
 }
 
 /// Draws `terrain` in the graphs `config` builds: the voxel node adds its

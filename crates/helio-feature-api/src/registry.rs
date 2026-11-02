@@ -183,6 +183,14 @@ impl<'e> BuildEnv<'e> {
     }
 
     /// Render size passes are prepared at (`render_scale` applied).
+    /// The format the scene-linear colour is lit, fogged and anti-aliased in
+    /// up to the tone map: the [`SceneColorFormat`] setting, or
+    /// [`DEFAULT_SCENE_FORMAT`].
+    pub fn scene_format(&self) -> wgpu::TextureFormat {
+        self.setting::<SceneColorFormat>()
+            .map_or(DEFAULT_SCENE_FORMAT, |format| format.0)
+    }
+
     pub fn internal_size(&self) -> (u32, u32) {
         (self.frame.internal_width, self.frame.internal_height)
     }
@@ -241,6 +249,40 @@ impl NodeBuild<'_, '_> {
 
 pub type PinsFn = Arc<dyn Fn(&Params) -> NodePins + Send + Sync>;
 pub type BuildFn = Arc<dyn Fn(&mut NodeBuild<'_, '_>) -> Result<(), String> + Send + Sync>;
+
+/// The scene-linear colour's format when a graph's builder sets none: half
+/// floats, so emitters above 1.0 reach bloom and flare unclamped.
+pub const DEFAULT_SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// The format the scene-linear colour is lit, fogged and anti-aliased in up
+/// to the tone map, as a setting (HLFS presets set the format their lighting
+/// prefers). Read it with [`BuildEnv::scene_format`].
+#[derive(Clone, Copy, Debug)]
+pub struct SceneColorFormat(pub wgpu::TextureFormat);
+
+/// The kind of the node that builds pass `name`: `helio.pass.<name>`.
+pub fn pass_kind(name: &str) -> String {
+    format!("helio.pass.{name}")
+}
+
+/// A pass node: kind `helio.pass.<name>`, one constructor, an `Enabled`
+/// toggle, pins generated from the passes it builds.
+pub fn pass_node(
+    name: &str,
+    title: &str,
+    category: &str,
+    description: &str,
+    build: impl Fn(&mut NodeBuild<'_, '_>) -> Result<(), String> + Send + Sync + 'static,
+) -> NodeDescriptor {
+    NodeDescriptor::new(&pass_kind(name), title, category, description, build)
+        .with_param(ParamDesc::boolean("enabled", "Enabled", true))
+        .with_generated_pins()
+}
+
+/// The error a node gives when a node it needs was not built before it.
+pub fn missing(node: &str, needs: &str) -> String {
+    format!("{node} needs the {needs} node to be built before it")
+}
 
 /// Where in the frame a feature's node runs: the spine's extension points.
 /// A preset graph places the nodes registered for each slot there (by order,
@@ -416,6 +458,7 @@ pub struct NodeRegistry {
     nodes: BTreeMap<String, Arc<NodeDescriptor>>,
     pin_table: PinTable,
     marker: Option<MarkerFn>,
+    preparers: Vec<PrepareFn>,
     finishers: Vec<FinishFn>,
 }
 
@@ -426,6 +469,11 @@ pub type PinTable = Arc<std::sync::RwLock<HashMap<String, NodePins>>>;
 /// Adds a performance marker after a node that asked for one; the second
 /// argument is the node's kind.
 pub type MarkerFn = Arc<dyn Fn(&mut NodeBuild<'_, '_>, &str) + Send + Sync>;
+
+/// Runs once before any node of a graph is built: where the graph's builder
+/// turns what it knows (a renderer's config, say) into the settings features
+/// read, so a feature never reads the builder's own types.
+pub type PrepareFn = Arc<dyn Fn(&mut BuildEnv<'_>) + Send + Sync>;
 
 /// Runs once every node of a graph is built: where features that meet are
 /// joined (a terrain's ground handed to foliage placement, say), since each
@@ -513,6 +561,16 @@ impl NodeRegistry {
     /// Adds a step run after every node of a graph is built.
     pub fn add_finisher(&mut self, finish: FinishFn) {
         self.finishers.push(finish);
+    }
+
+    /// Adds a step run before any node of a graph is built.
+    pub fn add_preparer(&mut self, prepare: PrepareFn) {
+        self.preparers.push(prepare);
+    }
+
+    /// The steps run before any node is built, in registration order.
+    pub fn preparers(&self) -> &[PrepareFn] {
+        &self.preparers
     }
 
     /// The steps run after every node is built, in registration order.

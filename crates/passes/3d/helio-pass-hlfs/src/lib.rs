@@ -13,6 +13,9 @@
 //! CPU work is constant in scene size. GPU culling scales with light count;
 //! per-pixel candidate and shadow work stays within the configured budget.
 
+pub mod feature;
+pub use feature::HlfsFeature;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result};

@@ -48,6 +48,12 @@ impl FeatureRegistrar<'_> {
         self.registry.register(descriptor);
     }
 
+    /// Adds a step run before any node of a graph is built (see
+    /// [`crate::PrepareFn`]).
+    pub fn prepare(&mut self, prepare: crate::PrepareFn) {
+        self.registry.add_preparer(prepare);
+    }
+
     /// Adds a step run once every node of a graph is built (see
     /// [`crate::FinishFn`]).
     pub fn finish(&mut self, finish: crate::FinishFn) {

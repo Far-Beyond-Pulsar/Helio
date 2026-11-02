@@ -4,6 +4,9 @@
 //! scene-linear radiance. See README.md for the optical model and the
 //! `lens_color` / `lens_resolved` graph contract.
 
+pub mod feature;
+pub use feature::LensFeature;
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
     CommandRecorder, PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult,

@@ -6,6 +6,8 @@ description = "Helio render pass: Hierarchical Light-Field Sampling (HLFS)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-feature-api = { path = "../../../helio-feature-api" }
+helio-spine = { path = "../../../helio-spine" }
 helio-gi-api = { path = "../../../api/helio-gi-api" }
 helio-core  = { workspace = true }
 wgpu      = { workspace = true }

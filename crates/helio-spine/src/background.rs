@@ -13,13 +13,13 @@ use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, RenderPass, ResourceKey, Result as HelioResult};
 
 /// Clears `pre_aa` to the caller's colour; records no draws.
-pub(crate) struct BackgroundPass {
+pub struct BackgroundPass {
     format: wgpu::TextureFormat,
     color: wgpu::Color,
 }
 
 impl BackgroundPass {
-    pub(crate) fn new(format: wgpu::TextureFormat, color: [f32; 4]) -> Self {
+    pub fn new(format: wgpu::TextureFormat, color: [f32; 4]) -> Self {
         Self {
             format,
             color: wgpu::Color {

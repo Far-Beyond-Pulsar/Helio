@@ -24,6 +24,9 @@
 //! )); // immediately after PortalMaskPass, before FoliageGBufferPass/VirtualGeometryPass
 //! ```
 
+pub mod feature;
+pub use feature::PortalFeature;
+
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey, RadiantTemplateRegistry};

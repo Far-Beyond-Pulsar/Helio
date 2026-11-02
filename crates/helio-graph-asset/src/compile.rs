@@ -60,6 +60,9 @@ pub(crate) fn build_graph(
         graph.enable_pipeline_cache_persistence(path);
     }
 
+    for prepare in registry.preparers() {
+        prepare(env);
+    }
     for &index in &plan.order {
         let node = &flat.nodes[index];
         let descriptor = registry

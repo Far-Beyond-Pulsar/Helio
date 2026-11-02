@@ -90,6 +90,7 @@ helio-pass-indirect-dispatch = { layer = "spine" }
 helio-pass-transparent = { layer = "spine" }
 helio-pass-tsr = { layer = "spine" }
 helio-pass-postprocess = { layer = "spine" }
+helio-spine = { layer = "spine" }
 
 # features
 helio-pass-sky = { layer = "feature", group = "sky" }
@@ -101,6 +102,7 @@ helio-pass-foliage-gbuffer = { layer = "feature", group = "foliage" }
 helio-pass-voxel-planet = { layer = "feature", group = "voxel" }
 helio-voxel-data = { layer = "feature", group = "voxel" }
 helio-voxel-world = { layer = "feature", group = "voxel" }
+helio-pass-vg = { layer = "feature", group = "vg" }
 helio-pass-vg-bvh = { layer = "feature", group = "vg" }
 helio-pass-vg-cull = { layer = "feature", group = "vg" }
 helio-pass-vg-dense = { layer = "feature", group = "vg" }

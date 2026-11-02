@@ -72,6 +72,9 @@
 //! pass nor be skipped over by the chain scan (it is a raster pass, not
 //! `chain_transparent`). Placing foliage after VG makes the fusion impossible.
 
+pub mod feature;
+pub use feature::FoliageFeature;
+
 mod geometry;
 
 pub use geometry::*;

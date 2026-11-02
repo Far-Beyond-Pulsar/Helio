@@ -30,6 +30,9 @@
 //! particles of an old one die. The spawn cursor stays pass-owned GPU state
 //! (`spawn_cursor_buf`).
 
+pub mod feature;
+pub use feature::CoronaFeature;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
