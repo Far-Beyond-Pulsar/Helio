@@ -7,7 +7,15 @@ alias help := default
 default:
     @just --list --unsorted --justfile {{justfile()}}
 
-ci: fmt-check check clippy nextest
+ci: fmt-check arch check clippy nextest
+
+# Layer gate (architecture/layers.toml); --update records fixed violations.
+arch *args:
+    python scripts/architecture/check_layers.py {{args}}
+
+# How often a change to one unit also changed others (architecture/layers.toml units).
+co-change *args:
+    python scripts/architecture/co_change.py {{args}}
 
 fmt:
     cargo fmt --all

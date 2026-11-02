@@ -1,0 +1,471 @@
+# Helio layered rewrite: Pulsar plugin → (components + Helio features) → passes
+
+Status: proposal, 2026-10-31. Measured against Helio `main` (3ea02d06),
+Pulsar-Native `main` (edfbcf35a) and `plugin-api-v2-phase1` (9363348e2,
+not merged), SceneDB `main` (30ab68d; Helio and Pulsar pin 017252c).
+
+Goal: every change touches one feature and the contracts it uses, never the
+whole tree. A voxel change builds and tests voxel, not the renderer, the
+editor and every pass crate.
+
+---
+
+## 1. Where we are (measured)
+
+### Helio
+
+| Fact | Number |
+|---|---|
+| Workspace crates | 70 (54 pass crates) |
+| Pass code | 177k Rust + 47k WGSL, one flat layer |
+| `helio-pass-voxel-planet` | 43k Rust + 10k WGSL: a world system shipped as "a pass" |
+| SceneDB components defined in Helio | 31 `#[derive(SceneStore)]` structs in 14 pass crates (gbuffer, forward-lit, deferred-light, sky, fog, water, lens, foliage, portals, decal, corona, billboard, postprocess, sprites) |
+| `RenderPass` hooks | ~25 (graph, scene, lifecycle, editor, debug, jitter, ray tracing, bundles, transparent chaining) |
+| `Renderer` fields | 77 (13 XR, bake, cull readback, frame timing, shader reload, templates…) |
+| `build_*_graph*` functions in `helio-default-passes` | 27 (one per combination) |
+| Pass crates acting as shared libraries | gbuffer (Mesh/Material/StaticObject/RenderGroup components, DrawSlots, ObjectBatchFrameData: ~20 users), shadow-matrix, sky, gi, postprocess |
+| `helio` → specific passes | 13 (TsrQuality, HdrOutputMode, ShadowQuality, FoliageQuality, LightComponent…) |
+| Dead crates | underwater, water-caustics, water-surface (23-line stubs); debug, depth-prepass, smaa, ssao (no users) |
+
+Co-change since 2026-10-01: **161 of 408 voxel commits (40%) also changed
+other crates**, 36 changed four or more. Most frequent companions: default
+graphs (87), examples (48), helio-component (28), helio-core (24),
+helio-default-passes (19), helio (19), shadow-matrix, foliage, deferred-light,
+TSR, GI, fog, sky (10-14 each). That is the "everything touches everything".
+
+### Pulsar ↔ Helio
+
+- **Repo cycle.** `helio-component` (32k lines) lives in the Helio repo but
+  declares `workspace = "../../../../.."`, i.e. Pulsar's root, and
+  `include_bytes!`s Pulsar's `assets/`. It depends upward on Pulsar editor
+  crates (gpui-ce, ui, ui_common, plugin_editor_api, engine_state…). It cannot
+  build from a Helio clone.
+- **Helio arrives as a submodule** (`crates/renderer/helio`, pinned one
+  commit behind Helio main today) with every crate path-depended. Both repos
+  now patch wgpu to the same fork branch (`helio/v30.0.1`).
+- **engine_backend depends on 14 pass crates** and downcasts into passes:
+  `TsrPass` (history reset), `VolumetricFogPass::set_active`,
+  `PostProcessVolumeBlendPass::set_defaults`, `WaterSimPass::sim_texture`,
+  `ChunkPass::set_appearance/diagnostics`. `voxel_backend.rs` (2.1k lines)
+  names voxel-planet internals 30 times.
+- **Path coupling outside Cargo.** `scene_inventory` scans
+  `crates/renderer/helio/crates` on disk; a test `#[path]`s into Helio
+  examples; `core_project_builder.rs` string-matches a Helio path.
+- **Rebuild blast radius.** A helio-core change reaches 87 local packages,
+  32 Pulsar workspace members (engine, game, every `ui_*` crate via
+  `ui_common → helio-snapshot`, five plugins).
+- **SceneDB identity leaks into Helio.** Because Helio defines components,
+  every Helio crate must resolve to Pulsar's exact SceneDB/reflection copy
+  (Pulsar's `[patch]` `//`-URL trick); helio-wasm already hit a `BufferKey`
+  mismatch from a second copy.
+
+### Plugin API v2 (#1532)
+
+- Built on `plugin-api-v2-phase1` (7 commits, not on main): manifests,
+  `requires`/`optional`, dependency-ordered loading, `Plugin`/`PluginBuilder`
+  registrar as a source layer over the v1 vtable.
+- Not built: `p.gpu()`, `p.render()`. No plugin registers a Helio pass or
+  node today; `register_graph_node` has zero callers.
+- Plugins are linked statically in practice (`builtin`); the DLL path has no
+  stable ABI (Rust trait objects, rustc hash must match).
+- Planned shape: **Pulsar plugin → render pass** (`p.render().pass_node(..)`),
+  with `helio-pass-api` split from helio-core (#1538) and Tier A/B pass moves
+  (#1541, #1544), passes moving "with their components".
+
+### SceneDB
+
+Already the right foundation: archetype `World`, `#[derive(SceneStore)]`
+schemas, `SceneGpuStore` owns every buffer, published by `BufferKey`, with
+`epoch`/`content_generation`/`FlushedRows` for change detection. Helio reads
+it only through `SceneBufferProjection` (key → handle, `from_handles`).
+
+---
+
+## 2. Diagnosis
+
+1. **The only unit is a pass; the real units are systems.** GI, shadows, VG,
+   water, foliage, voxel are each several passes + glue in
+   `helio-default-passes` + settings in `helio` + downcasts in hosts + a
+   component in `helio-component`. A feature change spans four layers and
+   two repos.
+2. **Dependency direction is not enforced.** Passes import passes for types,
+   the renderer imports features, presets import the renderer, the bridge
+   imports both repos. Nothing stops feature A from knowing feature B.
+3. **Components live in the renderer.** SceneDB schemas sit in pass crates
+   (base ones in the gbuffer pass), so every culler, shadow and water crate
+   imports `helio_pass_gbuffer`, and Helio inherits SceneDB's registry
+   identity constraints. Components are SceneDB's data, authored by the
+   engine; the renderer only needs the buffers they produce.
+4. **Graphs are code.** 27 builders because each combination is a function.
+5. **Plugin → pass is one level too low.** A plugin that adds water needs
+   several passes, persistent GPU state, settings, debug views and a way to
+   talk to terrain. A pass node can express none of that except the pass
+   itself; the rest falls back into central crates.
+
+---
+
+## 3. Target architecture
+
+A **Pulsar plugin** registers, side by side: file types, editors, **SceneDB
+components**, and **Helio features**. Components produce GPU buffers in
+SceneDB. Features (and the passes inside them) consume those buffers by key.
+Helio never sees a component.
+
+```
+PULSAR PLUGIN  (pulsar.water, pulsar.voxel, pulsar.mesh, pulsar.character …)
+  ├─ file types, importers
+  ├─ editors, panels
+  ├─ components ──────────────► SceneDB  (World, #[derive(SceneStore)], GPU mirror)
+  │                                 │ publishes buffers by key: "water.volumes", "mesh.static_objects"
+  └─ Helio features ◄───────────────┘ consume buffers by key + row ABI
+        └─ passes
+
+HELIO (no components, no SceneStore, no inventory)
+  presets         .rendergraph assets + feature lists (data, no code)
+  helio           Renderer facade: device, graph, views, FeatureSet (≈15 fields)
+  features        sky · gi · fog · water · foliage · vg · lens · decals · portals ·
+                  sprites2d · debug · voxel-render      (impl crates, never imported by peers)
+  feature APIs    sky-api · water-api · voxel-api …     (buffer contracts, row ABIs, handle traits; no statics)
+  spine           visibility · gbuffer · lighting · shadows · TSR/output + extension points
+  feature-api     Feature trait, registrar, extension-point traits, settings, debug views
+  scene-input     buffer contracts: key + row ABI + version; SceneBuffers projection;
+                  materials ABI; ray proxies         (no SceneDB derive, ideally no SceneDB dep)
+  graph           render graph, slim RenderPass, views, typed frame blackboard
+  gpu             device ctx, FrameUploads, caches, pipelines, shaders, profiling, readback
+```
+
+World systems that are not rendering (the voxel generator, edits,
+WorldQueries, residency planner, planet maps) are their own crates beside the
+renderer. The voxel plugin registers the voxel component, the world system,
+and the voxel-render feature.
+
+### Rules (enforced in CI, §6)
+
+1. Dependencies point down only.
+2. Helio defines no SceneDB components. It declares **buffer contracts**
+   (key, row ABI, version) and reads whatever SceneDB publishes under them.
+3. A feature impl crate depends on `gpu`, `graph`, `scene-input`,
+   `feature-api`, `spine` extension points, and other features' **`*-api`
+   crates only**. Never on another feature's impl.
+4. `*-api` and `feature-api` crates contain no `static`, `thread_local!` or
+   `inventory::collect!` (same rule as #1536), so they are safe across
+   statically linked copies and a future DLL.
+5. Hosts never downcast to a pass. They hold a feature handle.
+6. Graphs are data. Code registers nodes; it does not assemble pipelines.
+
+### Buffer contracts: the seam between components and features
+
+The consumer defines the format, because the shader reads it. So a
+feature's `*-api` crate owns the row ABI; the plugin's component produces
+rows in it.
+
+```rust
+// water-api (Helio): what the water feature reads
+pub const WATER_VOLUMES: BufferContract<WaterVolumeRow> =
+    BufferContract::new("water.volumes", /*version*/ 3);
+
+#[repr(C)] #[derive(Pod, Zeroable, Clone, Copy)]
+pub struct WaterVolumeRow { pub bounds_min: [f32; 4], pub bounds_max: [f32; 4], /* … */ }
+// + the matching WGSL struct, generated or checked by a layout test
+
+// pulsar.water plugin (Pulsar): the authored component, SceneDB's business
+#[derive(SceneStore)]
+#[gpu(layout = packed, buffer = "water.volumes")]
+pub struct WaterVolumeComponent { /* fields laid out as WaterVolumeRow */ }
+const _: () = water_api::WATER_VOLUMES.assert_layout::<WaterVolumeComponent>();
+```
+
+- The component can match the row directly (as above), map into it through
+  SceneDB's upload mapper, or be joined into it by a derivation the plugin
+  registers (what `environment_join`/`scene_join` do today with
+  helio-component's `*SourceRow`s).
+- At bind time the feature checks `BufferHandle.row_bytes` and the contract
+  version and reports a named error instead of reading garbage.
+- Helio's `scene-input` only needs `(key → wgpu::Buffer, epoch,
+  content_generation, flushed rows)`. That is what `SceneBufferProjection`
+  already is. If Helio owns that small type and Pulsar fills it from
+  `SceneGpuStore`, **Helio stops depending on `pulsar_scenedb` at all**:
+  no inventory identity, no shared-resolution `[patch]` tricks, standalone
+  Helio builds and tests without Pulsar.
+- Base contracts (mesh vertex/index pools, materials, static objects, render
+  groups, lights, reflection captures) belong to the spine's API. Their
+  components move to Pulsar (a core `pulsar.mesh`/`pulsar.lighting` plugin or
+  engine core), together with helio-component's source rows.
+- Helio's own examples and tests produce rows without Pulsar components: the
+  test host writes contract rows by key (or registers test-only SceneStore
+  structs in the example crate, which is allowed: examples are hosts).
+
+### The units
+
+**Pass** (graph layer): one GPU step. `RenderPass` keeps only what the graph
+needs: `name`, `declare_resources`/`reads`/`writes`, `declare_pipelines`,
+`prepare`, `execute`, `on_resize`. Everything else moves to `Feature`.
+
+**Feature** (Helio): a rendering system that owns its persistent GPU state,
+passes, settings and debug views, and declares the buffer contracts it
+consumes.
+
+```rust
+// helio-feature-api
+pub trait Feature: Send + Sync + 'static {
+    fn id(&self) -> FeatureId;                       // "helio.water"
+    fn requires(&self) -> &[FeatureDep] { &[] }      // other feature ids, by version
+    fn register(&self, r: &mut FeatureRegistrar);    // one-time, before the pin probe
+    fn instantiate(&self, ctx: &FeatureContext) -> Box<dyn FeatureInstance>;
+}
+
+pub trait FeatureInstance: Send + Sync {
+    fn prepare(&mut self, frame: &FrameContext) {}           // per frame, before graph prepare
+    fn is_member(&mut self, scene: &SceneContent) -> bool;   // present when its buffers have rows
+    fn handle(&self) -> Option<&dyn FeatureHandle> { None }  // typed control surface for hosts
+}
+
+impl FeatureRegistrar {
+    fn consumes<R: Pod>(&mut self, c: BufferContract<R>, need: Need); // Required | Optional
+    fn graph_node(&mut self, d: NodeDescriptor);             // nodes for .rendergraph assets
+    fn settings(&mut self, s: SettingsSchema);               // helio-settings, per feature
+    fn debug_view(&mut self, v: DebugViewDescriptor);
+    fn contribute<E: ExtensionPoint>(&mut self, c: E::Contribution);
+    fn publish<R: FrameResource>(&mut self, key: FrameKey<R>); // e.g. voxel.surface_height
+}
+```
+
+**Plugin** (Pulsar): file types + editors + components + features (+ world
+systems). `p.components().class(..)` and `p.gpu()` register the SceneDB side
+(#1534, #1535); `p.render().feature(WaterFeature)` registers the Helio side and
+replaces `p.render().pass_node(..)`; the feature registers its own nodes. The
+plugin manifest's `requires` covers both: `pulsar.water` requires
+`pulsar.voxel` only if its component or editor needs voxel; its Helio feature
+reads terrain through the spine's `SurfaceQuery`, not through the voxel
+plugin.
+
+### Extension points (the spine's public surface)
+
+The spine is where features meet. Instead of water importing deferred-light
+and voxel-planet, both sides talk to a spine trait:
+
+| Extension point | Contributors today |
+|---|---|
+| `GBufferContributor` (draws into the G-buffer, shares depth/MV/material ABI) | voxel chunks, VG, foliage, water surface, portals, decals |
+| `ShadowCaster` (draws into cascades / sun occlusion pages) | meshes, voxel, foliage, VG |
+| `RayProxySource` (TLAS instances, GI/ray-query geometry) | meshes, VG proxies, voxel |
+| `LightingContributor` (adds radiance / visibility terms) | GI, reflection captures, sky ambient |
+| `ParticipatingMedia` (fog, clouds, underwater) | fog, sky/clouds, water |
+| `PostEffect` (ordered post stack slots) | lens, flare, exposure, fog composite |
+| `SurfaceQuery` (heights, materials, hits for other features) | voxel → water shore, foliage placement |
+| `HistoryInvalidation` (TSR/denoiser reset) | anything that teleports or cuts |
+
+Each existing downcast becomes one of these, a handle method or SceneDB data:
+TSR reset → `HistoryInvalidation`; fog `set_active` / post-process defaults →
+component rows the plugin writes; `ChunkPass::set_appearance/diagnostics` →
+`VoxelHandle`; `WaterSimPass::sim_texture` → a debug view.
+
+### Why this shape
+
+- **Unreal** layers RHI → RenderCore (RDG) → Renderer; game-side components
+  hand the renderer *scene proxies*, plugins hook in through
+  `SceneViewExtension`. Its weakness is the monolithic deferred renderer
+  every feature edits; that is our `helio-default-passes` today.
+- **Frostbite** (FrameGraph) and **Unity SRP** (`ScriptableRendererFeature`)
+  make a *feature* the plugin unit: it owns its passes and injects them at
+  named points.
+- **Bevy**: components in the ECS, an extract step into render-world data,
+  render plugins with graph nodes. Right split of components vs rendering,
+  but no layer rules, so render plugins import each other's internals.
+
+Ours takes the Unreal/Bevy split (components are the engine's, the renderer
+consumes derived data) with the Frostbite/SRP unit (features own passes),
+and drops the extract step: SceneDB already mirrors rows to the GPU, so the
+contract is a buffer key and a row ABI. Cost scales with the number of
+features, not feature *pairs*, because features meet only at spine
+extension points and `*-api` crates, and a renderer that has no components
+can't be dragged into gameplay or editor changes.
+
+---
+
+## 4. Repositories
+
+Splitting repos before the contracts exist turns every change into a
+multi-repo PR with pin bumps. Split along contracts, after they are stable.
+
+| Repo | Contents | Depends on |
+|---|---|---|
+| **SceneDB** | as today | wgpu |
+| **Helio** | gpu, graph, scene-input, feature-api, spine, helio facade, core features (sky, post, TSR, fog, GI, decals, portals, sprites, debug) + their `*-api` crates, presets, test host. No components. | wgpu fork (SceneDB only if `scene-input` keeps its types) |
+| **Helio-Voxel** | voxel-api, voxel-world, voxel-render feature, voxel test suite | Helio API crates |
+| **Helio-VG** (later) | vg-format/build/stream + VG feature | Helio API crates |
+| **Pulsar-Native** | engine, editor, plugins. **All components** (helio-component's 23 classes and source rows, plus the 31 schemas now in Helio pass crates) live here, split per plugin (#1543) | Helio, Helio-Voxel by git rev/tag, SceneDB |
+
+Mechanics:
+- Pulsar takes Helio as a **git dependency on a tag or rev** in
+  `[workspace.dependencies]`, not a submodule. For co-development, a
+  git-ignored local `[patch]` file points it at the sibling checkout, so
+  there is one Helio on disk.
+- One wgpu fork branch, declared once (already unified on main); CI checks
+  the two manifests match.
+- No crate reaches into another repo by relative path, `#[path]`,
+  `include_bytes!` or a directory scan. Engine primitives are Pulsar assets.
+- Version the `*-api` crates. A change to an impl crate is a patch release
+  nobody downstream rebuilds against; a change to an API crate (a row ABI,
+  a handle trait) is the only thing that forces a coordinated bump.
+
+---
+
+## 5. Migration (strangler; every step green, deletes as it goes)
+
+Each phase keeps voxel_craft, voxel_flight and the Pulsar editor rendering
+identically (bursts and frames checked before commit).
+
+### Branches
+
+The old landing branches (`voxel-game-example`, `voxel-quick-setup`) are
+merged and retired. The rewrite runs on new branches, one per phase:
+
+| Phase | Branch (same name in every repo it touches) | Repos |
+|---|---|---|
+| 0 | `rewrite/p0-guard-rails` | Helio, Pulsar-Native |
+| 1 | `rewrite/p1-buffer-contracts` | Helio, Pulsar-Native (SceneDB only if the projection type changes) |
+| 2 | `rewrite/p2-core-split` | Helio, Pulsar-Native |
+| 3 | `rewrite/p3-feature-api` | Helio, Pulsar-Native (lands with plugin-api-v2's render section) |
+| 4 | `rewrite/p4-voxel` | Helio, Pulsar-Native |
+| 5 | `rewrite/p5-<feature>` (one per feature group: `p5-vg`, `p5-water`, `p5-sky`…) | Helio, Pulsar-Native |
+| 6 | `rewrite/p6-repo-split` | new Helio-Voxel / Helio-VG repos, Helio, Pulsar-Native |
+
+Rules:
+- Cut every branch from current `main` of each repo; never from another
+  phase branch. A phase starts after the previous one is merged, except
+  Phase 5 groups, which can run in parallel once Phase 4 is in.
+- One PR per repo per phase. Session work for a phase goes onto that
+  phase's branch, not into side PRs.
+- While a phase is open, Pulsar's branch points its Helio dependency at the
+  Helio phase branch. When landing: Helio's PR merges first, then Pulsar's
+  branch moves its Helio pin to the merged Helio `main` and merges.
+- A phase lands only when its "done when" holds, the layer check's
+  allow-list shrank, and the preset frames/bursts match.
+- `plugin-api-v2-phase1` is merged into Pulsar `main` before
+  `rewrite/p3-feature-api` is cut, so `p.render().feature(..)` builds on it.
+
+### Phase 0: hygiene and guard rails (small, do first)
+- Layer manifest `architecture/layers.toml`: every crate → layer. CI script
+  over `cargo metadata` reports violations; start with today's violations as
+  an allow-list that may only shrink.
+- Delete the dead crates (3 stubs, 4 unused passes).
+- Move `helio-component` into Pulsar-Native (it is Pulsar code). Remove the
+  5-level workspace path and `include_bytes!` of Pulsar assets.
+- Replace the submodule with a git dep + local patch.
+- Remove Pulsar's on-disk scans and `#[path]`s into Helio.
+- Co-change metric script (the 40% number) in CI output, tracked per phase.
+
+### Phase 1: buffer contracts; components leave Helio
+- `helio-scene-input`: `BufferContract<R>`, the `SceneBuffers` projection
+  (Helio-owned type, filled by the host), `SceneDerivation` trait, ray
+  proxies, materials ABI (`helio-mats`' GPU side).
+- For each of the 31 `SceneStore` structs in Helio pass crates: the row ABI
+  becomes a contract in the owning feature's (or spine's) API crate; the
+  component itself moves to Pulsar next to helio-component's matching source
+  row, and the two collapse into one component where they duplicate.
+- Helio examples/tests switch to the test host's row writer.
+- Done when no Helio crate uses `#[derive(SceneStore)]` or
+  `pulsar_scenedb_derive`, and no crate imports `helio_pass_gbuffer` for a
+  type. Stretch: no Helio crate depends on `pulsar_scenedb`.
+
+### Phase 2: split helio-core into `helio-gpu` + `helio-graph` (#1538 reshaped)
+- `helio-graph` is the statics-free crate #1538 calls `helio-pass-api`.
+- Slim `RenderPass` to graph-only hooks; editor/debug/jitter/ray-tracing/
+  bundle/transparent hooks move to `Feature`/`FeatureInstance` or spine
+  extension points. Shader hot reload stays host-side behind a trait.
+- Typed frame blackboard (`FrameKey<T>`) replaces string keys + `find_pass`
+  for pass-to-pass handles (Hi-Z sampler, portal buffers).
+
+### Phase 3: `helio-feature-api`, spine, thin renderer (#1539 reshaped)
+- Feature trait, registrar, extension-point traits, settings per feature
+  (helio-settings stays the schema source).
+- Spine = today's core deferred set (gbuffer, deferred-light, forward-lit,
+  object-batch, light-cull, shadow*, hiz, occlusion-cull, TSR, postprocess
+  output) behind extension points.
+- `Renderer` keeps device, graph, views, FeatureSet. XR becomes views; bake,
+  cull-stats readback and timing become features or graph services.
+- Presets become `.rendergraph` assets + feature lists. Delete the 27
+  `build_*_graph*` functions and `pipelines.rs` builders (#1539).
+- Pulsar: `p.render().feature(..)`; render_bps lists nodes from the registry
+  *after* features registered (drop its `OnceLock` snapshot).
+
+### Phase 4: voxel pilot (the pain we feel)
+- Split `helio-pass-voxel-planet` into `voxel-api` (handle trait, buffer
+  contracts, published keys like `voxel.surface`), `voxel-world`
+  (generator, edits, edit store, WorldQueries, residency, planet maps,
+  streams, flora/features data) and `voxel-render` (chunk passes, drawn,
+  sun pages; contributes GBuffer/Shadow/RayProxy/SurfaceQuery).
+- Water, foliage, sky, GI read voxel through `SurfaceQuery` / published
+  keys, never voxel-planet internals.
+- The `pulsar.voxel` plugin owns the voxel components (today in
+  helio-component), `voxel_backend.rs` and `scene/voxel_*` (#1544), and
+  registers voxel-world + voxel-render.
+- Test host (§6) with a voxel suite that needs only spine + voxel.
+- **Exit metric: voxel commits touching anything outside voxel crates and
+  their API < 10%** (from 36% in October by `just co-change --since
+  2026-10-01 --unit voxel`, hosts excluded; 40% with examples). If not met, the extension points are wrong;
+  fix them before converting more features.
+
+### Phase 5: remaining features (#1541, #1544 reshaped)
+- Group Tier A/B passes into features: VG (5 crates), GI, sky+clouds, fog,
+  water, foliage (place+gbuffer), lens+flare, portals, decals, sprites2d,
+  debug/perf overlays, SSR/planar reflections, FXAA/SMAA/HLFS post variants.
+- Each conversion: Helio feature + api crate, and in Pulsar the plugin that
+  registers its components and the feature, in one change per repo, deleting
+  the central registration.
+- `helio-default-passes` disappears.
+
+### Phase 6: repo split
+- Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
+  without a breaking change. Pulsar pins tags.
+
+### Mapping to Pulsar #1532
+
+| Issue | Change |
+|---|---|
+| #1533 Phase 1 leftovers | unchanged; add helio-component move-in |
+| #1534 component class API | components are plugin-owned; unchanged in spirit |
+| #1535 per-plugin GPU schemas | plugin registers the schema; the key/row ABI it writes is a Helio buffer contract |
+| #1536 typed cross-plugin access | same rules apply to Helio `*-api` crates |
+| #1538 helio-pass-api | becomes `helio-graph` + `helio-feature-api` (+ `helio-scene-input`) |
+| #1539 render registration | `p.render().feature(..)`; features register nodes |
+| #1541 Tier A moves | grouped as features, not per pass |
+| #1543 split helio_component | components go to their plugins; Helio's 31 pass-crate schemas join them |
+| #1544 Tier B moves | "passes move with their component" becomes: the plugin owns the component, the feature owns the passes; voxel first as the Phase 4 pilot |
+
+---
+
+## 6. Keeping it from rotting
+
+- **Layer check in CI** (Phase 0): `cargo metadata` against `layers.toml`;
+  the allow-list only shrinks.
+- **API purity test**: `*-api` crates have no statics (#1536 style).
+- **Contract layout tests**: each row ABI has a Rust/WGSL layout test in its
+  `*-api` crate; each Pulsar component asserts it matches.
+- **Test host** (`helio-test-host`): headless device + spine + chosen
+  features + contract rows written by key; golden frames and GPU timings per
+  feature. A feature PR runs its own suite + a spine smoke test; the preset
+  matrix (default, voxel_craft, voxel_flight, minimal) runs on merge.
+- **Co-change report** per PR: crates touched outside the feature and its
+  APIs. A PR that touches two impl crates is a review flag.
+- **Rebuild budget**: changing a feature impl rebuilds that crate, the preset
+  and the final binaries, nothing else. Checked with `cargo build --timings`
+  on a sample change per phase.
+
+---
+
+## 7. Open decisions
+
+1. **Voxel world home**: Helio-Voxel repo (recommended: it is GPU-heavy
+   engine tech, usable without the editor) or Pulsar.
+2. **Which features stay in the Helio repo** vs their own repos. Recommended:
+   split only voxel and VG at first; the rest stay in Helio under
+   `features/`, with the same layer rules.
+3. **Helio's SceneDB dependency**: own the small projection type and drop
+   `pulsar_scenedb` (recommended), or keep re-exporting SceneDB's handle
+   types.
+4. **Dylib plugins**: keep statically linked (today's real mode); the
+   statics-free API crates keep dylibs possible later.
+5. **Replacing core nodes from a plugin**: explicit `replaces =` in the
+   manifest, as #1532's doc proposes.

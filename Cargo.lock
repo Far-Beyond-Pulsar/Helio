@@ -1830,15 +1830,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-debug"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-debug-overlay"
 version = "0.1.0"
 dependencies = [
@@ -1876,17 +1867,6 @@ dependencies = [
  "pulsar_reflection",
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-depth-prepass"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-pass-gbuffer",
- "log",
  "wgpu",
 ]
 
@@ -2248,15 +2228,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-smaa"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-sprite-batch"
 version = "0.1.0"
 dependencies = [
@@ -2291,15 +2262,6 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "log",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-ssao"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
  "wgpu",
 ]
 
@@ -2340,14 +2302,6 @@ dependencies = [
  "half",
  "helio-core",
  "pollster 0.4.0",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-underwater"
-version = "0.1.0"
-dependencies = [
- "helio-core",
  "wgpu",
 ]
 
@@ -2481,14 +2435,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-water-caustics"
-version = "0.1.0"
-dependencies = [
- "helio-core",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-water-sim"
 version = "0.1.0"
 dependencies = [
@@ -2509,14 +2455,6 @@ dependencies = [
  "pulsar_scenedb",
  "pulsar_scenedb_derive",
  "rayon",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-water-surface"
-version = "0.1.0"
-dependencies = [
- "helio-core",
  "wgpu",
 ]
 

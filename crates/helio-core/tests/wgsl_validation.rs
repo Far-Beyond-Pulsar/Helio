@@ -152,7 +152,6 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
     // The depth passes prefix the alpha-tested depth material's declarations
     // (`helio_pass_gbuffer::depth_material::DepthMaterialBindings::shader_source`).
     const DEPTH_MATERIAL: &[&str] = &[
-        "helio-pass-depth-prepass/shaders/depth_prepass.wgsl",
         "helio-pass-shadow/shaders/shadow.wgsl",
     ];
     if DEPTH_MATERIAL
