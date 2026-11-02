@@ -4,7 +4,6 @@ pub mod simulation;
 use bytemuck::Zeroable;
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_pass_voxel_planet::{Planet, VolumeTransform};
 use std::f32::consts::PI;
 use wgpu::util::DeviceExt;
 
@@ -576,23 +575,6 @@ impl WaterSimPass {
         Ok(())
     }
 
-    /// Bake and install a shoreline directly from Helio voxel terrain. Call
-    /// after authoring or updating the terrain/ocean rest plane; sampling is a
-    /// one-time CPU bake and does not run in the render loop.
-    pub fn set_shore_map_from_voxel_planet(
-        &mut self,
-        center_xz: [f64; 2],
-        extent_xz: [f32; 2],
-        rest_y: f64,
-        planet: &Planet,
-        transform: VolumeTransform,
-    ) -> Result<(), &'static str> {
-        let map =
-            WaterShoreMap::from_voxel_planet(center_xz, extent_xz, rest_y, planet, transform)?;
-        self.set_shore_map(Some(map));
-        Ok(())
-    }
-
     /// Set the authored ocean spectrum; defaults match Ultra-Water's README
     /// scene and parameter panel.
     pub fn set_ocean_spectrum(&mut self, spectrum: OceanSpectrum) {
@@ -879,9 +861,9 @@ impl RenderPass for WaterSimPass {
             // by HiZBuildPass from `depth` alone, so it is available here.
             "hiz_nearest",
             // The sky the sea reflects and scatters.
-            helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
-            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE,
-            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
+            helio_sky_api::ATMOSPHERE_FRAME,
+            helio_sky_api::ATMOSPHERE_SKY_TABLE,
+            helio_sky_api::ATMOSPHERE_SKY_VIEW,
         ]
     }
     fn writes(&self) -> &'static [&'static str] {
@@ -1944,20 +1926,20 @@ impl RenderPass for WaterSimPass {
                 let atmosphere_buf = ctx
                     .registry
                     .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
-                        helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+                        helio_sky_api::ATMOSPHERE_FRAME,
                     ))
                     .unwrap_or(&self.fallback_atmosphere);
                 let sky_table_buf = ctx
                     .registry
                     .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
-                        helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE,
+                        helio_sky_api::ATMOSPHERE_SKY_TABLE,
                     ))
                     .unwrap_or(&self.fallback_sky_table);
 
                 let sky_view_tex = ctx
                     .registry
                     .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
-                        helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
+                        helio_sky_api::ATMOSPHERE_SKY_VIEW,
                     ))
                     .unwrap_or(&self.fallback_sky_view);
 
@@ -2385,13 +2367,13 @@ impl RenderPass for WaterSimPass {
                     let tint_atmosphere = ctx
                         .registry
                         .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
-                            helio_pass_sky::atmosphere::ATMOSPHERE_FRAME,
+                            helio_sky_api::ATMOSPHERE_FRAME,
                         ))
                         .unwrap_or(&self.fallback_atmosphere);
                     let tint_sky_view = ctx
                         .registry
                         .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
-                            helio_pass_sky::atmosphere::ATMOSPHERE_SKY_VIEW,
+                            helio_sky_api::ATMOSPHERE_SKY_VIEW,
                         ))
                         .unwrap_or(&self.fallback_sky_view);
 

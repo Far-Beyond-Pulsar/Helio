@@ -191,3 +191,31 @@ pub(crate) fn shore_params_layout(device: &wgpu::Device) -> wgpu::BindGroupLayou
         }],
     })
 }
+
+/// The frame's scene materials as Helio publishes them (the `materials`
+/// rows and the descriptor-indexed texture table), for
+/// [`ChunkPass::set_scene_materials`](super::pass::ChunkPass::set_scene_materials):
+/// voxel terrain textured by the same `MaterialRow`s as meshes.
+pub fn helio_scene_materials() -> SceneMaterialSource {
+    Box::new(|ctx| {
+        let textures = ctx
+            .registry
+            .read::<helio_mats::MaterialTextureBindings<'_>>(
+                helio_core::resource_keys::material_textures(),
+                "VoxelPlanet",
+            )?;
+        let materials = ctx
+            .scene_buffers
+            .get(helio_core::BufferKey::of("materials"))?;
+        let water_shore_fields = ctx.registry.texture_binding("water_shore_fields");
+        let water_shore_params = ctx.registry.buffer_binding("water_shore_params");
+        Some(SceneMaterialInputs {
+            materials: &materials.buffer,
+            texture_views: textures.texture_views,
+            samplers: textures.samplers,
+            water_shore_fields,
+            water_shore_params,
+            version: (textures.version, materials.epoch as u64),
+        })
+    })
+}

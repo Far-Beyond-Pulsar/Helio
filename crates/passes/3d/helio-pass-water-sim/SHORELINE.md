@@ -42,7 +42,7 @@ land-side run-up film, foam edge, wet darkening, and roughness change. Swash
 uses the same clock and travel-time/front fields as the water; its spatial
 phase noise is anchored relative to the authored map center so world-origin
 rebases do not move the wet line. The terrain effect is consumed when
-`ChunkPass::set_scene_materials` uses `helio_default_passes::voxel_scene_materials`
+`ChunkPass::set_scene_materials` uses `chunks::scene::helio_scene_materials`
 on a device with texture binding arrays; without that optional material path,
 the water resources remain available but voxel shading does not evaluate the
 swash yet. The swash currently uses Ultra-Water's default 0.55 m amplitude,
@@ -56,11 +56,13 @@ with fast sweeping and `sqrt(g * clamp(depth, 0.3, 14))` speed. Front direction
 and coherence, curvature, Green's-law shoaling and ray-tube convergence follow
 Ultra-Water's `shoreMap.js` pipeline.
 
-`WaterShoreMap::from_voxel_planet` is the built-in Helio adapter. It samples the
-voxel world's canonical `Matter::Ground` column query, including terrain edits.
-For sphere-shaped planets, it follows the planet's radial ground column under
-each ocean-plane sample; for voxel planes, this is the exact vertical column.
-Keep spherical-planet maps to a local tangent patch because the rendered ocean
-uses world XZ coordinates. `WaterSimPass::set_shore_map_from_voxel_planet` bakes
-and installs the result directly. The scene author chooses the ocean rest
+Water names no terrain. Helio's voxel terrain's provider is
+`helio_default_passes::water_shore::VoxelShoreTerrain` (and
+`shore_map_from_voxel_planet`, which bakes with it), where the two features
+meet: it samples the voxel world's canonical `Matter::Ground` column query,
+including terrain edits. For sphere-shaped planets, it follows the planet's
+radial ground column under each ocean-plane sample; for voxel planes, this is
+the exact vertical column. Keep spherical-planet maps to a local tangent patch
+because the rendered ocean uses world XZ coordinates. Install the result with
+`WaterSimPass::set_shore_map`. The scene author chooses the ocean rest
 height and map domain; baking is a one-time CPU authoring operation.

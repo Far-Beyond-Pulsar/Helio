@@ -11,7 +11,7 @@ fn hardware_wide_products_match_the_limb_versions() {
         eprintln!("SKIP: no 64-bit shader integers");
         return;
     }
-    let noise = include_str!("../shaders/noise.wgsl");
+    let noise = helio_voxel_world::wgsl::NOISE;
     let (_, rest) = noise.split_once("// wide:begin").unwrap();
     let (limbs, _) = rest.split_once("// wide:end").unwrap();
     let hardware = include_str!("../shaders/wide64.wgsl")

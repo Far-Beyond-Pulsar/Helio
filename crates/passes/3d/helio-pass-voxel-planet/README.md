@@ -1,4 +1,4 @@
-# helio-pass-voxel-planet
+# helio-pass-voxel-planet (and helio-voxel-world)
 
 Destructible voxel worlds for Helio: Earth-sized cube-sphere planets, finite
 planes and effectively infinite planes, built from exact voxels of 0.1 m to
@@ -39,22 +39,25 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 
 ## Crate map
 
+The world (grid, terrain, edits, queries: no GPU) is `helio-voxel-world`; this
+crate draws it and re-exports its modules, so a host names one crate.
+
 | Path | Role |
 |---|---|
-| `src/grid.rs` | The canonical grid: equal-angle cube sphere (or plane), cells, levels, faces, exact cell walking maths. |
-| `src/noise.rs`, `shaders/noise.wgsl`, `shaders/wide64.wgsl` | Bit-exact integer noise (Q16 and fine Q24), with hardware 64-bit products where the device has them. The only noise terrain may use. |
-| `src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL), and the program contract (module docs). Registry, material ids, `check_field`. |
-| `src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, desert, flat), validation and compilation. |
-| `src/landform.rs`, `shaders/landform.wgsl`, `src/ridge_envelope.rs` | The stack interpreter (CPU and WGSL): the two-rate column ([`docs/two-rate-field.md`](docs/two-rate-field.md)), octaves, layer composition, craters, erosion and material styles; coarse levels' ridge means. |
-| `src/planet_maps.rs`, `shaders/planet_maps.wgsl` | Planet maps ([`docs/planet-maps.md`](docs/planet-maps.md)): drainage, rivers, lakes and climate baked once per world; the Rivers layer's carving and climate lookups (CPU and WGSL). |
-| `src/volumes.rs`, `shaders/volumes.wgsl` | The volume layer ([`docs/volumes.md`](docs/volumes.md)): cave networks placed per region (chambers, tunnels, links, entrances) and cliff shapes (ledges, undercuts), CPU and WGSL. |
-| `shaders/world.wgsl`, `shaders/material_state.wgsl` | Grid mapping, layer quantization and material ids shared by generation and terrain programs. |
-| `src/features.rs` | Features: procedural content (trees, rocks, buildings) from the recipe's `FeatureSet`, generated like the terrain wherever a cell is asked for, on CPU and GPU bit for bit ([`docs/features.md`](docs/features.md)). |
-| `src/stamp.rs` | Stamps: small voxel models of material cells around an anchor, placed by features or as edits (`Stamp::brushes`). |
-| `src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution (`FaceBrush`), the ordered `EditLog` and its spatial index. |
-| `src/edit_store.rs` | Baked edits: what sealed brushes did to each cell, in sparse 8³ bricks with majority-built coarser levels. |
-| `src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`; `Edits` (large, baked and recent brushes, sealing, undo). |
-| `src/record.rs`, `src/snapshot.rs` | Saving edits: snapshots of what the edits left (large and recent brushes as records, baked bricks), and recipe fingerprints. Hosts keep the brush journal itself (`helio_voxel_data::VoxelEditJournal`). |
+| `../../../helio-voxel-world/src/grid.rs` | The canonical grid: equal-angle cube sphere (or plane), cells, levels, faces, exact cell walking maths. |
+| `../../../helio-voxel-world/src/noise.rs`, `../../../helio-voxel-world/shaders/noise.wgsl`, `shaders/wide64.wgsl` | Bit-exact integer noise (Q16 and fine Q24), with hardware 64-bit products where the device has them. The only noise terrain may use. |
+| `../../../helio-voxel-world/src/terrain.rs` | Pluggable generators: `TerrainGenerator` -> `TerrainField` (CPU) + `TerrainProgram` (WGSL), and the program contract (module docs). Registry, material ids, `check_field`. |
+| `../../../helio-voxel-world/src/layers.rs` | The built-in generator `helio.terrain`: ordered layer stacks (`TerrainLayers`), presets (Earth, moon, desert, flat), validation and compilation. |
+| `../../../helio-voxel-world/src/landform.rs`, `../../../helio-voxel-world/shaders/landform.wgsl`, `../../../helio-voxel-world/src/ridge_envelope.rs` | The stack interpreter (CPU and WGSL): the two-rate column ([`helio-voxel-world/docs/two-rate-field.md`](../../../helio-voxel-world/docs/two-rate-field.md)), octaves, layer composition, craters, erosion and material styles; coarse levels' ridge means. |
+| `../../../helio-voxel-world/src/planet_maps.rs`, `../../../helio-voxel-world/shaders/planet_maps.wgsl` | Planet maps ([`helio-voxel-world/docs/planet-maps.md`](../../../helio-voxel-world/docs/planet-maps.md)): drainage, rivers, lakes and climate baked once per world; the Rivers layer's carving and climate lookups (CPU and WGSL). |
+| `../../../helio-voxel-world/src/volumes.rs`, `../../../helio-voxel-world/shaders/volumes.wgsl` | The volume layer ([`helio-voxel-world/docs/volumes.md`](../../../helio-voxel-world/docs/volumes.md)): cave networks placed per region (chambers, tunnels, links, entrances) and cliff shapes (ledges, undercuts), CPU and WGSL. |
+| `../../../helio-voxel-world/shaders/world.wgsl`, `shaders/material_state.wgsl` | Grid mapping, layer quantization and material ids shared by generation and terrain programs. |
+| `../../../helio-voxel-world/src/features.rs` | Features: procedural content (trees, rocks, buildings) from the recipe's `FeatureSet`, generated like the terrain wherever a cell is asked for, on CPU and GPU bit for bit ([`helio-voxel-world/docs/features.md`](../../../helio-voxel-world/docs/features.md)). |
+| `../../../helio-voxel-world/src/stamp.rs` | Stamps: small voxel models of material cells around an anchor, placed by features or as edits (`Stamp::brushes`). |
+| `../../../helio-voxel-world/src/edits.rs` | Brushes (sphere/cube, remove/add/paint), per-face integer resolution (`FaceBrush`), the ordered `EditLog` and its spatial index. |
+| `../../../helio-voxel-world/src/edit_store.rs` | Baked edits: what sealed brushes did to each cell, in sparse 8³ bricks with majority-built coarser levels. |
+| `../../../helio-voxel-world/src/planet.rs` | `PlanetRecipe` + `Planet`: canonical queries (`kind`, `material`, `solid`), exact ray casts, `surface_point`, `air_clearance`, `ground_height`; `Edits` (large, baked and recent brushes, sealing, undo). |
+| `../../../helio-voxel-world/src/record.rs`, `../../../helio-voxel-world/src/snapshot.rs` | Saving edits: snapshots of what the edits left (large and recent brushes as records, baked bricks), and recipe fingerprints. Hosts keep the brush journal itself (`helio_voxel_data::VoxelEditJournal`). |
 | `src/chunks/mod.rs` | `ChunkWorld`: chunk generation jobs, GPU storage (slots, leaf pages, detail pages, the footprint pool), edit sync, kept chunks, the draw (seed raster, trace, sun and sky light, gbuffer publish), picks, timings. |
 | `src/chunks/classify.rs` | Nodes and footprints; what a node holds (Mixed, Buried, Empty, Solid) from its footprint's ranges and the edits over it. |
 | `src/chunks/residency.rs` | The planner (on a worker thread): which nodes are drawn, generated next and released for a moving eye, from distance and what rays met. |
@@ -66,8 +69,8 @@ it. The Pulsar editor integration is documented in Pulsar-Native's
 | `shaders/chunk_draw.wgsl` | The cut walk, chunk tracing, fades, sun and local light shadows, sky visibility, appearance, gbuffer publish and ray reports. |
 | `shaders/chunk_table.wgsl` | Scatters a frame's chunk-table changes. |
 | `tests/chunks.rs` | GPU correctness against the CPU planet (see [Tests](#tests)). |
-| `tests/wide_products.rs`, `tests/bake_cost.rs` | Hardware and limb wide products agree; what baking a brush costs as the history grows (a report). |
-| `../../../helio-default-passes/examples/voxel_flight/` | The flight harness: held views, flights, digs, picks, captures. |
+| `tests/wide_products.rs`, `../../../helio-voxel-world/tests/bake_cost.rs` | Hardware and limb wide products agree; what baking a brush costs as the history grows (a report). |
+| `../../../examples/voxel_flight/` | The flight harness: held views, flights, digs, picks, captures. |
 
 ## Data model
 
@@ -103,7 +106,7 @@ twice, in Rust (`TerrainField`) and WGSL (`TerrainProgram`), and the two must
 return equal integers for every input. That is the contract that lets the CPU
 ray cast what the GPU draws. A column is two-rate: its largest octaves are
 evaluated at nodes every 16 columns of its level and blended exactly
-([`docs/two-rate-field.md`](docs/two-rate-field.md)).
+([`helio-voxel-world/docs/two-rate-field.md`](../../../helio-voxel-world/docs/two-rate-field.md)).
 
 - All arithmetic is wrapping integer maths on the shared noise library.
   `noise_fine` / `mul_fine` (Q24, exact wide products) exist because Q16 noise at
@@ -126,7 +129,7 @@ evaluated at nodes every 16 columns of its level and blended exactly
   volumes (cave networks, cliff shapes: `volumes.rs`), a climate and a
   material style (Earthlike, Lunar, Layered, Rules). Rivers and the climate
   read the world's planet maps, baked once from its seed and layers
-  ([`docs/planet-maps.md`](docs/planet-maps.md)). The stack is data,
+  ([`helio-voxel-world/docs/planet-maps.md`](../../../helio-voxel-world/docs/planet-maps.md)). The stack is data,
   compiled to one octave table sorted coarse to fine; one interpreter runs
   it on CPU and GPU, so changing layers never recompiles shaders. Bounds
   (`bound_margins`, `height_range`) derive from the layers, so any stack
@@ -185,7 +188,7 @@ A recipe's `FeatureSet` (stamps and the spawns that place them) is part of
 the world's definition: placements are a function of the seed and the
 terrain, evaluated wherever a cell is asked for, at any level, on CPU and
 GPU bit for bit. Near levels draw the stamps, far levels a spawn's canopy.
-Edits apply over them. See [`docs/features.md`](docs/features.md).
+Edits apply over them. See [`helio-voxel-world/docs/features.md`](../../../helio-voxel-world/docs/features.md).
 
 ### Planet
 
@@ -281,7 +284,7 @@ frame of `ChunkPass`:
   last changed.
 - **A frame costs what changed.** Plans are diffs from the worker; the
   chunk table is patched on the GPU; edits regenerate the nodes they touch.
-- **Volumes are placed, not thresholded** ([`docs/volumes.md`](docs/volumes.md)).
+- **Volumes are placed, not thresholded** ([`helio-voxel-world/docs/volumes.md`](../../../helio-voxel-world/docs/volumes.md)).
   Caves are networks per region of the face (a hub, chambers, tunnels to
   the neighbouring hubs, an entrance) carved as capsules with flat floors
   and rough walls, at depths under the ground's reference level, closing
@@ -300,7 +303,7 @@ Everything is measured in Helio's graph or on `ChunkWorld` directly with
 variable):
 
 ```
-cargo run -p helio-default-passes --release --example voxel_flight -- OUT [W H [native|quality]]
+cargo run -p examples --release --bin voxel_flight -- OUT [W H [native|quality]]
 ```
 
 | Variable | Effect |
@@ -362,7 +365,7 @@ full contract is in `terrain.rs`'s module docs. The program defines:
 
 - `TerrainConstants` and `ground_material(p, surface, top_height, depth,
   slope, layer) -> u32`.
-- The two-rate column ([`docs/two-rate-field.md`](docs/two-rate-field.md)):
+- The two-rate column ([`helio-voxel-world/docs/two-rate-field.md`](../../../helio-voxel-world/docs/two-rate-field.md)):
   `TERRAIN_NODE_WORDS` (words a node carries, at least 1),
   `terrain_has_nodes(level)`, `terrain_node(p, level)` (evaluate the node
   at domain point `p`), `terrain_node_word(slot)` (a word of the node just
@@ -418,7 +421,7 @@ extent, height bounds) and `FaceBrush::contains` in `edits.rs`,
 `brush_holds` in `chunk_generate.wgsl`.
 
 **Features.** Add stamps and spawns to the recipe's `FeatureSet`; no code
-changes. See [`docs/features.md`](docs/features.md).
+changes. See [`helio-voxel-world/docs/features.md`](../../../helio-voxel-world/docs/features.md).
 
 ## Known limits and open work
 

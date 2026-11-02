@@ -17,6 +17,7 @@ members = [
     "crates/*",
     "crates/passes/2d/*",
     "crates/passes/3d/*",
+    "crates/api/*",
     "crates_other/*"
 ]
 exclude = [

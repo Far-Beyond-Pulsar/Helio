@@ -344,3 +344,14 @@ mod tests {
         assert_eq!(wind.to_gpu().gust, [0.6, 0.2, 1.25, 0.08]);
     }
 }
+
+impl From<GpuWind> for crate::FoliageWindRow {
+    fn from(v: GpuWind) -> Self {
+        bytemuck::cast(v)
+    }
+}
+impl From<crate::FoliageWindRow> for GpuWind {
+    fn from(v: crate::FoliageWindRow) -> Self {
+        bytemuck::cast(v)
+    }
+}

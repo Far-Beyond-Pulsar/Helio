@@ -11,6 +11,7 @@ pub mod portals;
 pub mod scene_join;
 pub mod texture_means;
 pub mod virtual_geometry;
+pub mod water_shore;
 pub use helio_vg_format::debug_view as vg_debug_view;
 pub use virtual_geometry::{
     virtual_geometry_supported, with_virtual_geometry, VgInputsPass, VgStreamBeginPass,
@@ -2288,34 +2289,6 @@ fn build_forward_graph_internal(
     graph.set_graph_data(rebuilder);
 
     graph
-}
-
-/// Reads the frame's scene materials (Helio's material rows and descriptor-
-/// indexed texture table) for `ChunkPass::set_scene_materials`, so voxel
-/// terrain is textured by the same `MaterialRow`s as meshes.
-pub fn voxel_scene_materials() -> helio_pass_voxel_planet::chunks::scene::SceneMaterialSource {
-    use helio_pass_voxel_planet::chunks::scene::SceneMaterialInputs;
-    Box::new(|ctx| {
-        let textures = ctx
-            .registry
-            .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
-                "VoxelPlanet",
-            )?;
-        let materials = ctx
-            .scene_buffers
-            .get(pulsar_scenedb::gpu::BufferKey::of("materials"))?;
-        let water_shore_fields = ctx.registry.texture_binding("water_shore_fields");
-        let water_shore_params = ctx.registry.buffer_binding("water_shore_params");
-        Some(SceneMaterialInputs {
-            materials: &materials.buffer,
-            texture_views: textures.texture_views,
-            samplers: textures.samplers,
-            water_shore_fields,
-            water_shore_params,
-            version: (textures.version, materials.epoch as u64),
-        })
-    })
 }
 
 /// A renderer config with a host's [`helio::helio_settings::RENDERER`]

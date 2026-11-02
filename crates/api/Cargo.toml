@@ -1,0 +1,9 @@
+[package]
+name = "helio-apis"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Container for crates/api/* - not a real crate, exists so the crates/* workspace glob has a manifest to read here."
+
+[lib]
+path = "lib.rs"
