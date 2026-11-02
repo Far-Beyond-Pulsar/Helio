@@ -11,7 +11,7 @@ pub const EXTENSION: &str = "rendergraph";
 pub const FORMAT_VERSION: u32 = 1;
 
 /// Node parameters by key.
-pub type Params = BTreeMap<String, Value>;
+pub use helio_feature_api::Params;
 
 /// Editor-only wire grouping, persisted with the graph so canvas layout survives reloads.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -91,15 +91,15 @@ pub struct SectionPort {
     /// Id of the pin on the section's node, and of the matching pin on its entry
     /// or exit inside.
     pub name: String,
-    pub ty: crate::pins::PinType,
+    pub ty: helio_feature_api::PinType,
     /// The resource the pin carries, empty for flow.
     #[serde(default)]
     pub resource: String,
 }
 
 impl SectionPort {
-    pub fn to_pin(&self) -> crate::pins::PinDesc {
-        crate::pins::PinDesc {
+    pub fn to_pin(&self) -> helio_feature_api::PinDesc {
+        helio_feature_api::PinDesc {
             name: self.name.clone(),
             ty: self.ty,
             resource: self.resource.clone(),

@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use crate::asset::{GraphAsset, NodeInstance};
 use crate::core_nodes::{ON_FRAME_START, OUTPUT};
-use crate::pins::{PinKind, PinType};
-use crate::registry::{NodePins, NodeRegistry};
+use helio_feature_api::{PinKind, PinType};
+use helio_feature_api::{NodePins, NodeRegistry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -408,8 +408,8 @@ mod tests {
     use super::*;
     use crate::asset::{Connection, NodeInstance, PinRef};
     use crate::core_nodes::{PERSISTENT_BUFFER, TEXTURE};
-    use crate::pins::PinDesc;
-    use crate::registry::NodeDescriptor;
+    use helio_feature_api::PinDesc;
+    use helio_feature_api::NodeDescriptor;
     use serde_json::json;
 
     fn node(id: &str, kind: &str, name: Option<&str>) -> NodeInstance {
@@ -433,7 +433,7 @@ mod tests {
     }
 
     fn registry() -> NodeRegistry {
-        NodeRegistry::with_core()
+        crate::core_registry()
     }
 
     /// A graph with the nodes every graph has: `start` and `out`.

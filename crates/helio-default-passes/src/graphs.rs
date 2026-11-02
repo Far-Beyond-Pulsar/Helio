@@ -65,11 +65,16 @@ const DEFERRED: &[&str] = &[
     "debug_draw",
 ];
 
-/// Core nodes, every pass node, the host inputs and the performance marker.
-pub fn base_registry() -> NodeRegistry {
-    let mut registry = NodeRegistry::with_core();
-    graph_nodes::register_passes(&mut registry);
+/// Core nodes plus everything `features` register.
+pub fn registry_for(features: &helio_feature_api::FeatureSet) -> NodeRegistry {
+    let mut registry = helio_graph_asset::core_registry();
+    features.register_into(&mut registry);
     registry
+}
+
+/// Core nodes and the default features ([`graph_nodes::default_features`]).
+pub fn base_registry() -> NodeRegistry {
+    registry_for(&graph_nodes::default_features())
 }
 
 fn pass_kinds(registry: &NodeRegistry) -> Vec<String> {
