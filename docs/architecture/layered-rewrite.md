@@ -656,12 +656,26 @@ As built, steps 3 and 4 (2026-11-02): every pass node lives with its pass;
   both steps (but for the background pass's type path). Hosts and Pulsar
   name `helio_presets` / `helio_scene_derivations`.
 
-**Rule (user, 2026-11-02): components are the API.** The editor, the game
-and Helio's passes communicate only through an object's component: its
-methods, and the rows and payloads it publishes. No object-specific
-knowledge in Helio, the presets, `engine_backend`'s renderer or other
-surrounding crates; no bespoke registries, traits or mailboxes for one kind
-of object.
+**Rule (user, 2026-11-02): components are the API, plugins own object
+kinds.**
+- Every object kind is a plugin that owns its SceneDB component (data and
+  methods), the Helio feature that renders it (its passes), its file format
+  and its editor UI.
+- Component methods are the only way to act on a component. They are
+  exposed to scripting, and the editor goes through the same methods as
+  scripts: no editor-only side channels.
+- The feature's passes consume only the rows and payloads the component
+  publishes.
+- No object-specific knowledge in Helio, the presets, `engine_backend`'s
+  renderer or other surrounding crates; no bespoke registries, traits,
+  mailboxes or renderer methods for one kind of object.
+- This holds for every kind, not just voxel. Meshes and virtual geometry
+  become a meshes plugin (mesh component + mesh/VG passes); Helio knows
+  no mesh or VG and has no API for them. Same for water, foliage, decals,
+  lights, sky, portals, sprites.
+- What stays in Helio is what no object kind owns: the graph, the
+  feature API, scene-input contracts, the renderer facade, and the spine's
+  frame structure (G-buffer, lighting, post) with its extension points.
 
 As built, step 5 (2026-11-02): the presets name no feature pair.
 - Features declare what they need of the others in their own preparers:
@@ -709,10 +723,19 @@ from host-made `VoxelTerrain` closures. Target and order:
    exports are published by the pass into SceneDB rows the component reads
    (`VoxelTerrainComponent::kept_chunks`, a pick method); the
    `VoxelChunkSaves` condvar mailbox and `SharedPicks` go.
-6. Then the plugin: the voxel components, their runtime and the editor's
-   sculpt tool move into a `pulsar.voxel` plugin that registers them and
-   `VoxelFeature`; `helio_component` and `engine_backend` keep no voxel
-   code.
+6. The `pulsar.voxel` plugin (still required; steps 1-5 only make its
+   boundary right): it owns the voxel components and their runtime, the
+   voxel feature and its passes (`helio-pass-voxel-planet`,
+   `helio-voxel-world`, `helio-voxel-data` move with it), the voxel file
+   formats (journal, kept chunks, presets) and the editor's sculpt tool and
+   terrain panel, which act only through component methods. It registers
+   the components and `VoxelFeature`; Helio, `helio_component` and
+   `engine_backend` keep no voxel code.
+
+Later steps apply the same pattern to every other kind (meshes + VG,
+water, foliage, decals, lights, sky, portals, sprites), one plugin per
+kind, each removing that kind from Helio, the presets, the scene
+derivations and `engine_backend`.
 
 ### Phase 6: repo split
 - Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
