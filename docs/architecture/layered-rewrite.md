@@ -338,12 +338,15 @@ merged and retired. The rewrite runs on new branches, one per phase:
 | 6 | `rewrite/p6-repo-split` | new Helio-Voxel / Helio-VG repos, Helio, Pulsar-Native |
 
 Rules:
-- Cut every branch from current `main` of each repo; never from another
-  phase branch. A phase starts after the previous one is merged, except
-  Phase 5 groups, which can run in parallel once Phase 4 is in.
+- Phases are **stacked**: phase N+1 is cut from phase N's branch, and its PR
+  targets phase N's branch, so work continues while phase N waits for
+  review. Phase 5 groups stack on phase 4 side by side.
+- PRs merge bottom-up. When phase N merges into `main`, phase N+1's PR is
+  retargeted to `main` (GitHub does it when N's branch is deleted) and phase
+  N+1 merges `main` in, so the next phase always sits on what landed.
 - One PR per repo per phase. Session work for a phase goes onto that
   phase's branch, not into side PRs.
-- While a phase is open, Pulsar's branch points its Helio dependency at the
+- While a phase is open, Pulsar's branch points its Helio submodule at the
   Helio phase branch. When landing: Helio's PR merges first, then Pulsar's
   branch moves its Helio pin to the merged Helio `main` and merges.
 - A phase lands only when its "done when" holds, the layer check's
