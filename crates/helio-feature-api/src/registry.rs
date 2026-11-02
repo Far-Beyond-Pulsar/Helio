@@ -119,7 +119,7 @@ pub struct BuildEnv<'e> {
     pub debug_camera_buffer: &'e wgpu::Buffer,
     pub cull_stats_buffer: &'e wgpu::Buffer,
     pub owns_device: bool,
-    settings: HashMap<TypeId, Box<dyn Any>>,
+    settings: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     shared: HashMap<TypeId, Box<dyn Any>>,
 }
 
@@ -148,13 +148,19 @@ impl<'e> BuildEnv<'e> {
     }
 
     /// Supplies a setting of type `T`, replacing one already there.
-    pub fn insert_setting<T: Any>(&mut self, value: T) {
-        self.settings.insert(TypeId::of::<T>(), Box::new(value));
+    pub fn insert_setting<T: Any + Send + Sync>(&mut self, value: T) {
+        self.settings.insert(TypeId::of::<T>(), Arc::new(value));
     }
 
     /// [`Self::insert_setting`], by value.
-    pub fn with_setting<T: Any>(mut self, value: T) -> Self {
+    pub fn with_setting<T: Any + Send + Sync>(mut self, value: T) -> Self {
         self.insert_setting(value);
+        self
+    }
+
+    /// Supplies every feature's settings (a renderer config carries them).
+    pub fn with_feature_settings(mut self, settings: &crate::FeatureSettings) -> Self {
+        self.settings.extend(settings.entries());
         self
     }
 

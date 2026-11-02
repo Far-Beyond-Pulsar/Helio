@@ -26,7 +26,7 @@ pub use debug::{
 pub use pipeline::{
     IntoGraph, PipelineFactory, PipelineInfo, PipelineOrigin, RenderPipelineRegistry,
 };
-pub use renderer_impl::{BillboardInstance, GraphRebuilder, Renderer};
+pub use renderer_impl::{GraphRebuilder, Renderer};
 pub use settings::TsrSetting;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use shader_reload::{ReloadMode, ShaderReloadStatus};

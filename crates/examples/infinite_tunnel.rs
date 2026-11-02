@@ -114,8 +114,8 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    portal_near: helio::PortalPair,
-    portal_far: helio::PortalPair,
+    portal_near: helio_pass_portal_cull::PortalPair,
+    portal_far: helio_pass_portal_cull::PortalPair,
 
     _light_ids: Vec<Entity>,
 
@@ -335,12 +335,12 @@ impl ApplicationHandler for App {
         // selects only content whose *mapped* position is in view, the
         // continuation is visible exactly when you look through the portal —
         // and nowhere else.
-        let pose_near = helio::portal_pose_facing(
+        let pose_near = helio_pass_portal_cull::portal_pose_facing(
             glam::Vec3::new(0.0, HALF_HEIGHT, PORTAL_Z),
             glam::Vec3::new(0.0, 0.0, 1.0),
             glam::Vec3::Y,
         );
-        let pose_far = helio::portal_pose_facing(
+        let pose_far = helio_pass_portal_cull::portal_pose_facing(
             glam::Vec3::new(0.0, HALF_HEIGHT, -PORTAL_Z),
             glam::Vec3::new(0.0, 0.0, -1.0),
             glam::Vec3::Y,
@@ -349,12 +349,12 @@ impl ApplicationHandler for App {
         // what the buried copies' sublevel placements line up with, so the
         // vertical-shift coordinate space maps each copy onto its seat in the
         // tunnel's continuation.
-        let pose_near_b = helio::portal_pose_facing(
+        let pose_near_b = helio_pass_portal_cull::portal_pose_facing(
             glam::Vec3::new(0.0, HALF_HEIGHT - HIDE_OFFSET, PORTAL_Z),
             glam::Vec3::new(0.0, 0.0, 1.0),
             glam::Vec3::Y,
         );
-        let pose_far_b = helio::portal_pose_facing(
+        let pose_far_b = helio_pass_portal_cull::portal_pose_facing(
             glam::Vec3::new(0.0, HALF_HEIGHT - HIDE_OFFSET, -PORTAL_Z),
             glam::Vec3::new(0.0, 0.0, -1.0),
             glam::Vec3::Y,
@@ -364,11 +364,11 @@ impl ApplicationHandler for App {
         // The near (+Z) portal pulls the +Z-direction copies up into the
         // tunnel that continues past the near end; the far (-Z) portal does
         // the same for the -Z direction.
-        let portal_near = helio::PortalPair {
+        let portal_near = helio_pass_portal_cull::PortalPair {
             a: pose_near,
             b: pose_near_b,
         };
-        let portal_far = helio::PortalPair {
+        let portal_far = helio_pass_portal_cull::PortalPair {
             a: pose_far,
             b: pose_far_b,
         };
@@ -429,7 +429,7 @@ impl ApplicationHandler for App {
             near_entity,
         )
         .expect("portal projection rows");
-        renderer.set_portal_projection_frame(&projection);
+        helio_default_passes::portals::set_projection_frame(&mut renderer, &projection);
 
         renderer.set_ambient([0.85, 0.9, 1.0], 0.05);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -619,7 +619,7 @@ impl AppState {
         let mut teleported = false;
         for portal in [self.portal_near, self.portal_far] {
             if let Some(pair) = Some(portal) {
-                if helio::crossing_detected(
+                if helio_pass_portal_cull::crossing_detected(
                     prev_pos,
                     self.cam_pos,
                     &pair.a,

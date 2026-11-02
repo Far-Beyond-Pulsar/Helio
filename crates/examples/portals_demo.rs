@@ -23,8 +23,9 @@
 
 mod v3_demo_common;
 
+use helio_pass_portal_cull::portal_pose_facing;
 use helio::{
-    portal_pose_facing, required_experimental_features, required_wgpu_features,
+    required_experimental_features, required_wgpu_features,
     required_wgpu_limits, Camera, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_default_passes::build_default_graph_external_with_context;
@@ -86,10 +87,10 @@ struct AppState {
 
     /// Duplicates content near the far end (-Z) so it's visible through the
     /// near portal (+Z).
-    portal_near: helio::PortalPair,
+    portal_near: helio_pass_portal_cull::PortalPair,
     /// Duplicates content near the near end (+Z) so it's visible through the
     /// far portal (-Z).
-    portal_far: helio::PortalPair,
+    portal_far: helio_pass_portal_cull::PortalPair,
 
     _light_ids: Vec<Entity>,
 }
@@ -357,13 +358,13 @@ impl ApplicationHandler for App {
 
         // Looking through the near portal (standing near +Z, facing further
         // +Z) shows what's actually near the far end.
-        let portal_near = helio::PortalPair {
+        let portal_near = helio_pass_portal_cull::PortalPair {
             a: pose_near,
             b: pose_far,
         };
         // Looking through the far portal shows what's actually near the near
         // end — the reverse direction, completing the loop.
-        let portal_far = helio::PortalPair {
+        let portal_far = helio_pass_portal_cull::PortalPair {
             a: pose_far,
             b: pose_near,
         };
@@ -532,7 +533,7 @@ impl AppState {
         // and the position/direction remap are just the CPU-side half of the
         // same portal, unaffected by how it's drawn.
         if let Some(pair) = Some(self.portal_near) {
-            if helio::crossing_detected(
+            if helio_pass_portal_cull::crossing_detected(
                 prev_pos,
                 self.cam_pos,
                 &pair.a,
@@ -547,7 +548,7 @@ impl AppState {
             }
         }
         if let Some(pair) = Some(self.portal_far) {
-            if helio::crossing_detected(
+            if helio_pass_portal_cull::crossing_detected(
                 prev_pos,
                 self.cam_pos,
                 &pair.a,

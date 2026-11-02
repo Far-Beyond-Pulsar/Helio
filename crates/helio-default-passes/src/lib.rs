@@ -7,11 +7,14 @@ pub mod graphs;
 pub mod hierarchy_resolve;
 pub mod pipelines;
 pub mod portal_projection;
+pub mod portals;
 pub mod scene_join;
 pub mod texture_means;
 pub mod virtual_geometry;
+pub use helio_vg_format::debug_view as vg_debug_view;
 pub use virtual_geometry::{
-    virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
+    virtual_geometry_supported, with_virtual_geometry, VgInputsPass, VgStreamBeginPass,
+    VgStreamEndPass,
 };
 
 use helio::DebugDrawState;
@@ -467,7 +470,10 @@ fn add_geometry_passes(
     // between the two raster passes it would break the very subpass fusion
     // FoliageGBufferPass exists to join. Nothing renders wrong either way, which is
     // exactly why this is worth a comment — the cost is a silent tile store/reload.
-    let foliage_buffers = config.enable_foliage.then(|| {
+    let foliage = config
+        .features
+        .get_or_default::<helio_pass_foliage_place::FoliageSettings>();
+    let foliage_buffers = foliage.enabled.then(|| {
         let (place_pass, boxes, draw) = foliage_passes(device, &config);
         graph.add_pass(Box::new(place_pass));
         // Blocky foliage expanded into boxes, before the G-buffer: between the two raster
@@ -721,18 +727,17 @@ pub(crate) fn foliage_passes(
     helio_pass_foliage_gbuffer::FoliageBoxesPass,
     FoliageGBufferPass,
 ) {
+    let foliage = config
+        .features
+        .get_or_default::<helio_pass_foliage_place::FoliageSettings>();
     let defaults = helio_pass_foliage_place::FoliageRange::default();
     let place = FoliagePlacePass::new_with(
         device,
-        config.foliage_quality,
+        foliage.quality,
         helio_pass_foliage_place::FoliageRange {
-            range: config
-                .foliage_range
-                .unwrap_or(config.foliage_quality.range()),
-            tufts_per_m2: config.foliage_tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
-            blades_per_tuft: config
-                .foliage_blades_per_tuft
-                .unwrap_or(defaults.blades_per_tuft),
+            range: foliage.reach(),
+            tufts_per_m2: foliage.tufts_per_m2.unwrap_or(defaults.tufts_per_m2),
+            blades_per_tuft: foliage.blades_per_tuft.unwrap_or(defaults.blades_per_tuft),
             ..defaults
         },
     );
@@ -746,7 +751,7 @@ pub(crate) fn foliage_passes(
         Arc::clone(&place.bands_buffer),
         Arc::clone(&place.interactors),
     );
-    draw.quality = config.foliage_quality;
+    draw.quality = foliage.quality;
     let boxes = draw.boxes_pass(device);
     (place, boxes, draw)
 }
@@ -1140,7 +1145,7 @@ fn build_default_graph_internal_with_lens_user(
     // emitters at 1.0 so nothing could bloom or flare.
     let lighting_config = RendererConfig {
         surface_format: FOGGED_HDR_FORMAT,
-        ..config
+        ..config.clone()
     };
     let perf = add_common_early_passes(
         &mut graph,
@@ -1429,7 +1434,7 @@ fn build_fxaa_graph_internal(
     // emitters at 1.0 so nothing could bloom or flare.
     let lighting_config = RendererConfig {
         surface_format: FOGGED_HDR_FORMAT,
-        ..config
+        ..config.clone()
     };
     let perf = add_common_early_passes(
         &mut graph,
@@ -1641,7 +1646,7 @@ fn build_hlfs_graph_internal(
 
     let lighting_config = RendererConfig {
         surface_format: lighting_format,
-        ..config
+        ..config.clone()
     };
 
     add_late_passes(
@@ -1914,7 +1919,7 @@ fn build_fxaa_hlfs_graph_internal(
 
     let lighting_config = RendererConfig {
         surface_format: lighting_format,
-        ..config
+        ..config.clone()
     };
 
     add_late_passes(
@@ -2182,7 +2187,7 @@ fn build_forward_graph_internal(
     // emitters at 1.0 so nothing could bloom or flare.
     let lighting_config = RendererConfig {
         surface_format: FOGGED_HDR_FORMAT,
-        ..config
+        ..config.clone()
     };
     let perf = add_common_early_passes(
         &mut graph,
@@ -2311,4 +2316,21 @@ pub fn voxel_scene_materials() -> helio_pass_voxel_planet::chunks::scene::SceneM
             version: (textures.version, materials.epoch as u64),
         })
     })
+}
+
+/// A renderer config with a host's [`helio::helio_settings::RENDERER`]
+/// values: the renderer's own, and the default features' settings
+/// (foliage). Engines build their config with this rather than
+/// `RendererConfig::with_settings`, which knows no feature.
+pub fn config_with_host_settings(
+    config: RendererConfig,
+    settings: &helio::helio_settings::Resolved,
+) -> RendererConfig {
+    let mut config = config.with_settings(settings);
+    let foliage = config
+        .features
+        .get_or_default::<helio_pass_foliage_place::FoliageSettings>()
+        .with_host_settings(settings);
+    config.features.insert(foliage);
+    config
 }

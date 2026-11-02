@@ -850,6 +850,11 @@ impl RenderGraph {
         self.locked
     }
 
+    /// Find the index of the first pass whose [`RenderPass::name`] is `name`.
+    pub fn pass_index_named(&self, name: &str) -> Option<usize> {
+        self.passes.iter().position(|p| p.name() == name)
+    }
+
     /// Find the index of the first pass matching type `T`.
     pub fn pass_index_of<T: RenderPass + 'static>(&self) -> Option<usize> {
         self.passes

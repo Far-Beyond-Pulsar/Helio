@@ -104,12 +104,24 @@ impl Harness {
             let factory: VoxelPassFactory =
                 Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(pass_source.clone())));
             let mut config = RendererConfig::new(SIZE[0], SIZE[1], wgpu::TextureFormat::Rgba8Unorm);
-            config.enable_foliage = true;
-            config.foliage_tufts_per_m2 = Some(8.0);
-            config.foliage_blades_per_tuft = Some(6.0);
-            config.foliage_range = Some(60.0);
+            config
+                .features
+                .edit::<helio_pass_foliage_place::FoliageSettings>()
+                .enabled = true;
+            config
+                .features
+                .edit::<helio_pass_foliage_place::FoliageSettings>()
+                .tufts_per_m2 = Some(8.0);
+            config
+                .features
+                .edit::<helio_pass_foliage_place::FoliageSettings>()
+                .blades_per_tuft = Some(6.0);
+            config
+                .features
+                .edit::<helio_pass_foliage_place::FoliageSettings>()
+                .range = Some(60.0);
             let mirror = scene.world.gpu_mirror().cloned().unwrap();
-            let renderer = RendererBuilder::new(config, mirror)
+            let renderer = RendererBuilder::new(config.clone(), mirror)
                 .with_external_device()
                 .with_pass_build_context(Box::new(move |ctx| {
                     build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])

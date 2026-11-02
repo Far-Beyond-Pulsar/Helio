@@ -335,7 +335,7 @@ impl ApplicationHandler for App {
                 let bounds_radius = base_scale * 1.2;
 
                 if _global_rock_idx % BILLBOARD_EVERY_N == 0 {
-                    billboards.push(helio::BillboardInstance {
+                    billboards.push(helio_pass_billboard::BillboardInstance {
                         world_pos: [pos.x, pos.y + scale.y * 2.0, pos.z, 0.0],
                         scale_flags: [1.4, 1.4, 0.0, 0.0],
                         color: MARKER_COLORS

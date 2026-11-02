@@ -421,17 +421,21 @@ impl Harness {
         let runtime = VgRuntime::default();
         build(&mut scene.world, &runtime);
         let mut config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
-        config.enable_foliage = false;
-        let renderer = RendererBuilder::new(config, scene.world.gpu_mirror().cloned().unwrap())
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-            .with_external_device()
-            .build(
-                device.clone(),
-                queue.clone(),
-                config.width,
-                config.height,
-                config.surface_format,
-            );
+        config
+            .features
+            .edit::<helio_pass_foliage_place::FoliageSettings>()
+            .enabled = false;
+        let renderer =
+            RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
+                .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+                .with_external_device()
+                .build(
+                    device.clone(),
+                    queue.clone(),
+                    config.width,
+                    config.height,
+                    config.surface_format,
+                );
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {

@@ -30,6 +30,10 @@ pub type GraphRebuilder = Arc<
 >;
 
 /// Reapplies application-owned pass settings after a rebuild replaces the graph.
+/// Makes a pass the renderer keeps in every graph it builds (see
+/// [`Renderer::install_persistent_pass`]).
+pub type PassFactory = Arc<dyn Fn() -> Box<dyn RenderPass> + Send + Sync>;
+
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
 use crate::camera::Camera;
@@ -54,8 +58,6 @@ pub(crate) struct MaterialBindingResources {
     pub(crate) version: u64,
     pub(crate) scene_views: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
 }
-
-pub use helio_pass_billboard::BillboardInstance;
 
 pub(crate) enum CullStatsReadbackState {
     Idle,
@@ -160,13 +162,9 @@ pub struct Renderer {
     pub(crate) frame_clock_delta: Option<f32>,
     /// A bake to run before the next frame. Its result is owned by the
     /// graph's `BakeInjectPass`, never by the renderer (Helio#256).
-    #[cfg(feature = "bake")]
-    pub(crate) bake_pending: Option<helio_bake::BakeRequest>,
     /// Optional CPU bake projection supplied by the SceneDB/frontend owner.
     /// The renderer may execute it, but never traverses or synthesizes scene
     /// entities to build it.
-    #[cfg(feature = "bake")]
-    pub(crate) bake_scene: Option<helio_bake::SceneGeometry>,
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
     /// A configuration change asks for a graph rebuild before the next frame.
@@ -176,6 +174,8 @@ pub struct Renderer {
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
+    /// Passes a host installed that survive graph rebuilds, by pass name.
+    pub(crate) persistent_passes: Vec<(&'static str, PassFactory)>,
     /// Shader hot-reload bookkeeping (see `shader_reload.rs`).
     #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
     pub(crate) shader_reload: super::shader_reload::ShaderReloadState,
@@ -486,21 +486,6 @@ impl Renderer {
         }
     }
 
-    /// Set the world-anchored pixel text shown by the editor's portal overlay.
-    pub fn set_portal_debug_texts(
-        &mut self,
-        texts: Vec<helio_pass_portal_instances::PortalDebugText>,
-    ) -> bool {
-        self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
-            .is_some_and(|pass| pass.set_debug_texts(texts))
-    }
-
-    /// Set transient portal-through geometry for the editor diagnostics view.
-    pub fn set_portal_debug_geometry(&mut self, vertices: Vec<[f64; 3]>) -> bool {
-        self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
-            .is_some_and(|pass| pass.set_ghost_vertices(vertices))
-    }
-
     /// Pass the latest asynchronous DeferredLight timestamp to its cost view.
     pub fn set_deferred_light_timing_ms(&mut self, milliseconds: f32) -> bool {
         self.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>()
@@ -636,24 +621,6 @@ impl Renderer {
         self.apply_coordinate_spaces();
     }
 
-    /// Upload a resolver-generated portal projection frame built with its own
-    /// table (`PortalProjectionBridge::build`): its spaces become the table.
-    /// A host that shares the table with other producers builds with
-    /// `build_into` and calls [`Self::set_coordinate_spaces`] and
-    /// [`Self::set_portal_projection_counts`] instead.
-    pub fn set_portal_projection_frame(
-        &mut self,
-        frame: &helio_pass_portal_cull::PortalProjectionFrame,
-    ) {
-        self.coordinate_spaces.clear();
-        self.coordinate_spaces
-            .extend_from_slice(frame.renderer_coordinate_spaces());
-        self.set_portal_projection_counts(
-            frame.counts.portal_view_count,
-            frame.counts.portal_chain_count,
-        );
-    }
-
     /// The live portal view and chain counts of a projection whose spaces the
     /// host placed in the table itself.
     pub fn set_portal_projection_counts(&mut self, portal_views: u32, portal_chains: u32) {
@@ -733,64 +700,39 @@ impl Renderer {
         self.graph_rebuilder = Some(rebuilder);
     }
 
-    #[cfg(feature = "bake")]
-    pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
-        self.bake_pending = Some(request);
+    /// Keep a pass in the graph from now on: it is added (or replaces the
+    /// pass of the same [`RenderPass::name`]) now and after every graph
+    /// rebuild, made fresh by `factory`. A host's results the graph cannot
+    /// build itself (a finished bake, say) stay rendered this way.
+    pub fn install_persistent_pass(&mut self, factory: PassFactory) {
+        let pass = factory();
+        let name = pass.name();
+        self.place_pass(pass);
+        self.persistent_passes
+            .retain(|(existing, _)| *existing != name);
+        self.persistent_passes.push((name, factory));
     }
 
-    /// Supply the explicit CPU bake projection assembled by the SceneDB
-    /// owner. This replaces the removed renderer scene traversal.
-    #[cfg(feature = "bake")]
-    pub fn set_bake_scene(&mut self, scene: helio_bake::SceneGeometry) {
-        self.bake_scene = Some(scene);
-    }
-
-    /// Bake the scene last given to [`Self::set_bake_scene`] before the next
-    /// frame. Build it with [`crate::bake_scene_from_world`]. Returns whether a
-    /// bake was queued, so a missing scene is not a silent no-op (Helio#256).
-    #[cfg(feature = "bake")]
-    pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) -> bool {
-        let Some(scene) = self.bake_scene.clone() else {
-            log::error!(
-                "Renderer::auto_bake requires set_bake_scene(helio::bake_scene_from_world(..)) first; nothing was baked"
-            );
-            return false;
-        };
-        self.configure_bake(helio_bake::BakeRequest { scene, config });
-        true
-    }
-
-    /// Hand a finished bake to the graph. `BakeInjectPass` owns it from here
-    /// and publishes it every frame; a re-bake replaces the previous one.
-    #[cfg(feature = "bake")]
-    pub(crate) fn install_baked_data(&mut self, baked: std::sync::Arc<helio_bake::BakedData>) {
-        let pass = Box::new(helio_bake::BakeInjectPass::new(baked));
-        match self.graph.pass_index_of::<helio_bake::BakeInjectPass>() {
+    fn place_pass(&mut self, pass: Box<dyn RenderPass>) {
+        match self.graph.pass_index_named(pass.name()) {
             Some(index) => self.graph.replace_pass_at(index, pass),
             None => self.graph.add_pass_live(pass),
         }
     }
 
-    /// The baked data the current graph publishes, for carrying it into a
-    /// rebuilt graph.
-    #[cfg(feature = "bake")]
-    pub(crate) fn installed_baked_data(&self) -> Option<std::sync::Arc<helio_bake::BakedData>> {
-        self.graph
-            .find_pass::<helio_bake::BakeInjectPass>()
-            .map(|pass| pass.baked_data().clone())
-    }
-
-    /// Replace the graph, keeping what the old one owned that a freshly
-    /// built graph cannot know about (a finished bake, the debug mode for
-    /// passes that only learn it through `set_debug_mode`).
+    /// Replace the graph, keeping what a freshly built graph cannot know
+    /// about: the persistent passes and the debug mode for passes that only
+    /// learn it through `set_debug_mode`.
     pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
         graph.set_debug_mode(self.debug_mode);
-        #[cfg(feature = "bake")]
-        let baked = self.installed_baked_data();
         self.graph = graph;
-        #[cfg(feature = "bake")]
-        if let Some(baked) = baked {
-            self.install_baked_data(baked);
+        let persistent: Vec<PassFactory> = self
+            .persistent_passes
+            .iter()
+            .map(|(_, factory)| Arc::clone(factory))
+            .collect();
+        for factory in persistent {
+            self.place_pass(factory());
         }
     }
 
@@ -824,7 +766,7 @@ impl Renderer {
             tsr_quality: self.tsr_quality,
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
-            ..self.graph_config
+            ..self.graph_config.clone()
         }
     }
 

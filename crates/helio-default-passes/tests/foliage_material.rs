@@ -103,8 +103,11 @@ fn meadow() -> Option<Meadow> {
     );
 
     let mut config = RendererConfig::new(SIZE, SIZE, wgpu::TextureFormat::Rgba8Unorm);
-    config.enable_foliage = true;
-    let mut renderer = RendererBuilder::new(config, mirror)
+    config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = true;
+    let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_external_device()
         .with_pass_build_context(Box::new(build_default_graph_external_with_context))
         .build(

@@ -418,7 +418,7 @@ async fn init_wgpu<T: HelioWasmApp>(
                 T::build_graph(
                     ctx.device,
                     ctx.queue,
-                    ctx.config,
+                    ctx.config.clone(),
                     ctx.debug_state.clone(),
                     ctx.camera_buffer,
                     ctx.debug_camera_buffer,

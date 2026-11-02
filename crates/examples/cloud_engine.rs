@@ -1027,7 +1027,7 @@ impl App {
         // not attach Helio's SkyActor here: its analytic sun disc would show
         // through the authored moon textures as an unwanted white rim.
         let graph_scene_db = scene_db_handle(&scene_db);
-        let mut scene_renderer = RendererBuilder::new(scene_config, graph_scene_db.clone())
+        let mut scene_renderer = RendererBuilder::new(scene_config.clone(), graph_scene_db.clone())
             .with_pass_build_context(Box::new(build_default_graph_external_with_context))
             .build(
                 device.clone(),

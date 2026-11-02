@@ -71,6 +71,7 @@ mod frame_data;
 mod pass;
 mod reference;
 mod residency;
+mod settings;
 mod uniforms;
 pub mod wind;
 
@@ -89,6 +90,7 @@ pub use reference::{
     ReferenceCandidate, ReferenceGround, ReferencePlacement,
 };
 pub use residency::{RingUpdate, TileRing};
+pub use settings::FoliageSettings;
 pub use uniforms::{FoliageCullUniforms, PlaceUniforms};
 pub use wind::{GpuWind, Wind};
 

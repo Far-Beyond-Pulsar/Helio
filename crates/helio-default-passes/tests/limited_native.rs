@@ -145,7 +145,7 @@ async fn run_default_graph(
     }
     let config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
     let mut renderer = RendererBuilder::new(
-        config,
+        config.clone(),
         scene_db
             .world
             .gpu_mirror()

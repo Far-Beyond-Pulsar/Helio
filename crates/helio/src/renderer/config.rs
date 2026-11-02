@@ -268,7 +268,7 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
@@ -300,33 +300,11 @@ pub struct RendererConfig {
     /// 1×1 black fallback when the pass is absent, so disabling it costs only
     /// the reflection contribution.
     pub enable_ssr: bool,
-    /// Enable the foliage passes. Default `true`.
-    ///
-    /// This is the outermost of three independent zero-cost guarantees, and the only one
-    /// that removes the passes from the graph entirely. The other two are runtime: with
-    /// the passes present but no foliage types registered, `Scene` leaves the `foliage`
-    /// frame slot unwritten and both passes early-out; with types registered but the ring
-    /// empty, the rasteriser issues four `draw_indirect` calls with zero instances.
-    ///
-    /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
-    /// — a scene with no SceneDB `foliage_types` column pays nothing for this being true.
-    pub enable_foliage: bool,
-    /// Densest foliage ground in tufts per square metre, or `None` for the default (8).
-    /// Sizes the bands' candidate grids at graph-build time: a type's `density` (tufts a
-    /// square metre) above this is thinned to it.
-    pub foliage_tufts_per_m2: Option<f32>,
-    /// Blades a tuft averages, or `None` for the default (8): sizes the near band's
-    /// slabs (a record per blade).
-    pub foliage_blades_per_tuft: Option<f32>,
-    /// Foliage quality preset: the default range, the density multiplier, the near LOD
-    /// distance's scale and the cull granularity. Default [`FoliageQuality::Medium`].
-    ///
-    /// [`FoliageQuality::Medium`]: helio_pass_foliage_place::FoliageQuality::Medium
-    pub foliage_quality: helio_pass_foliage_place::FoliageQuality,
-    /// Metres foliage reaches, or `None` for the quality preset's. Bands of tiles
-    /// (`helio_pass_foliage_place::plan_bands`) carry it out there at a cost that grows
-    /// with the number of bands, one per doubling of the range.
-    pub foliage_range: Option<f32>,
+    /// Settings of the features the renderer runs, one value per feature's
+    /// settings type (`helio_pass_foliage_place::FoliageSettings`, …). The
+    /// renderer knows none of them; graph builds hand them to the features'
+    /// nodes. Edit with `config.features.edit::<FooSettings>()`.
+    pub features: helio_feature_api::FeatureSettings,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -387,12 +365,6 @@ pub struct RendererConfig {
     /// voxel terrain and 0.5 m in mesh scenes, whose rooms, pillars and
     /// furniture are a few metres apart.
     pub gi_probe_spacing: Option<f32>,
-    /// Opaque id of the virtual-geometry runtime (`helio_vg_stream::VgRuntime::handle_id`)
-    /// the default deferred graph builds its virtual-geometry passes for, or
-    /// `None` (the default) for classic rendering only. The passes are added
-    /// only when the device supports them (`helio_default_passes::virtual_geometry_supported`);
-    /// otherwise the graph is exactly the classic one.
-    pub virtual_geometry: Option<u64>,
 }
 
 impl RendererConfig {
@@ -410,11 +382,7 @@ impl RendererConfig {
             shadow_face_capacity: 32,
             shadow_budget: helio_pass_shadow_matrix::ShadowBudget::default(),
             enable_ssr: false,
-            enable_foliage: true,
-            foliage_tufts_per_m2: None,
-            foliage_blades_per_tuft: None,
-            foliage_quality: helio_pass_foliage_place::FoliageQuality::Medium,
-            foliage_range: None,
+            features: helio_feature_api::FeatureSettings::new(),
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             tsr_quality: None,
@@ -423,22 +391,7 @@ impl RendererConfig {
             enable_xr: false,
             enable_portals: true,
             gi_probe_spacing: None,
-            virtual_geometry: None,
         }
-    }
-
-    /// Build the default deferred graph's virtual-geometry passes for `runtime`
-    /// (when the device supports them).
-    pub fn with_virtual_geometry(mut self, runtime: &helio_vg_stream::VgRuntime) -> Self {
-        self.virtual_geometry = Some(runtime.handle_id());
-        // `VG_DEBUG_VIEW` selects a virtual-geometry debug view at creation (tests,
-        // headless captures); an explicit `debug_mode` is left alone.
-        if self.debug_mode == 0 {
-            if let Some(view) = helio_vg_format::debug_view::from_env() {
-                self.debug_mode = view.id();
-            }
-        }
-        self
     }
 
     /// Set the default graphs' scene clear colour. Use alpha 0 for a transparent background.
