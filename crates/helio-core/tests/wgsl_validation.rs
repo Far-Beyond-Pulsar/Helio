@@ -100,7 +100,6 @@ fn is_composed(path: &Path) -> bool {
         // shared declaration pieces (`include_str!` constants joined in
         // Rust); validated when their passes build their pipelines (the
         // crates' GPU tests).
-        "helio-component/src/virtual_geometry_instances.wgsl",
         "helio-pass-vg-bvh/shaders/vg_bvh_build.wgsl",
         "helio-pass-vg-cull/shaders/vg_cull.wgsl",
         "helio-pass-vg-dense/shaders/args.wgsl",
