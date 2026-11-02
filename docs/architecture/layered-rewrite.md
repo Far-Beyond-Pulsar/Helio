@@ -297,10 +297,16 @@ multi-repo PR with pin bumps. Split along contracts, after they are stable.
 | **Pulsar-Native** | engine, editor, plugins. **All components** (helio-component's 23 classes and source rows, plus the 31 schemas now in Helio pass crates) live here, split per plugin (#1543) | Helio, Helio-Voxel by git rev/tag, SceneDB |
 
 Mechanics:
-- Pulsar takes Helio as a **git dependency on a tag or rev** in
-  `[workspace.dependencies]`, not a submodule. For co-development, a
-  git-ignored local `[patch]` file points it at the sibling checkout, so
-  there is one Helio on disk.
+- Until phase 6, Pulsar keeps Helio as a submodule, with every Helio crate
+  reached through `[workspace.dependencies]` (no crate-level relative paths).
+  The submodule gives each session worktree its own Helio checkout, which
+  parallel sessions need; a git dependency would make them share one local
+  `[patch]` target (Pulsar's `.cargo/config.toml` is tracked, so a per-clone
+  patch file has no clean home). Drift is handled by the branch rules: a
+  phase lands with Pulsar's pin on the merged Helio `main`.
+- At phase 6, with versioned `*-api` crates, Pulsar takes Helio and the split
+  repos as **git dependencies on tags**, and co-development uses a `[patch]`
+  passed with `cargo --config <file>`.
 - One wgpu fork branch, declared once (already unified on main); CI checks
   the two manifests match.
 - No crate reaches into another repo by relative path, `#[path]`,
@@ -346,15 +352,23 @@ Rules:
   `rewrite/p3-feature-api` is cut, so `p.render().feature(..)` builds on it.
 
 ### Phase 0: hygiene and guard rails (small, do first)
-- Layer manifest `architecture/layers.toml`: every crate → layer. CI script
-  over `cargo metadata` reports violations; start with today's violations as
-  an allow-list that may only shrink.
+- Layer manifest `architecture/layers.toml`: every crate → layer (features
+  also → group). `scripts/architecture/check_layers.py` (`just arch`, CI)
+  fails on new violations; today's 19 are in
+  `architecture/layer-violations.txt`, which may only shrink. A budget on
+  `#[derive(SceneStore)]` in Helio (31) may only go down.
 - Delete the dead crates (3 stubs, 4 unused passes).
-- Move `helio-component` into Pulsar-Native (it is Pulsar code). Remove the
-  5-level workspace path and `include_bytes!` of Pulsar assets.
-- Replace the submodule with a git dep + local patch.
-- Remove Pulsar's on-disk scans and `#[path]`s into Helio.
-- Co-change metric script (the 40% number) in CI output, tracked per phase.
+- Move `helio-component` into Pulsar-Native (`crates/core/helio_component`);
+  drop the 5-level workspace path and the 5-level asset paths.
+- Every Pulsar → Helio dependency goes through `[workspace.dependencies]`
+  (engine_backend's VG/inspector paths, ui_common's helio-snapshot path).
+- `scripts/architecture/co_change.py` (`just co-change`, CI on PRs).
+- Deferred: the submodule stays until phase 6 (§4). Pulsar's remaining
+  reads of Helio files (scene_inventory's pass/buffer scan, the
+  voxel_example_levels test `#[path]` into voxel_flight's worlds,
+  core_project_builder's path test) go with the phases that replace what they
+  check: the scan's buffer facts become Helio buffer contracts (phase 1), the
+  voxel presets become a voxel-api export (phase 4).
 
 ### Phase 1: buffer contracts; components leave Helio
 - `helio-scene-input`: `BufferContract<R>`, the `SceneBuffers` projection
