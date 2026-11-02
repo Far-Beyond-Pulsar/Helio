@@ -273,7 +273,7 @@ impl Flight {
                 config.surface_format,
             );
         let (ambient, intensity) = preset.ambient();
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: ambient,
             intensity: intensity,
         });

@@ -60,7 +60,7 @@ impl HelioWasmApp for Demo {
             world,
             point_light([3.0, 2.0, 2.0], [0.5, 0.7, 1.0], 6.0, 12.0),
         );
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.4, 0.45, 0.5],
             intensity: 0.15,
         });

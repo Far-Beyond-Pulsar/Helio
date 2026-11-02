@@ -90,7 +90,7 @@ impl HelioWasmApp for Demo {
             .collect();
         let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];
 
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.02, 0.02, 0.03],
             intensity: 1.0,
         });

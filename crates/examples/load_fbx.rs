@@ -135,7 +135,7 @@ impl ApplicationHandler for App {
             .expect("Helio renderer");
         let surface = graphics.surface;
         renderer.set_clear_color([0.03, 0.03, 0.04, 1.0]);
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.06, 0.06, 0.09],
             intensity: 1.0,
         });

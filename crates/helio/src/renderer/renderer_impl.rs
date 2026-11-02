@@ -381,6 +381,14 @@ impl Renderer {
         self.request_graph_rebuild();
     }
 
+    /// Sets a feature setting whose readers read it every frame (the
+    /// frame's `AmbientLight`, the materials' `MaterialSampler`), without
+    /// rebuilding the graph. A setting read when the graph builds needs
+    /// [`Self::set_feature`].
+    pub fn set_feature_live<T: std::any::Any + Send + Sync>(&mut self, setting: T) {
+        self.graph_config.features.insert(setting);
+    }
+
     /// The feature setting of type `T` this renderer builds with, if set.
     pub fn feature<T: std::any::Any>(&self) -> Option<&T> {
         self.graph_config.features.get::<T>()

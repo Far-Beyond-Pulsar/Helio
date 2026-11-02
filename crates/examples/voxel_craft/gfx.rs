@@ -466,7 +466,7 @@ impl Gfx {
         if vr {
             renderer.set_jitter_enabled(false);
         }
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.45, 0.58, 0.8],
             intensity: 0.35,
         });

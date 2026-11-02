@@ -368,7 +368,7 @@ impl ApplicationHandler for App {
             b: pose_near,
         };
 
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.85, 0.9, 1.0],
             intensity: 0.04,
         });

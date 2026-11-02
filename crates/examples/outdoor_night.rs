@@ -242,7 +242,7 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             point_light([0.0, 16.5, -14.0], [0.05, 0.9, 1.0], 4.0, 10.0),
         ));
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.1, 0.15, 0.3],
             intensity: 0.06,
         });

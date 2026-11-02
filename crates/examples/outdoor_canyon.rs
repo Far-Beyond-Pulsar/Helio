@@ -323,7 +323,7 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             directional_light([moon_dir.x, moon_dir.y, moon_dir.z], [0.5, 0.65, 1.0], 0.05),
         );
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.6, 0.55, 0.45],
             intensity: 0.08,
         });

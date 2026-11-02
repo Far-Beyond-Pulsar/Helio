@@ -171,7 +171,7 @@ impl HelioWasmApp for Demo {
                 point_light(p.to_array(), [1.0, 0.85, 0.60], 4.0, 18.0),
             );
         }
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.4, 0.42, 0.48],
             intensity: 0.12,
         });

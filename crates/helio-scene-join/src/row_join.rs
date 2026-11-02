@@ -22,9 +22,9 @@
 //! (`row_join.wgsl`); a kind picks the one its rows need.
 
 use crate::{
-    BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation, SceneDerivationContext,
-    SceneDerivationOutput, GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES, MESH_BOUNDS_ROW_BYTES,
-    OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
+    entry, signature, BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation,
+    SceneDerivationContext, SceneDerivationOutput, GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES,
+    MESH_BOUNDS_ROW_BYTES, OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
 };
 
 /// How a table's placed rows are moved into the frame (bits; see
@@ -393,33 +393,6 @@ impl RowJoin {
     }
 }
 
-fn signature(handles: &[Option<&BufferHandle>], extra: u64) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    let mut mix = |value: u64| {
-        hash ^= value;
-        hash = hash.wrapping_mul(0x0100_0000_01b3);
-    };
-    for handle in handles {
-        match handle {
-            Some(handle) => {
-                mix(handle.epoch);
-                mix(handle.content_generation);
-                mix(handle.buffer.size());
-            }
-            None => mix(u64::MAX),
-        }
-    }
-    mix(extra);
-    hash
-}
-
-fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry {
-        binding,
-        resource: buffer.as_entire_binding(),
-    }
-}
-
 impl SceneDerivation for RowJoin {
     fn name(&self) -> &'static str {
         self.name
@@ -494,7 +467,7 @@ impl SceneDerivation for RowJoin {
             } else {
                 table.epoch
             };
-            let inputs_now = signature(&table_inputs, extra);
+            let inputs_now = signature(&table_inputs, &[extra]);
             if !grew && table.last_inputs == Some(inputs_now) {
                 continue;
             }

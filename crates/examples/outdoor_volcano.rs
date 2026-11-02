@@ -392,7 +392,7 @@ impl ApplicationHandler for App {
                 point_light(p, [r, g, b], intensity, range),
             ));
         }
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.5, 0.1, 0.02],
             intensity: 0.04,
         });

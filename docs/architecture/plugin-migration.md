@@ -246,8 +246,12 @@ As built, A1-A3 (2026-11-02, branch `rewrite/p6-frame`):
   it); `WaterTransmission` is a new (dormant without water) pass;
   renamed contract resources (`indirect_diffuse`, `indirect_specular_*`,
   `transmission`, `view_remaps`); moved type paths (fog composite,
-  volume blend). Performance markers stay unconditional, so with portals
-  off the scene-prep marker follows the (empty) portal-cull node.
+  volume blend); after A4 the lighting no longer reads `ies_textures`
+  and the tone map no longer reads `color_grading_lut` (both are node
+  settings now). Performance markers stay unconditional (stable perf
+  phases whatever a level holds), so with portals off the markers of the
+  (now empty) portal-cull and portal-overlay nodes remain where the preset
+  used to drop the nodes.
 - Found, not fixed: the deferred lighting loads the half-resolution SSR
   trace at full-resolution pixels (`textureLoad(layer0, pix)`), as it did
   before; HLFS's composite reconstructs it properly. Transparency still
@@ -258,7 +262,9 @@ As built, A1-A3 (2026-11-02, branch `rewrite/p6-frame`):
 As built, A4 (2026-11-02):
 - **One generic seam replaces the kind setters**: `Renderer::set_feature<T>`
   (and `feature::<T>()`, `RendererBuilder::with_feature`) sets a feature's
-  settings in the renderer config and rebuilds the graph. Kinds own their
+  settings in the renderer config and rebuilds the graph;
+  `set_feature_live<T>` sets one whose readers read it every frame (the
+  ambient light, the material sampler) without a rebuild. Kinds own their
   settings types:
   - `set_shadow_quality` and `RendererConfig::{shadow_quality, shadow_budget}`
     -> `helio_pass_shadow_matrix::ShadowSettings { budget, quality }` (host

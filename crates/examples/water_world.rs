@@ -329,7 +329,7 @@ impl Showcase {
                 size[1],
                 renderer_config.surface_format,
             );
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.45, 0.58, 0.8],
             intensity: 0.35,
         });

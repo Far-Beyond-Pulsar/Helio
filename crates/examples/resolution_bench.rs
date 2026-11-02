@@ -612,7 +612,7 @@ fn run(
             helio_presets::deferred,
         ))
         .build(device.clone(), queue.clone(), width, height, FORMAT);
-    renderer.set_feature(helio::AmbientLight {
+    renderer.set_feature_live(helio::AmbientLight {
             color: [0.08, 0.08, 0.09],
             intensity: 1.0,
         });

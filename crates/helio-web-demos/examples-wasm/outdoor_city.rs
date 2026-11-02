@@ -170,7 +170,7 @@ impl HelioWasmApp for Demo {
             world,
             directional_light([moon.x, moon.y, moon.z], [0.4, 0.5, 0.9], 0.003),
         );
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.1, 0.12, 0.2],
             intensity: 0.02,
         });

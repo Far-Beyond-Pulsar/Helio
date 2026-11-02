@@ -612,7 +612,7 @@ fn build_scene(
         LensComponent::from(helio_pass_lens::LensRow::new(0)),
     );
 
-    renderer.set_feature(helio::AmbientLight {
+    renderer.set_feature_live(helio::AmbientLight {
             color: [0.10, 0.12, 0.18],
             intensity: 0.04,
         });

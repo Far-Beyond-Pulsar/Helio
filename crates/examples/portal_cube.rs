@@ -355,7 +355,7 @@ impl ApplicationHandler for App {
         // room; pushed up well past a typical scene's ambient so the walls
         // read clearly at every reflection depth instead of fading to black
         // a couple of bounces in.
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.6, 0.65, 0.75],
             intensity: 0.35,
         });

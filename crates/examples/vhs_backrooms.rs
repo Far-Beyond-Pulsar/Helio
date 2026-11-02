@@ -1067,7 +1067,7 @@ impl ApplicationHandler for App {
             },
         );
 
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.75, 0.7, 0.6],
             intensity: 0.04,
         });

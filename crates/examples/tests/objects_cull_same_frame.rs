@@ -87,7 +87,7 @@ fn spawned_and_despawned_objects_show_in_the_next_frame() {
     ))
     .build(device.clone(), queue.clone(), SIZE, SIZE, format);
     renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
-    renderer.set_feature(helio::AmbientLight {
+    renderer.set_feature_live(helio::AmbientLight {
         color: [0.0; 3],
         intensity: 0.0,
     });

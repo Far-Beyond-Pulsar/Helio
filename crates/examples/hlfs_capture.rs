@@ -279,7 +279,7 @@ pub fn run_scene_animated(
                 .expect("TSR pass")
                 .set_reactivity(value);
         }
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: if name.starts_with("cathedral") {
                 [0.10, 0.09, 0.085]
             } else {

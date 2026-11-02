@@ -290,7 +290,7 @@ impl HelioWasmApp for Demo {
             &mut scene_db.world,
             directional_light([moon_dir.x, moon_dir.y, moon_dir.z], [0.4, 0.5, 1.0], 0.02),
         );
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.4, 0.45, 0.65],
             intensity: 0.015,
         });

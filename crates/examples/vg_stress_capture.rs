@@ -1233,7 +1233,7 @@ impl Capture {
             .ambient
             .clone()
             .unwrap_or_else(|| self.default_ambient.clone());
-        s.renderer.set_feature(helio::AmbientLight {
+        s.renderer.set_feature_live(helio::AmbientLight {
             color: ambient.color,
             intensity: ambient.intensity,
         });

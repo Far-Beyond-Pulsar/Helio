@@ -238,7 +238,7 @@ fn add_showcase_lighting(world: &mut World, renderer: &mut Renderer, bounds: Sce
         world,
         directional_light([0.15, -1.0, 0.1], [0.07, 0.09, 0.14], 0.3),
     );
-    renderer.set_feature(helio::AmbientLight {
+    renderer.set_feature_live(helio::AmbientLight {
             color: [0.0, 0.0, 0.0],
             intensity: 0.0,
         });

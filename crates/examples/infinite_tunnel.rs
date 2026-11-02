@@ -431,7 +431,7 @@ impl ApplicationHandler for App {
         .expect("portal projection rows");
         helio_scene_derivations::portals::set_projection_frame(&mut renderer, &projection);
 
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.85, 0.9, 1.0],
             intensity: 0.05,
         });

@@ -732,7 +732,7 @@ impl ApplicationHandler for App {
             )
         };
         renderer.set_material_sampler(&material_sampler());
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [1.0, 0.95, 0.85],
             intensity: 0.05,
         });

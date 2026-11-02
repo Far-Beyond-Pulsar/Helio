@@ -264,7 +264,7 @@ impl ApplicationHandler for App {
         }
 
         // Optional faint moon as directional component-like sky bloom (general ambient control)
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.045, 0.06, 0.08],
             intensity: 0.08,
         });

@@ -997,7 +997,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         .renderer
         .set_tsr_quality(Some(helio_pass_tsr::TsrQuality::Native));
     editor.renderer.set_jitter_enabled(false);
-    editor.renderer.set_feature(helio::AmbientLight {
+    editor.renderer.set_feature_live(helio::AmbientLight {
         color: [1.0; 3],
         intensity: 1.0,
     });

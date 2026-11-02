@@ -477,7 +477,7 @@ impl ApplicationHandler for App {
         // ── Sky: nearly black — reflections visible only from lights ──────────
 
         spawn_sky(&mut scene_db.world, [0.02, 0.02, 0.04]);
-        renderer.set_feature(helio::AmbientLight {
+        renderer.set_feature_live(helio::AmbientLight {
             color: [0.01, 0.01, 0.02],
             intensity: 0.03,
         });

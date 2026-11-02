@@ -850,7 +850,7 @@ fn build_bench(
             other => panic!("unknown graph {other}; use hlfs or default"),
         })
         .build(device.clone(), queue.clone(), WIDTH, HEIGHT, format);
-    renderer.set_feature(helio::AmbientLight {
+    renderer.set_feature_live(helio::AmbientLight {
             color: [0.08, 0.08, 0.09],
             intensity: 1.0,
         });
