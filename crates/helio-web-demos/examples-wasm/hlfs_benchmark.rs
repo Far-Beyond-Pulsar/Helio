@@ -91,7 +91,7 @@ impl HelioWasmApp for Demo {
         let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];
 
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
-        let graph = helio_default_passes::presets::hlfs(helio::PassBuildContext {
+        let graph = helio_presets::hlfs(helio::PassBuildContext {
             device: &device,
             queue: &queue,
             config: renderer.renderer_config(),

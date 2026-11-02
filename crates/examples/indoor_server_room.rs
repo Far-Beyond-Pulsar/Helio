@@ -124,7 +124,7 @@ impl ApplicationHandler for App {
             .with_shadow_quality(helio::ShadowQuality::Ultra);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

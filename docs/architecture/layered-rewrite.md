@@ -625,6 +625,37 @@ As built, step 2 (2026-11-02): every shipped pipeline is a node graph.
   preset's graph, presets follow the config, HLFS keeps one format, voxel
   terrain joins every G-buffer preset.
 
+As built, steps 3 and 4 (2026-11-02): every pass node lives with its pass;
+`helio-default-passes` is gone.
+- `helio-spine` (layer spine) is the spine as a feature: scene prep,
+  shadows, culling, light binning, G-buffer, forward and deferred lighting,
+  transparency, TSR, the tone map, the host-input nodes and the background
+  pass. Its nodes read `SpineSettings` (shadow budget and quality,
+  background colour, debug mode, environment reflections), never
+  `RendererConfig`.
+- Every feature crate has a `feature.rs` registering its nodes: decals,
+  SSR (+ composite), planar reflections, HLFS, foliage (both nodes and the
+  ground finisher), VG (new crate `helio-pass-vg`: the chain's glue moved
+  out of the presets), portal cull, portal draws, billboards, corona, water,
+  volumetric fog, FXAA, lens, flare, sprites, buffer view, perf overlay
+  (with the phase markers), simple cube; the sky adds its composite.
+- Feature API: preparers (`FeatureRegistrar::prepare`, run before any node
+  builds), `SceneColorFormat` + `BuildEnv::scene_format`, the `pass_node`
+  and `missing` helpers.
+- `helio-presets` (layer preset) is what remains of the presets: `Preset`,
+  `features::default_features` (the feature list), the renderer's own
+  nodes (debug draw) and the config bridge (a preparer mapping
+  `RendererConfig` into `SpineSettings` and the perf overlay's mode),
+  `graphs`, `pipelines`, the swap policy, `with_voxel_terrain`,
+  `with_virtual_geometry`, `config_with_host_settings`, `water_shore`.
+- `helio-scene-derivations` (layer preset) holds the scene derivations:
+  scene join, hierarchy resolve, environment join, portal projection,
+  texture means, and their shaders. The environment join still knows many
+  features' rows; splitting it per feature is a follow-up.
+- Every preset's pass list for five configs is identical before and after
+  both steps (but for the background pass's type path). Hosts and Pulsar
+  name `helio_presets` / `helio_scene_derivations`.
+
 ### Phase 6: repo split
 - Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
   without a breaking change. Pulsar pins tags.

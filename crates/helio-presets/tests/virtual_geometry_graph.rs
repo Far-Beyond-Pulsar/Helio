@@ -67,12 +67,12 @@ fn build(
         .edit::<helio_pass_foliage_place::FoliageSettings>()
         .enabled = false;
     if let Some(runtime) = runtime {
-        config = helio_default_passes::with_virtual_geometry(config, runtime);
+        config = helio_presets::with_virtual_geometry(config, runtime);
     }
     RendererBuilder::new(config.clone(), mirror(device, queue))
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
-        .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+        .with_pass_build_context(Box::new(helio_presets::deferred))
         .build(
             Arc::clone(device),
             Arc::clone(queue),
@@ -127,7 +127,7 @@ fn the_chain_is_absent_by_default_and_idle_without_assets() {
     // Requested: present when the device supports it, absent otherwise.
     let runtime = VgRuntime::new(VgRuntimeSettings::default());
     let mut renderer = build(&device, &queue, Some(&runtime));
-    let supported = helio_default_passes::virtual_geometry_supported(&device);
+    let supported = helio_presets::virtual_geometry_supported(&device);
     assert_eq!(renderer.find_pass::<VgCullEarlyPass>().is_some(), supported);
     assert_eq!(renderer.find_pass::<VgShadePass>().is_some(), supported);
 
@@ -157,17 +157,17 @@ fn vg_debug_view_env_var_selects_the_initial_debug_mode() {
 
     std::env::set_var(ENV_VAR, "lod");
     assert_eq!(
-        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
+        helio_presets::with_virtual_geometry(config(), &runtime).debug_mode,
         VgDebugView::LodLevel.id()
     );
     std::env::set_var(ENV_VAR, "21");
     assert_eq!(
-        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
+        helio_presets::with_virtual_geometry(config(), &runtime).debug_mode,
         VgDebugView::ClusterId.id()
     );
     std::env::set_var(ENV_VAR, "not a view");
     assert_eq!(
-        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
+        helio_presets::with_virtual_geometry(config(), &runtime).debug_mode,
         0
     );
     // An explicit mode wins over the environment.
@@ -175,12 +175,12 @@ fn vg_debug_view_env_var_selects_the_initial_debug_mode() {
     let mut explicit = config();
     explicit.debug_mode = 5;
     assert_eq!(
-        helio_default_passes::with_virtual_geometry(explicit, &runtime).debug_mode,
+        helio_presets::with_virtual_geometry(explicit, &runtime).debug_mode,
         5
     );
     std::env::remove_var(ENV_VAR);
     assert_eq!(
-        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
+        helio_presets::with_virtual_geometry(config(), &runtime).debug_mode,
         0
     );
 
@@ -196,7 +196,7 @@ fn the_chain_registers_every_vg_debug_view_with_its_category() {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: virtual geometry debug views");
         return;
     };
-    if !helio_default_passes::virtual_geometry_supported(&device) {
+    if !helio_presets::virtual_geometry_supported(&device) {
         return;
     }
     let runtime = VgRuntime::new(VgRuntimeSettings::default());

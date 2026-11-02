@@ -186,7 +186,7 @@ impl ApplicationHandler for App {
         }
         let mut renderer = RendererBuilder::new(config, scene_handle)
             .with_editor_mode(true)
-            .with_pass_build_context(Box::new(helio_default_passes::presets::hlfs))
+            .with_pass_build_context(Box::new(helio_presets::hlfs))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

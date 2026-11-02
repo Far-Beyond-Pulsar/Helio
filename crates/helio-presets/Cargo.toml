@@ -1,9 +1,9 @@
 [package]
-name = "helio-default-passes"
+name = "helio-presets"
 version = "0.1.0"
 edition = "2021"
 workspace = "../../"
-description = "Helio's shipped pipelines (node-graph presets) and the nodes of its default passes"
+description = "Helio's shipped pipelines as node-graph presets, the feature list they build from, and the renderer config helpers"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -17,10 +17,7 @@ helio-graph-asset = { path = "../helio-graph-asset" }
 helio-core = { workspace = true }
 image = { workspace = true, features = ["png"] }
 wgpu = { workspace = true }
-bytemuck = { workspace = true }
 serde_json = { workspace = true }
-log = { workspace = true }
-helio-mats = { workspace = true }
 helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
 helio-pass-corona = { path = "../passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "../passes/3d/helio-pass-flare" }
@@ -60,6 +57,9 @@ helio-vg-format = { path = "../helio-vg-format" }
 helio-vg-stream = { path = "../helio-vg-stream" }
 
 [dev-dependencies]
+bytemuck = { workspace = true }
+helio-mats = { workspace = true }
+helio-scene-derivations = { path = "../helio-scene-derivations" }
 helio-pass-vg-cull = { path = "../passes/3d/helio-pass-vg-cull" }
 helio-pass-vg-shade = { path = "../passes/3d/helio-pass-vg-shade" }
 pulsar_scenedb = { workspace = true }

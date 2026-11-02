@@ -199,7 +199,7 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_editor_mode(true)
-            .with_pass_build_context(Box::new(helio_default_passes::presets::hlfs_fxaa))
+            .with_pass_build_context(Box::new(helio_presets::hlfs_fxaa))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

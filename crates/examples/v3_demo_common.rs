@@ -345,7 +345,7 @@ pub fn build_default_renderer(
     RendererBuilder::new(config.clone(), graph_scene_db.clone())
         .with_external_device()
         .with_pass_build_context(Box::new(
-            helio_default_passes::presets::deferred,
+            helio_presets::deferred,
         ))
         .build(
             device,
@@ -364,7 +364,7 @@ pub fn build_default_renderer_with_context(
     config: RendererConfig,
 ) -> Renderer {
     let builder = RendererBuilder::new(config.clone(), scene_db_handle(scene_db)).with_pass_build_context(
-        Box::new(helio_default_passes::presets::deferred),
+        Box::new(helio_presets::deferred),
     );
     graphics
         .build_renderer(builder, config)

@@ -8,7 +8,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
-use helio_default_passes::presets::Preset;
+use helio_presets::Preset;
 use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, Slot};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
@@ -133,15 +133,15 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
             .features
             .edit::<helio_pass_foliage_place::FoliageSettings>()
             .enabled = false;
-        let config = helio_default_passes::with_voxel_terrain(
+        let config = helio_presets::with_voxel_terrain(
             config,
             helio_pass_voxel_planet::VoxelTerrain::new(move || {
                 ChunkPass::new(Arc::clone(&pass_source))
             }),
         );
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let nodes = helio_default_passes::graphs::registry_for(
-            &helio_default_passes::graph_nodes::default_features()
+        let nodes = helio_presets::graphs::registry_for(
+            &helio_presets::features::default_features()
                 .with(FinalConsumerFeature(observed.clone())),
         );
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
@@ -414,7 +414,7 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
         .features
         .edit::<helio_pass_foliage_place::FoliageSettings>()
         .enabled = false;
-    let config = helio_default_passes::with_voxel_terrain(
+    let config = helio_presets::with_voxel_terrain(
         config,
         helio_pass_voxel_planet::VoxelTerrain::new(move || {
             ChunkPass::new(Arc::clone(&pass_source))

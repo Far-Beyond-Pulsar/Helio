@@ -11,7 +11,7 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::AtmosphereComponent;
-use helio_default_passes::presets::Preset;
+use helio_presets::Preset;
 use helio_pass_sky::{CloudLayer, PlanetWeather};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
@@ -79,7 +79,7 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
         .enabled = false;
     if ground {
         let pass_source = Arc::clone(&source);
-        config = helio_default_passes::with_voxel_terrain(
+        config = helio_presets::with_voxel_terrain(
             config,
             helio_pass_voxel_planet::VoxelTerrain::new(move || {
                 ChunkPass::new(Arc::clone(&pass_source))

@@ -10,7 +10,7 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::FoliageTypeComponent;
-use helio_default_passes::presets::Preset;
+use helio_presets::Preset;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, unpack_blade, FoliageKind, FoliagePlacePass, GpuBladeInstance,
     GpuFoliageTile, GpuFoliageType, GpuTileFrame, TileState,
@@ -118,7 +118,7 @@ impl Harness {
                 .features
                 .edit::<helio_pass_foliage_place::FoliageSettings>()
                 .range = Some(60.0);
-            let config = helio_default_passes::with_voxel_terrain(
+            let config = helio_presets::with_voxel_terrain(
                 config,
                 helio_pass_voxel_planet::VoxelTerrain::new(move || {
                     ChunkPass::new(pass_source.clone())

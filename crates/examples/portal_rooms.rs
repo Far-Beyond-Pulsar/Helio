@@ -167,7 +167,7 @@ impl ApplicationHandler for App {
         config.enable_portals = true;
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;
@@ -411,7 +411,7 @@ impl ApplicationHandler for App {
             projection_entities[0],
         )
         .expect("portal_rooms dense projection rows");
-        helio_default_passes::portals::set_projection_frame(&mut renderer, &projection_frame);
+        helio_scene_derivations::portals::set_projection_frame(&mut renderer, &projection_frame);
 
         // ── A light near the hub's center so its own walls read clearly.
         light_ids.push(spawn_light(

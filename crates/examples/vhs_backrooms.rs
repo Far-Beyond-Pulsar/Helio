@@ -1038,7 +1038,7 @@ impl ApplicationHandler for App {
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred));
+            .with_pass_build_context(Box::new(helio_presets::deferred));
         let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
         let xr_active = graphics.is_xr();
         if xr_active {

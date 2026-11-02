@@ -1,6 +1,6 @@
 //! Helio's default pipelines as node graphs.
 //!
-//! The shipped pipelines are graphs of the pass nodes in [`crate::graph_nodes`]
+//! The shipped pipelines are graphs of the pass nodes in [`crate::features`]
 //! ([`crate::presets`] makes them for a renderer config). This module has the
 //! registry that holds those nodes and the editor's laid-out template of the
 //! default deferred pipeline.
@@ -23,7 +23,7 @@ use helio_graph_asset::{
     NodeRegistry, PinDesc, PinKind, PinRef, PinType, Probe, SCENEDB_PREFIX,
 };
 
-use crate::graph_nodes::{self, host_kind, HOST_INPUTS};
+use crate::features::{self, host_kind, HOST_INPUTS};
 
 /// The config the editor's template and the pin probe use: the renderer's
 /// defaults (FXAA, portals and foliage on, no screen-space or planar
@@ -48,9 +48,9 @@ pub fn registry_for(features: &helio_feature_api::FeatureSet) -> NodeRegistry {
     registry
 }
 
-/// Core nodes and the default features ([`graph_nodes::default_features`]).
+/// Core nodes and the default features ([`features::default_features`]).
 pub fn base_registry() -> NodeRegistry {
-    registry_for(&graph_nodes::default_features())
+    registry_for(&features::default_features())
 }
 
 fn pass_kinds(registry: &NodeRegistry) -> Vec<String> {
@@ -278,7 +278,7 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph_nodes::kind;
+    use crate::features::kind;
     use helio_graph_asset::{validate, NodePins, Severity};
 
     #[test]

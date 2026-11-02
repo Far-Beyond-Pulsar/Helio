@@ -8,7 +8,7 @@
 //! other pipeline.
 //!
 //! This crate knows no pass. Registries are filled by the crates that own the
-//! passes (`helio-default-passes` registers Helio's), plus the core resource
+//! passes (`helio-presets` registers Helio's), plus the core resource
 //! nodes in [`core_nodes`].
 
 mod asset;

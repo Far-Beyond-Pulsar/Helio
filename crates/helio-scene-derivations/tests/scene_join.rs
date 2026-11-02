@@ -6,11 +6,11 @@
 use helio_components::StaticObjectComponent;
 use std::sync::Arc;
 
-use helio_default_passes::scene_join::{
+use helio_scene_derivations::scene_join::{
     BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation, SceneDerivationContext,
     SceneDerivationOutput,
 };
-use helio_default_passes::scene_join::{SceneJoin, SceneJoinKeys};
+use helio_scene_derivations::scene_join::{SceneJoin, SceneJoinKeys};
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
     let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());

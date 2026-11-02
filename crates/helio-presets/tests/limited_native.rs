@@ -151,7 +151,7 @@ async fn run_default_graph(
             .cloned()
             .expect("mirror attached above"),
     )
-    .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+    .with_pass_build_context(Box::new(helio_presets::deferred))
     .with_external_device()
     .build(
         Arc::clone(&device),

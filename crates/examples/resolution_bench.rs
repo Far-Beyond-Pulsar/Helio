@@ -609,7 +609,7 @@ fn run(
         .with_external_device()
         .with_editor_mode(args.editor)
         .with_pass_build_context(Box::new(
-            helio_default_passes::presets::deferred,
+            helio_presets::deferred,
         ))
         .build(device.clone(), queue.clone(), width, height, FORMAT);
     renderer.set_ambient([0.08, 0.08, 0.09], 1.0);

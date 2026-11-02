@@ -21,7 +21,7 @@
 //!    with `frag_depth`, depth-tested `>=` against the classic depth.
 //!
 //! The pass is driven through [`VgShade::encode`] with explicit resources
-//! rather than the graph registry: graph wiring is `helio-default-passes`'
+//! rather than the graph registry: graph wiring is `helio-presets`'
 //! job (T10). See [`VgShadeInputs`] for the contract with the cull/raster
 //! crates and `helio_vg_format::DECODE_WGSL` for the vertex decode.
 

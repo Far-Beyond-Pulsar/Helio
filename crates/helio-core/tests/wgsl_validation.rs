@@ -137,14 +137,14 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
     // `SceneJoin` and `EnvironmentJoin` prefix the shared join declarations.
     const JOINS: &[&str] = &[
-        "helio-default-passes/shaders/scene_join_meshes.wgsl",
-        "helio-default-passes/shaders/scene_join_lights.wgsl",
-        "helio-default-passes/shaders/environment_join.wgsl",
-        "helio-default-passes/shaders/hierarchy_resolve.wgsl",
-        "helio-default-passes/shaders/scene_join_moved.wgsl",
+        "helio-scene-derivations/shaders/scene_join_meshes.wgsl",
+        "helio-scene-derivations/shaders/scene_join_lights.wgsl",
+        "helio-scene-derivations/shaders/environment_join.wgsl",
+        "helio-scene-derivations/shaders/hierarchy_resolve.wgsl",
+        "helio-scene-derivations/shaders/scene_join_moved.wgsl",
     ];
     if JOINS.iter().any(|suffix| normalized.ends_with(suffix)) {
-        let common = root.join("crates/helio-default-passes/shaders/scene_join_common.wgsl");
+        let common = root.join("crates/helio-scene-derivations/shaders/scene_join_common.wgsl");
         let common = std::fs::read_to_string(common).expect("scene_join_common.wgsl");
         return format!("{common}\n{source}");
     }
@@ -276,7 +276,7 @@ fn every_wgsl_shader_parses_and_validates() {
 #[test]
 fn composed_shaders_parse_and_validate() {
     let mut sources = helio_pass_voxel_planet::engine::validation_sources();
-    sources.extend(helio_default_passes::scene_join::validation_sources());
+    sources.extend(helio_scene_derivations::scene_join::validation_sources());
     sources.push((
         "volumetric_fog.wgsl".into(),
         helio_pass_volumetric_fog::shader_source(),

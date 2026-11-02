@@ -231,7 +231,7 @@ impl ApplicationHandler for App {
         let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(|mut ctx| {
                 ctx.owns_device = false;
-                helio_default_passes::presets::forward(ctx)
+                helio_presets::forward(ctx)
             }));
         let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
         renderer.set_editor_mode(true);

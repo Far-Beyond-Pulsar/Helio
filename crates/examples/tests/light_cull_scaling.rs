@@ -94,7 +94,7 @@ fn culling_covers_grown_light_buffers_and_follows_moving_lights() {
     )
     .with_external_device()
     .with_pass_build_context(Box::new(
-        helio_default_passes::presets::deferred,
+        helio_presets::deferred,
     ))
     .build(device.clone(), queue.clone(), WIDTH, HEIGHT, format);
     let target = device.create_texture(&wgpu::TextureDescriptor {

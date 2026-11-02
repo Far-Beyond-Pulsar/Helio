@@ -299,7 +299,7 @@ frame of `ChunkPass`:
 ## Measuring
 
 Everything is measured in Helio's graph or on `ChunkWorld` directly with
-`helio-default-passes`' `voxel_flight` example (its module docs list every
+the examples crate's `voxel_flight` (its module docs list every
 variable):
 
 ```
@@ -327,7 +327,7 @@ GPU.
 
 `cargo test --release -p helio-pass-voxel-planet -- --test-threads=1` (CPU
 unit tests, `tests/chunks.rs`, `tests/wide_products.rs`) and
-`cargo test --release -p helio-default-passes --test voxel_pass_graph --
+`cargo test --release -p helio-presets --test voxel_pass_graph --
 --test-threads=1` (the pass inside the deferred graph).
 
 - Field: `terrain_programs_are_bit_identical_to_cpu` (every generator and

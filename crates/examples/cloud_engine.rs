@@ -1027,7 +1027,7 @@ impl App {
         // through the authored moon textures as an unwanted white rim.
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut scene_renderer = RendererBuilder::new(scene_config.clone(), graph_scene_db.clone())
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build(
                 device.clone(),
                 queue.clone(),

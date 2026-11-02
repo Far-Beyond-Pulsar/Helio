@@ -840,9 +840,9 @@ fn build_bench(
         .with_external_device()
         .with_editor_mode(args.editor)
         .with_pass_build_context(match args.graph.as_str() {
-            "hlfs" => Box::new(helio_default_passes::presets::hlfs),
+            "hlfs" => Box::new(helio_presets::hlfs),
             // The graph Pulsar-Native's editor viewport builds.
-            "default" => Box::new(helio_default_passes::presets::deferred),
+            "default" => Box::new(helio_presets::deferred),
             other => panic!("unknown graph {other}; use hlfs or default"),
         })
         .build(device.clone(), queue.clone(), WIDTH, HEIGHT, format);

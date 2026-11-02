@@ -1,19 +1,26 @@
-pub mod environment_join;
-pub mod graph_nodes;
+//! Helio's shipped pipelines and what they are made of.
+//!
+//! - [`Preset`]: the shipped pipelines as node graphs made from a renderer
+//!   config ([`presets`]): `deferred`, `hlfs`, `forward`, `simple`, ….
+//! - [`features`]: the feature list they build from (the spine and every
+//!   feature crate's nodes), the renderer's own nodes and the config bridge.
+//! - [`graphs`]: node registries, the editor's template, the pin probe.
+//! - [`pipelines`]: the presets as named pipelines for a host's registry.
+//! - Config helpers: [`with_voxel_terrain`], [`with_virtual_geometry`],
+//!   [`config_with_host_settings`]; and [`water_shore`], the voxel terrain's
+//!   shoreline for water.
+
+pub mod features;
 pub mod graphs;
-pub mod hierarchy_resolve;
 pub mod pipelines;
-pub mod portal_projection;
-pub mod portals;
 pub mod presets;
-pub mod scene_join;
-pub mod texture_means;
 pub mod virtual_geometry;
 pub mod water_shore;
 pub use helio_pass_vg::{
     virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
 };
 pub use helio_vg_format::debug_view as vg_debug_view;
+pub use presets::{deferred, deferred_fxaa, forward, hlfs, hlfs_fxaa, registry, simple, Preset};
 pub use virtual_geometry::with_virtual_geometry;
 
 use helio::RendererConfig;

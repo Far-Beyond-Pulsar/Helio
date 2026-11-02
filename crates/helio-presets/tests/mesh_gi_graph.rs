@@ -233,7 +233,7 @@ fn a_mesh_scene_s_probes_trace_its_meshes_on_frames_with_a_tlas() {
         .enabled = false;
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .with_external_device()
             .build(
                 device.clone(),
@@ -327,7 +327,7 @@ fn without_ray_queries_a_mesh_scene_has_no_gi() {
         .enabled = false;
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .with_external_device()
             .build(
                 device.clone(),

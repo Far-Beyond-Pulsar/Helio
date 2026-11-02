@@ -54,7 +54,7 @@ use helio::{
 };
 use helio_components::WorldRows;
 use helio_components::{CameraPostProcessComponent, LightComponent};
-use helio_default_passes::presets::Preset;
+use helio_presets::Preset;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::VolumeId;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPicks, SharedPlanetFrame, VolumeFrame};
@@ -261,7 +261,7 @@ impl Flight {
                 .edit::<helio_pass_foliage_place::FoliageSettings>()
                 .range = Some(meadow.range);
         }
-        let config = helio_default_passes::with_voxel_terrain(config, terrain);
+        let config = helio_presets::with_voxel_terrain(config, terrain);
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
             .with_external_device()
             .with_graph(Preset::Deferred)

@@ -12,9 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use helio::{DebugDrawState, PassBuildContext, RenderPipelineRegistry, RendererConfig};
 use helio_core::{GpuCameraUniforms, PassDeclaration};
-use helio_default_passes::pipelines::{DEFAULT, DEFERRED_GRAPH};
-use helio_default_passes::presets::Preset;
-use helio_default_passes::{graph_nodes, graphs};
+use helio_presets::pipelines::{DEFAULT, DEFERRED_GRAPH};
+use helio_presets::Preset;
+use helio_presets::{features, graphs};
 use helio_graph_asset::{Connection, GraphAsset, NodeInstance, PinRef};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
@@ -152,7 +152,7 @@ fn reflection_nodes_carry_the_platform_capability() {
     let registry = graphs::base_registry();
     for name in ["ssr", "planar_reflection"] {
         let descriptor = registry
-            .get(&graph_nodes::kind(name))
+            .get(&features::kind(name))
             .expect("reflection nodes are registered");
         assert_eq!(
             descriptor.unsupported.is_some(),
@@ -182,7 +182,7 @@ fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
     let mut asset = GraphAsset::default();
     asset.nodes.push(chain("ssr"));
     let ssr = asset.nodes.last_mut().unwrap();
-    ssr.kind = graph_nodes::kind("ssr");
+    ssr.kind = features::kind("ssr");
     start_and_output(&mut asset);
     wire(&mut asset, "start", "ssr");
     wire(&mut asset, "ssr", "out");
@@ -202,7 +202,7 @@ fn the_template_builds_the_deferred_preset() {
     };
 
     let mut pipelines = RenderPipelineRegistry::new();
-    helio_default_passes::pipelines::register_builtin_pipelines(&mut pipelines);
+    helio_presets::pipelines::register_builtin_pipelines(&mut pipelines);
     let preset = pipelines
         .create(Some(DEFAULT))
         .expect("default pipeline registered")
@@ -356,7 +356,7 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
         let mut asset = GraphAsset::default();
         asset.nodes.push(chain("tsr"));
         let tsr = asset.nodes.last_mut().unwrap();
-        tsr.kind = graph_nodes::kind("tsr");
+        tsr.kind = features::kind("tsr");
         if stochastic {
             tsr.params
                 .insert("stochastic_mask".into(), serde_json::json!(true));
@@ -397,7 +397,7 @@ fn voxel_terrain_joins_every_preset_with_a_gbuffer() {
         return;
     };
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-    fixtures.config = helio_default_passes::with_voxel_terrain(
+    fixtures.config = helio_presets::with_voxel_terrain(
         fixtures
             .config
             .clone()

@@ -28,7 +28,7 @@ use helio_components::WaterVolumeComponent;
 use helio_components::WorldRows;
 use helio_components::{CameraPostProcessComponent, LightComponent};
 use helio_components::{FoliageTypeComponent, FoliageWindComponent};
-use helio_default_passes::presets::Preset;
+use helio_presets::Preset;
 use helio_pass_foliage_place::FoliagePlacePass;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageType, FOLIAGE_FLAG_GROUND_COLOUR,
@@ -318,7 +318,7 @@ impl Showcase {
             .features
             .edit::<helio_pass_foliage_place::FoliageSettings>()
             .range = Some(meadow.range * 1.5);
-        let renderer_config = helio_default_passes::with_voxel_terrain(renderer_config, terrain);
+        let renderer_config = helio_presets::with_voxel_terrain(renderer_config, terrain);
         let mut renderer = RendererBuilder::new(renderer_config.clone(), mirror)
             .with_external_device()
             .with_graph(Preset::Deferred)
@@ -344,7 +344,7 @@ impl Showcase {
         scene.world.flush_gpu_mirror(&queue);
         if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
             sim.set_shore_map(Some(
-                helio_default_passes::water_shore::shore_map_from_voxel_planet(
+                helio_presets::water_shore::shore_map_from_voxel_planet(
                     [0.0, 0.0],
                     [EXTENT * 2.0, EXTENT * 2.0],
                     REST_Y,

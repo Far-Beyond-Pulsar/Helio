@@ -210,7 +210,7 @@ impl ApplicationHandler for App {
         let scene_db_handle = v3_demo_common::scene_db_handle(&scene_db);
 
         let mut renderer = RendererBuilder::new(config, scene_db_handle)
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

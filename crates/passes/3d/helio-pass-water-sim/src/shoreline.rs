@@ -3,7 +3,7 @@
 //! A map is baked from an elevation provider, never inferred from water
 //! volume bounds. A terrain feature answers [`WaterTerrainProvider`]; water
 //! names no terrain (Helio's voxel terrain's provider lives in the preset,
-//! `helio_default_passes::water_shore`).
+//! `helio_presets::water_shore`).
 use rayon::prelude::*;
 
 pub const SHORE_MAP_SIZE: u32 = 512;

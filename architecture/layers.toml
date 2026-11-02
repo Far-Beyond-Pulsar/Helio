@@ -139,7 +139,8 @@ helio = { layer = "renderer" }
 helio-xr = { layer = "renderer" }
 
 # presets
-helio-default-passes = { layer = "preset" }
+helio-presets = { layer = "preset" }
+helio-scene-derivations = { layer = "preset" }
 helio-graph-asset = { layer = "preset" }
 
 # hosts
@@ -160,4 +161,5 @@ scene_store_derives = 0
 
 [renamed]
 # Old crate names in git history -> today's crate, for the co-change report.
-helio-default-graphs = "helio-default-passes"
+helio-default-graphs = "helio-presets"
+helio-default-passes = "helio-presets"

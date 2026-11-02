@@ -1,6 +1,6 @@
 //! Helio's shipped pipelines, as node graphs.
 //!
-//! A preset is a graph of the pass nodes in [`crate::graph_nodes`], made for
+//! A preset is a graph of the pass nodes in [`crate::features`], made for
 //! the renderer config it is built with: the config picks the anti-aliasing
 //! (TSR when `tsr_quality` is set), screen-space and planar reflections,
 //! portals and foliage, and the TSR node's settings. The nodes features
@@ -27,7 +27,7 @@ use helio_graph_asset::{
 };
 use serde_json::Value;
 
-use crate::graph_nodes::{host_kind, kind, SceneColorFormat, HOST_INPUTS};
+use crate::features::{host_kind, kind, SceneColorFormat, HOST_INPUTS};
 
 /// One of Helio's shipped pipelines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

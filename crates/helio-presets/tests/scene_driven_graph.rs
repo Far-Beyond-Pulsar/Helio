@@ -134,7 +134,7 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
         .enabled = false;
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .with_external_device()
             .build(
                 device.clone(),

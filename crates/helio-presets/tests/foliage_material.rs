@@ -108,7 +108,7 @@ fn meadow() -> Option<Meadow> {
         .enabled = true;
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_external_device()
-        .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+        .with_pass_build_context(Box::new(helio_presets::deferred))
         .build(
             Arc::clone(&device),
             Arc::clone(&queue),

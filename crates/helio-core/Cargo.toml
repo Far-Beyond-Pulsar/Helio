@@ -33,7 +33,7 @@ helio-pass-gi = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
 helio-pass-sky = { workspace = true }
 helio-pass-volumetric-fog = { workspace = true }
-helio-default-passes = { workspace = true }
+helio-scene-derivations = { workspace = true }
 helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
 helio-pass-water-sim = { workspace = true }
 

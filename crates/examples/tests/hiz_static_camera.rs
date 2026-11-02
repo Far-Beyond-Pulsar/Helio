@@ -54,7 +54,7 @@ impl Harness {
         )
         .with_external_device()
         .with_pass_build_context(Box::new(
-            helio_default_passes::presets::deferred,
+            helio_presets::deferred,
         ))
         .build(device.clone(), queue.clone(), SIZE, SIZE, format);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);

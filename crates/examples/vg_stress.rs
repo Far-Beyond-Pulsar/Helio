@@ -703,7 +703,7 @@ impl ApplicationHandler for App {
                 .or_default()
                 .push(placement.clone());
         }
-        let vg_supported = helio_default_passes::virtual_geometry_supported(&device);
+        let vg_supported = helio_presets::virtual_geometry_supported(&device);
         if !vg_supported {
             log::warn!(
                 "This device does not support Helio's virtual-geometry passes; rendering scans through the classic mesh path."
@@ -711,12 +711,12 @@ impl ApplicationHandler for App {
         }
         let mut config = RendererConfig::new(size.width, size.height, format);
         if vg_supported {
-            config = helio_default_passes::with_virtual_geometry(config, &runtime);
+            config = helio_presets::with_virtual_geometry(config, &runtime);
         }
         let derivation =
             SceneVgDerivation::new(&device, runtime.clone(), targets.clone(), vg_supported);
         let builder = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .with_scene_derivation(Box::new(derivation));
         let mut renderer = if capture_options.is_none() {
             builder

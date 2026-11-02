@@ -407,7 +407,7 @@ pub fn lod_draws(level: u32, distance: f32, boundary: f32, band: f32, unit: f32)
 /// Rasterises grass blades and cards into the shared G-buffer.
 ///
 /// Construct it with the four buffers `FoliagePlacePass` owns, following the
-/// `ShadowDirtyPass` → `ShadowCullPass` handoff in `helio-default-passes`: the producer
+/// `ShadowDirtyPass` → `ShadowCullPass` handoff in `helio-presets`: the producer
 /// pass is built first and its `Arc<wgpu::Buffer>` fields are cloned into the consumer.
 pub struct FoliageGBufferPass {
     pipeline: wgpu::RenderPipeline,
