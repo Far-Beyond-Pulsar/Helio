@@ -347,6 +347,16 @@ crate; the hierarchy resolve stays in `helio-scene-derivations`.
   (`row_join.wgsl`) the kinds select by bit; the next step is each kind
   bringing its placement as a snippet, so a new kind needs no engine edit.
 
+Phase A verification (2026-11-02): preset snapshot as above; Helio and
+Pulsar `cargo check --workspace --all-targets` clean; layer gate 0;
+helio-presets GPU tests pass except the known
+`foliage_grows_on_the_voxel_ground`; voxel_craft bursts (alternating
+base/new, 4 poses) match to base/base noise (pose means within 0.05);
+`indoor_cathedral` captures base/new mean |Δ| 0.11 against base/base 0.19.
+`indoor_cathedral_water` drifts +0.3 to +0.7 levels evenly over the whole
+frame between runs: its candle flicker follows wall-clock time, so each
+capture lands at a different flicker phase (not the transmission input).
+
 **B. Plugins** (each: Pulsar plugin + its Helio crates move out of the
 Helio repo into it; component methods for every editor/game operation;
 editor moved onto those methods):
