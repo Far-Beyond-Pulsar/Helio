@@ -204,11 +204,11 @@ impl Flight {
         // both.
         if let Some(sky) = sky {
             let air = scene.world.spawn();
-            scene.world.insert(air, sky);
+            scene.world.insert_row(air, sky);
         }
         if let Some(haze) = preset.haze(planet.grid().radius()) {
             let entity = scene.world.spawn();
-            scene.world.insert(entity, haze);
+            scene.world.insert_row(entity, haze);
         }
         // The preset's ground cover: the engine's voxel meadow on Earth's
         // grass (`HELIO_VOXEL_FLIGHT_NO_FOLIAGE`: bare ground, A/B for its

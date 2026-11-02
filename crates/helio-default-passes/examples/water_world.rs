@@ -179,7 +179,7 @@ impl Showcase {
         // fraction of the real column and the sunset never reddens.
         let world_radius = 6_360_000.0;
         let atmosphere = scene.world.spawn();
-        scene.world.insert(
+        scene.world.insert_row(
             atmosphere,
             worlds::Preset::Earth
                 .sky(world_radius)
@@ -190,7 +190,7 @@ impl Showcase {
         // composited after the water, so it also veils the underwater far field.
         if std::env::var_os("WATER_WORLD_NO_HAZE").is_none() {
             let haze = scene.world.spawn();
-            scene.world.insert(
+            scene.world.insert_row(
                 haze,
                 worlds::Preset::Earth
                     .haze(world_radius)
