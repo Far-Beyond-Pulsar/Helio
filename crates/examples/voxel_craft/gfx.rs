@@ -16,7 +16,7 @@ use helio::{
 use helio_components::AtmosphereComponent;
 use helio_components::FoliageInteractorComponent;
 use helio_components::WorldRows;
-use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_default_passes::presets::Preset;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::ResidencyConfig;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
@@ -430,10 +430,10 @@ impl Gfx {
         let pass_source = source.clone();
         let appearance = palette.appearance;
         let config = chunk_config(render_size[1]);
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
+        let terrain = helio_pass_voxel_planet::VoxelTerrain::new(move || {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
-            Box::new(pass)
+            pass
         });
         let renderer_config = RendererConfig::new(render_size[0], render_size[1], render_format);
         // Render VR eyes at Performance scale by default, then reconstruct to
@@ -450,12 +450,10 @@ impl Gfx {
         renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().tufts_per_m2 = Some(meadow.tufts_per_m2);
         renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().blades_per_tuft = Some(meadow.blades_per_tuft);
         renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().range = Some(meadow.range);
+        let renderer_config = helio_default_passes::with_voxel_terrain(renderer_config, terrain);
         let handle = scene_db_handle(&scene);
-        let builder = RendererBuilder::new(renderer_config.clone(), handle).with_pass_build_context(
-            Box::new(move |ctx| {
-                build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])
-            }),
-        );
+        let builder =
+            RendererBuilder::new(renderer_config.clone(), handle).with_graph(Preset::Deferred);
         let (mut renderer, xr_input) = graphics
             .build_renderer(builder, renderer_config)
             .expect("Helio renderer");

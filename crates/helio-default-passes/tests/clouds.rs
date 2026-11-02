@@ -11,7 +11,7 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::AtmosphereComponent;
-use helio_default_passes::{build_default_graph_external_with_lighting_passes, VoxelPassFactory};
+use helio_default_passes::presets::Preset;
 use helio_pass_sky::{CloudLayer, PlanetWeather};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
@@ -72,30 +72,24 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
     let mut scene = pulsar_scenedb::SceneDb::new();
     scene.world.attach_gpu_mirror(mirror.clone());
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-    let voxel: Vec<VoxelPassFactory> = if ground {
-        let pass_source = Arc::clone(&source);
-        vec![Arc::new(move |_, _, _, _| {
-            Box::new(ChunkPass::new(Arc::clone(&pass_source)))
-        })]
-    } else {
-        Vec::new()
-    };
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
     config
         .features
         .edit::<helio_pass_foliage_place::FoliageSettings>()
         .enabled = false;
+    if ground {
+        let pass_source = Arc::clone(&source);
+        config = helio_default_passes::with_voxel_terrain(
+            config,
+            helio_pass_voxel_planet::VoxelTerrain::new(move || {
+                ChunkPass::new(Arc::clone(&pass_source))
+            }),
+        );
+    }
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.0; 3], 0.0)
         .with_external_device()
-        .with_pass_build_context(Box::new(move |ctx| {
-            build_default_graph_external_with_lighting_passes(
-                ctx,
-                voxel.clone(),
-                Vec::new(),
-                Vec::new(),
-            )
-        }))
+        .with_graph(Preset::Deferred)
         .build(
             Arc::clone(&device),
             Arc::clone(&queue),

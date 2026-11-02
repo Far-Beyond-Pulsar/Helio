@@ -7,7 +7,6 @@ use helio::{
     RendererConfig, BINDLESS_MATERIAL_FEATURES, EXPANDED_MATERIAL_TEXTURE_RESERVE,
     MAX_MATERIAL_TEXTURES,
 };
-use helio_default_passes::build_default_graph_external_with_context;
 
 const PORTABLE_SAMPLED_TEXTURE_LIMIT: u32 = 16;
 
@@ -152,7 +151,7 @@ async fn run_default_graph(
             .cloned()
             .expect("mirror attached above"),
     )
-    .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+    .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
     .with_external_device()
     .build(
         Arc::clone(&device),

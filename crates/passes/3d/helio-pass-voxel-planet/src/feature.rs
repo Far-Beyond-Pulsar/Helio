@@ -46,7 +46,8 @@ impl Feature for VoxelFeature {
                 "helio.pass.voxel_chunks",
                 "Voxel: Chunk Terrain",
                 "Passes: Geometry",
-                "Voxel worlds from the host's frames: residency, generation, the G-buffer                  and the GI probes' rays. Builds nothing without a VoxelTerrain setting.",
+                "Voxel worlds from the host's frames: residency, generation, the G-buffer \
+                 and the GI probes' rays. Builds nothing without a VoxelTerrain setting.",
                 |build| {
                     let makers = build
                         .env

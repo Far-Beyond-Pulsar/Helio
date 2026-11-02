@@ -1,8 +1,9 @@
 //! Helio's default pipelines as node graphs.
 //!
-//! The pipelines that used to be `add_pass` code are graphs of the pass nodes in
-//! [`crate::graph_nodes`]. This module has the registry that holds those nodes
-//! and the graph of the default deferred pipeline.
+//! The shipped pipelines are graphs of the pass nodes in [`crate::graph_nodes`]
+//! ([`crate::presets`] makes them for a renderer config). This module has the
+//! registry that holds those nodes and the editor's laid-out template of the
+//! default deferred pipeline.
 //!
 //! - [`base_registry`]: the core nodes, every pass node, the host-input nodes
 //!   and the performance marker. Pins are flow-only until a probe has run.
@@ -19,75 +20,25 @@ use std::collections::HashMap;
 
 use helio_graph_asset::{
     auto_layout, core_nodes, probe, BuildEnv, Connection, GraphAsset, NodeDescriptor, NodeInstance,
-    NodeRegistry, PinDesc, PinKind, PinRef, PinType, Probe, Slot, SCENEDB_PREFIX,
+    NodeRegistry, PinDesc, PinKind, PinRef, PinType, Probe, SCENEDB_PREFIX,
 };
 
-use crate::graph_nodes::{self, host_kind, kind, HOST_INPUTS};
+use crate::graph_nodes::{self, host_kind, HOST_INPUTS};
 
-/// The default deferred pipeline's passes, in the order they execute. This is the
-/// order the `add_pass` builders used; it is the execution chain of the graph.
-/// A step of the default pipeline: a pass by name, or an extension point
-/// where the nodes features registered for it go (by order, then kind).
-enum Step {
-    Pass(&'static str),
-    Slot(Slot),
+/// The config the editor's template and the pin probe use: the renderer's
+/// defaults (FXAA, portals and foliage on, no screen-space or planar
+/// reflections).
+pub fn template_config() -> helio::RendererConfig {
+    helio::RendererConfig::new(1920, 1080, wgpu::TextureFormat::Rgba8UnormSrgb)
 }
 
-const DEFERRED: &[Step] = &[
-    Step::Pass("object_batch"),
-    Step::Pass("atmosphere"),
-    Step::Pass("shadow_matrix"),
-    Step::Pass("shadow_dirty"),
-    Step::Pass("shadow"),
-    Step::Pass("background"),
-    Step::Pass("indirect_dispatch"),
-    Step::Pass("hiz"),
-    Step::Pass("occlusion_cull"),
-    Step::Pass("portal_cull"),
-    Step::Pass("light_cull"),
-    Step::Pass("foliage_place"),
-    Step::Pass("gbuffer"),
-    Step::Pass("portal_mask"),
-    Step::Pass("portal_instance"),
-    Step::Pass("foliage_gbuffer"),
-    Step::Slot(Slot::Geometry),
-    Step::Pass("decal"),
-    Step::Slot(Slot::LightingInputs),
-    Step::Pass("deferred_light"),
-    Step::Pass("atmosphere_composite"),
-    Step::Pass("corona"),
-    Step::Pass("portal_editor_overlay"),
-    Step::Pass("water_sim"),
-    Step::Pass("debug_draw_scene"),
-    Step::Pass("billboard"),
-    Step::Pass("post_process_volume_blend"),
-    Step::Pass("volumetric_fog"),
-    Step::Pass("fog_composite"),
-    Step::Pass("transparent"),
-    Step::Pass("fxaa"),
-    Step::Pass("lens"),
-    Step::Pass("lens_flare"),
-    Step::Pass("post_process"),
-    Step::Pass("buffer_view"),
-    Step::Pass("sprite_overlay"),
-    Step::Pass("perf_overlay"),
-    Step::Pass("debug_draw"),
-];
-
-/// The default pipeline's nodes in execution order, as (id, kind): its passes
-/// and, at each slot, the nodes registered for it.
+/// The default pipeline's nodes in execution order, as (id, kind).
 fn deferred_nodes(registry: &NodeRegistry) -> Vec<(String, String)> {
-    let mut nodes = Vec::new();
-    for step in DEFERRED {
-        match step {
-            Step::Pass(name) => nodes.push((name.to_string(), kind(name))),
-            Step::Slot(slot) => nodes.extend(registry.slotted(*slot).into_iter().map(|d| {
-                let id = d.kind.trim_start_matches("helio.pass.").replace('.', "_");
-                (id, d.kind.clone())
-            })),
-        }
-    }
-    nodes
+    crate::presets::Preset::Deferred
+        .nodes(registry, &template_config())
+        .into_iter()
+        .map(|node| (node.id, node.kind))
+        .collect()
 }
 
 /// Core nodes plus everything `features` register.
@@ -327,16 +278,20 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_nodes::kind;
     use helio_graph_asset::{validate, NodePins, Severity};
 
     #[test]
     fn every_default_pass_is_registered() {
         let registry = base_registry();
-        for step in DEFERRED {
-            if let Step::Pass(name) = step {
+        let config = template_config();
+        for preset in crate::presets::Preset::ALL {
+            for node in preset.nodes(&registry, &config) {
                 assert!(
-                    registry.get(&kind(name)).is_some(),
-                    "no node for pass `{name}`"
+                    registry.get(&node.kind).is_some(),
+                    "{}: no node for `{}`",
+                    preset.name(),
+                    node.kind
                 );
             }
         }

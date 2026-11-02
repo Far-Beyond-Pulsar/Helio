@@ -587,6 +587,44 @@ As built, step 1 (2026-11-02): features place their own nodes.
   simple presets as graphs; then the `build_*_graph*` functions and
   `VoxelPassFactory` go.
 
+As built, step 2 (2026-11-02): every shipped pipeline is a node graph.
+- `helio_default_passes::presets::Preset` (`Deferred`, `DeferredFxaa`,
+  `Hlfs`, `HlfsFxaa`, `Forward`, `Simple`) makes its graph asset from the
+  renderer config on each build (resize and shader reload included): the
+  config picks TSR or FXAA, SSR, planar reflections, portals, foliage and
+  the TSR node's params. Slots gained `Lighting` (after the lit colour) and
+  `Output` (after the final image).
+- `GraphAssetPipeline::made` builds such an asset (no fallback: a preset
+  that does not build is a bug and panics with its diagnostics); fixed
+  assets keep their fallback, now `presets::deferred`. The compiler keeps
+  graphs single-layer under XR, as the code builders did.
+- New nodes: `hlfs`, `ssr_composite`, `virtual_geometry` (carries the
+  geometry phase's perf marker), `simple_cube`; `transparent` and `tsr`
+  gained the HLFS reactive-mask params. The scene-linear format is a
+  setting (`SceneColorFormat`, default `FOGGED_HDR_FORMAT`); HLFS presets
+  set their lighting's preferred format.
+- Host WGSL is a setting: `helio_pass_postprocess::UserEffects`,
+  `helio_pass_lens::LensUser`.
+- Every host moved: ~70 examples to `presets::*`, voxel_craft,
+  voxel_flight, water_world and the voxel tests to `with_voxel_terrain` +
+  `Preset::Deferred`, Pulsar's scene renderer puts its voxel backends'
+  `VoxelTerrain` in the config, so terrain joins whichever pipeline a level
+  runs (HLFS and FXAA presets included; Forward has no G-buffer).
+- Deleted: the 27 `build_*_graph*` functions, `GraphPassFactory`,
+  `VoxelPassFactory` and their helpers (lib.rs 2319 → ~260 lines).
+- Checked before deleting: every preset against its builder for default,
+  TSR, voxel+TSR, reflections, and portals/foliage-off configs: pass lists,
+  reads, writes and write formats. Deferred and Forward and Simple were
+  identical. Intended differences: HLFS clears `pre_aa` in its lighting
+  format (the builder cleared it in the display format, then HLFS wrote
+  another), and the clouds' trace now runs before HLFS lighting (its
+  slot); `DeferredFxaa` now runs FXAA and draws transparency (the builder
+  had neither unless TSR was on). `DeclaredResource` records write formats
+  so tests see format differences.
+- `graph_parity` now tests the presets: the template builds the deferred
+  preset's graph, presets follow the config, HLFS keeps one format, voxel
+  terrain joins every G-buffer preset.
+
 ### Phase 6: repo split
 - Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
   without a breaking change. Pulsar pins tags.

@@ -10,7 +10,7 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::FoliageTypeComponent;
-use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_default_passes::presets::Preset;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, unpack_blade, FoliageKind, FoliagePlacePass, GpuBladeInstance,
     GpuFoliageTile, GpuFoliageType, GpuTileFrame, TileState,
@@ -101,8 +101,6 @@ impl Harness {
             }
             let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
             let pass_source = source.clone();
-            let factory: VoxelPassFactory =
-                Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(pass_source.clone())));
             let mut config = RendererConfig::new(SIZE[0], SIZE[1], wgpu::TextureFormat::Rgba8Unorm);
             config
                 .features
@@ -120,12 +118,16 @@ impl Harness {
                 .features
                 .edit::<helio_pass_foliage_place::FoliageSettings>()
                 .range = Some(60.0);
+            let config = helio_default_passes::with_voxel_terrain(
+                config,
+                helio_pass_voxel_planet::VoxelTerrain::new(move || {
+                    ChunkPass::new(pass_source.clone())
+                }),
+            );
             let mirror = scene.world.gpu_mirror().cloned().unwrap();
             let renderer = RendererBuilder::new(config.clone(), mirror)
                 .with_external_device()
-                .with_pass_build_context(Box::new(move |ctx| {
-                    build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])
-                }))
+                .with_graph(Preset::Deferred)
                 .build(
                     device.clone(),
                     queue.clone(),

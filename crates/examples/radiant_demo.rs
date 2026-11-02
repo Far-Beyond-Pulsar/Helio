@@ -14,7 +14,6 @@ use helio::{
     GpuMaterial, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_components::MaterialComponent;
-use helio_default_passes::build_default_graph_external_with_context;
 use helio_mats::{
     MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
     MATERIAL_CLASS_SUBSURFACE,
@@ -101,7 +100,7 @@ impl ApplicationHandler for App {
         config.enable_ssr = true;
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

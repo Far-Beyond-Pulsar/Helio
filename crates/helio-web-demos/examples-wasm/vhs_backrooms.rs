@@ -5,8 +5,7 @@
 //! camcorder look (chromatic aberration, grain, vignette, tracking noise,
 //! flicker) is driven entirely by `vhs_effects.wgsl`.
 //!
-//! Demonstrates `HelioWasmApp::build_graph` composing
-//! `build_default_graph_with_user_effects`, and per-frame custom params via
+//! Demonstrates per-frame custom params via
 //! `PostProcessPass::set_custom_params`.
 //!
 //! Controls:

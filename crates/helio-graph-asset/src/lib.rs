@@ -26,7 +26,7 @@ pub use asset::{
     Params, PinRef, SectionPort,
     EXTENSION, FORMAT_VERSION, SECTION_ENTRY, SECTION_EXIT, SECTION_PREFIX,
 };
-pub use compile::{compile, Fallback, GraphAssetPipeline};
+pub use compile::{compile, Fallback, GraphAssetPipeline, MakeAsset};
 pub use layout::{auto_layout, LANE_PREFIX};
 pub use helio_feature_api::{PinDesc, PinKind, PinShape, PinType};
 pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};

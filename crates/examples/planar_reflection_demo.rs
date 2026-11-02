@@ -19,7 +19,6 @@ use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     Camera, HelioGraphicsConfig, HelioGraphicsContext, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror,
@@ -267,7 +266,7 @@ impl ApplicationHandler for App {
 
         // ── Build renderer ─────────────────────────────────────────────────
         let mut renderer = RendererBuilder::new(renderer_config, scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

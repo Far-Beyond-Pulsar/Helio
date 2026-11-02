@@ -168,7 +168,7 @@ impl ApplicationHandler for App {
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_external_device()
             .with_pass_build_context(Box::new(
-                helio_default_passes::build_default_graph_external_with_context,
+                helio_default_passes::presets::deferred,
             ))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");

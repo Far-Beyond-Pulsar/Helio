@@ -8,9 +8,8 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
-use helio_default_passes::{
-    build_default_graph_external_with_lighting_passes, GraphPassFactory, VoxelPassFactory,
-};
+use helio_default_passes::presets::Preset;
+use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, Slot};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
@@ -19,6 +18,37 @@ use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, Sce
 struct FinalResourceConsumer {
     expected: [u32; 2],
     observed: Arc<Mutex<Vec<[u32; 2]>>>,
+}
+
+/// Adds a [`FinalResourceConsumer`] after the output, at the graph's
+/// internal size.
+struct FinalConsumerFeature(Arc<Mutex<Vec<[u32; 2]>>>);
+
+impl Feature for FinalConsumerFeature {
+    fn id(&self) -> &'static str {
+        "test.final_consumer"
+    }
+
+    fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        let observed = self.0.clone();
+        registrar.node(
+            NodeDescriptor::new(
+                "test.final_consumer",
+                "Final consumer",
+                "Test",
+                "Reads the frame after the output.",
+                move |build| {
+                    let (width, height) = build.env.internal_size();
+                    build.graph.add_pass(Box::new(FinalResourceConsumer {
+                        expected: [width, height],
+                        observed: observed.clone(),
+                    }));
+                    Ok(())
+                },
+            )
+            .in_slot(Slot::Output, 0),
+        );
+    }
 }
 impl helio_core::RenderPass for FinalResourceConsumer {
     fn name(&self) -> &'static str {
@@ -97,32 +127,26 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
 
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = Arc::clone(&source);
-        let factory: VoxelPassFactory =
-            Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         config
             .features
             .edit::<helio_pass_foliage_place::FoliageSettings>()
             .enabled = false;
+        let config = helio_default_passes::with_voxel_terrain(
+            config,
+            helio_pass_voxel_planet::VoxelTerrain::new(move || {
+                ChunkPass::new(Arc::clone(&pass_source))
+            }),
+        );
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let captured = observed.clone();
-        let final_factory: GraphPassFactory = Arc::new(move |_, _, width, height| {
-            Box::new(FinalResourceConsumer {
-                expected: [width, height],
-                observed: captured.clone(),
-            })
-        });
+        let nodes = helio_default_passes::graphs::registry_for(
+            &helio_default_passes::graph_nodes::default_features()
+                .with(FinalConsumerFeature(observed.clone())),
+        );
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
-            .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_lighting_passes(
-                    ctx,
-                    vec![factory],
-                    Vec::new(),
-                    vec![final_factory],
-                )
-            }))
+            .with_graph(Preset::Deferred.pipeline_with(Arc::new(nodes)))
             .build(
                 Arc::clone(&device),
                 Arc::clone(&queue),
@@ -384,24 +408,21 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     scene.world.attach_gpu_mirror(mirror.clone());
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
     let pass_source = Arc::clone(&source);
-    let factory: VoxelPassFactory =
-        Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
     config
         .features
         .edit::<helio_pass_foliage_place::FoliageSettings>()
         .enabled = false;
+    let config = helio_default_passes::with_voxel_terrain(
+        config,
+        helio_pass_voxel_planet::VoxelTerrain::new(move || {
+            ChunkPass::new(Arc::clone(&pass_source))
+        }),
+    );
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
-        .with_pass_build_context(Box::new(move |ctx| {
-            build_default_graph_external_with_lighting_passes(
-                ctx,
-                vec![factory],
-                Vec::new(),
-                Vec::new(),
-            )
-        }))
+        .with_graph(Preset::Deferred)
         .build(
             Arc::clone(&device),
             Arc::clone(&queue),

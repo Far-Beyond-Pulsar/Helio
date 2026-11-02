@@ -1,14 +1,9 @@
-//! The graph-compiled default deferred pipeline is the legacy builder's twin:
-//! one pass declares and sits exactly where the code that used to be this graph
-//! put it, the swap policy and lock size agree, and host inputs agree.
+//! The shipped pipelines as node graphs: the editor's laid-out template builds
+//! the deferred preset's graph, each preset follows the renderer config (the
+//! anti-aliasing, reflections, portals, foliage), HLFS lights in one format end
+//! to end, and the voxel terrain joins every preset with a G-buffer.
 //!
-//! Features join the graph at its slots (GI's update, tracer and resolve, the
-//! clouds' trace), as the legacy builder adds them. Voxel terrain is in
-//! neither here: its node needs a host's `VoxelTerrain`. Forward, HLFS and
-//! simple pipelines are not graphs yet, so there is nothing to compare them
-//! with.
-//!
-//! Everything needs a device: both pipelines build their passes for real
+//! Everything needs a device: the graphs build their passes for real
 //! (pipelines, buffers, bind group layouts). Without one the device-gated
 //! tests skip; the pure-structure guarantee stays with the registry and
 //! validation tests here, and `graphs.rs`'s order tests.
@@ -18,8 +13,9 @@ use std::sync::{Arc, Mutex};
 use helio::{DebugDrawState, PassBuildContext, RenderPipelineRegistry, RendererConfig};
 use helio_core::{GpuCameraUniforms, PassDeclaration};
 use helio_default_passes::pipelines::{DEFAULT, DEFERRED_GRAPH};
+use helio_default_passes::presets::Preset;
 use helio_default_passes::{graph_nodes, graphs};
-use helio_graph_asset::{BuildEnv, Connection, GraphAsset, NodeInstance, PinRef};
+use helio_graph_asset::{Connection, GraphAsset, NodeInstance, PinRef};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
@@ -199,44 +195,135 @@ fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
 }
 
 #[test]
-fn the_graph_pipeline_matches_the_legacy_default() {
+fn the_template_builds_the_deferred_preset() {
     let Some(fixtures) = fixtures() else {
-        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: deferred graph parity");
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: deferred template");
         return;
     };
 
     let mut pipelines = RenderPipelineRegistry::new();
     helio_default_passes::pipelines::register_builtin_pipelines(&mut pipelines);
-    let legacy = pipelines
+    let preset = pipelines
         .create(Some(DEFAULT))
-        .expect("legacy pipeline registered")
+        .expect("default pipeline registered")
         .into_graph(fixtures.context());
-    let graph = pipelines
+    let template = pipelines
         .create(Some(DEFERRED_GRAPH))
-        .expect("graph pipeline registered")
+        .expect("template pipeline registered")
         .into_graph(fixtures.context());
 
     let policy = |g: &helio_core::RenderGraph| format!("{:?}", g.swap_policy());
-    assert!(legacy.swap_policy().is_some(), "legacy declares a policy");
-    assert_eq!(policy(&legacy), policy(&graph), "swap policies differ");
-    assert_eq!(
-        legacy.internal_size(),
-        graph.internal_size(),
-        "lock sizes differ"
+    assert!(
+        preset.swap_policy().is_some(),
+        "the preset declares a policy"
     );
-
-    let mut legacy_inputs: Vec<_> = legacy.external_input_names();
-    let mut graph_inputs: Vec<_> = graph.external_input_names();
-    legacy_inputs.sort_unstable();
-    graph_inputs.sort_unstable();
-    assert_eq!(legacy_inputs, graph_inputs, "host inputs differ");
-
-    // GI and the clouds' trace join through their slots; neither side has
-    // voxel terrain (the voxel node builds nothing without a `VoxelTerrain`).
+    assert_eq!(policy(&preset), policy(&template), "swap policies differ");
+    assert_eq!(preset.internal_size(), template.internal_size());
+    let inputs = |g: &helio_core::RenderGraph| {
+        let mut names = g.external_input_names();
+        names.sort_unstable();
+        names
+    };
+    assert_eq!(inputs(&preset), inputs(&template), "host inputs differ");
     assert_eq!(
-        passes(&legacy),
-        passes(&graph),
-        "pass list or declarations differ (legacy vs graph)"
+        passes(&preset),
+        passes(&template),
+        "pass list or declarations differ (preset vs template)"
+    );
+}
+
+fn has<T: helio_core::RenderPass + 'static>(graph: &helio_core::RenderGraph) -> bool {
+    graph.find_pass::<T>().is_some()
+}
+
+#[test]
+fn presets_follow_the_config() {
+    let Some(mut fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: presets follow the config");
+        return;
+    };
+    let base = fixtures.config.clone();
+
+    let graph = Preset::Deferred.build(fixtures.context());
+    assert!(has::<helio_pass_fxaa::FxaaPass>(&graph));
+    assert!(!has::<helio_pass_tsr::TsrPass>(&graph));
+    assert!(has::<helio_pass_portal_cull::PortalCullPass>(&graph));
+    assert!(has::<helio_pass_foliage_place::FoliagePlacePass>(&graph));
+    assert!(!has::<helio_pass_ssr::SsrPass>(&graph));
+
+    fixtures.config = base.clone().with_tsr_quality(helio::TsrQuality::Quality);
+    let graph = Preset::Deferred.build(fixtures.context());
+    assert!(has::<helio_pass_tsr::TsrPass>(&graph));
+    assert!(!has::<helio_pass_fxaa::FxaaPass>(&graph));
+    // The FXAA presets never resolve temporally.
+    let graph = Preset::DeferredFxaa.build(fixtures.context());
+    assert!(has::<helio_pass_fxaa::FxaaPass>(&graph));
+    assert!(!has::<helio_pass_tsr::TsrPass>(&graph));
+
+    fixtures.config = base.clone();
+    fixtures.config.enable_ssr = true;
+    fixtures.config.enable_portals = false;
+    fixtures
+        .config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = false;
+    let graph = Preset::Deferred.build(fixtures.context());
+    assert_eq!(
+        has::<helio_pass_ssr::SsrPass>(&graph),
+        helio_core::REFLECTIONS_SUPPORTED
+    );
+    assert!(!has::<helio_pass_portal_cull::PortalCullPass>(&graph));
+    assert!(!has::<helio_pass_foliage_place::FoliagePlacePass>(&graph));
+
+    fixtures.config = base;
+    let graph = Preset::Forward.build(fixtures.context());
+    assert!(has::<helio_pass_forward_lit::ForwardLitPass>(&graph));
+    assert!(!has::<helio_pass_gbuffer::GBufferPass>(&graph));
+    let graph = Preset::Simple.build(fixtures.context());
+    assert_eq!(graph.pass_count(), 1);
+}
+
+#[test]
+fn hlfs_lights_in_its_format_end_to_end() {
+    let Some(mut fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: HLFS format");
+        return;
+    };
+    fixtures.config = fixtures
+        .config
+        .clone()
+        .with_tsr_quality(helio::TsrQuality::Quality);
+    let graph = Preset::Hlfs.build(fixtures.context());
+    // Every pass that writes the lit colour writes it in one format.
+    let formats: HashSet<_> = passes(&graph)
+        .iter()
+        .flat_map(|pass| pass.writes.iter())
+        .filter(|write| write.name == "pre_aa")
+        .map(|write| write.format)
+        .collect();
+    assert_eq!(formats.len(), 1, "pre_aa is written as {formats:?}");
+    assert!(has::<helio_pass_hlfs::HlfsPass>(&graph));
+    assert!(!has::<helio_pass_deferred_light::DeferredLightPass>(&graph));
+    let declarations = passes(&graph);
+    let tsr = declarations
+        .iter()
+        .find(|pass| pass.type_name == "helio_pass_tsr::TsrPass")
+        .expect("TSR");
+    let transparent = declarations
+        .iter()
+        .find(|pass| pass.type_name == "helio_pass_transparent::TransparentPass")
+        .expect("transparency");
+    // Under TSR, HLFS's transparency writes a reactive mask TSR reads.
+    let reactive: Vec<&str> = transparent
+        .writes
+        .iter()
+        .map(|write| write.name)
+        .filter(|name| tsr.reads.iter().any(|read| read.name == *name))
+        .collect();
+    assert!(
+        !reactive.is_empty(),
+        "TSR reads nothing transparency writes: {tsr:?} {transparent:?}"
     );
 }
 
@@ -301,7 +388,7 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
 }
 
 #[test]
-fn voxel_terrain_joins_the_graph_like_the_legacy_factory() {
+fn voxel_terrain_joins_every_preset_with_a_gbuffer() {
     use helio_pass_voxel_planet::chunks::pass::ChunkPass;
     use helio_pass_voxel_planet::engine::SharedPlanetFrame;
 
@@ -310,38 +397,39 @@ fn voxel_terrain_joins_the_graph_like_the_legacy_factory() {
         return;
     };
     let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-    let legacy_source = source.clone();
-    let legacy = helio_default_passes::build_default_graph_external_with_voxel_passes(
-        fixtures.context(),
-        vec![Arc::new(move |_, _, _, _| {
-            Box::new(ChunkPass::new(legacy_source.clone()))
-        })],
-    );
-
     fixtures.config = helio_default_passes::with_voxel_terrain(
-        fixtures.config.clone(),
+        fixtures
+            .config
+            .clone()
+            .with_tsr_quality(helio::TsrQuality::Quality),
         helio_pass_voxel_planet::VoxelTerrain::new(move || ChunkPass::new(source.clone())),
     );
-    let mut pipelines = RenderPipelineRegistry::new();
-    helio_default_passes::pipelines::register_builtin_pipelines(&mut pipelines);
-    let graph = pipelines
-        .create(Some(DEFERRED_GRAPH))
-        .expect("graph pipeline registered")
-        .into_graph(fixtures.context());
-
-    assert_eq!(
-        passes(&legacy),
-        passes(&graph),
-        "pass list or declarations differ with voxel terrain (legacy vs graph)"
-    );
-    for (name, g) in [("legacy", &legacy), ("graph", &graph)] {
-        let chunks = g.find_pass::<ChunkPass>().expect("the terrain's pass");
-        let place = g
+    for preset in [Preset::Deferred, Preset::DeferredFxaa, Preset::Hlfs] {
+        let graph = preset.build(fixtures.context());
+        let chunks = graph
+            .find_pass::<ChunkPass>()
+            .unwrap_or_else(|| panic!("{}: the terrain's pass", preset.name()));
+        let place = graph
             .find_pass::<helio_pass_foliage_place::FoliagePlacePass>()
             .expect("foliage placement");
         assert!(
             Arc::ptr_eq(place.ground(), &chunks.foliage_ground()),
-            "{name}: foliage does not grow on the terrain's ground"
+            "{}: foliage does not grow on the terrain's ground",
+            preset.name()
         );
     }
+    // Under TSR the terrain's rotating sun samples are integrated.
+    let graph = Preset::Deferred.build(fixtures.context());
+    let tsr = passes(&graph)
+        .into_iter()
+        .find(|pass| pass.type_name == "helio_pass_tsr::TsrPass")
+        .expect("TSR");
+    assert!(tsr
+        .reads
+        .iter()
+        .any(|read| read.name == helio_pass_tsr::STOCHASTIC_MASK));
+    // The forward preset has no G-buffer to draw into.
+    assert!(!has::<ChunkPass>(
+        &Preset::Forward.build(fixtures.context())
+    ));
 }

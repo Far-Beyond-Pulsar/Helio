@@ -7,7 +7,7 @@
 //!
 //! Rendered through the OpenXR path when a headset is connected (see `examples/vr`), and
 //! a plain desktop mirror with WASD + mouse look when OpenXR initialisation fails. The
-//! foliage graph (`build_default_graph`) is used unchanged in both modes. In XR mode,
+//! deferred preset (`presets::deferred`) is used unchanged in both modes. In XR mode,
 //! `render_window_frame()` drives both eyes and mirrors them into the app-owned window.
 //!
 //! Controls:
@@ -29,7 +29,6 @@ use helio::{
 use helio_components::{
     FoliageInteractorComponent, FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent,
 };
-use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageLayer, GpuFoliageType,
     FOLIAGE_FLAG_RECEIVES_INTERACTION, FOLIAGE_FLAG_TWO_SIDED,
@@ -220,7 +219,7 @@ impl ApplicationHandler for App {
         // publishes insert/mutate/remove through the World.
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context));
+            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred));
         let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
         let xr_active = graphics.is_xr();
 

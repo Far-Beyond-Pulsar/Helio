@@ -28,7 +28,7 @@ use helio_components::WaterVolumeComponent;
 use helio_components::WorldRows;
 use helio_components::{CameraPostProcessComponent, LightComponent};
 use helio_components::{FoliageTypeComponent, FoliageWindComponent};
-use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_default_passes::presets::Preset;
 use helio_pass_foliage_place::FoliagePlacePass;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageType, FOLIAGE_FLAG_GROUND_COLOUR,
@@ -296,10 +296,10 @@ impl Showcase {
         let pass_source = source.clone();
         let config = helio_pass_voxel_planet::chunks::ResidencyConfig::default();
         let appearance = worlds::Preset::Earth.appearance(planet.field().appearance());
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
+        let terrain = helio_pass_voxel_planet::VoxelTerrain::new(move || {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
-            Box::new(pass)
+            pass
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], format);
         renderer_config
@@ -318,11 +318,10 @@ impl Showcase {
             .features
             .edit::<helio_pass_foliage_place::FoliageSettings>()
             .range = Some(meadow.range * 1.5);
+        let renderer_config = helio_default_passes::with_voxel_terrain(renderer_config, terrain);
         let mut renderer = RendererBuilder::new(renderer_config.clone(), mirror)
             .with_external_device()
-            .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])
-            }))
+            .with_graph(Preset::Deferred)
             .build(
                 device.clone(),
                 queue.clone(),

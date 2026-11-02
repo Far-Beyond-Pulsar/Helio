@@ -3,7 +3,7 @@ name = "helio-default-passes"
 version = "0.1.0"
 edition = "2021"
 workspace = "../../"
-description = "Default render graph builders for Helio — depends on all pass crates"
+description = "Helio's shipped pipelines (node-graph presets) and the nodes of its default passes"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

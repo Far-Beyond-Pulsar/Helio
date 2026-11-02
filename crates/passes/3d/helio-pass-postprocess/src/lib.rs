@@ -158,6 +158,12 @@ impl LocalExposureGrid {
 pub const MAX_PP_VOLUMES: u32 = 64;
 const _: () = assert!(MAX_PP_VOLUMES == 64);
 
+/// A host's WGSL effects compiled into the post-process shader (see
+/// [`PostProcessPass::new_with_user_effects`]), as a feature setting: a
+/// graph's post-process node builds with it.
+#[derive(Clone, Copy, Debug)]
+pub struct UserEffects(pub &'static str);
+
 /// Position in the uber-shader effect chain where a user effect is injected.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

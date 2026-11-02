@@ -9,7 +9,6 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_vg_cull::VgCullEarlyPass;
 use helio_pass_vg_shade::VgShadePass;
 use helio_vg_stream::{VgRuntime, VgRuntimeSettings};
@@ -73,7 +72,7 @@ fn build(
     RendererBuilder::new(config.clone(), mirror(device, queue))
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+        .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
         .build(
             Arc::clone(device),
             Arc::clone(queue),

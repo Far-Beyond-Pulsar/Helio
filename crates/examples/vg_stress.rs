@@ -26,7 +26,6 @@ use helio::{
 use helio_core::{
     BufferHandle, BufferKey, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
 };
-use helio_default_passes::build_default_graph_external_with_context;
 use helio_vg_format::{
     GpuVgInstance, VgAssetReadyRow, INST_CONE_CULL, INST_ENABLED, INST_LOD_SUPPRESS,
     INST_SHADOW_CASTER, VG_ASSET_READY_FLAG_READY,
@@ -717,7 +716,7 @@ impl ApplicationHandler for App {
         let derivation =
             SceneVgDerivation::new(&device, runtime.clone(), targets.clone(), vg_supported);
         let builder = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
             .with_scene_derivation(Box::new(derivation));
         let mut renderer = if capture_options.is_none() {
             builder

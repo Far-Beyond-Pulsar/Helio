@@ -24,7 +24,7 @@
 //! with their eyes near y = 1.6. A 3 m ceiling reads correctly in a headset; 2.2 m feels
 //! like a crawlspace.
 //!
-//! **It is a forward-opaque graph.** `main.rs` builds `build_forward_opaque_graph`, so the
+//! **It is a forward-opaque graph.** `main.rs` builds the forward preset, so the
 //! hallway only shows features that graph actually renders. Decals, foliage and virtual
 //! geometry are deferred-graph passes — VG in particular crashes the pass (it expects a
 //! G-buffer to write into), so it is deliberately absent; the shipping container from

@@ -12,7 +12,6 @@ use helio::{
 };
 use helio_components::DecalComponent;
 use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
-use helio_default_passes::build_default_graph_external_with_context;
 
 /// Passes that need scene content or a debug mode the room does not have.
 const CONTENT_PASSES: &[&str] = &[
@@ -135,7 +134,7 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
         .enabled = false;
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
             .with_external_device()
             .build(
                 device.clone(),

@@ -37,7 +37,6 @@ use helio::{
     Camera, HelioGraphicsConfig, HelioGraphicsContext, HelioXrInput, RenderMode, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_forward_opaque_graph_with_context;
 use input::FreeCam;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{new_scene_db_with_gpu_mirror, scene_db_handle, update_object_transform};
@@ -232,7 +231,7 @@ impl ApplicationHandler for App {
         let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(|mut ctx| {
                 ctx.owns_device = false;
-                build_forward_opaque_graph_with_context(ctx)
+                helio_default_passes::presets::forward(ctx)
             }));
         let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
         renderer.set_editor_mode(true);

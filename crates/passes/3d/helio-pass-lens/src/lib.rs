@@ -430,6 +430,12 @@ pub struct LensPass {
     bindings: Option<(BindingKey, Vec<wgpu::BindGroup>)>,
 }
 
+/// A host's WGSL for [`element_kind::USER`] elements (see
+/// [`LensPass::new_with_user`]), as a feature setting: a graph's lens node
+/// builds with it.
+#[derive(Clone, Copy, Debug)]
+pub struct LensUser(pub &'static str);
+
 impl LensPass {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         Self::new_with_user(device, width, height, None)

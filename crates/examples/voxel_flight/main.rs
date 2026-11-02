@@ -54,7 +54,7 @@ use helio::{
 };
 use helio_components::WorldRows;
 use helio_components::{CameraPostProcessComponent, LightComponent};
-use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
+use helio_default_passes::presets::Preset;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::VolumeId;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPicks, SharedPlanetFrame, VolumeFrame};
@@ -236,10 +236,10 @@ impl Flight {
             .or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().frame_ms);
         // The generator's look with the materials the preset's features add.
         let appearance = preset.appearance(planet.field().appearance());
-        let factory: VoxelPassFactory = Arc::new(move |_, _, _, _| {
+        let terrain = helio_pass_voxel_planet::VoxelTerrain::new(move || {
             let mut pass = ChunkPass::with_config(pass_source.clone(), config);
             pass.set_appearance(Some(appearance));
-            Box::new(pass)
+            pass
         });
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8UnormSrgb)
             .with_tsr_quality(quality);
@@ -261,11 +261,10 @@ impl Flight {
                 .edit::<helio_pass_foliage_place::FoliageSettings>()
                 .range = Some(meadow.range);
         }
+        let config = helio_default_passes::with_voxel_terrain(config, terrain);
         let mut renderer = RendererBuilder::new(config.clone(), mirror)
             .with_external_device()
-            .with_pass_build_context(Box::new(move |ctx| {
-                build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])
-            }))
+            .with_graph(Preset::Deferred)
             .build(
                 device.clone(),
                 queue.clone(),

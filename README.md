@@ -49,30 +49,22 @@ milliseconds, and each profiler frame records GPU availability, frame lag,
 readback drops, and query overflows. GPU timings are asynchronous, so use the
 stored GPU frame index/lag when correlating them with frame samples.
 
-To wire the renderer up to your own window, the shape of it is always the same. You ask Helio which GPU features and limits it needs for the adapter you have, create a config and a scene, build a graph, and hand all of it to `Renderer::new`. From then on you call `render` once per frame with a camera and a surface view.
+To wire the renderer up to your own window, the shape of it is always the same. You ask Helio which GPU features and limits it needs for the adapter you have, create a config, hand the builder SceneDB's GPU mirror and a pipeline, and build the renderer. From then on you call `render` once per frame with a camera and a surface view.
 
 ```rust
-use helio::{Camera, DebugDrawState, Renderer, RendererConfig, Scene,
+use helio::{Camera, RendererBuilder, RendererConfig,
             required_wgpu_features, required_wgpu_limits};
-use helio_default_passes::build_default_graph;
+use helio_default_passes::presets::Preset;
 
 let features = required_wgpu_features(adapter.features());
 let limits   = required_wgpu_limits(adapter.limits());
-// ... create your device and queue with those ...
+// ... create your device and queue with those, and a SceneDB with its GPU
+// mirror attached (`scene_db_mirror`) ...
 
 let config = RendererConfig::new(width, height, surface_format);
-let scene  = Scene::new(device.clone(), queue.clone());
-let debug_state = std::sync::Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-
-let graph = build_default_graph(
-    &device, &queue, &scene, config,
-    debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None,
-);
-let mut renderer = Renderer::new(
-    device.clone(), queue.clone(),
-    config.surface_format, config.width, config.height, config.render_scale,
-    config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
-);
+let mut renderer = RendererBuilder::new(config, scene_db_mirror)
+    .with_graph(Preset::Deferred)
+    .build(device.clone(), queue.clone(), width, height, surface_format);
 
 let camera = Camera::perspective_look_at(
     glam::Vec3::new(0.0, 2.0, 6.0), glam::Vec3::ZERO, glam::Vec3::Y,
@@ -127,7 +119,7 @@ Building the web version is its own small tool rather than a shell script. Runni
 
 For current graph APIs and a composition walkthrough, see [Composing a custom Helio pass pipeline](docs/custom-pass-pipeline.md).
 
-A render graph is an ordered set of passes, each declaring the named resources it reads and produces, and the graph validates that dependency structure, manages the transient textures and barriers between passes, and rebuilds itself when the window changes size. Most of the time you never construct one directly, because a builder does it: `build_default_graph` gives you the full deferred pipeline, and `build_default_graph_with_user_effects` gives you the same thing with a slot for injected post-process WGSL.
+A render graph is an ordered set of passes, each declaring the named resources it reads and produces, and the graph validates that dependency structure, manages the transient textures and barriers between passes, and rebuilds itself when the window changes size. Most of the time you never construct one directly, because a preset does it: `Preset::Deferred` is the full deferred pipeline (TSR or FXAA, as the config says), and `Hlfs`, `Forward` and `Simple` are the others. A preset is a graph of pass nodes made for your renderer config, the same nodes the editor's render-graph assets are made of; features such as the voxel terrain join it through the config, and injected post-process WGSL is the `UserEffects` setting.
 
 When you do want something bespoke, you build the graph yourself, and it reads the same whether it ends up on a desktop or in a browser.
 
@@ -215,17 +207,16 @@ The post-process pass runs the usual chain of exposure, bloom, tone mapping, gra
 
 An effect is a WGSL function body that takes the current color and returns a new one. The engine wraps it in the signature `(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32>`, so the simplest possible effect is just `return color * vec3<f32>(1.0, 0.95, 0.9);` for a warm tint. You choose where in the chain it runs by position: before the blend stage, after the tonemap, after the grain, or right at the end after every built-in effect. Inside the snippet you have access to two things the engine provides, a storage array called `pp_custom` full of `vec4` parameters you upload each frame, and a tiling noise texture and sampler for grain and dithering.
 
-There are two ways to get your WGSL in. For a whole-frame effect that runs at the end, you pass it at graph-build time, which is what the VHS demo does:
+There are two ways to get your WGSL in. For a whole-frame effect that runs at the end, you give it to the renderer config, and every preset's post-process node builds with it. That is what the VHS demo does:
 
 ```rust
 const VHS: &str = include_str!("vhs_effects.wgsl");
 
-let graph = build_default_graph_with_user_effects(
-    &device, &queue, &scene, config,
-    debug_state, &debug_camera_buf, &cull_stats_buf,
-    None,   // debug overlay
-    VHS,    // your injected WGSL
-);
+let mut config = RendererConfig::new(width, height, surface_format);
+config.features.insert(helio_pass_postprocess::UserEffects(VHS));
+let renderer = RendererBuilder::new(config, scene_db_mirror)
+    .with_graph(Preset::Deferred)
+    .build(device.clone(), queue.clone(), width, height, surface_format);
 ```
 
 Or you can add effects to a live pass at runtime and commit them, which rebuilds the pipeline:

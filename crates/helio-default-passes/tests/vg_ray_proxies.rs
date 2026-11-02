@@ -19,7 +19,6 @@ use helio::{
 };
 use helio_components::ray_tracing::SceneDbRayTracing;
 use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
-use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_gi::{Clipmap, GiPass, LEVEL_PROBES, PROBE_WORDS};
 use helio_vg_stream::{content_words, VgRuntime, VgeoBytes, VgeoSource};
 use pulsar_scenedb::{Entity, World};
@@ -427,7 +426,7 @@ impl Harness {
             .enabled = false;
         let renderer =
             RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
-                .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+                .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
                 .with_external_device()
                 .build(
                     device.clone(),

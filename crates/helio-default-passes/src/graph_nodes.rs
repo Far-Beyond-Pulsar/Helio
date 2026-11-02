@@ -27,13 +27,13 @@ use helio_pass_perf_overlay::PerfOverlayShared;
 use crate::{
     scene_buffer_or_dummy, AtmosphereCompositePass, BackgroundPass, BillboardPass, CoronaPass,
     DecalPass, DeferredLightPass, FogCompositePass, FoliageGBufferPass, ForwardLitPass, FxaaPass,
-    GBufferPass, HiZBuildPass, IndirectDispatchPass, LensFlarePass, LensPass, LightCullPass,
-    ObjectBatchPass, OcclusionCullPass, PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass,
-    PerfOverlayPass, PlanarReflectionPass, PortalCullPass, PortalEditorOverlayPass,
-    PortalInstancePass, PortalMaskPass, PostProcessPass, PostProcessVolumeBlendPass,
-    ShadowDirtyPass, ShadowMatrixPass, ShadowPass, SpriteBatchPass, SpriteCullPass, SsrPass,
-    TsrPass, VolumetricFogPass, WaterSimPass, FOGGED_HDR, FOGGED_HDR_FORMAT, LENS_COLOR,
-    MAX_VISIBLE_SPRITES, SPOTLIGHT_PNG,
+    GBufferPass, HiZBuildPass, HlfsPass, IndirectDispatchPass, LensFlarePass, LensPass,
+    LightCullPass, ObjectBatchPass, OcclusionCullPass, PerfOverlayAnalyzerPass,
+    PerfOverlayCostAnalyzerPass, PerfOverlayPass, PlanarReflectionPass, PortalCullPass,
+    PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass, PostProcessPass,
+    PostProcessVolumeBlendPass, ShadowDirtyPass, ShadowMatrixPass, ShadowPass, SimpleCubePass,
+    SpriteBatchPass, SpriteCullPass, SsrPass, TsrPass, VolumetricFogPass, WaterSimPass, FOGGED_HDR,
+    FOGGED_HDR_FORMAT, LENS_COLOR, MAX_VISIBLE_SPRITES, SPOTLIGHT_PNG,
 };
 
 /// Resources the renderer supplies every frame. Each has a host node that
@@ -53,6 +53,17 @@ pub fn kind(name: &str) -> String {
 /// The kind of the host node for resource `name`.
 pub fn host_kind(name: &str) -> String {
     format!("host.{name}")
+}
+
+/// The format the scene-linear colour is lit, fogged and anti-aliased in,
+/// up to the tone map, as a setting. Without one it is [`FOGGED_HDR_FORMAT`];
+/// the HLFS presets set the format their lighting prefers.
+#[derive(Clone, Copy, Debug)]
+pub struct SceneColorFormat(pub wgpu::TextureFormat);
+
+fn scene_format(env: &BuildEnv<'_>) -> wgpu::TextureFormat {
+    env.setting::<SceneColorFormat>()
+        .map_or(FOGGED_HDR_FORMAT, |format| format.0)
 }
 
 // ── Shared state ─────────────────────────────────────────────────────────────
@@ -358,7 +369,7 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
         |build| {
             let c = ctx(build.env)?;
             build.graph.add_pass(Box::new(BackgroundPass::new(
-                c.config.surface_format,
+                scene_format(build.env),
                 c.config.background_color,
             )));
             Ok(())
@@ -536,20 +547,39 @@ fn register_geometry(registry: &mut FeatureRegistrar<'_>) {
         },
     ));
 
+    registry.node(pass_node(
+        "foliage_gbuffer",
+        "Foliage: Draw to GBuffer",
+        CATEGORY,
+        "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
+        |build| {
+            let c = ctx(build.env)?;
+            let draw = build
+                .env
+                .shared_existing::<PendingFoliageDraw>()
+                .and_then(|pending| pending.0.take())
+                .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
+            build.graph.add_pass(Box::new(draw));
+            Ok(())
+        },
+    ));
+
+    // Last of the classic geometry: its resolve depth-tests against the
+    // combined classic depth (portals and foliage included). Builds nothing
+    // unless the host set up virtual geometry and the device supports it.
     registry.node(
         pass_node(
-            "foliage_gbuffer",
-            "Foliage: Draw to GBuffer",
+            "virtual_geometry",
+            "Geometry: Virtual Geometry",
             CATEGORY,
-            "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
+            "Streams, culls, rasterises and shades virtual-geometry clusters into the GBuffer.",
             |build| {
                 let c = ctx(build.env)?;
-                let draw = build
-                    .env
-                    .shared_existing::<PendingFoliageDraw>()
-                    .and_then(|pending| pending.0.take())
-                    .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
-                build.graph.add_pass(Box::new(draw));
+                crate::virtual_geometry::add_virtual_geometry_passes(
+                    build.graph,
+                    c.device,
+                    &c.config,
+                );
                 Ok(())
             },
         )
@@ -565,7 +595,7 @@ fn register_geometry(registry: &mut FeatureRegistrar<'_>) {
             |build| {
                 let c = ctx(build.env)?;
                 let render_all_opaque = build.boolean("render_all_opaque");
-                let mut pass = ForwardLitPass::new(c.device, c.config.surface_format);
+                let mut pass = ForwardLitPass::new(c.device, scene_format(build.env));
                 pass.render_all_opaque = render_all_opaque;
                 build.graph.add_pass(Box::new(pass));
                 Ok(())
@@ -575,7 +605,8 @@ fn register_geometry(registry: &mut FeatureRegistrar<'_>) {
             "render_all_opaque",
             "Render all opaque",
             false,
-        )),
+        ))
+        .with_marker_after(),
     );
 }
 
@@ -651,7 +682,7 @@ fn register_lighting(registry: &mut FeatureRegistrar<'_>) {
             |build| {
                 let c = ctx(build.env)?;
                 let mut pass =
-                    DeferredLightPass::new(c.device, c.queue, c.camera, FOGGED_HDR_FORMAT);
+                    DeferredLightPass::new(c.device, c.queue, c.camera, scene_format(build.env));
                 pass.set_shadow_quality(c.config.shadow_quality, c.queue);
                 pass.debug_mode = c.config.debug_mode;
                 pass.set_env_reflections(c.config.enable_environment_reflections);
@@ -660,6 +691,44 @@ fn register_lighting(registry: &mut FeatureRegistrar<'_>) {
             },
         )
         .with_marker_after(),
+    );
+
+    registry.node(pass_node(
+        "hlfs",
+        "Lighting: HLFS",
+        CATEGORY,
+        "Hybrid light-field shading of the GBuffer: the lighting of the HLFS pipelines.",
+        |build| {
+            let c = ctx(build.env)?;
+            let mut pass = HlfsPass::new(c.device, c.queue, c.iw, c.ih, scene_format(build.env));
+            pass.set_shadow_quality(c.config.shadow_quality, c.queue);
+            build.graph.add_pass(Box::new(pass));
+            Ok(())
+        },
+    ));
+
+    registry.node(
+        pass_node(
+            "ssr_composite",
+            "Reflections: Composite Screen-Space",
+            CATEGORY,
+            "Adds the screen-space reflections to the lit colour, for lighting that does not read them itself (HLFS).",
+            |build| {
+                let c = ctx(build.env)?;
+                if !helio_core::REFLECTIONS_SUPPORTED {
+                    return Ok(());
+                }
+                build
+                    .graph
+                    .add_pass(Box::new(helio_pass_ssr::SsrCompositePass::new(
+                        c.device,
+                        c.camera,
+                        scene_format(build.env),
+                    )));
+                Ok(())
+            },
+        )
+        .with_unsupported_when(helio_core::REFLECTIONS_SUPPORTED, MISSING_REFLECTIONS),
     );
 }
 
@@ -675,7 +744,7 @@ fn register_overlays(registry: &mut FeatureRegistrar<'_>) {
             let c = ctx(build.env)?;
             build.graph.add_pass(Box::new(AtmosphereCompositePass::new(
                 c.device,
-                FOGGED_HDR_FORMAT,
+                scene_format(build.env),
             )));
             Ok(())
         },
@@ -697,7 +766,7 @@ fn register_overlays(registry: &mut FeatureRegistrar<'_>) {
                     c.device,
                     c.queue,
                     c.camera,
-                    FOGGED_HDR_FORMAT,
+                    scene_format(build.env),
                     spotlight.as_raw(),
                     width,
                     height,
@@ -722,7 +791,7 @@ fn register_overlays(registry: &mut FeatureRegistrar<'_>) {
                     c.device,
                     c.queue,
                     c.camera,
-                    FOGGED_HDR_FORMAT,
+                    scene_format(build.env),
                 )));
                 Ok(())
             },
@@ -740,7 +809,7 @@ fn register_overlays(registry: &mut FeatureRegistrar<'_>) {
                 let c = ctx(build.env)?;
                 build.graph.add_pass(Box::new(PortalEditorOverlayPass::new(
                     c.device,
-                    FOGGED_HDR_FORMAT,
+                    scene_format(build.env),
                 )));
                 Ok(())
             },
@@ -761,7 +830,7 @@ fn register_overlays(registry: &mut FeatureRegistrar<'_>) {
                     c.camera,
                     c.iw,
                     c.ih,
-                    FOGGED_HDR_FORMAT,
+                    scene_format(build.env),
                 )));
                 Ok(())
             },
@@ -779,7 +848,7 @@ fn register_overlays(registry: &mut FeatureRegistrar<'_>) {
             build.graph.add_pass(Box::new(helio::DebugDrawPass::new(
                 c.device,
                 c.debug_camera,
-                FOGGED_HDR_FORMAT,
+                scene_format(build.env),
                 c.debug_state.clone(),
                 true,
                 true,
@@ -829,26 +898,37 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
             let c = ctx(build.env)?;
             build.graph.add_pass(Box::new(FogCompositePass::with_format(
                 c.device,
-                FOGGED_HDR_FORMAT,
+                scene_format(build.env),
             )));
             Ok(())
         },
     ));
 
-    registry.node(pass_node(
-        "transparent",
-        "Transparency: Blend",
-        CATEGORY,
-        "Alpha-blended geometry over the fogged colour.",
-        |build| {
-            let c = ctx(build.env)?;
-            build.graph.add_pass(Box::new(
-                helio_pass_transparent::TransparentPass::new(c.device, FOGGED_HDR_FORMAT)
-                    .with_fogged_target(),
-            ));
-            Ok(())
-        },
-    ));
+    registry.node(
+        pass_node(
+            "transparent",
+            "Transparency: Blend",
+            CATEGORY,
+            "Alpha-blended geometry over the fogged colour.",
+            |build| {
+                let c = ctx(build.env)?;
+                let pass =
+                    helio_pass_transparent::TransparentPass::new(c.device, scene_format(build.env));
+                let pass = if build.boolean("reactive_mask") {
+                    pass.with_reactive_mask()
+                } else {
+                    pass
+                };
+                build.graph.add_pass(Box::new(pass.with_fogged_target()));
+                Ok(())
+            },
+        )
+        .with_param(ParamDesc::boolean(
+            "reactive_mask",
+            "Reactive mask (for TSR)",
+            false,
+        )),
+    );
 
     registry.node(
         pass_node(
@@ -876,6 +956,11 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                 } else {
                     tsr
                 };
+                let tsr = if build.boolean("transparency_reactivity") {
+                    tsr.with_transparency_reactivity()
+                } else {
+                    tsr
+                };
                 build.graph.add_pass(Box::new(tsr));
                 Ok(())
             },
@@ -890,6 +975,11 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
             "stochastic_mask",
             "Stochastic mask",
             false,
+        ))
+        .with_param(ParamDesc::boolean(
+            "transparency_reactivity",
+            "Transparency reactivity",
+            false,
         )),
     );
 
@@ -900,10 +990,11 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
         "Fast approximate anti-aliasing of the fogged colour.",
         |build| {
             let c = ctx(build.env)?;
+            let format = scene_format(build.env);
             build.graph.add_pass(Box::new(
-                FxaaPass::new(c.device, FOGGED_HDR_FORMAT)
+                FxaaPass::new(c.device, format)
                     .with_color_input(FOGGED_HDR)
-                    .with_intermediate_target(FOGGED_HDR_FORMAT),
+                    .with_intermediate_target(format),
             ));
             Ok(())
         },
@@ -919,9 +1010,17 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                 let c = ctx(build.env)?;
                 let input = colour_resource(&build.text("color_input"));
                 build.graph.add_pass(Box::new(
-                    LensPass::new_with_user(c.device, c.iw, c.ih, None)
-                        .with_color_input(input)
-                        .with_bundled_resources(),
+                    LensPass::new_with_user(
+                        c.device,
+                        c.iw,
+                        c.ih,
+                        build
+                            .env
+                            .setting::<helio_pass_lens::LensUser>()
+                            .map(|user| user.0),
+                    )
+                    .with_color_input(input)
+                    .with_bundled_resources(),
                 ));
                 Ok(())
             },
@@ -965,7 +1064,10 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                         c.config.width,
                         c.config.height,
                         c.config.surface_format,
-                        None,
+                        build
+                            .env
+                            .setting::<helio_pass_postprocess::UserEffects>()
+                            .map(|effects| effects.0),
                     )
                     .with_color_input(input),
                 ));
@@ -987,6 +1089,21 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
 
 fn register_output(registry: &mut FeatureRegistrar<'_>) {
     const CATEGORY: &str = "Passes: Output";
+
+    registry.node(pass_node(
+        "simple_cube",
+        "Test: Simple Cube",
+        CATEGORY,
+        "A spinning test cube straight into the output: checks the device and surface.",
+        |build| {
+            let c = ctx(build.env)?;
+            build.graph.add_pass(Box::new(SimpleCubePass::new(
+                c.device,
+                c.config.surface_format,
+            )));
+            Ok(())
+        },
+    ));
 
     registry.node(pass_node(
         "buffer_view",

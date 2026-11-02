@@ -254,6 +254,13 @@ pub enum Slot {
     /// After decals, before deferred lighting: what lighting reads that is
     /// not the G-buffer (GI irradiance, the clouds' sun visibility).
     LightingInputs,
+    /// After the scene is lit, before the overlays, fog and transparency:
+    /// resolves that write the lit colour and keep the pixels they do not
+    /// touch.
+    Lighting,
+    /// After everything drawn over the final image: consumers of the
+    /// finished frame (captures, readbacks).
+    Output,
 }
 
 /// A node type.

@@ -171,6 +171,9 @@ pub enum DeclaredKind {
 pub struct DeclaredResource {
     pub name: &'static str,
     pub kind: DeclaredKind,
+    /// The texture format a write declares (`None` for reads, buffers and
+    /// bare names).
+    pub format: Option<crate::graph::ResourceFormat>,
 }
 
 /// What one pass declares, see [`RenderGraph::pass_declaration`].
@@ -1178,27 +1181,34 @@ impl RenderGraph {
         };
         let mut push = |list: &mut Vec<DeclaredResource>,
                         name: &'static str,
-                        kind: DeclaredKind| {
+                        kind: DeclaredKind,
+                        format: Option<crate::graph::ResourceFormat>| {
             match list.iter_mut().find(|existing| existing.name == name) {
                 // A precise kind beats the unknown one a bare name implies.
-                Some(existing) if existing.kind == DeclaredKind::Unknown => existing.kind = kind,
+                Some(existing) if existing.kind == DeclaredKind::Unknown => {
+                    existing.kind = kind;
+                    existing.format = format;
+                }
                 Some(_) => {}
-                None => list.push(DeclaredResource { name, kind }),
+                None => list.push(DeclaredResource { name, kind, format }),
             }
         };
         for &name in pass.reads() {
-            push(&mut declaration.reads, name, DeclaredKind::Unknown);
+            push(&mut declaration.reads, name, DeclaredKind::Unknown, None);
         }
         for &name in pass.writes() {
-            push(&mut declaration.writes, name, DeclaredKind::Unknown);
+            push(&mut declaration.writes, name, DeclaredKind::Unknown, None);
         }
         let mut builder = crate::graph::ResourceBuilder::new();
         pass.declare_resources(&mut builder);
         for resource in builder.declarations() {
             match resource.access {
-                crate::graph::ResourceAccess::Read => {
-                    push(&mut declaration.reads, resource.name, DeclaredKind::Unknown)
-                }
+                crate::graph::ResourceAccess::Read => push(
+                    &mut declaration.reads,
+                    resource.name,
+                    DeclaredKind::Unknown,
+                    None,
+                ),
                 crate::graph::ResourceAccess::Write => {
                     let kind = match resource.format {
                         None => DeclaredKind::Buffer,
@@ -1211,6 +1221,7 @@ impl RenderGraph {
                         &mut declaration.writes,
                         resource.group.unwrap_or(resource.name),
                         kind,
+                        resource.format,
                     );
                 }
             }

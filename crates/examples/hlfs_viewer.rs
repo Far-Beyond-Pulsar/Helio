@@ -97,7 +97,7 @@ impl ApplicationHandler for App {
         .with_editor_mode(true)
         .with_pass_build_context(Box::new(move |ctx| {
             let device = ctx.device.clone();
-            let mut graph = helio_default_passes::build_fxaa_hlfs_graph_with_context(ctx);
+            let mut graph = helio_default_passes::presets::hlfs_fxaa(ctx);
             graph
                 .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                 .expect("HLFS")

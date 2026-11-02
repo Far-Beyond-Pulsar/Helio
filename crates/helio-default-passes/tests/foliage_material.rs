@@ -13,7 +13,6 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::{FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent};
-use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageLayer, GpuFoliageType,
     FOLIAGE_FLAG_TWO_SIDED,
@@ -109,7 +108,7 @@ fn meadow() -> Option<Meadow> {
         .enabled = true;
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_external_device()
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+        .with_pass_build_context(Box::new(helio_default_passes::presets::deferred))
         .build(
             Arc::clone(&device),
             Arc::clone(&queue),
