@@ -65,6 +65,7 @@ helio-core = { layer = "core" }
 
 # scene
 helio-mats = { layer = "scene" }
+helio-scene-join = { layer = "scene" }
 
 # feature api
 helio-feature-api = { layer = "feature_api" }

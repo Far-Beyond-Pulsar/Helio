@@ -43,6 +43,8 @@
 //! usable inside a `RenderGraph` that carries no 3D scene data at all.
 
 pub mod feature;
+pub mod scene_rows;
+
 pub use feature::SpriteFeature;
 
 use bytemuck::{Pod, Zeroable};

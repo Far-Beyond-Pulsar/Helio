@@ -1,20 +1,16 @@
-//! The scene join: the frontend's authored component rows to the object,
-//! material and light rows Helio's passes draw from, on the GPU
+//! The meshes' scene join: the frontend's authored mesh rows to the object
+//! and material rows the meshes' passes draw from, on the GPU
 //! (Pulsar-Native#1035, Phase 2; `03-gpu-reflection-and-rendering.md`).
+//! Lights have their own derivation (`helio_pass_light_cull::scene_rows`).
 //!
 //! A frontend whose components are separate entities linked to their owner
-//! objects (a mesh instance, a light instance, each joined to its object's
-//! transform and visibility) installs a [`SceneJoin`] as a scene derivation
-//! ([`helio::RendererBuilder::with_scene_derivation`]). Each frame its input
-//! rows changed, the join recomputes, for every instance:
-//!
-//! - **meshes**: one `StaticObjectRow`-shaped row and one material row
-//!   per section of every placed mesh instance, published as
-//!   `"static_objects"`/`"materials"` for the object-batch, G-buffer, shadow
-//!   and virtual-geometry passes;
-//! - **lights**: one `GpuLight` row per placed light instance, positioned and
-//!   oriented by its owner, published as `"scene_lights"`; and, in editor
-//!   mode, a billboard per light as `"billboard_instances"`.
+//! objects (a mesh instance joined to its object's transform and visibility)
+//! installs a [`SceneJoin`] as a scene derivation
+//! (`helio::RendererBuilder::with_scene_derivation`). Each frame its input
+//! rows changed, the join recomputes one `StaticObjectRow`-shaped row and one
+//! material row per section of every placed mesh instance, published as
+//! `"static_objects"`/`"materials"` for the object-batch, G-buffer, shadow
+//! and virtual-geometry passes.
 //!
 //! "Placed" means: the instance is attached and enabled, the generation it
 //! recorded for its owner is the owner's current one, the owner is not
@@ -39,66 +35,27 @@ pub use helio_core::{
     SceneDerivationOutput, ENTITY_GENERATIONS_KEY,
 };
 
-/// `ComponentOwner`: `owner_index`, `owner_generation`, `enabled` (u32 each).
-pub const OWNER_ROW_BYTES: u64 = 12;
-/// One `u32` generation per entity index.
-pub const GENERATION_ROW_BYTES: u64 = 4;
-/// An object's hidden flag (`u32`, zero = visible).
-pub const HIDDEN_ROW_BYTES: u64 = 4;
-/// An object's transform (the frontend's `TransformRow`): its f64 position
-/// as an f32 pair (`hi`, the nearest f32, then `lo`, what that drops), YXZ
-/// Euler rotation in degrees, scale (four `[f32; 3]`).
-pub const TRANSFORM_ROW_BYTES: u64 = 48;
+pub use helio_scene_join::{
+    join_source, GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES, MESH_BOUNDS_ROW_BYTES, OWNER_ROW_BYTES,
+    TRANSFORM_ROW_BYTES,
+};
+use helio_scene_join::{origin_bits, origin_pair};
+
 /// A var-len handle: `offset`, `count` (u32 each).
 pub const HANDLE_ROW_BYTES: u64 = 8;
-/// A mesh instance's local bounding sphere `[center.xyz, radius]`.
-pub const MESH_BOUNDS_ROW_BYTES: u64 = 16;
 /// A mesh instance's object-row flags (`u32`).
 pub const MESH_FLAGS_ROW_BYTES: u64 = 4;
 /// One mesh section: draw range, material class and graph hash, then a
 /// `helio_mats::GpuMaterial`.
 pub const MESH_SECTION_ROW_BYTES: u64 = 128;
-/// A `GpuLight` in light space, bit 31 of its `_pad` word carrying `enabled`.
-pub const LIGHT_SOURCE_ROW_BYTES: u64 = 128;
 
 const OBJECT_ROW_BYTES: u64 = 252;
 const MATERIAL_ROW_BYTES: u64 = 96;
-const LIGHT_ROW_BYTES: u64 = 128;
-const BILLBOARD_ROW_BYTES: u64 = 48;
 const WORKGROUP: u32 = 64;
 
-/// A join shader as compiled: the shared join declarations, then `source`.
-pub fn join_source(source: &str) -> String {
-    format!(
-        "{}\n{source}",
-        include_str!("../shaders/scene_join_common.wgsl")
-    )
-}
-
-/// The scene and environment join shaders as compiled (shader validation
-/// without a device).
-pub fn validation_sources() -> Vec<(String, String)> {
-    [
-        (
-            "scene_join_meshes.wgsl",
-            include_str!("../shaders/scene_join_meshes.wgsl"),
-        ),
-        (
-            "scene_join_lights.wgsl",
-            include_str!("../shaders/scene_join_lights.wgsl"),
-        ),
-        (
-            "hierarchy_resolve.wgsl",
-            include_str!("../shaders/hierarchy_resolve.wgsl"),
-        ),
-        (
-            "environment_join.wgsl",
-            include_str!("../shaders/environment_join.wgsl"),
-        ),
-    ]
-    .into_iter()
-    .map(|(name, source)| (name.to_string(), join_source(source)))
-    .collect()
+/// The mesh join's shader as compiled (shader validation without a device).
+pub fn mesh_join_source() -> String {
+    join_source(include_str!("../shaders/scene_join_meshes.wgsl"))
 }
 
 /// Where the frontend's authored rows live. See the module doc for what
@@ -126,20 +83,16 @@ pub struct SceneJoinKeys {
     pub palette_handles: BufferKey,
     /// The section pool; one output object row per pool slot.
     pub mesh_sections: BufferKey,
-    /// Light instances' light-space rows, keyed by the instance entity.
-    pub light_sources: BufferKey,
 }
 
 pub const OBJECTS_KEY: BufferKey = BufferKey::of("static_objects");
 pub const MATERIALS_KEY: BufferKey = BufferKey::of("materials");
-pub const LIGHTS_KEY: BufferKey = BufferKey::of("scene_lights");
 /// A marker whose `content_generation` moves only when the *structure* of the
 /// object rows changes (objects added, removed, hidden, or their mesh,
 /// material or flags changed), not when objects merely move. The object batch
 /// keeps its sort and grouping while this is unchanged. The name is shared
 /// with `helio-pass-object-batch`, which reads it.
 pub const OBJECTS_STRUCTURE_KEY: BufferKey = BufferKey::of("scene_objects_structure");
-pub const BILLBOARDS_KEY: BufferKey = BufferKey::of("billboard_instances");
 /// The object slots (rows of `static_objects`) a frame that only moved objects
 /// rewrote, as `[total, fresh, slot, ..]` words: this frame's moved slots plus
 /// the previous frame's, so a consumer can settle both. Published only for a
@@ -157,21 +110,6 @@ struct Uniforms {
     /// subtracted pair-wise from the world positions of the rows.
     origin_hi: [f32; 4],
     origin_lo: [f32; 4],
-}
-
-/// `origin` as an f32 hi/lo pair, so positions near it subtract to their
-/// offset from it without the f32 rounding of either. The hi half's `w` is
-/// 1.0, the shaders' guard against reassociated floats (`object_relative`).
-pub(crate) fn origin_pair(origin: glam::DVec3) -> ([f32; 4], [f32; 4]) {
-    let hi = origin.as_vec3();
-    let lo = (origin - hi.as_dvec3()).as_vec3();
-    (hi.extend(1.0).to_array(), lo.extend(0.0).to_array())
-}
-
-/// The bits of `origin`, for an input signature: a moved origin moves
-/// every output position.
-pub(crate) fn origin_bits(origin: glam::DVec3) -> [u64; 3] {
-    [origin.x.to_bits(), origin.y.to_bits(), origin.z.to_bits()]
 }
 
 /// A buffer the join owns and publishes.
@@ -232,17 +170,12 @@ impl Output {
 /// The scene join as a scene derivation. See the module doc.
 pub struct SceneJoin {
     keys: SceneJoinKeys,
-    billboards: bool,
     mesh_pipeline: wgpu::ComputePipeline,
-    light_pipeline: wgpu::ComputePipeline,
     mesh_uniforms: wgpu::Buffer,
-    light_uniforms: wgpu::Buffer,
     /// Bound in place of an optional input that is not registered yet.
     empty: wgpu::Buffer,
     objects: Output,
     materials: Output,
-    lights: Output,
-    billboard_rows: Output,
     /// Signatures of the mesh join's inputs at its last run, split into the
     /// structure and the placement (see `derive`).
     last_structure_inputs: Option<u64>,
@@ -253,8 +186,6 @@ pub struct SceneJoin {
     /// The buffers the mesh join was last bound to, and the bind group made
     /// from them.
     mesh_bind: Option<(Vec<wgpu::Buffer>, wgpu::BindGroup)>,
-    light_bind: Option<(Vec<wgpu::Buffer>, wgpu::BindGroup)>,
-    last_light_inputs: Option<u64>,
     reported: Vec<BufferKey>,
     moved: MovedJoin,
 }
@@ -479,9 +410,7 @@ impl MovedJoin {
 }
 
 impl SceneJoin {
-    /// `billboards`: also publish a billboard per placed light (editor
-    /// light icons).
-    pub fn new(device: &wgpu::Device, keys: SceneJoinKeys, billboards: bool) -> Self {
+    pub fn new(device: &wgpu::Device, keys: SceneJoinKeys) -> Self {
         let pipeline = |label: &str, source: &str, entry: &str| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -509,19 +438,12 @@ impl SceneJoin {
         };
         Self {
             keys,
-            billboards,
             mesh_pipeline: pipeline(
                 "Scene Join Meshes",
                 include_str!("../shaders/scene_join_meshes.wgsl"),
                 "cs_join_meshes",
             ),
-            light_pipeline: pipeline(
-                "Scene Join Lights",
-                include_str!("../shaders/scene_join_lights.wgsl"),
-                "cs_join_lights",
-            ),
             mesh_uniforms: uniforms("Scene Join Mesh Uniforms"),
-            light_uniforms: uniforms("Scene Join Light Uniforms"),
             empty: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Scene Join Empty Input"),
                 size: 256,
@@ -530,8 +452,6 @@ impl SceneJoin {
             }),
             objects: Output::new(device, "Scene Join Objects", OBJECT_ROW_BYTES),
             materials: Output::new(device, "Scene Join Materials", MATERIAL_ROW_BYTES),
-            lights: Output::new(device, "Scene Join Lights", LIGHT_ROW_BYTES),
-            billboard_rows: Output::new(device, "Scene Join Billboards", BILLBOARD_ROW_BYTES),
             last_structure_inputs: None,
             last_placement_inputs: None,
             structure_generation: 0,
@@ -542,8 +462,6 @@ impl SceneJoin {
                 mapped_at_creation: false,
             }),
             mesh_bind: None,
-            light_bind: None,
-            last_light_inputs: None,
             reported: Vec::new(),
             moved: MovedJoin::new(device),
         }
@@ -741,13 +659,12 @@ impl SceneDerivation for SceneJoin {
         let skin_handles = self.input(inputs, keys.skin_handles, HANDLE_ROW_BYTES);
         let palette_handles = self.input(inputs, keys.palette_handles, HANDLE_ROW_BYTES);
         let sections = self.input(inputs, keys.mesh_sections, MESH_SECTION_ROW_BYTES);
-        let sources = self.input(inputs, keys.light_sources, LIGHT_SOURCE_ROW_BYTES);
         // Meshes are placed from rows composed only up to their nearest rigid
         // frame (and tagged with that frame's space) when a hierarchy resolve
         // ran ahead of this join; otherwise from the plain transform rows, in the
-        // world space. Lights and the rest read the world rows.
-        let placement_key = if inputs.contains(crate::hierarchy_resolve::LOCAL_PLACEMENT_KEY) {
-            crate::hierarchy_resolve::LOCAL_PLACEMENT_KEY
+        // world space.
+        let placement_key = if inputs.contains(helio_scene_join::LOCAL_PLACEMENT_KEY) {
+            helio_scene_join::LOCAL_PLACEMENT_KEY
         } else {
             keys.transforms
         };
@@ -756,7 +673,7 @@ impl SceneDerivation for SceneJoin {
         } else {
             self.input(inputs, placement_key, TRANSFORM_ROW_BYTES)
         };
-        let spaces = self.input(inputs, crate::hierarchy_resolve::OBJECT_SPACE_KEY, 4);
+        let spaces = self.input(inputs, helio_scene_join::OBJECT_SPACE_KEY, 4);
         let mut recorded = false;
         let (origin_hi, origin_lo) = origin_pair(ctx.world_origin);
         let [ox, oy, oz] = origin_bits(ctx.world_origin);
@@ -806,7 +723,7 @@ impl SceneDerivation for SceneJoin {
             // A hierarchy resolve ahead of this join builds its own moved list on
             // the GPU (its count is not known here, so the dispatch is indirect).
             // It is only usable when it describes the rows being read.
-            let resolved = inputs.get(crate::hierarchy_resolve::HIERARCHY_MOVED_ARGS_KEY);
+            let resolved = inputs.get(helio_scene_join::HIERARCHY_MOVED_ARGS_KEY);
             let gpu_list = resolved
                 .filter(|args| {
                     args.content_generation != 0
@@ -976,92 +893,9 @@ impl SceneDerivation for SceneJoin {
             recorded = true;
         }
 
-        // ── Lights ──────────────────────────────────────────────────────
-        let light_rows = sources.map_or(0, |h| rows_of(h, LIGHT_SOURCE_ROW_BYTES));
-        let grew = self.lights.ensure(ctx.device, light_rows)
-            | (self.billboards && self.billboard_rows.ensure(ctx.device, light_rows));
-        let light_inputs = [owners, generations, hidden, world_transforms, sources];
-        let light_signature = signature(
-            &light_inputs,
-            &[
-                self.lights.epoch,
-                self.billboard_rows.epoch,
-                u64::from(self.billboards),
-                ox,
-                oy,
-                oz,
-            ],
-        );
-        if grew || self.last_light_inputs != Some(light_signature) {
-            helio_core::cpu_scope!("SceneJoin: lights");
-            self.last_light_inputs = Some(light_signature);
-            encoder.clear_buffer(&self.lights.buffer, 0, None);
-            if self.billboards {
-                encoder.clear_buffer(&self.billboard_rows.buffer, 0, None);
-            }
-            if let (Some(owners), Some(generations), Some(transforms), Some(sources)) =
-                (owners, generations, world_transforms, sources)
-            {
-                ctx.queue.write_buffer(
-                    &self.light_uniforms,
-                    0,
-                    bytemuck::bytes_of(&Uniforms {
-                        rows: light_rows.min(self.lights.rows),
-                        second: u32::from(self.billboards),
-                        _pad: [0; 2],
-                        origin_hi,
-                        origin_lo,
-                    }),
-                );
-                let bound = [
-                    &owners.buffer,
-                    &generations.buffer,
-                    hidden.map_or(&self.empty, |h| &h.buffer),
-                    &transforms.buffer,
-                    &sources.buffer,
-                    &self.lights.buffer,
-                    &self.billboard_rows.buffer,
-                ];
-                let reusable = self.light_bind.as_ref().is_some_and(|(buffers, _)| {
-                    buffers.iter().zip(bound).all(|(cached, now)| cached == now)
-                });
-                if !reusable {
-                    let layout = self.light_pipeline.get_bind_group_layout(0);
-                    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Scene Join Lights"),
-                        layout: &layout,
-                        entries: &[
-                            entry(0, &self.light_uniforms),
-                            entry(1, bound[0]),
-                            entry(2, bound[1]),
-                            entry(3, bound[2]),
-                            entry(4, bound[3]),
-                            entry(5, bound[4]),
-                            entry(6, bound[5]),
-                            entry(7, bound[6]),
-                        ],
-                    });
-                    self.light_bind =
-                        Some((bound.iter().map(|b| (*b).clone()).collect(), bind_group));
-                }
-                let bind_group = &self.light_bind.as_ref().expect("bound above").1;
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("Scene Join Lights"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.light_pipeline);
-                pass.set_bind_group(0, bind_group, &[]);
-                pass.dispatch_workgroups(light_rows.div_ceil(WORKGROUP).max(1), 1, 1);
-            }
-            self.lights.content_generation += 1;
-            self.billboard_rows.content_generation += 1;
-            recorded = true;
-        }
-
         let mut buffers = vec![
             (OBJECTS_KEY, self.objects.handle()),
             (MATERIALS_KEY, self.materials.handle()),
-            (LIGHTS_KEY, self.lights.handle()),
             (
                 OBJECTS_MOVED_KEY,
                 BufferHandle {
@@ -1081,9 +915,6 @@ impl SceneDerivation for SceneJoin {
                 },
             ),
         ];
-        if self.billboards {
-            buffers.push((BILLBOARDS_KEY, self.billboard_rows.handle()));
-        }
         SceneDerivationOutput {
             buffers,
             flushed: Vec::new(),

@@ -73,6 +73,7 @@ pollster = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
 helio-mesh-api = { path = "crates/api/helio-mesh-api" }
+helio-scene-join = { path = "crates/helio-scene-join" }
 helio-settings = { path = "crates/helio-settings" }
 helio-vg-format = { path = "crates/helio-vg-format" }
 helio-mats = { path = "crates/helio-mats" }

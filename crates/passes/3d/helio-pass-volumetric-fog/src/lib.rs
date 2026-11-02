@@ -35,6 +35,8 @@
 //! and handed to later passes via [`RenderPass::publish`].
 
 pub mod feature;
+pub mod scene_rows;
+pub use scene_rows::FogRowSources;
 pub use feature::FogFeature;
 mod fog_composite;
 pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};

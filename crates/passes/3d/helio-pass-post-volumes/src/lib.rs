@@ -5,6 +5,8 @@
 
 mod components;
 pub mod feature;
+pub mod scene_rows;
+pub use scene_rows::PostRowSources;
 mod volume_blend;
 
 pub use components::{

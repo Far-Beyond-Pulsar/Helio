@@ -1,4 +1,6 @@
 pub mod feature;
+pub mod scene_rows;
+pub use scene_rows::WaterRowSources;
 pub use feature::WaterFeature;
 
 pub mod pipeline;

@@ -1,4 +1,6 @@
 pub mod feature;
+pub mod scene_rows;
+
 pub use feature::DecalFeature;
 
 use helio_core::graph::ResourceBuilder;

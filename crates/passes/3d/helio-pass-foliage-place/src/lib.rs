@@ -65,6 +65,8 @@ use bytemuck::{Pod, Zeroable};
 pub use helio_foliage_api::*;
 
 pub mod blade;
+pub mod scene_rows;
+pub use scene_rows::FoliageRowSources;
 pub use helio_foliage_api::components;
 mod frame_data;
 mod pass;

@@ -1,16 +1,17 @@
-//! The scene join on the GPU: handcrafted input rows in, object/material/
-//! light/billboard rows out, compared against the CPU math the join
+//! The meshes' and lights' scene joins on the GPU: handcrafted input rows
+//! in, object/material/light/billboard rows out, compared against the CPU math the join
 //! replaces (`StaticObjectComponent::new` for meshes, the owner's rotation
 //! of -Y for lights). Needs a GPU adapter (lavapipe works); skips without.
 
 use helio_components::StaticObjectComponent;
 use std::sync::Arc;
 
-use helio_scene_derivations::scene_join::{
+use helio_pass_light_cull::scene_rows::{LightJoin, LightJoinKeys};
+use helio_pass_object_batch::scene_join::{
     BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation, SceneDerivationContext,
     SceneDerivationOutput,
 };
-use helio_scene_derivations::scene_join::{SceneJoin, SceneJoinKeys};
+use helio_pass_object_batch::scene_join::{SceneJoin, SceneJoinKeys};
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
     let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
@@ -37,8 +38,29 @@ const KEYS: SceneJoinKeys = SceneJoinKeys {
     skin_handles: BufferKey::of("t_skin_handles"),
     palette_handles: BufferKey::of("t_palette_handles"),
     mesh_sections: BufferKey::of("t_sections"),
+};
+
+const LIGHT_KEYS: LightJoinKeys = LightJoinKeys {
+    owners: KEYS.owners,
+    generations: KEYS.generations,
+    hidden: KEYS.hidden,
+    transforms: KEYS.transforms,
     light_sources: BufferKey::of("t_lights"),
 };
+
+/// The meshes' join and the lights' (`billboards`: the lights' billboards
+/// too).
+struct Joins {
+    meshes: SceneJoin,
+    lights: LightJoin,
+}
+
+fn joins(device: &wgpu::Device, billboards: bool) -> Joins {
+    Joins {
+        meshes: SceneJoin::new(device, KEYS),
+        lights: LightJoin::new(device, LIGHT_KEYS, billboards),
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -152,7 +174,7 @@ fn read<T: bytemuck::Pod>(
 
 /// Run the join once over `scene`; returns the published buffers.
 fn run(
-    join: &mut SceneJoin,
+    join: &mut Joins,
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     scene: &Scene,
@@ -163,7 +185,7 @@ fn run(
 
 /// [`run`] in a frame with `world_origin`.
 fn run_at(
-    join: &mut SceneJoin,
+    join: &mut Joins,
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     scene: &Scene,
@@ -172,17 +194,16 @@ fn run_at(
 ) -> SceneBufferProjection {
     let mut projection = scene.projection(device, queue, generation);
     let mut encoder = device.create_command_encoder(&Default::default());
-    let output = join.derive(
-        &SceneDerivationContext {
-            device,
-            queue,
-            inputs: &projection,
-            world_origin,
-        },
-        &mut encoder,
-    );
+    let context = SceneDerivationContext {
+        device,
+        queue,
+        inputs: &projection,
+        world_origin,
+    };
+    let mut buffers = join.meshes.derive(&context, &mut encoder).buffers;
+    buffers.extend(join.lights.derive(&context, &mut encoder).buffers);
     queue.submit([encoder.finish()]);
-    for (key, handle) in output.buffers {
+    for (key, handle) in buffers {
         projection.insert(key, handle);
     }
     projection
@@ -306,7 +327,7 @@ fn base_scene() -> Scene {
     // Enabled (bit 31) plus a shadow policy (priority 1.0, in sixteenths).
     light._pad = (1 << 31) | (16 << 8);
     scene.put(
-        KEYS.light_sources,
+        LIGHT_KEYS.light_sources,
         &[
             helio::GpuLight::default(),
             helio::GpuLight::default(),
@@ -333,7 +354,7 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
         eprintln!("skipping: no GPU adapter available");
         return;
     };
-    let mut join = SceneJoin::new(&device, KEYS, true);
+    let mut join = joins(&device, true);
     let scene = base_scene();
     let out = run(&mut join, &device, &queue, &scene, 1);
 
@@ -485,7 +506,7 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
         ],
     );
     let origin = glam::DVec3::new(0.75, 6_371_000.125, -2.0);
-    let mut join = SceneJoin::new(&device, KEYS, true);
+    let mut join = joins(&device, true);
     let out = run_at(&mut join, &device, &queue, &scene, 1, origin);
 
     // The f64 offset to the f32 rounding of a small number (a millimetre's
@@ -565,7 +586,7 @@ fn hiding_the_owner_a_stale_generation_or_a_disabled_light_removes_the_rows() {
         eprintln!("skipping: no GPU adapter available");
         return;
     };
-    let mut join = SceneJoin::new(&device, KEYS, false);
+    let mut join = joins(&device, false);
     let mut scene = base_scene();
     scene.put(KEYS.hidden, &[1u32, 0, 0, 0]);
     let out = run(&mut join, &device, &queue, &scene, 1);
@@ -611,7 +632,7 @@ fn hiding_the_owner_a_stale_generation_or_a_disabled_light_removes_the_rows() {
         ..Default::default()
     };
     light._pad = 0;
-    scene.put(KEYS.light_sources, &[light, light, light, light]);
+    scene.put(LIGHT_KEYS.light_sources, &[light, light, light, light]);
     let out = run(&mut join, &device, &queue, &scene, 3);
     let lights: Vec<helio::GpuLight> = read(
         &device,
@@ -630,7 +651,7 @@ fn unchanged_inputs_record_nothing_and_keep_the_outputs() {
         eprintln!("skipping: no GPU adapter available");
         return;
     };
-    let mut join = SceneJoin::new(&device, KEYS, false);
+    let mut join = SceneJoin::new(&device, KEYS);
     let scene = base_scene();
     let projection = scene.projection(&device, &queue, 7);
     let mut derive = || {
@@ -672,7 +693,7 @@ fn moving_objects_moves_the_objects_but_not_the_structure() {
         return;
     };
     let scene = base_scene();
-    let mut join = SceneJoin::new(&device, KEYS, false);
+    let mut join = joins(&device, false);
     let generation = |projection: &SceneBufferProjection, key: &'static str| {
         projection
             .get(BufferKey::of(key))
@@ -687,9 +708,9 @@ fn moving_objects_moves_the_objects_but_not_the_structure() {
     );
 
     // The same scene, the transform column alone reporting new contents.
-    let derive = |join: &mut SceneJoin, mut projection: SceneBufferProjection| {
+    let derive = |join: &mut Joins, mut projection: SceneBufferProjection| {
         let mut encoder = device.create_command_encoder(&Default::default());
-        let output = join.derive(
+        let output = join.meshes.derive(
             &SceneDerivationContext {
                 device: &device,
                 queue: &queue,

@@ -6,6 +6,7 @@ description = "Helio 2D pass: GPU-instanced sprite batcher with texture atlasing
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-scene-join = { path = "../../../helio-scene-join" }
 helio-frame-api = { path = "../../../helio-frame-api" }
 helio-feature-api = { path = "../../../helio-feature-api" }
 helio-pass-sprite-cull = { path = "../helio-pass-sprite-cull" }

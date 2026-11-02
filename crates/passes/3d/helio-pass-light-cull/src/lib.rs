@@ -10,6 +10,8 @@
 //! These buffers are published into `ResourceRegistry` so `DeferredLightPass` can
 //! skip every light that doesn't touch the current pixel's tile.
 
+pub mod scene_rows;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};

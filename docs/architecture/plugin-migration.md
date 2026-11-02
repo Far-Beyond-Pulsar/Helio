@@ -290,6 +290,56 @@ As built, A4 (2026-11-02):
   `helio-bake-types`; `PORTAL_VIEWS` was dropped (the portal crates' own
   `PORTAL_VIEWS` contract already named it). The facade no longer
   re-exports mesh types.
+- Left for the kinds' plugins (phase B), with why:
+  - `set_ray_tracing_frame`: the frame's TLAS and the rows after it are
+    built by the host's acceleration projection (`helio_components`); they
+    become the meshes plugin's publication (a derivation or pass that
+    builds the TLAS from SceneDB), not a setting.
+  - `set_portal_projection_counts`: the portal passes decide membership
+    from the live counts on the CPU, the frame they change; reading them
+    back from the `portal_projection_counts` rows instead delays joins by
+    a readback. It moves with the portal projection into the portals
+    plugin, which can publish the counts with its derivation.
+  - `RendererConfig::{enable_portals, enable_ssr, enable_planar_reflections,
+    enable_environment_reflections}` stay renderer fields, bridged into
+    `PortalSettings`, `SsrSettings`, `PlanarReflectionSettings` and the
+    spine settings by the presets' preparer, because host settings
+    (`helio-settings`) map onto them; they leave with the presets'
+    config bridge.
+
+As built, A5 (2026-11-02): one scene derivation per kind, each in its
+crate; the hierarchy resolve stays in `helio-scene-derivations`.
+- `helio-scene-join` (layer `scene`): what no kind owns: the owner,
+  generation, hidden, transform and mesh-bounds row layouts, the shared
+  join WGSL and frame-origin helpers, the hierarchy resolve's output keys,
+  `JoinOutput`/`signature` helpers, `DerivationGroup` (several derivations
+  run as one, each seeing the earlier ones' buffers), and **`RowJoin`**:
+  the environment join's engine made kind-agnostic. A kind describes its
+  tables (`RowTable`: source key and row size, output key and words,
+  packing, slice, gate, layers written over it, a particle pool, a phase
+  period) and picks placements from `placement` (`OWNER_AABB`,
+  `GATE_HIDDEN`, `SURFACE_HEIGHT`, `SQUARE_LAYER`, `CENTRED`, `OWNER_BOX`,
+  `POOL_RANGE`, `SUN`, `WIND`, `MESH_BOUNDS`, `PLANAR_2D`).
+- Each kind's crate has `scene_rows::scene_rows(device, RowJoinKeys,
+  sources) -> RowJoin` and owns its source row sizes, output keys and
+  capacities: fog (global/local media), post-process volumes (volumes,
+  camera baselines), the lens (camera lenses), water (volumes with the
+  sun, wind and world phase; hitboxes), foliage (types, layers, wind),
+  the sky (atmospheres), decals, corona (emitters and the particle pool),
+  sprites. The level's wind rows are the foliage api's
+  (`WIND_SOURCE_ROW_BYTES`, `GLOBAL_WIND_MARK_WORD`); water reads them by
+  key.
+- The scene join split in two: the meshes' `SceneJoin` (objects,
+  materials, moved list, structure marker) moved to
+  `helio-pass-object-batch::scene_join`; the lights' `LightJoin` (the light
+  list and the editor's light billboards) is
+  `helio-pass-light-cull::scene_rows`. A host installs the lights' join
+  before the row joins (water takes its sun from the light list).
+- Pulsar groups the kinds' joins (`DerivationGroup`) in `helio_bridge`
+  until each kind's plugin installs its own derivation (phase B).
+- Not changed: the placements are still WGSL ops of one shader
+  (`row_join.wgsl`) the kinds select by bit; the next step is each kind
+  bringing its placement as a snippet, so a new kind needs no engine edit.
 
 **B. Plugins** (each: Pulsar plugin + its Helio crates move out of the
 Helio repo into it; component methods for every editor/game operation;
