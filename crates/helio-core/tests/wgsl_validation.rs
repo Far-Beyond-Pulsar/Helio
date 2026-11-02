@@ -100,7 +100,6 @@ fn is_composed(path: &Path) -> bool {
         // shared declaration pieces (`include_str!` constants joined in
         // Rust); validated when their passes build their pipelines (the
         // crates' GPU tests).
-        "helio-component/src/virtual_geometry_instances.wgsl",
         "helio-pass-vg-bvh/shaders/vg_bvh_build.wgsl",
         "helio-pass-vg-cull/shaders/vg_cull.wgsl",
         "helio-pass-vg-dense/shaders/args.wgsl",
@@ -151,10 +150,7 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
     }
     // The depth passes prefix the alpha-tested depth material's declarations
     // (`helio_pass_gbuffer::depth_material::DepthMaterialBindings::shader_source`).
-    const DEPTH_MATERIAL: &[&str] = &[
-        "helio-pass-depth-prepass/shaders/depth_prepass.wgsl",
-        "helio-pass-shadow/shaders/shadow.wgsl",
-    ];
+    const DEPTH_MATERIAL: &[&str] = &["helio-pass-shadow/shaders/shadow.wgsl"];
     if DEPTH_MATERIAL
         .iter()
         .any(|suffix| normalized.ends_with(suffix))

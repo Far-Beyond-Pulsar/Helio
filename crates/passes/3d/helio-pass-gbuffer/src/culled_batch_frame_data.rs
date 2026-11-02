@@ -2,8 +2,8 @@
 //! indirect draw args and compacted instance indices -- what every pass that actually issues
 //! `multi_draw_indexed_indirect` calls (`helio-pass-gbuffer`, `helio-pass-
 //! shadow` and its `-cull`/`-dirty` siblings, `helio-pass-transparent`,
-//! `helio-pass-forward-lit`, `helio-pass-depth-prepass`, `helio-pass-
-//! portal-cull`/`-instances`) should read. Produced by `helio-pass-
+//! `helio-pass-forward-lit`, `helio-pass-portal-cull`/`-instances`) should
+//! read. Produced by `helio-pass-
 //! occlusion-cull`'s `OcclusionCullPass` from `helio-pass-indirect-
 //! dispatch`'s `IndirectDispatchFrameData`.
 //!

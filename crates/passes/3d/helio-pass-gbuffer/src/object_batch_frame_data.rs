@@ -8,7 +8,7 @@
 //! central scene storage (`helio-pass-gbuffer`, `helio-pass-occlusion-cull`,
 //! `helio-pass-indirect-dispatch`, `helio-pass-shadow` and its
 //! `-cull`/`-dirty` siblings, `helio-pass-transparent`, `helio-pass-
-//! forward-lit`, `helio-pass-depth-prepass`, `helio-pass-portal-cull`/
+//! forward-lit`, `helio-pass-portal-cull`/
 //! `-instances`).
 //!
 //! Defined here rather than in `helio-pass-object-batch` itself because that
