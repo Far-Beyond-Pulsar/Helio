@@ -732,6 +732,73 @@ from host-made `VoxelTerrain` closures. Target and order:
    the components and `VoxelFeature`; Helio, `helio_component` and
    `engine_backend` keep no voxel code.
 
+As built, steps 6.2 to 6.5 (2026-11-02): the voxel terrain reaches the
+renderer, the cameras and the editor only through its component.
+- **One world per terrain** (Pulsar `voxel_runtime`): each enabled terrain
+  instance has a `VoxelTerrainRuntime`, a SceneDB component beside it that
+  is never saved (a copy of the scene, play in editor, builds its own). Its
+  world builds on the runtime's own worker thread: a journal that only grew
+  extends a copy of the world shown (each new edit's yield counted, so block
+  events fire for every edit, the editor's strokes included, from the
+  build), an undo undoes in a copy, anything else rebuilds with the save's
+  kept chunks. Readers see the last world built; a description that does
+  not build keeps it and says why. The backend's world, its `WorldBuilder`
+  and the process-global `WORLDS` cache are gone.
+- **Scene subsystems are SceneDB's**: `VoxelWorlds` is a SceneDB
+  `Subsystem` (it keeps journals on their ground, skies on their terrain,
+  drives the runtimes and stamps sculpt samples). Plugins register scene
+  subsystems (`pulsar_world_registry::SceneSubsystemRegistration`); hosts
+  install them into every scene they step (`install_scene_subsystems`) and
+  `SceneDb::step` runs them. `VoxelWorldSync` left engine_backend.
+- **Edits**: `append_edits` checks edits against the grid (no world needed),
+  appends them and shows them to the brick queries at once; the runtime's
+  build applies them. `record_strokes` is gone: the sculpt tool, scripts and
+  gameplay make the same call. Queries read the world shown (a terrain just
+  added answers once its first world lands; `is_world_ready`).
+- **Queries are component methods**: `ground_altitude`, `ground_up_x/_y/_z`,
+  `ground_lift`, `clip_near`, `clip_far` (world methods, script-callable).
+  Hosts know no terrain: `engine_backend::camera_ground::GroundQueries`
+  calls these methods by name on any component that has them, the way
+  scripts call them (`pulsar_world_registry::components_with_method`); the
+  editor camera, the game's free camera and the clip planes use it.
+  `VoxelGround`, `voxel_ground`, `voxel_altitude`, `lift_out_of_ground` and
+  the backend's camera hooks are gone.
+- **Rendering reads what the component publishes**: Helio's scene input
+  gained CPU payloads, `PayloadContract<T>` (key and type; the CPU half of a
+  buffer contract) and `ScenePayloads`, read by passes from
+  `ctx.scene_buffers.payload(..)` and handed over by hosts
+  (`Renderer::set_scene_payloads`). Plugins register publishers
+  (`pulsar_world_registry::ScenePayloadRegistration`: key, a function of the
+  scene, problems to show, whether the content wants temporal resolve, and
+  whether it is still settling); engine_backend forwards them by key. The
+  voxel runtime publishes `VOXEL_FRAME` (`PlanetFrame`: its volumes with
+  their world, kept chunks, appearance, smoothing and requests, and the
+  scene's sun). `ChunkPass::new(ResidencyConfig)` reads it; the feature is
+  enabled by the feature setting `VoxelSettings`. Deleted: `VoxelTerrain`,
+  `ChunkPassMaker`, `SharedPlanetFrame`, `VoxelRenderBackend`,
+  `VoxelBackendRegistry`, `PlanetVoxelBackend`, `voxel_frame.rs` and the
+  `find_pass_mut` appearance calls (a look change keeps the pass asking for
+  frames until temporal history settles). Two generic pass hooks replace
+  the hosts' downcasts: `RenderPass::needs_frame` and
+  `RenderPass::diagnostics` (`Renderer::needs_frame`/`diagnostics`).
+- **GPU answers come back to the component**: a volume's requests are
+  data in its payload (`VolumeRequests`: picks as world-space rays from a
+  camera's eye, a save's keep request id) and the pass answers into the
+  runtime's inbox (`VolumeAnswers`). A pick is answered by the pass whose
+  camera is at the ray's origin (it projects the ray to its pixel), so split
+  viewports never answer each other's picks. Saves ask the terrain's runtime
+  (`TerrainWorld::kept_chunks`) off the render thread. Deleted:
+  `SharedPicks`, `Picks`, `KeptExport`, `SharedKeptExport`,
+  `VoxelChunkSaves`, the mailbox field, and the renderer's
+  `VoxelBrushRequest`/`VoxelBrushTool`/`VoxelBrushCommit`/brush handling.
+- **Sculpting is a component method**: `voxel_sculpt::sculpt` (script:
+  `sculpt_stroke`) takes a stroke sample (ray, brush, start); near the last
+  stamp it stamps at once over the brick queries, else it asks the drawn
+  world for a pick and the scene step stamps when it is answered (or walks
+  the exact terrain after 150 ms). The editor's sculpt tool hands the
+  renderer a generic `ToolRay` (a closure the render thread calls with the
+  frame camera's pointer ray and the scene), which calls `sculpt`.
+
 Later steps apply the same pattern to every other kind (meshes + VG,
 water, foliage, decals, lights, sky, portals, sprites), one plugin per
 kind, each removing that kind from Helio, the presets, the scene

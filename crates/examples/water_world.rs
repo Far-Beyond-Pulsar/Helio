@@ -35,12 +35,12 @@ use helio_pass_foliage_place::{
     FOLIAGE_FLAG_TWO_SIDED,
 };
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
+use helio_pass_voxel_planet::engine::{PlanetFrame, TerrainAppearance, VOXEL_FRAME};
 use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe, VolumeTransform};
 use helio_pass_water_sim::{GpuWaterVolume, OceanSpectrum, WaterSimPass, WaterSpraySettings};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{collections::HashSet, time::Instant};
 use winit::{
     application::ApplicationHandler,
@@ -58,8 +58,9 @@ struct Showcase {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     renderer: Renderer,
-    source: SharedPlanetFrame,
     planet: Arc<Planet>,
+    /// The terrain's look, published with the planet each frame.
+    appearance: TerrainAppearance,
     scene: pulsar_scenedb::SceneDb,
     sun_entity: pulsar_scenedb::Entity,
     /// The water volume and its row: its `sun_direction` is the scene's sun, which
@@ -292,15 +293,8 @@ impl Showcase {
             WaterVolumeComponent::from(helio_pass_water_sim::WaterVolumeRow::from(water)),
         );
 
-        let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-        let pass_source = source.clone();
-        let config = helio_pass_voxel_planet::chunks::ResidencyConfig::default();
         let appearance = worlds::Preset::Earth.appearance(planet.field().appearance());
-        let terrain = helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            let mut pass = ChunkPass::with_config(pass_source.clone(), config);
-            pass.set_appearance(Some(appearance));
-            pass
-        });
+        let terrain = helio_pass_voxel_planet::VoxelSettings::default();
         let mut renderer_config = RendererConfig::new(size[0], size[1], format);
         renderer_config
             .features
@@ -467,8 +461,8 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             device,
             queue,
             renderer,
-            source,
             planet,
+            appearance,
             scene,
             sun_entity,
             water_entity,
@@ -511,8 +505,10 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
         }
         let (azimuth, elevation) = preset_sun(preset);
         let sun = sun_direction(azimuth, elevation);
-        *self.source.lock().expect("planet frame lock") =
-            Some(PlanetFrame::single(eye, self.planet.clone(), sun));
+        let mut frame = PlanetFrame::single(self.planet.clone(), sun);
+        frame.volumes[0].appearance = Some(self.appearance);
+        self.renderer
+            .set_scene_payload(&VOXEL_FRAME, Arc::new(frame));
         let forward = forward.normalize();
         let up = if forward.y.abs() > 0.999 {
             Vec3::X
@@ -763,7 +759,7 @@ impl AppState {
                 );
             }
             if let Some(chunks) = self.showcase.renderer.find_pass::<ChunkPass>() {
-                eprintln!("WATER_WORLD_CHUNKS {}", chunks.diagnostics());
+                eprintln!("WATER_WORLD_CHUNKS {}", chunks.stats_line());
             }
             self.showcase.save(output, &self.preset);
             self.capture_requested = false;

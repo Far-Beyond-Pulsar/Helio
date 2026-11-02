@@ -57,13 +57,15 @@ use helio_components::{CameraPostProcessComponent, LightComponent};
 use helio_presets::Preset;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::VolumeId;
-use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPicks, SharedPlanetFrame, VolumeFrame};
+use helio_pass_voxel_planet::engine::{
+    PlanetFrame, TerrainAppearance, VolumeFrame, VolumeRequests, VOXEL_FRAME,
+};
 use helio_pass_voxel_planet::{
     Brush, BrushOp, BrushShape, Planet, PlanetRecipe, VolumeTransform, VoxelVolume,
 };
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Instant;
 
 const FRAMES_IN_FLIGHT: usize = 2;
@@ -72,8 +74,9 @@ struct Flight {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     renderer: Renderer,
-    source: SharedPlanetFrame,
     planet: Arc<Planet>,
+    /// The volumes' look: the generator's with the preset's materials.
+    appearance: TerrainAppearance,
     target: wgpu::Texture,
     size: [u32; 2],
     sun: Vec3,
@@ -84,8 +87,8 @@ struct Flight {
     in_flight: std::collections::VecDeque<Arc<std::sync::atomic::AtomicBool>>,
     /// The render thread's cycles in the last `draw`'s recording.
     render_cycles: u64,
-    /// Pick requests drawn frames answer (`pick_probe`).
-    picks: Option<SharedPicks>,
+    /// The planet's requests drawn frames answer (`pick_probe`).
+    requests: VolumeRequests,
     /// Volumes drawn beside the planet (`volumes_tour`), placed each frame.
     extra: Vec<VoxelVolume>,
 }
@@ -223,8 +226,6 @@ impl Flight {
             scene.world.insert_row(wind, meadow.wind);
         }
         scene.world.flush_gpu_mirror(&queue);
-        let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-        let pass_source = source.clone();
         // The renderer's pass generates as a host's does: the engine's
         // milliseconds a frame unless the environment sets them.
         let mut config = chunk_config(size[1], 256);
@@ -236,11 +237,7 @@ impl Flight {
             .or(helio_pass_voxel_planet::chunks::ResidencyConfig::default().frame_ms);
         // The generator's look with the materials the preset's features add.
         let appearance = preset.appearance(planet.field().appearance());
-        let terrain = helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            let mut pass = ChunkPass::with_config(pass_source.clone(), config);
-            pass.set_appearance(Some(appearance));
-            pass
-        });
+        let terrain = helio_pass_voxel_planet::VoxelSettings { residency: config };
         let mut config = RendererConfig::new(size[0], size[1], wgpu::TextureFormat::Rgba8UnormSrgb)
             .with_tsr_quality(quality);
         config
@@ -330,8 +327,8 @@ impl Flight {
             device,
             queue,
             renderer,
-            source,
             planet: Arc::new(planet),
+            appearance,
             target,
             size,
             sun: sun_dir,
@@ -341,7 +338,7 @@ impl Flight {
             output: output.to_path_buf(),
             in_flight: Default::default(),
             render_cycles: 0,
-            picks: None,
+            requests: VolumeRequests::default(),
             extra: Vec::new(),
         }
     }
@@ -351,14 +348,16 @@ impl Flight {
     /// milliseconds recording it took and those waiting.
     fn draw(&mut self, eye: DVec3, forward: Vec3) -> (f64, f64) {
         let started = Instant::now();
-        let mut frame = PlanetFrame {
-            picks: self.picks.clone(),
-            ..PlanetFrame::single(eye, self.planet.clone(), self.sun_at(eye))
-        };
+        let mut frame = PlanetFrame::single(self.planet.clone(), self.sun_at(eye));
+        frame.volumes[0].requests = self.requests.clone();
         frame
             .volumes
             .extend(self.extra.iter().cloned().map(VolumeFrame::new));
-        *self.source.lock().unwrap() = Some(frame);
+        for v in &mut frame.volumes {
+            v.appearance = Some(self.appearance);
+        }
+        self.renderer
+            .set_scene_payload(&VOXEL_FRAME, Arc::new(frame));
         let up = up_for(eye);
         let forward = forward.normalize();
         let up = if forward.dot(up).abs() > 0.999 {
@@ -544,7 +543,7 @@ fn volumes_tour(flight: &mut Flight, ground: DVec3, heading: f64, seed: u64) {
             let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
             flight.capture(&format!("volumes_tour_{:02}", frame / 150));
             let pass = flight.renderer.find_pass::<ChunkPass>().unwrap();
-            eprintln!("VOLUMES frame {frame} t {t:.1} s: {}", pass.diagnostics());
+            eprintln!("VOLUMES frame {frame} t {t:.1} s: {}", pass.stats_line());
         }
     }
     std::fs::write(flight.output.join("volumes_tour.csv"), csv).unwrap();
@@ -688,7 +687,7 @@ fn volumes_hover(flight: &mut Flight, ground: DVec3, seed: u64) {
     flight.capture("volumes_hover");
     std::fs::write(flight.output.join("volumes_hover.csv"), csv).unwrap();
     let pass = flight.renderer.find_pass::<ChunkPass>().unwrap();
-    eprintln!("VOLUMES hover: {}", pass.diagnostics());
+    eprintln!("VOLUMES hover: {}", pass.stats_line());
 }
 
 fn percentile(values: &[f64], p: f64) -> f64 {
@@ -1580,7 +1579,7 @@ fn chunk_engine_hold(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3)
     eprintln!(
         "CHUNKENGINE {view} settled in {:.2} s ({frames} frames): {}",
         started.elapsed().as_secs_f64(),
-        pass.diagnostics()
+        pass.stats_line()
     );
     let mut by_pass: Vec<(&str, f64)> = settling
         .iter()
@@ -2550,15 +2549,15 @@ fn refinement_gate(output: &std::path::Path, mode: &str, samples: usize) {
     );
 }
 
-/// `HELIO_VOXEL_PICKS=x,y;x,y` (output pixels): the renderer's picks there
-/// against the CPU raycast through the same pixel.
+/// `HELIO_VOXEL_PICKS=x,y;x,y` (output pixels): the renderer's picks along
+/// the camera's rays through those pixels against the CPU raycast along the
+/// same rays.
 fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
-    use helio_pass_voxel_planet::engine::{PickRequest, Picks};
+    use helio_pass_voxel_planet::engine::{PickRequest, VolumeAnswer, VolumeAnswers};
     let Ok(points) = std::env::var("HELIO_VOXEL_PICKS") else {
         return;
     };
     let [w, h] = flight.size;
-    let picks = std::sync::Arc::new(std::sync::Mutex::new(Picks::default()));
     let pixels: Vec<[u32; 2]> = points
         .split(';')
         .map(|p| {
@@ -2568,23 +2567,6 @@ fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
         })
         .map(|v| [v[0], v[1]])
         .collect();
-    picks.lock().unwrap().requests = pixels
-        .iter()
-        .enumerate()
-        .map(|(n, p)| PickRequest {
-            id: n as u64,
-            uv: [
-                (p[0] as f32 + 0.5) / w as f32,
-                (p[1] as f32 + 0.5) / h as f32,
-            ],
-        })
-        .collect();
-    flight.picks = Some(picks.clone());
-    for _ in 0..12 {
-        flight.draw(eye, forward);
-        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
-    }
-    flight.picks = None;
     let up = up_for(eye);
     let forward = forward.normalize();
     let up = if forward.dot(up).abs() > 0.999 {
@@ -2595,19 +2577,56 @@ fn pick_probe(flight: &mut Flight, view: &str, eye: DVec3, forward: Vec3) {
     let right = forward.cross(up).normalize();
     let cam_up = right.cross(forward);
     let tan = (std::f32::consts::FRAC_PI_4 * 0.5).tan();
-    let results = std::mem::take(&mut picks.lock().unwrap().results);
+    // The camera's ray through each pixel's centre, from the eye it draws
+    // from.
+    let rays: Vec<DVec3> = pixels
+        .iter()
+        .map(|p| {
+            let ndc = [
+                (p[0] as f32 + 0.5) / w as f32 * 2.0 - 1.0,
+                1.0 - (p[1] as f32 + 0.5) / h as f32 * 2.0,
+            ];
+            (forward + right * ndc[0] * tan * (w as f32 / h as f32) + cam_up * ndc[1] * tan)
+                .normalize()
+                .as_dvec3()
+        })
+        .collect();
+    // Request ids only grow: the pass answers each id once.
+    static NEXT_PICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let first = NEXT_PICK.fetch_add(rays.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    let answers = Arc::new(VolumeAnswers::default());
+    flight.requests = VolumeRequests {
+        picks: rays
+            .iter()
+            .enumerate()
+            .map(|(n, &direction)| PickRequest {
+                id: first + n as u64,
+                origin: eye,
+                direction,
+            })
+            .collect(),
+        keep: None,
+        answers: Some(answers.clone()),
+    };
+    for _ in 0..12 {
+        flight.draw(eye, forward);
+        let _ = flight.device.poll(wgpu::PollType::wait_indefinitely());
+    }
+    flight.requests = VolumeRequests::default();
+    let results: Vec<_> = answers
+        .take()
+        .into_iter()
+        .filter_map(|a| match a {
+            VolumeAnswer::Pick(r) => Some(r),
+            _ => None,
+        })
+        .collect();
     for (n, p) in pixels.iter().enumerate() {
-        let ndc = [
-            (p[0] as f32 + 0.5) / w as f32 * 2.0 - 1.0,
-            1.0 - (p[1] as f32 + 0.5) / h as f32 * 2.0,
-        ];
-        let dir = (forward + right * ndc[0] * tan * (w as f32 / h as f32) + cam_up * ndc[1] * tan)
-            .normalize()
-            .as_dvec3();
+        let dir = rays[n];
         let cpu = flight.planet.raycast(eye, dir, 100_000.0);
         let pick = results
             .iter()
-            .find(|r| r.id == n as u64)
+            .find(|r| r.id == first + n as u64)
             .and_then(|r| r.hit);
         eprintln!(
             "PICK {view} {},{}: drawn {:?} | cpu {:?}",

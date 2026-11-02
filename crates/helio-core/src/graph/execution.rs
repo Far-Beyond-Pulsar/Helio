@@ -785,6 +785,18 @@ impl RenderGraph {
             .chain(self.dormant.iter_mut().map(|(_, pass)| pass))
     }
 
+    /// Whether any pass needs more frames ([`RenderPass::needs_frame`]).
+    pub fn needs_frame(&self) -> bool {
+        self.all_passes().any(|(_, pass)| pass.needs_frame())
+    }
+
+    /// Every pass's diagnostics line ([`RenderPass::diagnostics`]).
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.all_passes()
+            .filter_map(|(_, pass)| pass.diagnostics())
+            .collect()
+    }
+
     /// Number of passes that are not members of the current frame.
     pub fn dormant_count(&self) -> usize {
         self.dormant.len()

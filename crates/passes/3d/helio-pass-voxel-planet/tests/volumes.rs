@@ -11,7 +11,7 @@ mod common;
 use common::{gpu, Gpu};
 use glam::{DQuat, DVec3, Mat4, Vec3};
 use helio_pass_voxel_planet::chunks::{Capacity, ChunkWorld, ResidencyConfig, VolumeId};
-use helio_pass_voxel_planet::engine::{PickHit, PickRequest, Picks, SharedPicks};
+use helio_pass_voxel_planet::engine::{PickHit, PickResult, VolumeAnswer, VolumeAnswers};
 use helio_pass_voxel_planet::grid::Shape;
 use helio_pass_voxel_planet::layers::TerrainLayers;
 use helio_pass_voxel_planet::planet::Matter;
@@ -19,7 +19,7 @@ use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{
     Brush, BrushOp, BrushShape, Cell, Planet, PlanetRecipe, VolumeTransform, Volumes, VoxelVolume,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 const FOV_Y: f32 = std::f32::consts::FRAC_PI_4;
 
@@ -103,6 +103,28 @@ impl Camera {
 }
 
 /// A chunk world of several volumes and its frame counter.
+/// A tool's picks waiting to be copied (request id, view point 0..1 from
+/// the top left) and the inbox they are answered into.
+#[derive(Default)]
+struct Picks {
+    waiting: Vec<(u64, [f32; 2])>,
+    answers: Arc<VolumeAnswers>,
+}
+
+impl Picks {
+    /// The answers so far.
+    fn results(&self) -> Vec<PickResult> {
+        self.answers
+            .take()
+            .into_iter()
+            .filter_map(|a| match a {
+                VolumeAnswer::Pick(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 struct Scene {
     world: ChunkWorld,
     ids: Vec<VolumeId>,
@@ -160,7 +182,7 @@ impl Scene {
         &mut self,
         gpu: &Gpu,
         camera: &Camera,
-        picks: Option<&SharedPicks>,
+        picks: Option<&mut Picks>,
     ) -> helio_pass_voxel_planet::chunks::UpdateStats {
         let view_proj = camera.view_proj();
         let prev = self.last.replace(view_proj).unwrap_or(view_proj);
@@ -204,7 +226,10 @@ impl Scene {
             gi.as_ref(),
         );
         if let Some(picks) = picks {
-            self.world.copy_picks(&mut recorder, picks);
+            let taken = self
+                .world
+                .copy_picks(&mut recorder, &picks.waiting, &picks.answers);
+            picks.waiting.drain(..taken);
         }
         drop(recorder);
         gpu.queue.submit([encoder.finish()]);
@@ -607,7 +632,7 @@ fn picks_name_the_volume_they_hit() {
     };
     let mut scene = Scene::new(gpu, &volumes);
     let hits = scene.settle(gpu, &camera);
-    let picks: SharedPicks = Arc::new(Mutex::new(Picks::default()));
+    let mut picks = Picks::default();
     // A pixel each volume shows, by the middle of the most it shows.
     let at: Vec<[f32; 2]> = [1u64, 5]
         .iter()
@@ -627,18 +652,15 @@ fn picks_name_the_volume_they_hit() {
             ]
         })
         .collect();
-    picks.lock().unwrap().requests = at
+    picks.waiting = at
         .iter()
         .enumerate()
-        .map(|(n, uv)| PickRequest {
-            id: n as u64,
-            uv: *uv,
-        })
+        .map(|(n, uv)| (n as u64, *uv))
         .collect();
     for _ in 0..6 {
-        scene.frame(gpu, &camera, Some(&picks));
+        scene.frame(gpu, &camera, Some(&mut picks));
     }
-    let results = picks.lock().unwrap().results.clone();
+    let results = picks.results();
     assert_eq!(results.len(), at.len(), "{results:?}");
     let mut volumes_hit = std::collections::BTreeSet::new();
     for r in results {

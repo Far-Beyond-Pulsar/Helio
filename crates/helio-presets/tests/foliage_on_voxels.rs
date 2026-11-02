@@ -2,7 +2,7 @@
 //! pass asks the planet pass's ground (`chunks::ground`) and the blades it keeps stand on
 //! the terrain the CPU planet has, on the ground their types allow, gone where it is
 //! dug, still on a still camera.
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use glam::DVec3;
 use helio::{
@@ -15,7 +15,7 @@ use helio_pass_foliage_place::{
     GpuFoliageTile, GpuFoliageType, GpuTileFrame, TileState,
 };
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
+use helio_pass_voxel_planet::engine::{PlanetFrame, VOXEL_FRAME};
 use helio_pass_voxel_planet::terrain::material;
 use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Planet, PlanetRecipe, RayHit};
 use helio_presets::Preset;
@@ -28,7 +28,6 @@ struct Harness {
     queue: Arc<wgpu::Queue>,
     renderer: helio::Renderer,
     scene: pulsar_scenedb::SceneDb,
-    source: SharedPlanetFrame,
     view: wgpu::TextureView,
 }
 
@@ -99,8 +98,6 @@ impl Harness {
                     FoliageTypeComponent::from(helio_pass_foliage_place::FoliageTypeRow::from(t)),
                 );
             }
-            let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-            let pass_source = source.clone();
             let mut config = RendererConfig::new(SIZE[0], SIZE[1], wgpu::TextureFormat::Rgba8Unorm);
             config
                 .features
@@ -118,10 +115,7 @@ impl Harness {
                 .features
                 .edit::<helio_pass_foliage_place::FoliageSettings>()
                 .range = Some(60.0);
-            let config =
-                config.with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
-                    ChunkPass::new(pass_source.clone())
-                }));
+            let config = config.with_feature(helio_pass_voxel_planet::VoxelSettings::default());
             let mirror = scene.world.gpu_mirror().cloned().unwrap();
             let renderer = RendererBuilder::new(config.clone(), mirror)
                 .with_external_device()
@@ -153,7 +147,6 @@ impl Harness {
                 queue,
                 renderer,
                 scene,
-                source,
                 view,
             })
         })
@@ -171,7 +164,9 @@ impl Harness {
             0.05,
             40_000_000.0,
         );
-        *self.source.lock().unwrap() = Some(PlanetFrame::single(eye, planet.clone(), up));
+        let frame = PlanetFrame::single(planet.clone(), up);
+        self.renderer
+            .set_scene_payload(&VOXEL_FRAME, Arc::new(frame));
         for _ in 0..frames {
             self.scene.world.flush_gpu_mirror(&self.queue);
             self.renderer.render(&camera, &self.view).unwrap();

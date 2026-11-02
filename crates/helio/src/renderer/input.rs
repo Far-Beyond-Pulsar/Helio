@@ -71,6 +71,11 @@ impl<'a> SceneInputAdapter<'a> {
         }
     }
 
+    /// The host's payloads for this frame.
+    pub(crate) fn set_payloads(&mut self, payloads: helio_core::ScenePayloads) {
+        self.buffers.set_payloads(payloads);
+    }
+
     /// Run the renderer's scene derivations, publishing their outputs into
     /// this frame's scene buffers, and submit their work ahead of the graph.
     pub(crate) fn run_derivations(

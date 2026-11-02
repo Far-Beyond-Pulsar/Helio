@@ -1,29 +1,41 @@
 //! Chunk trees in Helio's render graph: residency, primary visibility, sun
-//! and sky light, and the gbuffer, from a host's [`SharedPlanetFrame`]: its
-//! volumes, each placed by its transform, in one world. Lighting is Helio's
-//! deferred lighting, its sun shadowed by walks through the chunk trees
-//! (`directional_visibility`).
+//! and sky light, and the gbuffer, of the volumes the scene publishes
+//! ([`VOXEL_FRAME`]), each placed by its transform, in one world. Lighting is
+//! Helio's deferred lighting, its sun shadowed by walks through the chunk
+//! trees (`directional_visibility`). It answers what each volume's owner
+//! asks of the drawn world (picks, a save's chunks) into the owner's inbox.
 
 use super::{
     residency, ChunkWorld, EditSync, FrameTimings, ResidencyConfig, UpdateStats, VolumeId,
 };
-use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
+use crate::engine::{PlanetFrame, TerrainAppearance, VolumeAnswer, VOXEL_FRAME};
 use glam::{DVec3, Mat4, Vec2, Vec3};
 use helio_core::Result as HelioResult;
 use helio_core::{
     DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, PassContext, PrepareContext,
     RenderPass,
 };
+use std::sync::Arc;
 
 /// A frame's volume as the world holds it: the host's id, the world's, the
-/// recipe it was added for (fingerprint), and a save's export underway (its
-/// resident edited chunks packing).
+/// recipe it was added for (fingerprint), the look shown, and its owner's
+/// requests in hand.
 struct HeldVolume {
     id: u64,
     volume: VolumeId,
     recipe: u64,
-    exporting: bool,
+    /// The appearance and smoothing shown.
+    look: (Option<TerrainAppearance>, f32),
+    /// The keep request whose chunks are packing, and the last answered.
+    exporting: Option<u64>,
+    kept: Option<u64>,
+    /// The newest pick request taken (answered here or not this camera's).
+    picked: u64,
 }
+
+/// Frames to keep drawing after a volume's look changed, so temporal
+/// history settles on it before an on-demand host goes idle.
+const LOOK_SETTLE_FRAMES: u32 = 32;
 
 /// The appearance a volume shows: the host's, else `generator`'s own, lit
 /// `smoothing` smooth.
@@ -39,18 +51,14 @@ fn shown_appearance(
 }
 
 pub struct ChunkPass {
-    source: SharedPlanetFrame,
     config: ResidencyConfig,
-    /// The host's art settings (none: each terrain generator's).
-    appearance: Option<TerrainAppearance>,
-    /// The host's surface smoothing (`TerrainAppearance::smoothing`), over
-    /// whichever appearance is shown.
-    smoothing: f32,
     debug_mode: u32,
     world: Option<ChunkWorld>,
     /// The frame's volumes the world holds.
     held: Vec<HeldVolume>,
-    shown: Option<PlanetFrame>,
+    shown: Option<Arc<PlanetFrame>>,
+    /// Frames left to draw after a look changed ([`LOOK_SETTLE_FRAMES`]).
+    settling: u32,
     /// How the kept chunks of the last volume added went into it: how
     /// many, or why they were refused.
     kept_loaded: Option<Result<usize, String>>,
@@ -85,28 +93,22 @@ pub struct ChunkPass {
 }
 
 impl ChunkPass {
-    /// A pass drawing the frames `source` gives.
-    pub fn new(source: SharedPlanetFrame) -> Self {
-        Self::with_config(source, ResidencyConfig::default())
-    }
-
-    /// With residency settings `config` (its pixel angle follows the
+    /// A pass drawing the volumes the scene publishes ([`VOXEL_FRAME`]),
+    /// with residency settings `config` (its pixel angle follows the
     /// camera).
-    pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
+    pub fn new(config: ResidencyConfig) -> Self {
         let planet_ground = std::sync::Arc::new(super::ground::PlanetGround::default());
         let foliage_ground =
             std::sync::Arc::new(helio_foliage_api::GroundLink::answered_elsewhere(
                 Box::new(planet_ground.clone()),
             ));
         Self {
-            source,
             config,
-            appearance: None,
-            smoothing: 0.0,
             debug_mode: 0,
             world: None,
             held: Vec::new(),
             shown: None,
+            settling: 0,
             kept_loaded: None,
             last_eye: [None; 2],
             residency_eye: None,
@@ -158,65 +160,29 @@ impl ChunkPass {
         self.residency_eye = eye;
     }
 
-    /// The host's art settings (every volume's); whether they changed.
-    pub fn set_appearance(&mut self, appearance: Option<TerrainAppearance>) -> bool {
-        if self.appearance == appearance {
-            return false;
-        }
-        self.appearance = appearance;
-        self.apply_appearance();
-        true
-    }
-
-    /// Light the terrain's surfaces `smoothing` smooth (0 to 1; see
-    /// `TerrainAppearance::smoothing`) over whichever appearance is shown.
-    /// Returns whether it changed.
-    pub fn set_smoothing(&mut self, smoothing: f32) -> bool {
-        let smoothing = if smoothing.is_finite() {
-            smoothing.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        if self.smoothing == smoothing {
-            return false;
-        }
-        self.smoothing = smoothing;
-        self.apply_appearance();
-        true
-    }
-
-    /// Send the appearance shown to every volume the world holds.
-    fn apply_appearance(&mut self) {
-        let (appearance, smoothing) = (self.appearance, self.smoothing);
-        if let (Some(world), Some(frame)) = (&mut self.world, &self.shown) {
-            for v in &frame.volumes {
-                if let Some(held) = self.held.iter().find(|h| h.id == v.volume.id) {
-                    world.set_appearance(
-                        held.volume,
-                        &shown_appearance(appearance, smoothing, || {
-                            v.volume.planet.field().appearance()
-                        }),
-                    );
-                }
-            }
-        }
-    }
-
-    /// A host viewport should keep rendering until residency settles.
-    /// A save's export too, until answered.
-    pub fn needs_frame(&self) -> bool {
-        let Ok(source) = self.source.try_lock() else {
-            return true;
-        };
-        let Some(frame) = source.as_ref() else {
-            return false;
-        };
-        let exporting = frame.volumes.iter().any(|v| {
-            v.export
-                .as_ref()
-                .is_some_and(|e| e.try_lock().map_or(true, |e| e.wanted))
+    /// Whether residency settles, a save's chunks pack, picks wait or a new
+    /// look settles: a host rendering on demand keeps drawing meanwhile.
+    fn wants_frames(&self) -> bool {
+        let asked = self.shown.as_ref().is_some_and(|frame| {
+            frame.volumes.iter().any(|v| {
+                let held = self.held.iter().find(|h| h.id == v.volume.id);
+                let keep = v
+                    .requests
+                    .keep
+                    .is_some_and(|id| held.is_none_or(|h| h.kept != Some(id)));
+                let picks = v
+                    .requests
+                    .picks
+                    .iter()
+                    .any(|r| held.is_none_or(|h| r.id > h.picked));
+                keep || picks
+            })
         });
-        exporting || self.world.as_ref().is_none_or(|w| !w.settled())
+        asked
+            || self.settling > 0
+            || self.world.as_ref().is_some_and(ChunkWorld::picks_in_flight)
+            || self.world.as_ref().is_none_or(|w| !w.settled())
+                && self.shown.as_ref().is_some_and(|f| !f.volumes.is_empty())
     }
 
     /// How the kept chunks of the last volume added went into it: how many
@@ -266,8 +232,8 @@ impl ChunkPass {
         std::mem::take(&mut self.timings)
     }
 
-    /// One line for a host's diagnostics.
-    pub fn diagnostics(&self) -> String {
+    /// One line for a host's diagnostics ([`RenderPass::diagnostics`]).
+    pub fn stats_line(&self) -> String {
         let s = &self.stats;
         let gpu = self.timings.last();
         format!(
@@ -375,9 +341,6 @@ impl RenderPass for ChunkPass {
         let Some(previous) = previous.as_any_mut().downcast_mut::<Self>() else {
             return false;
         };
-        if !std::sync::Arc::ptr_eq(&self.source, &previous.source) {
-            return false;
-        }
         self.world = previous.world.take();
         self.debug_mode = previous.debug_mode;
         if let Some(world) = &mut self.world {
@@ -386,9 +349,7 @@ impl RenderPass for ChunkPass {
         self.held = std::mem::take(&mut previous.held);
         self.shown = previous.shown.take();
         self.kept_loaded = previous.kept_loaded.take();
-        // A graph rebuild must not revert the host's art settings.
-        self.appearance = previous.appearance;
-        self.smoothing = previous.smoothing;
+        self.settling = previous.settling;
         if self.scene.is_none() {
             self.scene = previous.scene.take();
         }
@@ -398,6 +359,13 @@ impl RenderPass for ChunkPass {
     }
     fn reads(&self) -> &'static [&'static str] {
         READS
+    }
+    fn needs_frame(&self) -> bool {
+        self.wants_frames()
+    }
+    fn diagnostics(&self) -> Option<String> {
+        self.shown.as_ref()?;
+        Some(self.stats_line())
     }
     fn writes(&self) -> &'static [&'static str] {
         WRITES
@@ -526,15 +494,9 @@ impl ChunkPass {
             let excess = self.timings.len().saturating_sub(KEEP_TIMINGS);
             self.timings.drain(..excess);
         }
-        let frame = self
-            .source
-            .lock()
-            .map_err(|_| {
-                helio_core::Error::InvalidPassConfig("planet frame source poisoned".into())
-            })?
-            .clone();
-        // No frame: the chunks and storage go.
-        let Some(frame) = frame else {
+        self.settling = self.settling.saturating_sub(1);
+        // No volumes published: the chunks and storage go.
+        let Some(frame) = ctx.scene_buffers.payload(&VOXEL_FRAME) else {
             self.shown = None;
             self.world = None;
             self.held.clear();
@@ -558,8 +520,17 @@ impl ChunkPass {
                 .filter(|&n| self.held[n].recipe == recipe)
                 .and_then(|n| world.sync_edits(self.held[n].volume, planet));
             if let Some(sync) = synced {
-                let h = self.held.swap_remove(at.unwrap());
+                let mut h = self.held.swap_remove(at.unwrap());
                 world.set_transform(h.volume, v.volume.transform);
+                let look = (v.appearance, clean_smoothing(v.smoothing));
+                if h.look != look {
+                    world.set_appearance(
+                        h.volume,
+                        &shown_appearance(look.0, look.1, || planet.field().appearance()),
+                    );
+                    h.look = look;
+                    self.settling = LOOK_SETTLE_FRAMES;
+                }
                 // Another history (a level loaded): its saved chunks too.
                 if sync == EditSync::Resynced {
                     self.kept_loaded = v
@@ -574,12 +545,11 @@ impl ChunkPass {
                 world.remove_volume(self.held.swap_remove(n).volume);
             }
             let volume = world.add_volume(v.volume.id, planet, v.volume.transform);
-            if self.appearance.is_some() || self.smoothing != 0.0 {
+            let look = (v.appearance, clean_smoothing(v.smoothing));
+            if look.0.is_some() || look.1 != 0.0 {
                 world.set_appearance(
                     volume,
-                    &shown_appearance(self.appearance, self.smoothing, || {
-                        v.volume.planet.field().appearance()
-                    }),
+                    &shown_appearance(look.0, look.1, || planet.field().appearance()),
                 );
             }
             self.kept_loaded = v
@@ -591,7 +561,10 @@ impl ChunkPass {
                 id: v.volume.id,
                 volume,
                 recipe,
-                exporting: false,
+                look,
+                exporting: None,
+                kept: None,
+                picked: 0,
             });
         }
         // Volumes the frame no longer shows go.
@@ -604,25 +577,25 @@ impl ChunkPass {
             self.planet_ground
                 .set_volume(*v.volume.planet.grid(), v.volume.transform);
         }
-        // A save's export: a volume's resident edited chunks packed (over
-        // the next updates), then its kept chunks answered for its world.
+        // A save's keep request: a volume's resident edited chunks packed
+        // (over the next updates), then answered for its world.
         for (h, v) in self.held.iter_mut().zip(&frame.volumes) {
-            let Some(export) = &v.export else { continue };
-            let mut export = export.lock().map_err(|_| {
-                helio_core::Error::InvalidPassConfig("kept chunk export poisoned".into())
-            })?;
-            if !export.wanted {
-                h.exporting = false;
-            } else if !h.exporting {
+            let wanted = v.requests.keep.filter(|id| h.kept != Some(*id));
+            let (Some(id), Some(answers)) = (wanted, &v.requests.answers) else {
+                h.exporting = None;
+                continue;
+            };
+            if h.exporting != Some(id) {
                 world.keep_resident();
-                h.exporting = true;
+                h.exporting = Some(id);
             } else if world.keeping() == 0 {
-                export.answer = Some((
-                    v.volume.planet.clone(),
-                    world.kept_chunks(h.volume, &v.volume.planet),
-                ));
-                export.wanted = false;
-                h.exporting = false;
+                answers.push(VolumeAnswer::Kept {
+                    id,
+                    planet: v.volume.planet.clone(),
+                    chunks: world.kept_chunks(h.volume, &v.volume.planet),
+                });
+                h.kept = Some(id);
+                h.exporting = None;
             }
         }
         self.shown = Some(frame);
@@ -664,8 +637,8 @@ impl ChunkPass {
         // The tracer starts every perspective ray at zero. Its matrices must
         // therefore be eye-relative, and its absolute ray origin must be the
         // SAME eye as the renderer camera (including OpenXR's predicted pose
-        // and each eye's offset). PlanetFrame.eye can be an older input sample;
-        // it remains useful for residency, but cannot anchor the traced view.
+        // and each eye's offset). Residency follows it too, unless the host
+        // set a head-centred eye for a stereo pair.
         let at = Vec3::from_slice(&camera.position_near[..3]);
         let (trace_eye, view_proj, prev_view_proj) = trace_camera(camera, ctx.world_origin);
         let proj = Mat4::from_cols_array(&camera.proj);
@@ -675,7 +648,7 @@ impl ChunkPass {
             std::mem::replace(&mut self.last_jitter[eye_index], jitter),
         ];
         let now = std::time::Instant::now();
-        let residency_eye = self.residency_eye.unwrap_or(frame.eye);
+        let residency_eye = self.residency_eye.unwrap_or(trace_eye);
         let interval =
             self.last_eye[eye_index].map(|(_, at)| now.duration_since(at).as_secs_f64().max(1e-3));
         let velocity = match (self.last_eye[eye_index], interval) {
@@ -838,11 +811,64 @@ impl ChunkPass {
         }
         let scene_inputs = self.scene.as_ref().and_then(|(_, source)| source(ctx));
         world.publish_scene(encoder, gbuffer, ctx.depth, scene_inputs);
-        if let Some(picks) = &frame.picks {
-            world.copy_picks(encoder, picks);
+        // Picks along rays from this camera's eye: each volume's, at the
+        // view points they cross. Others' are another camera's.
+        for (h, v) in self.held.iter_mut().zip(&frame.volumes) {
+            let Some(answers) = &v.requests.answers else {
+                continue;
+            };
+            let fresh: Vec<_> = v
+                .requests
+                .picks
+                .iter()
+                .filter(|r| r.id > h.picked)
+                .collect();
+            let mine: Vec<(u64, [f32; 2])> = fresh
+                .iter()
+                .filter_map(|r| Some((r.id, pick_uv(r, trace_eye, view_proj)?)))
+                .collect();
+            let taken = world.copy_picks(encoder, &mine, answers);
+            // Taken, or not this camera's: done here. Untaken ones wait.
+            let first_waiting = mine.get(taken).map(|(id, _)| *id);
+            for r in fresh {
+                if first_waiting.is_none_or(|w| r.id < w) {
+                    h.picked = h.picked.max(r.id);
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// Surface smoothing within 0 to 1.
+fn clean_smoothing(smoothing: f32) -> f32 {
+    if smoothing.is_finite() {
+        smoothing.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Where `request`'s ray crosses this camera's view (0..1 from the top
+/// left), when it leaves this camera's eye (`trace_eye`, eye-relative
+/// `view_proj`) and is in view.
+fn pick_uv(
+    request: &crate::engine::PickRequest,
+    trace_eye: DVec3,
+    view_proj: Mat4,
+) -> Option<[f32; 2]> {
+    let off = request.origin.distance(trace_eye);
+    if !(off <= 0.05 + trace_eye.length() * 1.0e-7) {
+        return None;
+    }
+    let d = request.direction.try_normalize()?.as_vec3();
+    let clip = view_proj * d.extend(1.0);
+    if !(clip.w > 0.0) {
+        return None;
+    }
+    let ndc = clip.truncate() / clip.w;
+    let uv = [ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5];
+    uv.iter().all(|c| (0.0..=1.0).contains(c)).then_some(uv)
 }
 
 /// The frame's volume the world takes as its primary (`ChunkWorld::primary`:

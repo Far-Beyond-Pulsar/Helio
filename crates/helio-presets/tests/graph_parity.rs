@@ -390,20 +390,16 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
 #[test]
 fn voxel_terrain_joins_every_preset_with_a_gbuffer() {
     use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-    use helio_pass_voxel_planet::engine::SharedPlanetFrame;
 
     let Some(mut fixtures) = fixtures() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: voxel terrain node");
         return;
     };
-    let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
     fixtures.config = fixtures
         .config
         .clone()
         .with_tsr_quality(helio::TsrQuality::Quality)
-        .with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            ChunkPass::new(source.clone())
-        }));
+        .with_feature(helio_pass_voxel_planet::VoxelSettings::default());
     for preset in [Preset::Deferred, Preset::DeferredFxaa, Preset::Hlfs] {
         let graph = preset.build(fixtures.context());
         let chunks = graph

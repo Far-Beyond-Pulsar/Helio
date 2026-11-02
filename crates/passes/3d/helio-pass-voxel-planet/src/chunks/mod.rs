@@ -1821,9 +1821,10 @@ const MAX_PICKS: usize = 8;
 /// visibility (8) then distance (at 16).
 struct PickSlot {
     buffer: wgpu::Buffer,
-    /// Request ids, the tool's picks, and the state as for `Buried`.
+    /// Request ids, the inbox they are answered into, and the state as
+    /// for `Buried`.
     requests: Vec<u64>,
-    sink: Option<crate::engine::SharedPicks>,
+    sink: Option<std::sync::Arc<crate::engine::VolumeAnswers>>,
     state: ReachState,
 }
 
@@ -5959,35 +5960,34 @@ impl ChunkWorld {
         self.record_at.clear();
     }
 
-    /// Copy the last draw's hits under `picks`' requests (at most
-    /// `MAX_PICKS` a frame) for readback; [`Self::submitted`] answers them.
+    /// Copy the last draw's hits under `picks` (request id, view point
+    /// 0..1 from the top left) for readback, at most [`Self::pick_room`] a
+    /// frame; [`Self::submitted`] answers them into `answers`. Returns how
+    /// many it took (the rest wait a frame).
     pub fn copy_picks(
         &mut self,
         encoder: &mut helio_core::CommandRecorder<'_>,
-        picks: &crate::engine::SharedPicks,
-    ) {
-        let Some(targets) = &self.targets else { return };
+        picks: &[(u64, [f32; 2])],
+        answers: &std::sync::Arc<crate::engine::VolumeAnswers>,
+    ) -> usize {
+        let Some(targets) = &self.targets else {
+            return 0;
+        };
         let Some(slot) = self
             .pick_slots
             .iter_mut()
             .find(|s| matches!(s.state, ReachState::Free))
         else {
-            return;
+            return 0;
         };
-        let requests: Vec<crate::engine::PickRequest> = {
-            let Ok(mut shared) = picks.lock() else { return };
-            let n = shared.requests.len().min(MAX_PICKS);
-            shared.requests.drain(..n).collect()
-        };
+        let requests = &picks[..picks.len().min(MAX_PICKS)];
         if requests.is_empty() {
-            return;
+            return 0;
         }
         let size = targets.size;
-        for (n, request) in requests.iter().enumerate() {
-            let x =
-                ((request.uv[0].clamp(0.0, 1.0) * size[0] as f32) as u32).min(size[0].max(1) - 1);
-            let y =
-                ((request.uv[1].clamp(0.0, 1.0) * size[1] as f32) as u32).min(size[1].max(1) - 1);
+        for (n, (_, uv)) in requests.iter().enumerate() {
+            let x = ((uv[0].clamp(0.0, 1.0) * size[0] as f32) as u32).min(size[0].max(1) - 1);
+            let y = ((uv[1].clamp(0.0, 1.0) * size[1] as f32) as u32).min(size[1].max(1) - 1);
             for (texture, at) in [(&targets.visibility, 0), (&targets.distance, 16)] {
                 encoder.copy_texture_to_buffer(
                     wgpu::TexelCopyTextureInfo {
@@ -6012,9 +6012,17 @@ impl ChunkWorld {
                 );
             }
         }
-        slot.requests = requests.iter().map(|r| r.id).collect();
-        slot.sink = Some(picks.clone());
+        slot.requests = requests.iter().map(|(id, _)| *id).collect();
+        slot.sink = Some(answers.clone());
         slot.state = ReachState::Copied;
+        requests.len()
+    }
+
+    /// Whether picks are on their way back.
+    pub fn picks_in_flight(&self) -> bool {
+        self.pick_slots
+            .iter()
+            .any(|s| !matches!(s.state, ReachState::Free))
     }
 
     /// The hit of a pixel's visibility (slot, cell) and distance.
@@ -6104,8 +6112,10 @@ impl ChunkWorld {
                     };
                     let slot = &mut self.pick_slots[n];
                     slot.buffer.unmap();
-                    if let Some(Ok(mut shared)) = slot.sink.take().as_ref().map(|s| s.lock()) {
-                        shared.results.extend(results);
+                    if let Some(sink) = slot.sink.take() {
+                        for result in results {
+                            sink.push(crate::engine::VolumeAnswer::Pick(result));
+                        }
                     }
                     slot.requests.clear();
                     slot.state = ReachState::Free;

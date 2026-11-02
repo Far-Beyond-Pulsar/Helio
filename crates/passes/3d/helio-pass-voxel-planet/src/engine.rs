@@ -20,36 +20,33 @@ pub const GBUFFER_FORMATS: [wgpu::TextureFormat; 8] = [
     wgpu::TextureFormat::Rgba16Float,
 ];
 
-/// One published view of the voxel volumes. `eye` is the host's camera
-/// sample in the world (the frame every volume's transform places it in),
-/// used for residency. When the renderer supplies a world origin, ChunkPass
-/// traces from the active camera's absolute eye instead (including
-/// predicted stereo poses). Otherwise this is also the trace eye for hosts
-/// supplying an already eye-relative camera.
+/// The voxel volumes a scene shows, as its content publishes them each
+/// frame under [`VOXEL_FRAME`] (a Pulsar voxel terrain's runtime, a Helio
+/// example host). The pass draws them from the active camera's eye.
 #[derive(Clone)]
 pub struct PlanetFrame {
-    pub eye: DVec3,
     /// The volumes shown: a planet, moons, planes, small free volumes. The
     /// first is the primary one (foliage grows on it, GI probes trace it).
     pub volumes: Vec<VolumeFrame>,
     /// Direction towards the sun (world frame).
     pub sun: Vec3,
-    /// Where tools ask for the terrain hit under points of the view.
-    pub picks: Option<SharedPicks>,
 }
+
+/// Where scene content publishes its voxel volumes for the voxel feature's
+/// pass ([`helio_core::PayloadContract`]).
+pub const VOXEL_FRAME: helio_core::PayloadContract<PlanetFrame> =
+    helio_core::PayloadContract::new("voxel.frame");
 
 impl PlanetFrame {
     /// A frame of one world at the origin (its own frame is the world's).
-    pub fn single(eye: DVec3, planet: Arc<Planet>, sun: Vec3) -> Self {
+    pub fn single(planet: Arc<Planet>, sun: Vec3) -> Self {
         Self {
-            eye,
             volumes: vec![VolumeFrame::new(VoxelVolume::new(
                 0,
                 planet,
                 VolumeTransform::IDENTITY,
             ))],
             sun,
-            picks: None,
         }
     }
 
@@ -59,7 +56,8 @@ impl PlanetFrame {
     }
 }
 
-/// A volume of a frame: the world and where it is, and its saves' chunks.
+/// A volume of a frame: the world and where it is, how it looks, the chunks
+/// a save kept of its edits, and what its owner asks of the drawn world.
 #[derive(Clone)]
 pub struct VolumeFrame {
     pub volume: VoxelVolume,
@@ -67,8 +65,13 @@ pub struct VolumeFrame {
     /// those edits restores them by copy instead of generating them (others
     /// are refused, [`crate::chunks::ChunkWorld::load_kept`]).
     pub kept: Option<Arc<crate::chunks::KeptChunks>>,
-    /// Where a host asks for the volume's edited chunks for a save.
-    pub export: Option<SharedKeptExport>,
+    /// The owner's art settings (none: the terrain generator's own).
+    pub appearance: Option<TerrainAppearance>,
+    /// How smooth its surfaces are lit, 0 to 1, over whichever appearance
+    /// is shown (`TerrainAppearance::smoothing`).
+    pub smoothing: f32,
+    /// What the owner asks of the drawn world, and where the answers go.
+    pub requests: VolumeRequests,
 }
 
 impl VolumeFrame {
@@ -76,31 +79,34 @@ impl VolumeFrame {
         Self {
             volume,
             kept: None,
-            export: None,
+            appearance: None,
+            smoothing: 0.0,
+            requests: VolumeRequests::default(),
         }
     }
 }
 
-pub type SharedPlanetFrame = Arc<Mutex<Option<PlanetFrame>>>;
-
-/// A save's request for a volume's edited chunks: the host sets `wanted`;
-/// the pass packs every resident edited chunk of it and, a few frames
-/// later, answers with the world shown and its kept chunks, valid for that
-/// world's edits ([`crate::chunks::ChunkWorld::kept_chunks`]).
-#[derive(Default)]
-pub struct KeptExport {
-    pub wanted: bool,
-    pub answer: Option<(Arc<Planet>, crate::chunks::KeptChunks)>,
+/// A volume owner's questions about the drawn world, published with every
+/// frame until answered: each is answered once, into `answers`.
+#[derive(Clone, Default)]
+pub struct VolumeRequests {
+    /// The drawn surface under rays from a camera's eye.
+    pub picks: Vec<PickRequest>,
+    /// Pack the volume's resident edited chunks for a save (a request id;
+    /// a newer id asks again).
+    pub keep: Option<u64>,
+    /// The owner's inbox.
+    pub answers: Option<Arc<VolumeAnswers>>,
 }
 
-pub type SharedKeptExport = Arc<Mutex<KeptExport>>;
-
-/// A request for the terrain hit under view point `uv` (0..1, from the top
-/// left), answered a frame or two later in [`Picks::results`].
+/// A request for the first terrain hit drawn along a ray from a camera's
+/// eye (world frame), answered a frame or two later by the pass whose
+/// camera is at that eye ([`VolumeAnswer::Pick`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PickRequest {
     pub id: u64,
-    pub uv: [f32; 2],
+    pub origin: DVec3,
+    pub direction: DVec3,
 }
 
 /// The answer to a [`PickRequest`]: the first terrain hit along that
@@ -130,14 +136,41 @@ pub struct PickHit {
     pub material: u32,
 }
 
-/// Pick requests and answers shared between a tool and the pass.
-#[derive(Default, Debug)]
-pub struct Picks {
-    pub requests: Vec<PickRequest>,
-    pub results: Vec<PickResult>,
+/// What the pass answers a volume's owner.
+#[derive(Clone)]
+pub enum VolumeAnswer {
+    Pick(PickResult),
+    /// The resident edited chunks of the world shown, for keep request
+    /// `id`: valid for that world's edits
+    /// ([`crate::chunks::ChunkWorld::kept_chunks`]).
+    Kept {
+        id: u64,
+        planet: Arc<Planet>,
+        chunks: crate::chunks::KeptChunks,
+    },
 }
 
-pub type SharedPicks = Arc<Mutex<Picks>>;
+/// A volume owner's inbox: the pass pushes answers, the owner takes them.
+#[derive(Default)]
+pub struct VolumeAnswers(Mutex<Vec<VolumeAnswer>>);
+
+impl VolumeAnswers {
+    pub fn push(&self, answer: VolumeAnswer) {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(answer);
+    }
+
+    pub fn take(&self) -> Vec<VolumeAnswer> {
+        std::mem::take(
+            &mut *self
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+}
 
 pub use crate::terrain::{MaterialAppearance, TerrainAppearance, MATERIALS};
 

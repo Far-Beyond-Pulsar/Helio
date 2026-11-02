@@ -1,35 +1,24 @@
-//! Voxel terrain as a feature: the node that adds a host's chunk pass to
-//! preset graphs.
+//! Voxel terrain as a feature: the node that adds the chunk pass to preset
+//! graphs.
 //!
 //! The terrain joins at [`Slot::Geometry`] between GI's probe update and its
 //! mesh rays: it writes the G-buffer over the spine's and traces the probes'
-//! rays. It offers its ground to foliage placement
-//! ([`helio_foliage_api::OfferedGrounds`]).
-
-use std::sync::Arc;
+//! rays. It draws the volumes the scene publishes
+//! ([`crate::engine::VOXEL_FRAME`]) and offers its ground to foliage
+//! placement ([`helio_foliage_api::OfferedGrounds`]).
 
 use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, ParamDesc, Slot};
 
-use crate::chunks::pass::ChunkPass;
+use crate::chunks::{pass::ChunkPass, ResidencyConfig};
 
-/// Makes a host's chunk pass: its frame source, residency configuration and
-/// appearance. Called on every graph build.
-pub type ChunkPassMaker = Arc<dyn Fn() -> ChunkPass + Send + Sync>;
-
-/// The voxel terrain a graph draws (a renderer config's `features`): the
-/// host's chunk passes. Without it the voxel node builds nothing.
-#[derive(Clone, Default)]
-pub struct VoxelTerrain {
-    pub passes: Vec<ChunkPassMaker>,
-}
-
-impl VoxelTerrain {
-    /// A terrain drawn by the passes `make` returns.
-    pub fn new(make: impl Fn() -> ChunkPass + Send + Sync + 'static) -> Self {
-        Self {
-            passes: vec![Arc::new(make)],
-        }
-    }
+/// The voxel feature's settings (a renderer config's `features`): with
+/// them, graphs draw the voxel volumes the scene publishes; without them
+/// the voxel node builds nothing.
+#[derive(Clone, Debug, Default)]
+pub struct VoxelSettings {
+    /// How chunks stream (budgets, cache; the pixel angle follows the
+    /// camera).
+    pub residency: ResidencyConfig,
 }
 
 /// Voxel worlds ([`crate`]).
@@ -44,10 +33,7 @@ impl Feature for VoxelFeature {
         // With terrain to draw, it traces GI's probes every frame and its sun
         // samples rotate over blocks of pixels for TSR to integrate.
         registrar.prepare(std::sync::Arc::new(|env| {
-            let drawn = env
-                .setting::<VoxelTerrain>()
-                .is_some_and(|terrain| !terrain.passes.is_empty());
-            if drawn {
+            if env.setting::<VoxelSettings>().is_some() {
                 env.insert_setting(helio_gi_api::TerrainTracer);
                 env.insert_setting(helio_pass_tsr::StochasticSamples);
             }
@@ -57,23 +43,19 @@ impl Feature for VoxelFeature {
                 "helio.pass.voxel_chunks",
                 "Voxel: Chunk Terrain",
                 "Passes: Geometry",
-                "Voxel worlds from the host's frames: residency, generation, the G-buffer \
-                 and the GI probes' rays. Builds nothing without a VoxelTerrain setting.",
+                "The voxel volumes the scene publishes: residency, generation, the G-buffer \
+                 and the GI probes' rays. Builds nothing without VoxelSettings.",
                 |build| {
-                    let makers = build
+                    let Some(settings) = build.env.setting::<VoxelSettings>().cloned() else {
+                        return Ok(());
+                    };
+                    let pass = ChunkPass::new(settings.residency);
+                    build
                         .env
-                        .setting::<VoxelTerrain>()
-                        .map(|terrain| terrain.passes.clone())
-                        .unwrap_or_default();
-                    for make in makers {
-                        let pass = make();
-                        build
-                            .env
-                            .shared(helio_foliage_api::OfferedGrounds::default)
-                            .0
-                            .push(pass.foliage_ground());
-                        build.graph.add_pass(Box::new(pass));
-                    }
+                        .shared(helio_foliage_api::OfferedGrounds::default)
+                        .0
+                        .push(pass.foliage_ground());
+                    build.graph.add_pass(Box::new(pass));
                     Ok(())
                 },
             )

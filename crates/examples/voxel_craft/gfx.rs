@@ -19,10 +19,10 @@ use helio_components::WorldRows;
 use helio_presets::Preset;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::ResidencyConfig;
-use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
+use helio_pass_voxel_planet::engine::{PlanetFrame, TerrainAppearance, VOXEL_FRAME};
 use helio_pass_voxel_planet::Planet;
 use pulsar_scenedb::{Entity, SceneDb};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use winit::window::Window;
 
 pub struct Gfx {
@@ -45,7 +45,8 @@ pub struct Gfx {
     rays: SceneRays,
     /// The player's feet pressing the meadow (a `FoliageInteractorComponent` row).
     feet: Entity,
-    source: SharedPlanetFrame,
+    /// The blocks' look, published with the world each frame.
+    appearance: TerrainAppearance,
     sun_light: Entity,
     /// The renderer's world origin of the last frame.
     pub origin: DVec3,
@@ -425,16 +426,12 @@ impl Gfx {
         let avatar = Avatar::spawn(&mut scene.world, |block| palette.hand_material(block));
         scene.world.flush_gpu_mirror(&queue);
 
-        // The planet pass draws the world's latest snapshot.
-        let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-        let pass_source = source.clone();
+        // The planet pass draws the world's latest snapshot, published each
+        // frame (`VOXEL_FRAME`).
         let appearance = palette.appearance;
-        let config = chunk_config(render_size[1]);
-        let terrain = helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            let mut pass = ChunkPass::with_config(pass_source.clone(), config);
-            pass.set_appearance(Some(appearance));
-            pass
-        });
+        let terrain = helio_pass_voxel_planet::VoxelSettings {
+            residency: chunk_config(render_size[1]),
+        };
         let renderer_config = RendererConfig::new(render_size[0], render_size[1], render_format);
         // Render VR eyes at Performance scale by default, then reconstruct to
         // the headset's native swapchain dimensions. This cuts pixel shading
@@ -512,7 +509,7 @@ impl Gfx {
             avatar,
             rays,
             feet,
-            source,
+            appearance,
             sun_light,
             origin: DVec3::ZERO,
             size,
@@ -602,22 +599,22 @@ impl Gfx {
     /// Draws a frame of `view`.
     pub fn draw(&mut self, view: &View) {
         let (planet, eye, forward) = (view.planet, view.eye, view.look);
-        // The planet pass builds eye-relative chunk geometry from PlanetFrame.eye.
-        // In VR that must be the tracked head position, not the player's body
-        // eye: otherwise the camera follows vertical room-scale head motion
-        // while the voxel pass's geometry origin stays fixed, making the world
-        // appear to move toward the player. Keep `eye` for gameplay/avatar
-        // placement and use `render_eye` only for rendering and residency.
+        // The planet pass draws from the camera's eye and streams around the
+        // residency eye. In VR both must be the tracked head position, not
+        // the player's body eye: otherwise the camera follows vertical
+        // room-scale head motion while the voxel pass's geometry origin stays
+        // fixed, making the world appear to move toward the player. Keep
+        // `eye` for gameplay/avatar placement and use `render_eye` only for
+        // rendering and residency.
         #[cfg(not(target_arch = "wasm32"))]
         let render_eye = view.vr.map(|vr| vr.head.w_axis.truncate()).unwrap_or(eye);
         #[cfg(target_arch = "wasm32")]
         let render_eye = eye;
         let sun = view.sun.normalize();
-        *self.source.lock().unwrap() = Some(PlanetFrame::single(
-            render_eye,
-            planet.clone(),
-            sun.as_vec3(),
-        ));
+        let mut frame = PlanetFrame::single(planet.clone(), sun.as_vec3());
+        frame.volumes[0].appearance = Some(self.appearance);
+        self.renderer
+            .set_scene_payload(&VOXEL_FRAME, Arc::new(frame));
         // The sun's light follows the sky.
         update_light(
             &mut self.scene.world,

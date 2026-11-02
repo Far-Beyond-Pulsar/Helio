@@ -3,7 +3,7 @@
 //! ground under them along the sun, a still view holds still, and what they
 //! cost.
 use helio_components::LightComponent;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{
@@ -13,7 +13,7 @@ use helio::{
 use helio_components::AtmosphereComponent;
 use helio_pass_sky::{CloudLayer, PlanetWeather};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
+use helio_pass_voxel_planet::engine::{PlanetFrame, VOXEL_FRAME};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
 use helio_presets::Preset;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
@@ -26,8 +26,9 @@ struct View {
     scene: pulsar_scenedb::SceneDb,
     sun: pulsar_scenedb::Entity,
     air: pulsar_scenedb::Entity,
-    /// The voxel ground's frame, when the view has ground.
-    ground: Option<SharedPlanetFrame>,
+    /// Whether the view has a voxel ground (it shows what is published
+    /// under `VOXEL_FRAME`).
+    ground: bool,
 }
 
 /// A renderer of `width` x `height` without temporal anti-aliasing or
@@ -71,17 +72,13 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
     let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
     let mut scene = pulsar_scenedb::SceneDb::new();
     scene.world.attach_gpu_mirror(mirror.clone());
-    let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
     config
         .features
         .edit::<helio_pass_foliage_place::FoliageSettings>()
         .enabled = false;
     if ground {
-        let pass_source = Arc::clone(&source);
-        config = config.with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            ChunkPass::new(Arc::clone(&pass_source))
-        }));
+        config = config.with_feature(helio_pass_voxel_planet::VoxelSettings::default());
     }
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.0; 3], 0.0)
@@ -120,7 +117,7 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
         scene,
         sun,
         air,
-        ground: ground.then_some(source),
+        ground,
     })
 }
 
@@ -454,9 +451,11 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     let ground_point = Vec3::new(0.0, 1.0, 0.0);
     let down = looking(ground_point + sun * to_eye, -sun, down_fov);
     let up = looking(ground_point, sun, up_fov);
-    let source = view.ground.clone().unwrap();
-    let settle_ground = |view: &mut View, eye: Vec3, camera: &Camera| {
-        *source.lock().unwrap() = Some(PlanetFrame::single(eye.as_dvec3(), planet.clone(), sun));
+    assert!(view.ground, "a view with ground");
+    let settle_ground = |view: &mut View, camera: &Camera| {
+        let frame = PlanetFrame::single(planet.clone(), sun);
+        view.renderer
+            .set_scene_payload(&VOXEL_FRAME, Arc::new(frame));
         let started = std::time::Instant::now();
         loop {
             view.render(camera);
@@ -473,10 +472,10 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
         AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth().with_clouds(clouds)),
     ] {
         view.set_sky(sun, air);
-        settle_ground(&mut view, ground_point + sun * to_eye, &down);
+        settle_ground(&mut view, &down);
         let ground = view.settle(&down, 16);
         view.set_sky(side_sun, air);
-        settle_ground(&mut view, ground_point, &up);
+        settle_ground(&mut view, &up);
         let sky = view.settle(&up, 16);
         images.push((ground, sky));
     }
@@ -593,8 +592,10 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
         1.0,
         1.0e9,
     );
-    let source = view.ground.clone().unwrap();
-    *source.lock().unwrap() = Some(PlanetFrame::single(eye, planet, sun));
+    assert!(view.ground, "a view with ground");
+    let frame = PlanetFrame::single(planet, sun);
+    view.renderer
+        .set_scene_payload(&VOXEL_FRAME, Arc::new(frame));
     let air = AtmosphereComponent::from(
         helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], radius),
     );

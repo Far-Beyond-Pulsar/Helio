@@ -8,7 +8,7 @@ use glam::{DVec3, Mat4, Vec3};
 use helio_pass_voxel_planet::chunks::{
     residency, Capacity, ChunkWorld, GiRays, KeptChunks, ResidencyConfig, SceneLights, VolumeId,
 };
-use helio_pass_voxel_planet::engine::{PickHit, PickRequest, SharedPicks};
+use helio_pass_voxel_planet::engine::{PickHit, PickResult, VolumeAnswer, VolumeAnswers};
 use helio_pass_voxel_planet::features::{FeatureSet, Spawn};
 use helio_pass_voxel_planet::grid::Shape;
 use helio_pass_voxel_planet::layers::{Layer, LayerKind, TerrainLayers};
@@ -95,6 +95,28 @@ const TEST_CAPACITY: Capacity = Capacity {
     counters: false,
 };
 
+/// A tool's picks waiting to be copied (request id, view point 0..1 from
+/// the top left) and the inbox they are answered into.
+#[derive(Default)]
+struct Picks {
+    waiting: Vec<(u64, [f32; 2])>,
+    answers: std::sync::Arc<VolumeAnswers>,
+}
+
+impl Picks {
+    /// The answers so far.
+    fn results(&self) -> Vec<PickResult> {
+        self.answers
+            .take()
+            .into_iter()
+            .filter_map(|a| match a {
+                VolumeAnswer::Pick(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
 struct World {
     chunks: ChunkWorld,
     frame: u64,
@@ -149,7 +171,7 @@ impl World {
         gpu: &Gpu,
         planet: &Planet,
         view: &View,
-        picks: Option<&SharedPicks>,
+        picks: Option<&mut Picks>,
     ) -> helio_pass_voxel_planet::chunks::UpdateStats {
         self.frame_picked(gpu, planet, view, &view.config(), picks)
     }
@@ -171,7 +193,7 @@ impl World {
         planet: &Planet,
         view: &View,
         config: &ResidencyConfig,
-        picks: Option<&SharedPicks>,
+        picks: Option<&mut Picks>,
     ) -> helio_pass_voxel_planet::chunks::UpdateStats {
         let mut view_proj = view.view_proj(planet);
         let mut jitter = glam::Vec2::ZERO;
@@ -243,7 +265,10 @@ impl World {
             gi.as_ref(),
         );
         if let Some(picks) = picks {
-            self.chunks.copy_picks(&mut recorder, picks);
+            let taken = self
+                .chunks
+                .copy_picks(&mut recorder, &picks.waiting, &picks.answers);
+            picks.waiting.drain(..taken);
         }
         drop(recorder);
         gpu.queue.submit([encoder.finish()]);
@@ -3470,19 +3495,19 @@ fn picks_report_the_drawn_hit() {
     let mut world = World::new(&gpu, &planet);
     let hits = world.settle(&gpu, &planet, &view);
     let pixels: Vec<[u32; 2]> = (0..8).map(|n| [20 + n * 37, 5 + n * 24]).collect();
-    let picks = SharedPicks::default();
-    picks.lock().unwrap().requests = pixels
+    let mut picks = Picks::default();
+    picks.waiting = pixels
         .iter()
         .enumerate()
-        .map(|(n, p)| PickRequest {
-            id: n as u64,
-            uv: [(p[0] as f32 + 0.5) / 320.0, (p[1] as f32 + 0.5) / 180.0],
+        .map(|(n, p)| {
+            let uv = [(p[0] as f32 + 0.5) / 320.0, (p[1] as f32 + 0.5) / 180.0];
+            (n as u64, uv)
         })
         .collect();
     for _ in 0..8 {
-        world.frame(&gpu, &planet, &view, Some(&picks));
+        world.frame(&gpu, &planet, &view, Some(&mut picks));
     }
-    let results = std::mem::take(&mut picks.lock().unwrap().results);
+    let results = picks.results();
     assert_eq!(results.len(), pixels.len());
     assert!(
         results.iter().any(|r| r.hit.is_none()) && results.iter().any(|r| r.hit.is_some()),

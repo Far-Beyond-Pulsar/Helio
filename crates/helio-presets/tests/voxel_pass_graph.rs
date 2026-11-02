@@ -8,9 +8,10 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
+use helio_core::RenderPass;
 use helio_feature_api::{Feature, FeatureRegistrar, NodeDescriptor, Slot};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
+use helio_pass_voxel_planet::engine::{PlanetFrame, VOXEL_FRAME};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
 use helio_presets::Preset;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
@@ -126,16 +127,12 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         );
         let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
 
-        let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-        let pass_source = Arc::clone(&source);
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
         config
             .features
             .edit::<helio_pass_foliage_place::FoliageSettings>()
             .enabled = false;
-        let config = config.with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            ChunkPass::new(Arc::clone(&pass_source))
-        }));
+        let config = config.with_feature(helio_pass_voxel_planet::VoxelSettings::default());
         let observed = Arc::new(Mutex::new(Vec::new()));
         let nodes = helio_presets::graphs::registry_for(
             &helio_presets::features::default_features()
@@ -194,13 +191,18 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // A host's first eye can be anywhere (an editor camera starts at the
         // planet's centre): nothing to stream there.
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-        *source.lock().unwrap() = Some(PlanetFrame::single(
+        publish(&mut renderer, Some(PlanetFrame::single(planet.clone(), up)));
+        let centre = Camera::perspective_look_to(
             glam::DVec3::new(8.0, 6.0, 12.0),
-            planet.clone(),
+            forward,
             up,
-        ));
+            std::f32::consts::FRAC_PI_4,
+            640.0 / 360.0,
+            0.05,
+            40_000_000.0,
+        );
         for _ in 0..600 {
-            renderer.render(&camera, &view).unwrap();
+            renderer.render(&centre, &view).unwrap();
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             if !renderer.find_pass::<ChunkPass>().unwrap().needs_frame() {
                 break;
@@ -214,7 +216,6 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         // Moved to the surface, it streams the planet around the eye until
         // settled: the plan for the old eye does not settle the new one
         // (hosts stop rendering once settled).
-        *source.lock().unwrap() = Some(PlanetFrame::single(eye, planet.clone(), up));
         let mut frames = 0;
         let started = std::time::Instant::now();
         loop {
@@ -300,8 +301,8 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
                 .join(", ")
         );
 
-        // Removing the source drops the planet's chunks.
-        *source.lock().unwrap() = None;
+        // Removing the volumes drops the planet's chunks.
+        publish(&mut renderer, None);
         let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
         renderer.render(&camera, &view).unwrap();
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
@@ -316,7 +317,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
 
         // A resize resizes the graph in place; downstream passes see the new
         // size.
-        *source.lock().unwrap() = Some(PlanetFrame::single(eye, planet, up));
+        publish(&mut renderer, Some(PlanetFrame::single(planet, up)));
         renderer.set_render_size(320, 180);
         let resized = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("final consumer resize"),
@@ -354,11 +355,18 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
     });
 }
 
+/// Publish `frame` as the scene's voxel volumes (none: no volumes).
+fn publish(renderer: &mut helio::Renderer, frame: Option<PlanetFrame>) {
+    match frame {
+        Some(frame) => renderer.set_scene_payload(&VOXEL_FRAME, Arc::new(frame)),
+        None => renderer.set_scene_payloads(helio_core::ScenePayloads::default()),
+    }
+}
+
 struct Editor {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     renderer: helio::Renderer,
-    source: SharedPlanetFrame,
     target: wgpu::Texture,
     scene: pulsar_scenedb::SceneDb,
     sun: Option<pulsar_scenedb::Entity>,
@@ -404,16 +412,12 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
     let mut scene = pulsar_scenedb::SceneDb::new();
     scene.world.attach_gpu_mirror(mirror.clone());
-    let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-    let pass_source = Arc::clone(&source);
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
     config
         .features
         .edit::<helio_pass_foliage_place::FoliageSettings>()
         .enabled = false;
-    let config = config.with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
-        ChunkPass::new(Arc::clone(&pass_source))
-    }));
+    let config = config.with_feature(helio_pass_voxel_planet::VoxelSettings::default());
     let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
@@ -444,7 +448,6 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
         device,
         queue,
         renderer,
-        source,
         target,
         scene,
         sun: None,
@@ -478,6 +481,11 @@ impl Editor {
             }
         }
         self.scene.world.flush_gpu_mirror(&self.queue);
+    }
+
+    /// Publish `frame` as the scene's voxel volumes (none: no volumes).
+    fn show(&mut self, frame: Option<PlanetFrame>) {
+        publish(&mut self.renderer, frame);
     }
 
     fn render(&mut self, camera: &Camera) {
@@ -559,8 +567,7 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     let ground = planet.surface_point(glam::DVec3::new(0.2, 1.0, 0.3), 0.0);
     let up = ground.normalize();
     let forward = up.any_orthonormal_vector().as_vec3();
-    *editor.source.lock().unwrap() =
-        Some(PlanetFrame::single(ground, planet.clone(), up.as_vec3()));
+    editor.show(Some(PlanetFrame::single(planet.clone(), up.as_vec3())));
     let validation = editor
         .device
         .push_error_scope(wgpu::ErrorFilter::Validation);
@@ -568,7 +575,6 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
     // clearance, the smallest near plane and a planetary far plane.
     for step in 0..120 {
         let eye = ground + up * (0.02 + 0.004 * f64::from(step % 10));
-        editor.source.lock().unwrap().as_mut().unwrap().eye = eye;
         let camera = Camera::perspective_look_to(
             eye,
             forward,
@@ -592,7 +598,7 @@ fn editor_overlays_stay_in_world_space_in_camera_relative_frames() {
 
     // Near the world's origin the grid shows: above an empty scene, looking
     // down at the origin, the lines and both axes appear.
-    *editor.source.lock().unwrap() = None;
+    editor.show(None);
     let eye = Vec3::new(3.0, 6.0, 3.0);
     let camera = Camera::perspective_look_at(
         eye,
@@ -1001,7 +1007,14 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         .unwrap(),
     );
     let eye = glam::DVec3::Y * 20.0;
-    *editor.source.lock().unwrap() = Some(PlanetFrame::single(eye, planet, Vec3::Y));
+    // The volume as its owner shows it: with `appearance` (none: the
+    // generator's own).
+    let look = |appearance| {
+        let mut frame = PlanetFrame::single(planet.clone(), Vec3::Y);
+        frame.volumes[0].appearance = appearance;
+        Some(frame)
+    };
+    editor.show(look(None));
     let camera = Camera::perspective_look_to(
         eye,
         -Vec3::Y,
@@ -1041,11 +1054,7 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
     appearance.materials[helio_pass_voxel_planet::terrain::material::GRASS as usize].patches =
         Some([[0.85, 0.03, 0.03]; 3]);
     appearance.detail = [0.0; 4];
-    assert!(editor
-        .renderer
-        .find_pass_mut::<ChunkPass>()
-        .unwrap()
-        .set_appearance(Some(appearance)));
+    editor.show(look(Some(appearance)));
     editor
         .renderer
         .find_pass_mut::<helio_pass_tsr::TsrPass>()
@@ -1053,6 +1062,8 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
         .reset_history();
     editor.render(&camera);
     let after = editor.rgba();
+    // A new look asks an on-demand host for frames while history settles.
+    assert!(editor.renderer.needs_frame(), "a new look asks for frames");
     eprintln!(
         "appearance before {:?}, after {:?}",
         [mean(&before, 0), mean(&before, 1)],
@@ -1069,16 +1080,18 @@ fn appearance_edit_is_visible_in_one_frame_without_rebuilding_residency() {
             .resident_chunks,
         chunks
     );
-    assert!(!editor
-        .renderer
-        .find_pass_mut::<ChunkPass>()
-        .unwrap()
-        .set_appearance(Some(appearance)));
-    assert!(editor
-        .renderer
-        .find_pass_mut::<ChunkPass>()
-        .unwrap()
-        .set_appearance(None));
+    // Settled, the same look published again is no change.
+    for _ in 0..64 {
+        if !editor.renderer.needs_frame() {
+            break;
+        }
+        editor.render(&camera);
+    }
+    assert!(!editor.renderer.needs_frame(), "the new look never settled");
+    editor.show(look(Some(appearance)));
+    editor.render(&camera);
+    assert!(!editor.renderer.needs_frame(), "the same look is no change");
+    editor.show(look(None));
     editor
         .renderer
         .find_pass_mut::<helio_pass_tsr::TsrPass>()
@@ -1147,7 +1160,7 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
         );
         for height in [2.0, 25.0, 300.0, 20_000.0] {
             let eye = planet.surface_point(dir, height);
-            *editor.source.lock().unwrap() = Some(PlanetFrame::single(eye, planet.clone(), sun));
+            editor.show(Some(PlanetFrame::single(planet.clone(), sun)));
             let forward = (up.any_orthonormal_vector() - up * 0.2)
                 .normalize()
                 .as_vec3();
@@ -1198,14 +1211,17 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
 }
 
 /// A host's save asks the pass for the edited chunks through the frame
-/// (`KeptExport`): the pass asks for frames until it answers with the
-/// planet shown and its world's kept chunks. Given back with the loaded
+/// (a keep request in `VolumeRequests`): the pass asks for frames until it
+/// answers into the volume's inbox, once, with the planet shown and its
+/// world's kept chunks. Given back with the loaded
 /// planet (`PlanetFrame::kept`), a new world restores the edited chunks by
 /// copy instead of generating them; chunks of another history are refused.
 #[test]
 fn saved_edited_chunks_come_back_through_the_frame() {
     use helio_pass_voxel_planet::chunks::KeptChunks;
-    use helio_pass_voxel_planet::engine::KeptExport;
+    use helio_pass_voxel_planet::engine::{
+        VolumeAnswer, VolumeAnswers, VolumeFrame, VolumeRequests,
+    };
     use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape};
     let Some(mut editor) = editor(160, 90) else {
         return;
@@ -1243,20 +1259,18 @@ fn saved_edited_chunks_come_back_through_the_frame() {
         0.05,
         40_000_000.0,
     );
-    let frame = |planet: &Arc<Planet>, kept: Option<Arc<KeptChunks>>, export| {
+    let frame = |planet: &Arc<Planet>, kept: Option<Arc<KeptChunks>>, requests| {
         Some(PlanetFrame {
-            eye,
-            volumes: vec![helio_pass_voxel_planet::engine::VolumeFrame {
-                volume: helio_pass_voxel_planet::VoxelVolume::new(
+            volumes: vec![VolumeFrame {
+                kept,
+                requests,
+                ..VolumeFrame::new(helio_pass_voxel_planet::VoxelVolume::new(
                     0,
                     planet.clone(),
                     helio_pass_voxel_planet::VolumeTransform::IDENTITY,
-                ),
-                kept,
-                export,
+                ))
             }],
             sun: up.as_vec3(),
-            picks: None,
         })
     };
     // Settled, it counts the edited chunks restored and generated.
@@ -1280,30 +1294,45 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     let validation = editor
         .device
         .push_error_scope(wgpu::ErrorFilter::Validation);
-    let export = Arc::new(Mutex::new(KeptExport::default()));
-    *editor.source.lock().unwrap() = frame(&planet, None, Some(export.clone()));
+    let answers = Arc::new(VolumeAnswers::default());
+    let asking = |keep| VolumeRequests {
+        keep,
+        answers: Some(answers.clone()),
+        ..Default::default()
+    };
+    editor.show(frame(&planet, None, asking(None)));
     let (_, edited) = settle(&mut editor);
     assert!(edited > 50, "{edited} edited chunks generated");
 
-    export.lock().unwrap().wanted = true;
+    editor.show(frame(&planet, None, asking(Some(1))));
     let mut frames = 0;
     let (shown, kept) = loop {
+        editor.render(&camera);
+        frames += 1;
+        let answer = answers.take().into_iter().find_map(|a| match a {
+            VolumeAnswer::Kept { id, planet, chunks } => Some((id, planet, chunks)),
+            _ => None,
+        });
+        if let Some((id, shown, kept)) = answer {
+            assert_eq!(id, 1, "the keep request answered");
+            break (shown, kept);
+        }
         assert!(
             editor
                 .renderer
                 .find_pass::<ChunkPass>()
                 .unwrap()
                 .needs_frame(),
-            "an export waits for frames"
+            "a keep request waits for frames"
         );
-        editor.render(&camera);
-        frames += 1;
-        if let Some(answer) = export.lock().unwrap().answer.take() {
-            break answer;
-        }
-        assert!(frames < 200, "no export after {frames} frames");
+        assert!(frames < 200, "no kept chunks after {frames} frames");
     };
-    assert!(Arc::ptr_eq(&shown, &planet) && !export.lock().unwrap().wanted);
+    assert!(Arc::ptr_eq(&shown, &planet));
+    // Answered once: the request still published asks nothing more.
+    for _ in 0..8 {
+        editor.render(&camera);
+    }
+    assert!(answers.take().is_empty(), "a keep request answered twice");
     assert!(kept.len() > 50, "{} chunks kept", kept.len());
     let bytes = kept.to_bytes();
 
@@ -1311,9 +1340,13 @@ fn saved_edited_chunks_come_back_through_the_frame() {
     let loaded =
         Arc::new(Planet::from_snapshot(PlanetRecipe::default(), &planet.snapshot()).unwrap());
     let chunks = Arc::new(KeptChunks::from_bytes(&bytes).unwrap());
-    *editor.source.lock().unwrap() = None;
+    editor.show(None);
     editor.render(&camera);
-    *editor.source.lock().unwrap() = frame(&loaded, Some(chunks.clone()), None);
+    editor.show(frame(
+        &loaded,
+        Some(chunks.clone()),
+        VolumeRequests::default(),
+    ));
     let (restored, generated) = settle(&mut editor);
     let pass = editor.renderer.find_pass::<ChunkPass>().unwrap();
     assert_eq!(pass.kept_loaded(), Some(&Ok(kept.len())));
@@ -1335,9 +1368,13 @@ fn saved_edited_chunks_come_back_through_the_frame() {
             height: 0.0,
         })
         .unwrap();
-    *editor.source.lock().unwrap() = None;
+    editor.show(None);
     editor.render(&camera);
-    *editor.source.lock().unwrap() = frame(&Arc::new(other), Some(chunks), None);
+    editor.show(frame(
+        &Arc::new(other),
+        Some(chunks),
+        VolumeRequests::default(),
+    ));
     editor.render(&camera);
     assert!(editor
         .renderer

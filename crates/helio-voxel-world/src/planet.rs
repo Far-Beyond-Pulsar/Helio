@@ -81,6 +81,14 @@ impl PlanetRecipe {
     pub fn to_json(&self) -> String {
         serde_json::to_string(self).expect("recipe serializes")
     }
+    /// The grid of the world this recipe makes, without generating it: what
+    /// an edit is resolved against before its world is built.
+    pub fn grid(&self) -> Result<Grid, String> {
+        match self.shape {
+            Shape::Sphere => Grid::new(self.radius_m, self.voxel_size_m),
+            shape => Grid::plane(shape, self.plane_size_m, self.voxel_size_m),
+        }
+    }
 }
 
 /// Result of an exact ray cast on the base grid.
@@ -435,10 +443,7 @@ impl Planet {
                 .info()
                 .version;
         }
-        let grid = match recipe.shape {
-            Shape::Sphere => Grid::new(recipe.radius_m, recipe.voxel_size_m)?,
-            shape => Grid::plane(shape, recipe.plane_size_m, recipe.voxel_size_m)?,
-        };
+        let grid = recipe.grid()?;
         let field = terrain::build(&recipe.terrain, &grid)?;
         let features = Arc::new(CompiledFeatures::new(
             &recipe.features,
