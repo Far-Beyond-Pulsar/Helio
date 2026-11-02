@@ -592,8 +592,6 @@ fn add_late_passes(
         sh,
     );
     billboard_pass.set_occluded_by_geometry(true);
-    graph.add_pass(Box::new(billboard_pass));
-    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
     graph.add_pass(Box::new(CoronaPass::new(
         device,
@@ -643,6 +641,12 @@ fn add_late_passes(
         true,
         true,
     )));
+
+    // Keep the light sprites in front of the editor's depth-tested debug
+    // lines. Billboards test against scene depth but intentionally do not
+    // write to it, so the line pass cannot otherwise see them as occluders.
+    graph.add_pass(Box::new(billboard_pass));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 }
 
 fn convert_perf_mode(mode: helio::PerfOverlayMode) -> helio_pass_perf_overlay::PerfOverlayMode {
