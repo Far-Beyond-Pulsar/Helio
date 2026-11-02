@@ -352,7 +352,7 @@ Rules:
 - A phase lands only when its "done when" holds, the layer check's
   allow-list shrank, and the preset frames/bursts match.
 - `plugin-api-v2-phase1` is merged into Pulsar `main` before
-  `rewrite/p3-feature-api` is cut, so `p.render().feature(..)` builds on it.
+  `rewrite/p3-spine` is cut, so `p.render().feature(..)` builds on it.
 
 ### Phase 0: hygiene and guard rails (small, do first)
 - Layer manifest `architecture/layers.toml`: every crate → layer (features
