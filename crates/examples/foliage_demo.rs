@@ -26,10 +26,10 @@ use helio::{
     Camera, HelioGraphicsConfig, HelioGraphicsContext, HelioXrInput, RenderMode, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_default_graph_external_with_context;
-use helio_pass_foliage_place::components::{
+use helio_components::{
     FoliageInteractorComponent, FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent,
 };
+use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageLayer, GpuFoliageType,
     FOLIAGE_FLAG_RECEIVES_INTERACTION, FOLIAGE_FLAG_TWO_SIDED,
@@ -342,7 +342,13 @@ impl ApplicationHandler for App {
         let interactor_entity = scene_db.world.spawn();
         scene_db.world.insert(
             interactor_entity,
-            FoliageInteractorComponent::new(glam::DVec3::ZERO, 1.2, 1.0, glam::Vec3::ZERO, 1.0),
+            FoliageInteractorComponent::from(helio_pass_foliage_place::FoliageInteractorRow::new(
+                glam::DVec3::ZERO,
+                1.2,
+                1.0,
+                glam::Vec3::ZERO,
+                1.0,
+            )),
         );
 
         // ── Lighting ─────────────────────────────────────────────────────────

@@ -167,7 +167,7 @@ struct AppState {
     debug_overlay_enabled: bool,
 
     scene_db: SceneDb,
-    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_components::ray_tracing::SceneDbRayTracing>,
     /// Whether lights cast ray-traced shadows (`HLFS_RT`); without, any
     /// `acceleration` is the meshes for the GI probes only.
     ray_traced: bool,
@@ -281,7 +281,7 @@ impl ApplicationHandler for App {
                     .unwrap()
                     .config()
             );
-            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(
+            Some(helio_components::ray_tracing::SceneDbRayTracing::new(
                 device.clone(),
                 queue.clone(),
             ))
@@ -291,12 +291,10 @@ impl ApplicationHandler for App {
             && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off")
         {
             // No ray-traced shadows: the meshes for the GI probes alone.
-            Some(
-                helio_default_passes::ray_tracing::SceneDbRayTracing::partial(
-                    device.clone(),
-                    queue.clone(),
-                ),
-            )
+            Some(helio_components::ray_tracing::SceneDbRayTracing::partial(
+                device.clone(),
+                queue.clone(),
+            ))
         } else {
             None
         };

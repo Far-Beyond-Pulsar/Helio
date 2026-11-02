@@ -24,8 +24,11 @@ mod worlds;
 
 use glam::{DVec3, Vec3};
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
+use helio_components::WaterVolumeComponent;
+use helio_components::WorldRows;
+use helio_components::{CameraPostProcessComponent, LightComponent};
+use helio_components::{FoliageTypeComponent, FoliageWindComponent};
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
-use helio_pass_foliage_place::components::{FoliageTypeComponent, FoliageWindComponent};
 use helio_pass_foliage_place::FoliagePlacePass;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageType, FOLIAGE_FLAG_GROUND_COLOUR,
@@ -34,9 +37,7 @@ use helio_pass_foliage_place::{
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe, VolumeTransform};
-use helio_pass_water_sim::{
-    GpuWaterVolume, OceanSpectrum, WaterSimPass, WaterSpraySettings, WaterVolumeComponent,
-};
+use helio_pass_water_sim::{GpuWaterVolume, OceanSpectrum, WaterSimPass, WaterSpraySettings};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -145,21 +146,17 @@ impl Showcase {
                 max_cells_metadata: 0,
             },
         );
-        helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut store, 4, &device);
-        helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut store, 16, &device);
-        helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
-            &mut store, 16, &device,
-        );
-        helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-            &mut store, 16, &device,
-        );
-        helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
-            &mut store, 16, &device,
-        );
-        helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(
+        helio_components::AtmosphereComponent::register_gpu_columns_growable(
             &mut store, 4, &device,
         );
-        helio_pass_water_sim::WaterVolumeComponent::register_gpu_columns_growable(
+        helio_components::MeshComponent::register_gpu_columns_growable(&mut store, 16, &device);
+        helio_components::MaterialComponent::register_gpu_columns_growable(&mut store, 16, &device);
+        helio_components::StaticObjectComponent::register_gpu_columns_growable(
+            &mut store, 16, &device,
+        );
+        helio_components::LightComponent::register_gpu_columns_growable(&mut store, 16, &device);
+        helio_components::GlobalFogComponent::register_gpu_columns_growable(&mut store, 4, &device);
+        helio_components::WaterVolumeComponent::register_gpu_columns_growable(
             &mut store, 8, &device,
         );
         FoliageTypeComponent::register_gpu_columns_growable(&mut store, 8, &device);
@@ -208,7 +205,10 @@ impl Showcase {
         let sun_entity = scene.world.spawn();
         scene.world.insert(
             sun_entity,
-            helio_pass_forward_lit::LightComponent::from(directional_sun(preset_sun("coast").0, preset_sun("coast").1)),
+            LightComponent::from(helio_pass_forward_lit::LightRow::from(directional_sun(
+                preset_sun("coast").0,
+                preset_sun("coast").1,
+            ))),
         );
 
         let meadow = worlds::Preset::Earth
@@ -218,7 +218,7 @@ impl Showcase {
             .with_wind([1.0, 0.35], 4.5, 0.8);
         for row in &meadow.types {
             let entity = scene.world.spawn();
-            scene.world.insert(entity, *row);
+            scene.world.insert_row(entity, *row);
         }
         // The authored voxel meadow is intentionally low and blocky. Add a
         // small band of native blade tufts so the close shoreline preset can
@@ -253,11 +253,14 @@ impl Showcase {
             metallic: 0.0,
         }));
         let blade_entity = scene.world.spawn();
-        scene
-            .world
-            .insert(blade_entity, FoliageTypeComponent::from(shoreline_blades));
+        scene.world.insert(
+            blade_entity,
+            FoliageTypeComponent::from(helio_pass_foliage_place::FoliageTypeRow::from(
+                shoreline_blades,
+            )),
+        );
         let wind = scene.world.spawn();
-        scene.world.insert(wind, meadow.wind);
+        scene.world.insert_row(wind, meadow.wind);
 
         let mut water = GpuWaterVolume::default_ocean();
         water.bounds_min = [-EXTENT, -500.0, -EXTENT, 0.0];
@@ -284,9 +287,10 @@ impl Showcase {
         let (coast_azimuth, coast_elevation) = preset_sun("coast");
         let coast_sun = sun_direction(coast_azimuth, coast_elevation);
         water.sun_direction = [coast_sun.x, coast_sun.y, coast_sun.z, 1.0];
-        scene
-            .world
-            .insert(water_entity, WaterVolumeComponent::from(water));
+        scene.world.insert(
+            water_entity,
+            WaterVolumeComponent::from(helio_pass_water_sim::WaterVolumeRow::from(water)),
+        );
 
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
         let pass_source = source.clone();
@@ -322,7 +326,9 @@ impl Showcase {
         let camera = scene.world.spawn();
         scene.world.insert(
             camera,
-            helio_pass_postprocess::CameraPostProcessComponent::new(0, &post),
+            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+                0, &post,
+            )),
         );
         scene.world.flush_gpu_mirror(&queue);
         if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
@@ -471,16 +477,19 @@ struct Out { @builtin(position) position: vec4<f32>, @location(0) uv: vec2<f32> 
             *self
                 .scene
                 .world
-                .get_mut::<helio_pass_forward_lit::LightComponent>(self.sun_entity)
-                .expect("sun light component") =
-                helio_pass_forward_lit::LightComponent::from(directional_sun(azimuth, elevation));
+                .get_mut::<helio_components::LightComponent>(self.sun_entity)
+                .expect("sun light component") = LightComponent::from(
+                helio_pass_forward_lit::LightRow::from(directional_sun(azimuth, elevation)),
+            );
             let sun = sun_direction(azimuth, elevation);
             self.water_row.sun_direction = [sun.x, sun.y, sun.z, 1.0];
             *self
                 .scene
                 .world
                 .get_mut::<WaterVolumeComponent>(self.water_entity)
-                .expect("water volume component") = WaterVolumeComponent::from(self.water_row);
+                .expect("water volume component") = WaterVolumeComponent::from(
+                helio_pass_water_sim::WaterVolumeRow::from(self.water_row),
+            );
             self.scene.world.flush_gpu_mirror(&self.queue);
             self.sun_preset = preset.to_owned();
         }
@@ -894,7 +903,10 @@ impl ApplicationHandler for App {
             },
         ))
         .expect("create Helio graphics context");
-        let surface_size = [graphics.surface_config.width, graphics.surface_config.height];
+        let surface_size = [
+            graphics.surface_config.width,
+            graphics.surface_config.height,
+        ];
         let showcase = Showcase::new(
             graphics.device.clone(),
             graphics.queue.clone(),

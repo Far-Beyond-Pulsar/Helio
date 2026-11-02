@@ -2,4 +2,4 @@
 
 mod billboard;
 
-pub use billboard::{BillboardComponent, BillboardSceneBinding, SceneGpuBinding, SceneGpuRecord};
+pub use billboard::{BillboardRow, BILLBOARD_INSTANCES};

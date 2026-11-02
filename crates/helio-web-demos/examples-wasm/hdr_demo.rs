@@ -4,6 +4,7 @@ use crate::common::{
 };
 use glam::Vec3;
 use helio::{Camera, Renderer};
+use helio_components::CameraPostProcessComponent;
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
 use pulsar_scenedb::{Entity, SceneDb};
 use std::sync::Arc;
@@ -127,7 +128,7 @@ impl HelioWasmApp for Demo {
             point_light([3.0, 4.0, -3.0], [1.0, 0.9, 0.7], 20.0, 15.0),
         );
 
-        helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(
+        helio_components::CameraPostProcessComponent::register_gpu_columns_growable(
             scene_db.world.gpu_mirror().expect("GPU mirror").store(),
             4096,
             renderer.device(),
@@ -135,10 +136,10 @@ impl HelioWasmApp for Demo {
         let settings_entity = scene_db.world.spawn();
         scene_db.world.insert(
             settings_entity,
-            helio_pass_postprocess::CameraPostProcessComponent::new(
+            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
                 0,
                 &helio_pass_postprocess::PostProcessSettings::default(),
-            ),
+            )),
         );
         Self {
             settings_entity,
@@ -224,7 +225,10 @@ impl HelioWasmApp for Demo {
         }
         self.scene_db.world.insert(
             self.settings_entity,
-            helio_pass_postprocess::CameraPostProcessComponent::new(camera.view_id, &settings),
+            CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+                camera.view_id,
+                &settings,
+            )),
         );
         self.scene_db.world.flush_gpu_mirror(renderer.queue());
         camera

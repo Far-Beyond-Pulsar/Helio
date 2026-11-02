@@ -1,0 +1,48 @@
+[package]
+name = "helio-components"
+version = "0.1.0"
+edition = "2021"
+description = "SceneDB components for Helio's standalone hosts (examples, demos, wasm, tests). Engines register their own; the renderer never depends on this crate."
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["gpu"]
+# `#[derive(SceneStore)]` checks the deriving crate's own `gpu` feature.
+gpu = []
+bake = ["helio/bake"]
+
+[dependencies]
+helio = { path = "../helio" }
+helio-core = { workspace = true }
+pulsar_scenedb = { workspace = true }
+pulsar_scenedb_derive = { workspace = true }
+# `#[derive(SceneStore)]` expands to `::serde_json`, `::wgpu` and reflection paths.
+pulsar_reflection = { workspace = true }
+serde_json = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+glam = { workspace = true }
+helio-mats = { workspace = true }
+helio-vg-stream = { path = "../helio-vg-stream" }
+helio-asset-compat = { path = "../helio-asset-compat" }
+log = { workspace = true }
+twox-hash = { version = "2.1.3", default-features = false, features = ["alloc", "xxhash3_64"] }
+helio-default-passes = { path = "../helio-default-passes" }
+helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
+helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
+helio-pass-corona = { path = "../passes/3d/helio-pass-corona" }
+helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
+helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
+helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
+helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
+helio-pass-lens = { path = "../passes/3d/helio-pass-lens" }
+helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
+helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
+helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
+helio-pass-sprite-batch = { path = "../passes/2d/helio-pass-sprite-batch" }
+helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
+helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
+
+[dev-dependencies]
+helio = { path = "../helio", features = ["bake"] }

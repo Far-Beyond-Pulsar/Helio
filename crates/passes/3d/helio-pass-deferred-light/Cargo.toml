@@ -15,4 +15,3 @@ helio-pass-gi = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }
-pulsar_scenedb_derive = { workspace = true }

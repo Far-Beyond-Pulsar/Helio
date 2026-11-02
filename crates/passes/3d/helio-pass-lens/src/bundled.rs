@@ -39,7 +39,7 @@ impl BundledLens {
     ];
 
     /// The layer of the bundled [`crate::PrescriptionBank`], for
-    /// `LensElementComponent::prescription`.
+    /// `LensElementRow::prescription`.
     pub fn layer(self) -> u32 {
         self as u32
     }

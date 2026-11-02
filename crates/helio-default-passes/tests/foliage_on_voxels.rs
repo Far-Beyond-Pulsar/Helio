@@ -9,8 +9,8 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
+use helio_components::FoliageTypeComponent;
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
-use helio_pass_foliage_place::components::FoliageTypeComponent;
 use helio_pass_foliage_place::{
     pack_kind_and_flags, unpack_blade, FoliageKind, FoliagePlacePass, GpuBladeInstance,
     GpuFoliageTile, GpuFoliageType, GpuTileFrame, TileState,
@@ -63,19 +63,17 @@ impl Harness {
                     max_cells_metadata: 0,
                 },
             );
-            helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(
+            helio_components::AtmosphereComponent::register_gpu_columns_growable(
                 &mut store, 4, &device,
             );
-            helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(
+            helio_components::MeshComponent::register_gpu_columns_growable(&mut store, 16, &device);
+            helio_components::MaterialComponent::register_gpu_columns_growable(
                 &mut store, 16, &device,
             );
-            helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+            helio_components::StaticObjectComponent::register_gpu_columns_growable(
                 &mut store, 16, &device,
             );
-            helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-                &mut store, 16, &device,
-            );
-            helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+            helio_components::LightComponent::register_gpu_columns_growable(
                 &mut store, 16, &device,
             );
             scene
@@ -96,7 +94,10 @@ impl Harness {
                 };
                 t.set_blades_per_tuft([4, 8]);
                 let e = scene.world.spawn();
-                scene.world.insert(e, FoliageTypeComponent::from(t));
+                scene.world.insert(
+                    e,
+                    FoliageTypeComponent::from(helio_pass_foliage_place::FoliageTypeRow::from(t)),
+                );
             }
             let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
             let pass_source = source.clone();

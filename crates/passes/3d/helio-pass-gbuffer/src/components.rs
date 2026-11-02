@@ -2,22 +2,17 @@
 //!
 //! The gbuffer/cull passes project these rows into transient instance and
 //! coordinate-space inputs. No renderer-side group registry is authoritative.
-use pulsar_scenedb::gpu::{BufferHandle, BufferKey, GpuMirrorHandle};
-use pulsar_scenedb_derive::SceneStore;
-use std::marker::PhantomData;
 
-/// Mesh payload authored as a SceneDB component.
-///
-/// The two variable-length fields share SceneDB's keyed geometry pools. Their
-/// generated `*_gpu_handle` accessors expose the allocated ranges needed by
-/// `StaticObjectComponent`; the renderer never owns or resolves a mesh asset.
-#[derive(SceneStore, Clone, Debug)]
-pub struct MeshComponent {
-    #[gpu(buffer = "builtin_mesh_vertex", mirror = Once)]
-    pub vertices: Vec<helio_core::PackedVertex>,
-    #[gpu(buffer = "builtin_mesh_index", mirror = Once)]
-    pub indices: Vec<u32>,
-}
+/// Mesh vertices: a pool shared by every mesh. A [`StaticObjectRow`]'s
+/// `vertex_offset` addresses it. Engines fill it (Helio's standalone hosts use
+/// `helio_components::MeshComponent`).
+pub const MESH_VERTICES: helio_core::PoolContract<helio_core::PackedVertex> =
+    helio_core::PoolContract::new("builtin_mesh_vertex");
+
+/// Mesh indices: a pool shared by every mesh, addressed by a
+/// [`StaticObjectRow`]'s `first_index`/`index_count`.
+pub const MESH_INDICES: helio_core::PoolContract<u32> =
+    helio_core::PoolContract::new("builtin_mesh_index");
 
 /// A material authored as a SceneDB component.
 ///
@@ -25,49 +20,45 @@ pub struct MeshComponent {
 /// migration step, but its lifetime and updates are now owned by the World.
 /// Render passes resolve the packed `"materials"` buffer by key; no renderer
 /// material table publication is required for the row itself.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "materials")]
-pub struct MaterialComponent {
-    #[gpu]
+pub struct MaterialRow {
     pub base_color: [f32; 4],
-    #[gpu]
     pub emissive: [f32; 4],
-    #[gpu]
     pub roughness_metallic: [f32; 4],
-    #[gpu]
     pub tex_base_color: u32,
-    #[gpu]
     pub tex_normal: u32,
-    #[gpu]
     pub tex_roughness: u32,
-    #[gpu]
     pub tex_emissive: u32,
-    #[gpu]
     pub tex_occlusion: u32,
-    #[gpu]
     pub workflow: u32,
-    #[gpu]
     pub flags: u32,
-    #[gpu]
     pub material_class: u32,
-    #[gpu]
     pub class_params: [f32; 4],
 }
 
-impl From<helio_mats::GpuMaterial> for MaterialComponent {
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for MaterialRow {}
+
+/// The buffer the renderer reads [`MaterialRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const MATERIALS: helio_core::BufferContract<MaterialRow> =
+    helio_core::BufferContract::new("materials");
+
+impl From<helio_mats::GpuMaterial> for MaterialRow {
     fn from(value: helio_mats::GpuMaterial) -> Self {
         bytemuck::cast(value)
     }
 }
 
-impl From<MaterialComponent> for helio_mats::GpuMaterial {
-    fn from(value: MaterialComponent) -> Self {
+impl From<MaterialRow> for helio_mats::GpuMaterial {
+    fn from(value: MaterialRow) -> Self {
         bytemuck::cast(value)
     }
 }
 
-impl MaterialComponent {
+impl MaterialRow {
     /// Construct a material row without involving a renderer or an asset
     /// registry. Texture values are SceneDB texture-store slot indices.
     pub fn new(
@@ -120,13 +111,20 @@ impl MaterialComponent {
 }
 
 /// Stable group membership. `group_mask == 0` means always visible.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "render_groups")]
-pub struct RenderGroupComponent {
-    #[gpu]
+pub struct RenderGroupRow {
     pub group_mask: u64,
 }
+
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for RenderGroupRow {}
+
+/// The buffer the renderer reads [`RenderGroupRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const RENDER_GROUPS: helio_core::BufferContract<RenderGroupRow> =
+    helio_core::BufferContract::new("render_groups");
 
 /// Stable content-space index for an authored sublevel.
 ///
@@ -140,27 +138,24 @@ pub type SubLevelIndex = u32;
 /// The default level's authored sublevel index.
 pub const DEFAULT_SUBLEVEL_INDEX: SubLevelIndex = 0;
 
-/// SceneDB-authored placement of an indexed sublevel inside its owning level.
+/// Placement of an indexed sublevel inside its owning level: the portal
+/// resolver's CPU input (`helio_pass_portal_cull::SubLevelResolver`).
 ///
 /// This is the direct-instancing primitive for reusable content (for example,
 /// an aircraft or room). It is deliberately separate from portal data:
 /// portals display a peer portal's context through an aperture and do not
-/// become sublevel actors. The row is registered and mirrored now so the
-/// authoritative SceneDB schema exists without changing the current render
-/// passes; a later resolver will project it into coordinate-space slots.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+/// become sublevel actors. No pass reads it on the GPU, so it is not a buffer
+/// contract; hosts keep it wherever they keep authored placements (a plain
+/// SceneDB component is fine).
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "sublevel_actors")]
-pub struct SubLevelActorComponent {
-    #[gpu]
+pub struct SubLevelActorRow {
     pub sublevel_index: SubLevelIndex,
-    #[gpu]
     pub flags: u32,
-    #[gpu]
     pub transform: [[f32; 4]; 4],
 }
 
-impl SubLevelActorComponent {
+impl SubLevelActorRow {
     /// Bit in [`Self::flags`] that enables this actor instance.
     pub const FLAG_ENABLED: u32 = 1 << 0;
 
@@ -179,25 +174,6 @@ impl SubLevelActorComponent {
     pub fn is_enabled(&self) -> bool {
         self.flags & Self::FLAG_ENABLED != 0
     }
-}
-
-/// The renderer consumes sectioned-object placement as a transient set of
-/// draw records, while the asset and authored section list remain on the
-/// owning SceneDB entity (`SectionedMeshComponent`/`MeshObjectComponent`).
-/// This small packed row is the only persistent GPU-facing state needed by
-/// the sectioned-object pass.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
-#[repr(C)]
-#[gpu(layout = packed, buffer = "sectioned_objects")]
-pub struct SectionedObjectComponent {
-    #[gpu]
-    pub bounds: [f32; 4],
-    #[gpu]
-    pub group_mask: u64,
-    #[gpu]
-    pub flags: u32,
-    #[gpu]
-    pub movable: u32,
 }
 
 /// A single-mesh static-object placement: SceneDB-owned mesh/material row
@@ -227,70 +203,59 @@ pub struct SectionedObjectComponent {
 /// GPU-driven culling pass reads (batching same-mesh-same-material
 /// instances into one indirect draw call, partitioned into contiguous
 /// opaque/transparent/forward ranges by `material_class`) requires sorting
-/// every live `StaticObjectComponent` row by `(material_class, graph_hash,
+/// every live `StaticObjectRow` row by `(material_class, graph_hash,
 /// mesh_id, material_id)` — a cross-entity operation, not a per-row one.
 /// That GPU sort/group/dispatch pipeline is specified but not yet
 /// implemented; see the Helio issue tracking it. Until it lands, a
 /// consumer must still assemble those arrays itself from a `World` query
 /// over this component (a per-frame CPU cost, same category as the
 /// pre-existing shadow-atlas scoring — tracked, not silently hidden).
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "static_objects")]
-pub struct StaticObjectComponent {
-    #[gpu]
+pub struct StaticObjectRow {
     pub mesh_slot: u32,
-    #[gpu]
     pub mesh_generation: u32,
-    #[gpu]
     pub material_slot: u32,
-    #[gpu]
     pub material_generation: u32,
-    #[gpu]
     pub transform: [[f32; 4]; 4],
     /// Previous frame's `transform`, for TAA/TSR motion vectors. Equal to
     /// `transform` (zero apparent velocity) the frame this row is first
     /// inserted or whenever a caller uses [`Self::with_transform`] without
     /// tracking real per-frame motion -- a quality simplification (a
     /// stationary-looking first frame), never a correctness one.
-    #[gpu]
     pub prev_transform: [[f32; 4]; 4],
-    #[gpu]
     pub normal_mat: [[f32; 4]; 3],
-    #[gpu]
     pub bounds: [f32; 4],
     /// Resolved once at spawn time from `Renderer::mesh_slice` -- see the
     /// struct doc's "Why the draw parameters are stored" section.
-    #[gpu]
     pub index_count: u32,
-    #[gpu]
     pub first_index: u32,
-    #[gpu]
     pub vertex_offset: i32,
     /// Resolved once at spawn time from `Renderer::material_batch_key`.
-    #[gpu]
     pub material_class: u32,
-    #[gpu]
     pub graph_hash_lo: u32,
-    #[gpu]
     pub graph_hash_hi: u32,
     /// See `helio_pass_object_batch::GpuInstanceData::flags`.
-    #[gpu]
     pub flags: u32,
     /// Base vertex in the parallel four-influence skin stream (zero for rigid meshes).
-    #[gpu]
     pub skin_vertex_offset: u32,
     /// Base joint matrix in the shared palette pool (zero for rigid meshes).
-    #[gpu]
     pub bone_palette_offset: u32,
     /// Number of valid joint matrices for this instance.
-    #[gpu]
     pub bone_palette_count: u32,
-    #[gpu]
     pub _skin_pad: u32,
 }
 
-impl StaticObjectComponent {
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for StaticObjectRow {}
+
+/// The buffer the renderer reads [`StaticObjectRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const STATIC_OBJECTS: helio_core::BufferContract<StaticObjectRow> =
+    helio_core::BufferContract::new("static_objects");
+
+impl StaticObjectRow {
     /// Construct an object row from already-resolved SceneDB asset metadata.
     ///
     /// `mesh_slot` and `material_slot` are plain SceneDB row indices. The
@@ -371,79 +336,23 @@ fn normal_matrix_cols(m: glam::Mat4) -> [[f32; 4]; 3] {
     ]
 }
 
-macro_rules! binding {
-    ($name:ident, $ty:ty, $key:literal) => {
-        #[derive(Clone)]
-        pub struct $name {
-            handle: BufferHandle,
-            _marker: PhantomData<$ty>,
-        }
-        impl $name {
-            pub fn resolve(mirror: &GpuMirrorHandle) -> Option<Self> {
-                mirror
-                    .store()
-                    .resolve_buffer_handle(BufferKey::of($key))
-                    .map(|handle| Self {
-                        handle,
-                        _marker: PhantomData,
-                    })
-            }
-            pub fn buffer(&self) -> &wgpu::Buffer {
-                &self.handle.buffer
-            }
-            pub fn epoch(&self) -> u64 {
-                self.handle.epoch
-            }
-        }
-    };
-}
-
-binding!(
-    RenderGroupSceneBinding,
-    RenderGroupComponent,
-    "render_groups"
-);
-binding!(
-    SubLevelActorSceneBinding,
-    SubLevelActorComponent,
-    "sublevel_actors"
-);
-binding!(
-    SectionedObjectSceneBinding,
-    SectionedObjectComponent,
-    "sectioned_objects"
-);
-
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn component_layouts_are_stable() {
-        assert_eq!(std::mem::size_of::<MaterialComponent>(), 96);
-        assert_eq!(std::mem::size_of::<RenderGroupComponent>(), 8);
-        assert_eq!(std::mem::size_of::<SubLevelActorComponent>(), 72);
-        assert_eq!(std::mem::size_of::<SectionedObjectComponent>(), 32);
-        assert_eq!(std::mem::align_of::<SubLevelActorComponent>(), 4);
+        assert_eq!(std::mem::size_of::<MaterialRow>(), 96);
+        assert_eq!(std::mem::size_of::<RenderGroupRow>(), 8);
+        assert_eq!(std::mem::size_of::<SubLevelActorRow>(), 72);
+        assert_eq!(std::mem::align_of::<SubLevelActorRow>(), 4);
     }
 
     #[test]
     fn sublevel_actor_round_trips_index_and_transform() {
         let actor =
-            SubLevelActorComponent::new(7, glam::Mat4::from_translation(glam::vec3(3.0, 4.0, 5.0)));
+            SubLevelActorRow::new(7, glam::Mat4::from_translation(glam::vec3(3.0, 4.0, 5.0)));
         assert_eq!(actor.sublevel_index, 7);
-        assert_eq!(actor.flags, SubLevelActorComponent::FLAG_ENABLED);
+        assert_eq!(actor.flags, SubLevelActorRow::FLAG_ENABLED);
         assert_eq!(actor.transform().w_axis, glam::vec4(3.0, 4.0, 5.0, 1.0));
-    }
-}
-#[cfg(test)]
-mod lifecycle_tests {
-    use super::RenderGroupComponent;
-    #[test]
-    fn a_render_group_row_is_removed_with_its_value() {
-        let mut world = pulsar_scenedb::World::new();
-        let group = world.spawn();
-        let g = RenderGroupComponent { group_mask: 1 };
-        world.insert(group, g);
-        assert_eq!(world.remove::<RenderGroupComponent>(group), Some(g));
     }
 }

@@ -1,5 +1,6 @@
 //! The voxel planet pass inside the default deferred graph: pipeline and
 //! attachment compatibility, residency settling, source removal and resize.
+use helio_components::{AtmosphereComponent, LightComponent};
 use std::sync::{Arc, Mutex};
 
 use glam::Vec3;
@@ -71,27 +72,23 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
                 max_cells_metadata: 0,
             },
         );
-        helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(
+        helio_components::AtmosphereComponent::register_gpu_columns_growable(
             &mut gpu_store,
             4,
             &device,
         );
-        helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(
+        helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+        helio_components::MaterialComponent::register_gpu_columns_growable(
             &mut gpu_store,
             16,
             &device,
         );
-        helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+        helio_components::StaticObjectComponent::register_gpu_columns_growable(
             &mut gpu_store,
             16,
             &device,
         );
-        helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-            &mut gpu_store,
-            16,
-            &device,
-        );
-        helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+        helio_components::LightComponent::register_gpu_columns_growable(
             &mut gpu_store,
             16,
             &device,
@@ -366,23 +363,19 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
             max_cells_metadata: 0,
         },
     );
-    helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
-    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+    helio_components::AtmosphereComponent::register_gpu_columns_growable(
+        &mut gpu_store,
+        4,
+        &device,
+    );
+    helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+    helio_components::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+    helio_components::StaticObjectComponent::register_gpu_columns_growable(
         &mut gpu_store,
         16,
         &device,
     );
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        16,
-        &device,
-    );
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        16,
-        &device,
-    );
+    helio_components::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
     let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
     let mut scene = pulsar_scenedb::SceneDb::new();
     scene.world.attach_gpu_mirror(mirror.clone());
@@ -440,18 +433,18 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
 impl Editor {
     /// A directional sun shining from `towards`, and the scene's atmosphere
     /// row (`None` removes it).
-    fn set_sky(&mut self, towards: Vec3, air: Option<helio_pass_sky::AtmosphereComponent>) {
+    fn set_sky(&mut self, towards: Vec3, air: Option<helio_components::AtmosphereComponent>) {
         let sun = *self.sun.get_or_insert_with(|| self.scene.world.spawn());
         self.scene.world.insert(
             sun,
-            helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
+            LightComponent::from(helio_pass_forward_lit::LightRow::from(helio::GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [-towards.x, -towards.y, -towards.z, 0.0],
                 color_intensity: [1.0, 1.0, 1.0, 3.0],
                 shadow_index: u32::MAX,
                 light_type: helio::LightType::Directional as u32,
                 ..Default::default()
-            }),
+            })),
         );
         let entity = *self.air.get_or_insert_with(|| self.scene.world.spawn());
         match air {
@@ -459,7 +452,7 @@ impl Editor {
             None => {
                 self.scene
                     .world
-                    .remove::<helio_pass_sky::AtmosphereComponent>(entity);
+                    .remove::<helio_components::AtmosphereComponent>(entity);
             }
         }
         self.scene.world.flush_gpu_mirror(&self.queue);
@@ -602,8 +595,10 @@ const EARTH_RADIUS: f64 = 6_360_000.0;
 /// Earth's atmosphere preset: 100 km of air.
 const AIR_THICKNESS: f64 = 100_000.0;
 
-fn earth_air() -> helio_pass_sky::AtmosphereComponent {
-    helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], EARTH_RADIUS)
+fn earth_air() -> helio_components::AtmosphereComponent {
+    AtmosphereComponent::from(
+        helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], EARTH_RADIUS),
+    )
 }
 
 fn mean_rgb(pixels: &[[u8; 4]]) -> [f64; 3] {
@@ -900,7 +895,12 @@ fn atmosphere_over_flat_ground_without_a_planet() {
         .device
         .push_error_scope(wgpu::ErrorFilter::Validation);
     let sun = Vec3::new(0.3, 0.6, 0.2).normalize();
-    editor.set_sky(sun, Some(helio_pass_sky::AtmosphereComponent::earth()));
+    editor.set_sky(
+        sun,
+        Some(AtmosphereComponent::from(
+            helio_pass_sky::AtmosphereRow::earth(),
+        )),
+    );
     let eye = Vec3::new(0.0, 2.0, 0.0);
     let up_camera = Camera::perspective_look_at(
         eye,
@@ -1119,7 +1119,9 @@ fn terrain_under_an_atmosphere_is_lit_at_every_height() {
     ] {
         editor.set_sky(
             sun,
-            Some(helio_pass_sky::AtmosphereComponent::earth().around_planet([0.0; 3], radius)),
+            Some(AtmosphereComponent::from(
+                helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], radius),
+            )),
         );
         for height in [2.0, 25.0, 300.0, 20_000.0] {
             let eye = planet.surface_point(dir, height);

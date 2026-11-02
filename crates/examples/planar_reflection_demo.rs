@@ -10,6 +10,7 @@
 
 mod v3_demo_common;
 
+use helio_components::AtmosphereComponent;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -225,9 +226,10 @@ impl ApplicationHandler for App {
         // renderer's own ambient term (`set_ambient`, below). The sky is
         // Earth's air, lit by the directional light below.
         let sky_entity = scene_db.world.spawn();
-        scene_db
-            .world
-            .insert(sky_entity, helio_pass_sky::AtmosphereComponent::earth());
+        scene_db.world.insert(
+            sky_entity,
+            AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth()),
+        );
 
         // ── Lights ─────────────────────────────────────────────────────────
         spawn_light(

@@ -93,7 +93,7 @@ fn resolver_matches_the_rust_blender_property_by_property() {
     );
     let camera_rows = buffer(
         "camera rows",
-        &[0u8; std::mem::size_of::<CameraPostProcessComponent>()],
+        &[0u8; std::mem::size_of::<CameraPostProcessRow>()],
         wgpu::BufferUsages::STORAGE,
     );
     let output = device.create_buffer(&wgpu::BufferDescriptor {

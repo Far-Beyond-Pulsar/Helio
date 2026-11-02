@@ -45,7 +45,6 @@
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result};
 use pulsar_scenedb::gpu::BufferKey;
-use pulsar_scenedb_derive::SceneStore;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -146,40 +145,34 @@ impl SpriteInstance {
 /// [`SpriteInstance`] and `shaders/sprite.wgsl`; cull/sort/indirect buffers
 /// remain renderer-derived state.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, SceneStore, bytemuck::Pod, bytemuck::Zeroable)]
-#[gpu(layout = packed, buffer = "sprite_instances")]
-pub struct SpriteComponent {
-    #[gpu]
+#[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SpriteRow {
     pub position_x: f32,
-    #[gpu]
     pub position_y: f32,
-    #[gpu]
     pub size_x: f32,
-    #[gpu]
     pub size_y: f32,
-    #[gpu]
     pub rotation: f32,
-    #[gpu]
     pub depth: f32,
-    #[gpu]
     pub _pad_uv_x: f32,
-    #[gpu]
     pub _pad_uv_y: f32,
-    #[gpu]
     pub uv_rect: [f32; 4],
-    #[gpu]
     pub color: [f32; 4],
-    #[gpu]
     pub atlas_layer: u32,
-    #[gpu]
     pub _pad_tail_0: u32,
-    #[gpu]
     pub _pad_tail_1: u32,
-    #[gpu]
     pub _pad_tail_2: u32,
 }
 
-impl From<SpriteInstance> for SpriteComponent {
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for SpriteRow {}
+
+/// The buffer the renderer reads [`SpriteRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const SPRITE_INSTANCES: helio_core::BufferContract<SpriteRow> =
+    helio_core::BufferContract::new("sprite_instances");
+
+impl From<SpriteInstance> for SpriteRow {
     fn from(value: SpriteInstance) -> Self {
         Self {
             position_x: value.position[0],
@@ -200,8 +193,8 @@ impl From<SpriteInstance> for SpriteComponent {
     }
 }
 
-impl From<SpriteComponent> for SpriteInstance {
-    fn from(value: SpriteComponent) -> Self {
+impl From<SpriteRow> for SpriteInstance {
+    fn from(value: SpriteRow) -> Self {
         Self {
             position: [value.position_x, value.position_y],
             size: [value.size_x, value.size_y],

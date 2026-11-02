@@ -52,6 +52,8 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
+use helio_components::WorldRows;
+use helio_components::{CameraPostProcessComponent, LightComponent};
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::VolumeId;
@@ -152,20 +154,16 @@ impl Flight {
                 max_cells_metadata: 0,
             },
         );
-        helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut store, 4, &device);
-        helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut store, 16, &device);
-        helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
-            &mut store, 16, &device,
-        );
-        helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-            &mut store, 16, &device,
-        );
-        helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
-            &mut store, 16, &device,
-        );
-        helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(
+        helio_components::AtmosphereComponent::register_gpu_columns_growable(
             &mut store, 4, &device,
         );
+        helio_components::MeshComponent::register_gpu_columns_growable(&mut store, 16, &device);
+        helio_components::MaterialComponent::register_gpu_columns_growable(&mut store, 16, &device);
+        helio_components::StaticObjectComponent::register_gpu_columns_growable(
+            &mut store, 16, &device,
+        );
+        helio_components::LightComponent::register_gpu_columns_growable(&mut store, 16, &device);
+        helio_components::GlobalFogComponent::register_gpu_columns_growable(&mut store, 4, &device);
         let mirror = GpuMirrorHandle::new(Arc::new(store), queue.clone());
         let mut scene = pulsar_scenedb::SceneDb::new();
         scene.world.attach_gpu_mirror(mirror.clone());
@@ -182,7 +180,7 @@ impl Flight {
         let sky = preset.sky(planet.grid().radius());
         scene.world.insert(
             light,
-            helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
+            LightComponent::from(helio_pass_forward_lit::LightRow::from(helio::GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [-sun_dir.x, -sun_dir.y, -sun_dir.z, 0.0],
                 // The sun above the air: the atmosphere colours it.
@@ -197,7 +195,7 @@ impl Flight {
                 god_rays_exposure: 1.0,
                 god_rays_decay: 1.0,
                 ..Default::default()
-            }),
+            })),
         );
         // The preset's air around the planet, centred on the world origin
         // (none on the Moon), with its clouds (`HELIO_VOXEL_FLIGHT_NO_CLOUDS`:
@@ -219,10 +217,10 @@ impl Flight {
         if let Some(meadow) = &meadow {
             for row in &meadow.types {
                 let entity = scene.world.spawn();
-                scene.world.insert(entity, *row);
+                scene.world.insert_row(entity, *row);
             }
             let wind = scene.world.spawn();
-            scene.world.insert(wind, meadow.wind);
+            scene.world.insert_row(wind, meadow.wind);
         }
         scene.world.flush_gpu_mirror(&queue);
         let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
@@ -289,7 +287,9 @@ impl Flight {
             let camera = scene.world.spawn();
             scene.world.insert(
                 camera,
-                helio_pass_postprocess::CameraPostProcessComponent::new(0, &post),
+                CameraPostProcessComponent::from(
+                    helio_pass_postprocess::CameraPostProcessRow::new(0, &post),
+                ),
             );
             scene.world.flush_gpu_mirror(&queue);
         }
@@ -636,9 +636,7 @@ fn volumes_hover(flight: &mut Flight, ground: DVec3, seed: u64) {
         .unwrap_or_else(|| up.any_orthonormal_vector());
     // Ahead across the sun.
     let ahead = level.cross(up);
-    let under = flight
-        .planet
-        .surface_point(ground + ahead * 12.0, 0.0);
+    let under = flight.planet.surface_point(ground + ahead * 12.0, 0.0);
     // The slab's underside in the block's frame.
     let bottom = ship
         .raycast_of(
@@ -2436,7 +2434,10 @@ fn chunk_stress(flight: &mut Flight, mode: &str, ground: DVec3, heading: f64) {
             .collect();
         means.sort_by(|a, b| a.0 .0.cmp(&b.0 .0).then(b.1.total_cmp(&a.1)));
         for ((depth, name), ms) in means {
-            eprintln!("CHUNKSCOPES {mode}: mean {}{name} {ms:.3} ms", "  ".repeat(*depth as usize));
+            eprintln!(
+                "CHUNKSCOPES {mode}: mean {}{name} {ms:.3} ms",
+                "  ".repeat(*depth as usize)
+            );
         }
     }
     for (interval, t, altitude) in slow.iter().take(5) {

@@ -39,9 +39,8 @@ pub mod draw_slots;
 mod indirect_draw;
 mod object_batch_frame_data;
 pub use components::{
-    MaterialComponent, MeshComponent, RenderGroupComponent, RenderGroupSceneBinding,
-    SectionedObjectComponent, SectionedObjectSceneBinding, StaticObjectComponent,
-    SubLevelActorComponent, SubLevelActorSceneBinding, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX,
+    MaterialRow, RenderGroupRow, StaticObjectRow, SubLevelActorRow, SubLevelIndex,
+    DEFAULT_SUBLEVEL_INDEX, MATERIALS, MESH_INDICES, MESH_VERTICES, RENDER_GROUPS, STATIC_OBJECTS,
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
@@ -754,11 +753,7 @@ impl RenderPass for GBufferPass {
             // The table held still since the last upload: a space that stopped
             // moving has no motion, so the history catches up.
             if let Some(words) = self.last_coordinate_words.as_ref() {
-                ctx.write_buffer(
-                    &self.coordinate_spaces_prev,
-                    0,
-                    bytemuck::cast_slice(words),
-                );
+                ctx.write_buffer(&self.coordinate_spaces_prev, 0, bytemuck::cast_slice(words));
             }
             self.coordinate_prev_stale = false;
         }

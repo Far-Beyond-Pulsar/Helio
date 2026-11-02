@@ -16,7 +16,8 @@ use helio::{
     HelioGraphicsConfig, HelioGraphicsContext, LightType, Renderer, RendererBuilder,
     RendererConfig,
 };
-use helio_pass_lens::{LensComponent, LensElementComponent, LensRegion, ProjectionModel};
+use helio_components::{LensComponent, LensElementComponent};
+use helio_pass_lens::{LensRegion, ProjectionModel};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle,
     spawn_light, spawn_material, spawn_mesh, spawn_object, sphere_mesh,
@@ -610,7 +611,10 @@ fn build_scene(
         let neutral: LensElementComponent = bytemuck::Zeroable::zeroed();
         scene_db.world.insert(entity, neutral);
     }
-    v3_demo_common::set_camera_lens(&mut scene_db.world, LensComponent::new(0));
+    v3_demo_common::set_camera_lens(
+        &mut scene_db.world,
+        LensComponent::from(helio_pass_lens::LensRow::new(0)),
+    );
 
     renderer.set_ambient([0.10, 0.12, 0.18], 0.04);
     renderer.set_clear_color([0.01, 0.01, 0.03, 1.0]);
@@ -815,7 +819,7 @@ fn capture_all() {
 
 fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
     use LensRegion::FullFrame as F;
-    let mut lens = LensComponent::new(0);
+    let mut lens = LensComponent::from(helio_pass_lens::LensRow::new(0));
     lens.f_number = 2.8;
     lens.focus_distance_m = 6.0;
     lens.quality = 1;
@@ -842,173 +846,232 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
         }
         "anamorphic" => {
             lens.f_number = 2.0;
-            vec![LensElementComponent::pupil(F).with_anamorphic(1.8)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::pupil(F).with_anamorphic(1.8),
+            )]
         }
         "swirly-bokeh" => {
             lens.f_number = 1.4;
-            vec![LensElementComponent::pupil(F)
-                .with_swirl(1.4)
-                .with_cats_eye(0.8, 1.0)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::pupil(F)
+                    .with_swirl(1.4)
+                    .with_cats_eye(0.8, 1.0),
+            )]
         }
         "longitudinal-ca" => {
             lens.f_number = 1.8;
-            vec![LensElementComponent::longitudinal_ca(-0.65, 0.0, -0.65, F)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::longitudinal_ca(-0.65, 0.0, -0.65, F),
+            )]
         }
         "lateral-ca" => {
             lens.quality = 2;
-            vec![LensElementComponent::lateral_ca(0.08, 0.0, F)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::lateral_ca(0.08, 0.0, F),
+            )]
         }
-        "barrel" => vec![LensElementComponent::brown_conrady(
-            [-0.35, 0.04, 0.0, 0.0, 0.0, 0.0],
-            [0.0; 2],
-            F,
+        "barrel" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::brown_conrady(
+                [-0.35, 0.04, 0.0, 0.0, 0.0, 0.0],
+                [0.0; 2],
+                F,
+            ),
         )],
         "fisheye" => {
             lens.focal_length_mm = 16.0;
-            vec![LensElementComponent::projection(
-                ProjectionModel::Equidistant,
-                F,
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::projection(ProjectionModel::Equidistant, F),
             )]
         }
-        "projection-equisolid" => vec![LensElementComponent::projection(
-            ProjectionModel::Equisolid,
-            F,
+        "projection-equisolid" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::projection(ProjectionModel::Equisolid, F),
         )],
-        "projection-orthographic" => vec![LensElementComponent::projection(
-            ProjectionModel::Orthographic,
-            F,
+        "projection-orthographic" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::projection(ProjectionModel::Orthographic, F),
         )],
-        "projection-stereographic" => vec![LensElementComponent::projection(
-            ProjectionModel::Stereographic,
-            F,
+        "projection-stereographic" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::projection(ProjectionModel::Stereographic, F),
         )],
         "projection-kannala-brandt" => {
-            vec![
-                LensElementComponent::projection(ProjectionModel::KannalaBrandt, F)
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::projection(ProjectionModel::KannalaBrandt, F)
                     .with_kannala_brandt([-0.02, 0.003, 0.0, 0.0]),
-            ]
+            )]
         }
         "split-diopter" => {
             lens.f_number = 2.0;
-            vec![LensElementComponent::diopter(
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::diopter(
+                    4.8,
+                    LensRegion::HalfPlane {
+                        angle: 0.0,
+                        offset: 0.0,
+                    },
+                )
+                .with_feather(0.025),
+            )]
+        }
+        "pro-mist" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pro_mist(0.45, F),
+        )],
+        "black-pro-mist" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::black_pro_mist(0.45, F),
+        )],
+        "halation" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::halation(0.7, 0.018, F),
+        )],
+        "halation-tint" => {
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::halation(0.7, 0.018, F)
+                    .with_halation_tint([1.0, 0.25, 0.08]),
+            )]
+        }
+        "star-filter" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::star_filter(6, 0.2, 0.12, 0.5, F),
+        )],
+        "coma-astigmatism" => vec![
+            LensElementComponent::from(helio_pass_lens::LensElementRow::coma(0.5, 0.09, F)),
+            LensElementComponent::from(helio_pass_lens::LensElementRow::astigmatism(
+                0.035, 0.35, F,
+            )),
+        ],
+        "iris-rounded-blades" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F)
+                .with_iris(6, 0.0, 0.25)
+                .with_f_number_rounding(4.0),
+        )],
+        "iris-texture-star" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_aperture_texture(0, 1.0),
+        )],
+        "iris-texture-heart" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_aperture_texture(1, 1.0),
+        )],
+        "iris-texture-triangle" => {
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::pupil(F).with_aperture_texture(2, 1.0),
+            )]
+        }
+        "anamorphic-133" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_anamorphic(1.33),
+        )],
+        "anamorphic-200" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_anamorphic(2.0),
+        )],
+        "cats-eye" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_cats_eye(1.4, 1.0),
+        )],
+        "spherical-rim" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_spherical_aberration(0.8, 0.0),
+        )],
+        "spherical-soft" => {
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::pupil(F).with_spherical_aberration(-0.8, 1.0),
+            )]
+        }
+        "onion-rings" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_onion_rings(0.9, 8.0),
+        )],
+        "apodization" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pupil(F).with_apodization(0.38),
+        )],
+        "central-obstruction" => {
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::pupil(F).with_central_obstruction(0.55),
+            )]
+        }
+        "split-horizontal" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::diopter(
                 4.8,
                 LensRegion::HalfPlane {
                     angle: 0.0,
                     offset: 0.0,
                 },
             )
-            .with_feather(0.025)]
-        }
-        "pro-mist" => vec![LensElementComponent::pro_mist(0.45, F)],
-        "black-pro-mist" => vec![LensElementComponent::black_pro_mist(0.45, F)],
-        "halation" => vec![LensElementComponent::halation(0.7, 0.018, F)],
-        "halation-tint" => {
-            vec![LensElementComponent::halation(0.7, 0.018, F).with_halation_tint([1.0, 0.25, 0.08])]
-        }
-        "star-filter" => vec![LensElementComponent::star_filter(6, 0.2, 0.12, 0.5, F)],
-        "coma-astigmatism" => vec![
-            LensElementComponent::coma(0.5, 0.09, F),
-            LensElementComponent::astigmatism(0.035, 0.35, F),
-        ],
-        "iris-rounded-blades" => vec![LensElementComponent::pupil(F)
-            .with_iris(6, 0.0, 0.25)
-            .with_f_number_rounding(4.0)],
-        "iris-texture-star" => vec![LensElementComponent::pupil(F).with_aperture_texture(0, 1.0)],
-        "iris-texture-heart" => vec![LensElementComponent::pupil(F).with_aperture_texture(1, 1.0)],
-        "iris-texture-triangle" => {
-            vec![LensElementComponent::pupil(F).with_aperture_texture(2, 1.0)]
-        }
-        "anamorphic-133" => vec![LensElementComponent::pupil(F).with_anamorphic(1.33)],
-        "anamorphic-200" => vec![LensElementComponent::pupil(F).with_anamorphic(2.0)],
-        "cats-eye" => vec![LensElementComponent::pupil(F).with_cats_eye(1.4, 1.0)],
-        "spherical-rim" => vec![LensElementComponent::pupil(F).with_spherical_aberration(0.8, 0.0)],
-        "spherical-soft" => {
-            vec![LensElementComponent::pupil(F).with_spherical_aberration(-0.8, 1.0)]
-        }
-        "onion-rings" => vec![LensElementComponent::pupil(F).with_onion_rings(0.9, 8.0)],
-        "apodization" => vec![LensElementComponent::pupil(F).with_apodization(0.38)],
-        "central-obstruction" => {
-            vec![LensElementComponent::pupil(F).with_central_obstruction(0.55)]
-        }
-        "split-horizontal" => vec![LensElementComponent::diopter(
-            4.8,
-            LensRegion::HalfPlane {
-                angle: 0.0,
-                offset: 0.0,
-            },
-        )
-        .with_feather(0.02)],
-        "split-vertical" => vec![LensElementComponent::diopter(
-            4.8,
-            LensRegion::HalfPlane {
-                angle: std::f32::consts::FRAC_PI_2,
-                offset: 0.0,
-            },
-        )
-        .with_feather(0.02)],
-        "split-diagonal" => vec![LensElementComponent::diopter(
-            4.8,
-            LensRegion::HalfPlane {
-                angle: std::f32::consts::FRAC_PI_4,
-                offset: 0.0,
-            },
-        )
-        .with_feather(0.02)],
+            .with_feather(0.02),
+        )],
+        "split-vertical" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::diopter(
+                4.8,
+                LensRegion::HalfPlane {
+                    angle: std::f32::consts::FRAC_PI_2,
+                    offset: 0.0,
+                },
+            )
+            .with_feather(0.02),
+        )],
+        "split-diagonal" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::diopter(
+                4.8,
+                LensRegion::HalfPlane {
+                    angle: std::f32::consts::FRAC_PI_4,
+                    offset: 0.0,
+                },
+            )
+            .with_feather(0.02),
+        )],
         "split-multi-ellipse" => vec![
-            LensElementComponent::diopter(
+            LensElementComponent::from(helio_pass_lens::LensElementRow::diopter(
                 4.8,
                 LensRegion::Ellipse {
                     center: [-0.22, 0.0],
                     radii: [0.22, 0.42],
                     rotation: -0.2,
                 },
-            ),
-            LensElementComponent::diopter(
+            )),
+            LensElementComponent::from(helio_pass_lens::LensElementRow::diopter(
                 8.0,
                 LensRegion::Ellipse {
                     center: [0.22, 0.0],
                     radii: [0.22, 0.42],
                     rotation: 0.2,
                 },
-            ),
+            )),
         ],
-        "split-radial-band" => vec![LensElementComponent::diopter(
-            4.8,
-            LensRegion::RadialBand {
-                r0: 0.18,
-                r1: 0.52,
-                center: [0.5, 0.5],
-            },
+        "split-radial-band" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::diopter(
+                4.8,
+                LensRegion::RadialBand {
+                    r0: 0.18,
+                    r1: 0.52,
+                    center: [0.5, 0.5],
+                },
+            ),
         )],
-        "split-polygon" => vec![LensElementComponent::diopter(
-            4.8,
-            LensRegion::Polygon(&[
-                [-0.55, -0.4],
-                [0.0, -0.48],
-                [0.25, 0.0],
-                [0.0, 0.48],
-                [-0.55, 0.4],
-            ]),
+        "split-polygon" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::diopter(
+                4.8,
+                LensRegion::Polygon(&[
+                    [-0.55, -0.4],
+                    [0.0, -0.48],
+                    [0.25, 0.0],
+                    [0.0, 0.48],
+                    [-0.55, 0.4],
+                ]),
+            ),
         )],
-        "split-seam" => vec![LensElementComponent::diopter(
-            4.8,
-            LensRegion::HalfPlane {
-                angle: std::f32::consts::FRAC_PI_4,
-                offset: 0.08,
-            },
-        )
-        .with_feather(0.06)
-        .with_seam_darkening(0.75)
-        .with_mount_distance(0.04)],
-        "sweet-spot" => vec![LensElementComponent::sweet_spot(
-            18.0,
-            LensRegion::Ellipse {
-                center: [0.0, 0.0],
-                radii: [0.27, 0.34],
-                rotation: 0.0,
-            },
-        )
-        .with_feather(0.08)],
+        "split-seam" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::diopter(
+                4.8,
+                LensRegion::HalfPlane {
+                    angle: std::f32::consts::FRAC_PI_4,
+                    offset: 0.08,
+                },
+            )
+            .with_feather(0.06)
+            .with_seam_darkening(0.75)
+            .with_mount_distance(0.04),
+        )],
+        "sweet-spot" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::sweet_spot(
+                18.0,
+                LensRegion::Ellipse {
+                    center: [0.0, 0.0],
+                    radii: [0.27, 0.34],
+                    rotation: 0.0,
+                },
+            )
+            .with_feather(0.08),
+        )],
         "tilt-focus" => {
             lens.tilt_angle = 0.16;
             lens.tilt_axis = 0.25;
@@ -1025,118 +1088,171 @@ fn apply_case(scene_db: &mut pulsar_scenedb::SceneDb, name: &str) {
             lens.af_speed = 0.0;
             vec![]
         }
-        "division-distortion" => vec![LensElementComponent::division(-0.35, 0.05, F)],
-        "pincushion" => vec![LensElementComponent::brown_conrady(
-            [0.28, 0.02, 0.0, 0.0, 0.0, 0.0],
-            [0.0; 2],
-            F,
+        "division-distortion" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::division(-0.35, 0.05, F),
         )],
-        "anamorphic-distortion" => vec![LensElementComponent::anamorphic_distortion(
-            [-0.3, 0.0],
-            [0.25, 0.0],
-            F,
+        "pincushion" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::brown_conrady(
+                [0.28, 0.02, 0.0, 0.0, 0.0, 0.0],
+                [0.0; 2],
+                F,
+            ),
         )],
-        "anamorphic-squeeze" => vec![LensElementComponent::anamorphic_squeeze(1.8, F)],
-        "lens-shift" => vec![LensElementComponent::shift(0.18, -0.08, F)],
-        "keystone" => vec![LensElementComponent::keystone(0.35, -0.2, F)],
+        "anamorphic-distortion" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::anamorphic_distortion([-0.3, 0.0], [0.25, 0.0], F),
+        )],
+        "anamorphic-squeeze" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::anamorphic_squeeze(1.8, F),
+        )],
+        "lens-shift" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::shift(0.18, -0.08, F),
+        )],
+        "keystone" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::keystone(0.35, -0.2, F),
+        )],
         "panini" => {
-            vec![LensElementComponent::projection(ProjectionModel::Panini, F).with_panini(0.8, 0.7)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::projection(ProjectionModel::Panini, F)
+                    .with_panini(0.8, 0.7),
+            )]
         }
-        "cylindrical" => vec![LensElementComponent::projection(
-            ProjectionModel::Cylindrical,
-            F,
+        "cylindrical" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::projection(ProjectionModel::Cylindrical, F),
         )],
-        "focus-breathing" => vec![LensElementComponent::focus_breathing(0.35, F)],
+        "focus-breathing" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::focus_breathing(0.35, F),
+        )],
         "prism-line" => {
-            vec![LensElementComponent::prism(4, 0.055, 0.25, F).with_prism_falloff(0.8)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::prism(4, 0.055, 0.25, F).with_prism_falloff(0.8),
+            )]
         }
-        "prism-ring" => vec![LensElementComponent::prism(5, 0.055, 0.0, F)
-            .with_prism_ring()
-            .with_prism_spin(0.2)
-            .with_prism_falloff(0.75)],
-        "flat-port" => vec![LensElementComponent::flat_port(1.333, 0.02, F)],
-        "dome-port" => vec![LensElementComponent::dome_port(0.18, 0.08, F)],
-        "natural-vignette" => vec![LensElementComponent::natural_vignette(1.0, F)],
-        "optical-vignette" => vec![LensElementComponent::optical_vignette(1.1, 0.8, 2.8, F)],
-        "circular-hood" => vec![LensElementComponent::circular_hood(0.62, 0.12, F)],
-        "matte-box" => vec![LensElementComponent::matte_box([0.46, 0.42], 0.12, 0.08, F)],
-        "nd-filter" => vec![LensElementComponent::nd_filter(1.5, F)],
-        "graduated-nd" => vec![LensElementComponent::graduated_nd(
-            1.8,
-            1.15,
-            0.0,
-            0.2,
-            [1.0, 0.9, 0.75],
-            F,
+        "prism-ring" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::prism(5, 0.055, 0.0, F)
+                .with_prism_ring()
+                .with_prism_spin(0.2)
+                .with_prism_falloff(0.75),
         )],
-        "color-filter" => vec![LensElementComponent::color_filter(
-            [0.9, 0.55, 0.35],
-            0.7,
-            F,
+        "flat-port" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::flat_port(1.333, 0.02, F),
+        )],
+        "dome-port" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::dome_port(0.18, 0.08, F),
+        )],
+        "natural-vignette" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::natural_vignette(1.0, F),
+        )],
+        "optical-vignette" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::optical_vignette(1.1, 0.8, 2.8, F),
+        )],
+        "circular-hood" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::circular_hood(0.62, 0.12, F),
+        )],
+        "matte-box" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::matte_box([0.46, 0.42], 0.12, 0.08, F),
+        )],
+        "nd-filter" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::nd_filter(1.5, F),
+        )],
+        "graduated-nd" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::graduated_nd(1.8, 1.15, 0.0, 0.2, [1.0, 0.9, 0.75], F),
+        )],
+        "color-filter" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::color_filter([0.9, 0.55, 0.35], 0.7, F),
         )],
         "t-stop" => {
             lens.f_number = 2.8;
             lens.t_stop = 5.6;
-            vec![LensElementComponent::t_stop_loss(1.0, F)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::t_stop_loss(1.0, F),
+            )]
         }
-        "spherical-glow" => vec![LensElementComponent::spherical_glow(
-            0.7, 2.8, 2.0, 0.025, F,
+        "spherical-glow" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::spherical_glow(0.7, 2.8, 2.0, 0.025, F),
         )],
-        "corner-softness" => vec![LensElementComponent::corner_softness(0.022, 0.45, F)],
-        "diffusion" => vec![LensElementComponent::diffusion(0.45, 0.018, F)],
+        "corner-softness" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::corner_softness(0.022, 0.45, F),
+        )],
+        "diffusion" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::diffusion(0.45, 0.018, F),
+        )],
         "diffusion-tail" => {
-            vec![LensElementComponent::diffusion(0.45, 0.018, F).with_diffusion_tail(0.9)]
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::diffusion(0.45, 0.018, F).with_diffusion_tail(0.9),
+            )]
         }
-        "glint" => vec![LensElementComponent::pro_mist(0.4, F).with_glint(0.8)],
-        "glimmerglass" => vec![LensElementComponent::glimmerglass(0.45, F).with_glint(0.8)],
-        "fog-diffusion" => vec![LensElementComponent::fog(0.45, F)],
-        "water-drops" => vec![LensElementComponent::water_drops(
-            0.025,
-            0,
-            0.008,
-            LensRegion::MaskChannel {
-                layer: 0,
-                channel: 3,
-                invert: false,
-            },
+        "glint" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::pro_mist(0.4, F).with_glint(0.8),
         )],
-        "water-drops-transformed" => vec![LensElementComponent::water_drops(
-            0.025,
-            0,
-            0.008,
-            LensRegion::MaskChannel {
-                layer: 0,
-                channel: 3,
-                invert: false,
-            },
-        )
-        .with_mask_transform(1.7, [0.12, -0.08], true)],
-        "smear" => vec![LensElementComponent::smear(0.55, 0.06, 0.35, F)],
-        "dirt" => vec![LensElementComponent::dirt(
-            0.55,
-            0.03,
-            0.12,
-            LensRegion::MaskChannel {
-                layer: 0,
-                channel: 3,
-                invert: false,
-            },
+        "glimmerglass" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::glimmerglass(0.45, F).with_glint(0.8),
         )],
-        "prescription-thin-lens" => vec![LensElementComponent::prescription(0, F)],
-        "prescription-cooke" => vec![LensElementComponent::prescription(1, F)],
-        "prescription-double-gauss" => vec![LensElementComponent::prescription(2, F)],
+        "fog-diffusion" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::fog(0.45, F),
+        )],
+        "water-drops" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::water_drops(
+                0.025,
+                0,
+                0.008,
+                LensRegion::MaskChannel {
+                    layer: 0,
+                    channel: 3,
+                    invert: false,
+                },
+            ),
+        )],
+        "water-drops-transformed" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::water_drops(
+                0.025,
+                0,
+                0.008,
+                LensRegion::MaskChannel {
+                    layer: 0,
+                    channel: 3,
+                    invert: false,
+                },
+            )
+            .with_mask_transform(1.7, [0.12, -0.08], true),
+        )],
+        "smear" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::smear(0.55, 0.06, 0.35, F),
+        )],
+        "dirt" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::dirt(
+                0.55,
+                0.03,
+                0.12,
+                LensRegion::MaskChannel {
+                    layer: 0,
+                    channel: 3,
+                    invert: false,
+                },
+            ),
+        )],
+        "prescription-thin-lens" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::prescription(0, F),
+        )],
+        "prescription-cooke" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::prescription(1, F),
+        )],
+        "prescription-double-gauss" => vec![LensElementComponent::from(
+            helio_pass_lens::LensElementRow::prescription(2, F),
+        )],
         "user-hook" => {
             let mut params = [0.0; 16];
             params[0] = 0.035;
             params[1] = 0.65;
             params[2] = 0.25;
-            vec![LensElementComponent::user(
-                helio_pass_lens::user::MAP
-                    | helio_pass_lens::user::TRANSMISSION
-                    | helio_pass_lens::user::FOCUS
-                    | helio_pass_lens::user::SPECTRAL,
-                params,
-                F,
+            vec![LensElementComponent::from(
+                helio_pass_lens::LensElementRow::user(
+                    helio_pass_lens::user::MAP
+                        | helio_pass_lens::user::TRANSMISSION
+                        | helio_pass_lens::user::FOCUS
+                        | helio_pass_lens::user::SPECTRAL,
+                    params,
+                    F,
+                ),
             )]
         }
         _ => panic!("unknown lens case {name}"),

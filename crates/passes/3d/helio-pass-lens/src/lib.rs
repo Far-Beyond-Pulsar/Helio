@@ -20,6 +20,10 @@ mod prescriptions;
 pub use prescriptions::*;
 mod bundled;
 pub use bundled::*;
+pub use components::LensElementRow;
+pub use components::LensRow;
+pub use components::CAMERA_LENSES;
+pub use components::LENS_ELEMENTS;
 
 /// Scene-linear image after the lens, at the size of the pass's input.
 pub const LENS_COLOR: &str = "lens_color";
@@ -659,12 +663,12 @@ impl LensPass {
             ),
             fallback_lenses: buffer(
                 "Lens no rows",
-                std::mem::size_of::<LensComponent>() as u64,
+                std::mem::size_of::<LensRow>() as u64,
                 wgpu::BufferUsages::STORAGE,
             ),
             fallback_elements: buffer(
                 "Lens no elements",
-                std::mem::size_of::<LensElementComponent>() as u64,
+                std::mem::size_of::<LensElementRow>() as u64,
                 wgpu::BufferUsages::STORAGE,
             ),
             fallback_prescriptions: buffer(

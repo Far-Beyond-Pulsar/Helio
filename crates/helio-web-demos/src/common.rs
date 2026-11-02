@@ -4,6 +4,7 @@
 
 use glam::{Mat4, Vec3};
 use helio::{GpuLight, LightType, MeshUpload, PackedVertex};
+use helio_components::{LightComponent, MaterialComponent, StaticObjectComponent};
 use pulsar_scenedb::{Entity, World};
 
 pub type SceneResult<T> = Result<T, &'static str>;
@@ -14,14 +15,14 @@ pub fn make_material(
     metallic: f32,
     emissive: [f32; 3],
     emissive_strength: f32,
-) -> helio_pass_gbuffer::MaterialComponent {
-    helio_pass_gbuffer::MaterialComponent::new(
+) -> helio_components::MaterialComponent {
+    MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
         base_color,
         roughness,
         metallic,
         emissive,
         emissive_strength,
-    )
+    ))
 }
 
 pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -> GpuLight {
@@ -83,15 +84,14 @@ pub fn insert_object(
         .cloned()
         .ok_or("scene has no GPU mirror")?;
     let vertices =
-        helio_pass_gbuffer::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
+        helio_components::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
             .filter(|handle| handle.count != 0)
             .ok_or("mesh has no GPU vertex range")?;
-    let indices =
-        helio_pass_gbuffer::MeshComponent::indices_gpu_handle(mirror.store(), mesh.index())
-            .filter(|handle| handle.count != 0)
-            .ok_or("mesh has no GPU index range")?;
+    let indices = helio_components::MeshComponent::indices_gpu_handle(mirror.store(), mesh.index())
+        .filter(|handle| handle.count != 0)
+        .ok_or("mesh has no GPU index range")?;
     let material_component = world
-        .get::<helio_pass_gbuffer::MaterialComponent>(material)
+        .get::<helio_components::MaterialComponent>(material)
         .ok_or("material entity has no MaterialComponent")?;
     let bounds = [
         transform.w_axis.x,
@@ -99,7 +99,7 @@ pub fn insert_object(
         transform.w_axis.z,
         radius,
     ];
-    let object = helio_pass_gbuffer::StaticObjectComponent::new(
+    let object = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
         mesh.index(),
         mesh.generation().wrapping_add(1),
         material.index(),
@@ -112,16 +112,13 @@ pub fn insert_object(
         material_component.material_class,
         0,
         0,
-    );
+    ));
     let entity = world.spawn();
     world.insert(entity, object);
     Ok(entity)
 }
 
-pub fn spawn_material(
-    world: &mut World,
-    material: helio_pass_gbuffer::MaterialComponent,
-) -> Entity {
+pub fn spawn_material(world: &mut World, material: helio_components::MaterialComponent) -> Entity {
     let entity = world.spawn();
     world.insert(entity, material);
     entity
@@ -131,7 +128,7 @@ pub fn spawn_mesh(world: &mut World, upload: MeshUpload) -> Entity {
     let entity = world.spawn();
     world.insert(
         entity,
-        helio_pass_gbuffer::MeshComponent {
+        helio_components::MeshComponent {
             vertices: upload.vertices,
             indices: upload.indices,
         },
@@ -141,7 +138,10 @@ pub fn spawn_mesh(world: &mut World, upload: MeshUpload) -> Entity {
 
 pub fn spawn_light(world: &mut World, light: GpuLight) -> Entity {
     let entity = world.spawn();
-    world.insert(entity, helio_pass_forward_lit::LightComponent::from(light));
+    world.insert(
+        entity,
+        LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+    );
     entity
 }
 

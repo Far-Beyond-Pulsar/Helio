@@ -3,6 +3,7 @@
 use crate::GpuCameraUniforms;
 use pulsar_scenedb::gpu::SceneGpuStore;
 pub use pulsar_scenedb::gpu::{BufferHandle, BufferKey, FlushedRows};
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 /// The frontend's entity-generation buffer: one `u32` per entity index, the
@@ -14,6 +15,128 @@ pub const ENTITY_GENERATIONS_KEY: BufferKey = BufferKey::of("world_entity_genera
 /// The current render view's camera uniform buffer, also exposed to scene
 /// derivations that make per-view decisions (for example authored mesh LOD).
 pub const CAMERA_BUFFER_KEY: BufferKey = BufferKey::of("scene_camera");
+
+/// A GPU buffer the renderer reads: its key and the row layout its shaders
+/// expect. Helio declares contracts and defines no components: whoever
+/// produces the data (a SceneDB component an engine registers, or a scene
+/// derivation) writes rows of `R` under the key
+/// (docs/architecture/layered-rewrite.md, phase 1).
+pub struct BufferContract<R: 'static> {
+    key: &'static str,
+    _row: PhantomData<fn() -> R>,
+}
+
+impl<R: 'static> BufferContract<R> {
+    /// Bytes per row; a buffer published under the key must use this stride.
+    pub const ROW_BYTES: u64 = std::mem::size_of::<R>() as u64;
+
+    pub const fn new(key: &'static str) -> Self {
+        Self {
+            key,
+            _row: PhantomData,
+        }
+    }
+
+    pub const fn key(&self) -> BufferKey {
+        BufferKey::of(self.key)
+    }
+
+    pub const fn name(&self) -> &'static str {
+        self.key
+    }
+
+    /// Compile-time check for a producer: `layout` is a component or row
+    /// stored under `key` (`const _: () = CONTRACT.assert_producer::<C>("k");`).
+    /// Panics (a const-evaluation error) when the key or the size differ.
+    pub const fn assert_producer<C>(&self, key: &str) {
+        assert!(
+            str_eq(self.key, key),
+            "producer's buffer key differs from the contract's"
+        );
+        assert!(
+            std::mem::size_of::<C>() == std::mem::size_of::<R>(),
+            "producer's row size differs from the contract's"
+        );
+    }
+
+    /// The buffer published under this contract, if any. A buffer whose row
+    /// stride is not `R`'s is an error naming the contract, never a silent
+    /// misread.
+    pub fn resolve<'a>(
+        &self,
+        scene: &'a SceneBufferProjection,
+    ) -> Result<Option<&'a BufferHandle>, ContractError> {
+        match scene.get(self.key()) {
+            Some(handle) if handle.row_bytes != 0 && handle.row_bytes != Self::ROW_BYTES => {
+                Err(ContractError {
+                    key: self.key,
+                    expected_row_bytes: Self::ROW_BYTES,
+                    found_row_bytes: handle.row_bytes,
+                })
+            }
+            found => Ok(found),
+        }
+    }
+}
+
+impl<R: 'static> Clone for BufferContract<R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R: 'static> Copy for BufferContract<R> {}
+
+impl<R: 'static> std::fmt::Debug for BufferContract<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "BufferContract({:?}, {} B rows)",
+            self.key,
+            Self::ROW_BYTES
+        )
+    }
+}
+
+/// A variable-length pool the renderer reads: elements of `T` under `key`,
+/// addressed by `(offset, count)` ranges a row of another contract carries
+/// (mesh vertices and indices, portal chains).
+pub type PoolContract<T> = BufferContract<T>;
+
+/// A buffer published under a contract's key with a different row stride.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractError {
+    pub key: &'static str,
+    pub expected_row_bytes: u64,
+    pub found_row_bytes: u64,
+}
+
+impl std::fmt::Display for ContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "buffer `{}` has {}-byte rows; its contract expects {}",
+            self.key, self.found_row_bytes, self.expected_row_bytes
+        )
+    }
+}
+
+impl std::error::Error for ContractError {}
+
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
 
 /// Type-agnostic, read-only GPU buffers supplied by the frontend SceneDB.
 /// Buffer contents are interpreted by the pass that declared the key; core

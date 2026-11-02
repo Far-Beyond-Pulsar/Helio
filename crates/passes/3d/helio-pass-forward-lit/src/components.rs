@@ -1,12 +1,12 @@
 //! SceneDB-owned light primitive.
 //!
-//! Mirrors `helio-pass-corona::CoronaEmitterComponent`'s recipe exactly: the
+//! Mirrors `helio-pass-corona::CoronaEmitterRow`'s recipe exactly: the
 //! pass that consumes a kind of scene content owns that content's schema.
 //! SceneDB owns the packed CPU column and its GPU projection; this crate
 //! never holds a second, renderer-local copy of "what lights exist."
 //!
 //! Unlike corona (which still needs a CPU-supplied count each frame),
-//! [`LightComponent`]'s buffer is read with a *fixed* iteration count
+//! [`LightRow`]'s buffer is read with a *fixed* iteration count
 //! ([`MAX_LIGHTS`], its registered capacity) directly out of
 //! `ctx.scene_buffers` (`BufferKey::of("scene_lights")`) — see this pass's
 //! `prepare()`/`execute()`. No renderer method creates, updates, or binds
@@ -25,8 +25,6 @@
 //! rows, the rest `u32::MAX`. It re-runs only when these rows change, so
 //! there is no per-frame CPU work and nothing to do while lights are idle.
 
-use pulsar_scenedb_derive::SceneStore;
-
 /// Initial capacity of the `"scene_lights"` buffer: `World`'s own
 /// auto-registration capacity, and the capacity frontends register it with.
 /// The buffer grows as lights are added; passes iterate its live
@@ -37,83 +35,68 @@ pub const MAX_LIGHTS: u32 = pulsar_scenedb::gpu::world_mirror::DEFAULT_AUTO_REGI
 /// A placed light, authored as a SceneDB component. Field-for-field
 /// identical to [`crate::GpuLight`] (enforced by the size/align test
 /// below) so conversion is a zero-cost `bytemuck::cast`, matching
-/// `CoronaEmitterComponent`'s relationship to `GpuCoronaEmitter`.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+/// `CoronaEmitterRow`'s relationship to `GpuCoronaEmitter`.
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "scene_lights")]
-pub struct LightComponent {
-    #[gpu]
+pub struct LightRow {
     pub position_range: [f32; 4],
-    #[gpu]
     pub direction_outer: [f32; 4],
-    #[gpu]
     pub color_intensity: [f32; 4],
-    #[gpu]
     pub shadow_index: u32,
-    #[gpu]
     pub light_type: u32,
-    #[gpu]
     pub inner_angle: f32,
-    #[gpu]
     pub _pad: u32,
-    #[gpu]
     pub god_rays_enabled: u32,
-    #[gpu]
     pub god_rays_density: f32,
-    #[gpu]
     pub god_rays_weight: f32,
-    #[gpu]
     pub god_rays_decay: f32,
-    #[gpu]
     pub god_rays_exposure: f32,
-    #[gpu]
     pub flare_enabled: u32,
-    #[gpu]
     pub flare_type: u32,
-    #[gpu]
     pub flare_intensity: f32,
-    #[gpu]
     pub flare_scale: f32,
-    #[gpu]
     pub flare_tint_r: f32,
-    #[gpu]
     pub flare_tint_g: f32,
-    #[gpu]
     pub flare_tint_b: f32,
-    #[gpu]
     pub ies_profile_index: i32,
-    #[gpu]
     pub light_function_index: i32,
-    #[gpu]
     pub ies_angle_scale: f32,
-    #[gpu]
     pub ies_angle_offset: f32,
 }
 
-impl From<crate::GpuLight> for LightComponent {
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for LightRow {}
+
+/// The buffer the renderer reads [`LightRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const SCENE_LIGHTS: helio_core::BufferContract<LightRow> =
+    helio_core::BufferContract::new("scene_lights");
+
+impl From<crate::GpuLight> for LightRow {
     fn from(value: crate::GpuLight) -> Self {
         bytemuck::cast(value)
     }
 }
 
-impl From<LightComponent> for crate::GpuLight {
-    fn from(value: LightComponent) -> Self {
+impl From<LightRow> for crate::GpuLight {
+    fn from(value: LightRow) -> Self {
         bytemuck::cast(value)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::LightComponent;
+    use super::LightRow;
 
     #[test]
     fn scene_record_matches_light_gpu_abi() {
         assert_eq!(
-            std::mem::size_of::<LightComponent>(),
+            std::mem::size_of::<LightRow>(),
             std::mem::size_of::<crate::GpuLight>()
         );
         assert_eq!(
-            std::mem::align_of::<LightComponent>(),
+            std::mem::align_of::<LightRow>(),
             std::mem::align_of::<crate::GpuLight>()
         );
     }

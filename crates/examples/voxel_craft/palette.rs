@@ -4,7 +4,7 @@
 //! one (the block in hand).
 
 use crate::blocks::Block;
-use helio_pass_gbuffer::MaterialComponent;
+use helio_components::MaterialComponent;
 use helio_pass_voxel_planet::engine::TerrainAppearance;
 use pulsar_scenedb::{Entity, World};
 use std::collections::HashMap;
@@ -39,7 +39,13 @@ pub fn load(world: &mut World) -> Palette {
             let entity = world.spawn();
             world.insert(
                 entity,
-                MaterialComponent::new([r, g, b, 1.0], block.roughness(), 0.0, emissive, strength),
+                MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+                    [r, g, b, 1.0],
+                    block.roughness(),
+                    0.0,
+                    emissive,
+                    strength,
+                )),
             );
             (block, entity)
         })

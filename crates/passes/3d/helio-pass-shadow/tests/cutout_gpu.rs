@@ -1,4 +1,5 @@
 //! Rasterize the production shadow shader and read actual depth pixels.
+use helio_components::MaterialComponent;
 use wgpu::util::DeviceExt;
 
 #[test]
@@ -76,8 +77,9 @@ fn leaf_opacity_casts_identical_cutout_shadows_from_both_sides() {
             layout: &layout0,
             entries: &entries,
         });
-        let mut material =
-            helio_pass_gbuffer::MaterialComponent::new([1.0; 4], 0.8, 0.0, [0.0; 3], 0.0);
+        let mut material = MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+            [1.0; 4], 0.8, 0.0, [0.0; 3], 0.0,
+        ));
         material.flags = 5; // double-sided + alpha-test
         material.tex_base_color = 0;
         let material_buffer = buffer(bytemuck::bytes_of(&material));

@@ -12,10 +12,8 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
+use helio_components::{FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent};
 use helio_default_passes::build_default_graph_external_with_context;
-use helio_pass_foliage_place::components::{
-    FoliageLayerComponent, FoliageTypeComponent, FoliageWindComponent,
-};
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageLayer, GpuFoliageType,
     FOLIAGE_FLAG_TWO_SIDED,
@@ -58,12 +56,10 @@ fn meadow() -> Option<Meadow> {
             max_cells_metadata: 0,
         },
     );
-    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut store, 4, &device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut store, 4, &device);
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-        &mut store, 4, &device,
-    );
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(&mut store, 4, &device);
+    helio_components::MeshComponent::register_gpu_columns_growable(&mut store, 4, &device);
+    helio_components::MaterialComponent::register_gpu_columns_growable(&mut store, 4, &device);
+    helio_components::StaticObjectComponent::register_gpu_columns_growable(&mut store, 4, &device);
+    helio_components::LightComponent::register_gpu_columns_growable(&mut store, 4, &device);
     FoliageTypeComponent::register_gpu_columns_growable(&mut store, 4, &device);
     FoliageLayerComponent::register_gpu_columns_growable(&mut store, 4, &device);
     FoliageWindComponent::register_gpu_columns_growable(&mut store, 4, &device);
@@ -83,13 +79,18 @@ fn meadow() -> Option<Meadow> {
         kind_and_flags: pack_kind_and_flags(FoliageKind::Blade, FOLIAGE_FLAG_TWO_SIDED),
         ..Default::default()
     };
-    world.insert(grass, FoliageTypeComponent::from(row));
     world.insert(
         grass,
-        FoliageLayerComponent::from(GpuFoliageLayer {
-            bounds_min: [-20.0, -1.0, -20.0, 0.0],
-            bounds_max: [20.0, 4.0, 20.0, 0.0],
-        }),
+        FoliageTypeComponent::from(helio_pass_foliage_place::FoliageTypeRow::from(row)),
+    );
+    world.insert(
+        grass,
+        FoliageLayerComponent::from(helio_pass_foliage_place::FoliageLayerRow::from(
+            GpuFoliageLayer {
+                bounds_min: [-20.0, -1.0, -20.0, 0.0],
+                bounds_max: [20.0, 4.0, 20.0, 0.0],
+            },
+        )),
     );
     world.insert(
         grass,

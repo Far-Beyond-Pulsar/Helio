@@ -26,10 +26,11 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
+use helio_components::PortalComponent;
 use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_portal_cull::{
-    components::PortalComponent, PortalProjectionBridge, PortalProjectionConfig, SubLevelContents,
-    SubLevelResolver, MAX_PORTAL_CHAINS,
+    PortalProjectionBridge, PortalProjectionConfig, SubLevelContents, SubLevelResolver,
+    MAX_PORTAL_CHAINS,
 };
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
@@ -257,11 +258,11 @@ impl ApplicationHandler for App {
             // not rely on a hidden continuation marker.
             let pose = helio::portal_pose_facing(normal * HALF_SIZE, -normal, up);
             let entity = authored_portal_entities[i];
-            let component = PortalComponent::new(
+            let component = PortalComponent::from(helio_pass_portal_cull::PortalRow::new(
                 Some(authored_portal_entities[opposite_face[i]]),
                 pose.transform,
                 [DOOR_HALF_W, DOOR_HALF_H],
-            );
+            ));
             scene_db.world.insert(entity, component);
             authored_portals.push((entity, component));
         }
@@ -280,7 +281,10 @@ impl ApplicationHandler for App {
         );
 
         let mut resolver = SubLevelResolver::new();
-        resolver.insert_sublevel(0, SubLevelContents::new([], authored_portals));
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new([], authored_portals.iter().map(|(e, p)| (*e, p.row()))),
+        );
         let projection_bridge = PortalProjectionBridge::with_config(PortalProjectionConfig {
             max_chain_depth: PORTAL_RECURSION_DEPTH,
             max_chains: chain_budget,
@@ -312,14 +316,14 @@ impl ApplicationHandler for App {
                 initial_position,
             )
             .expect("portal_cube authored portal graph");
-        projection_frame
-            .publish_to_world(
-                &mut scene_db.world,
-                &projection_entities[..projection_frame.portal_views.len()],
-                &projection_entities[..projection_frame.portal_chains.len()],
-                projection_entities[0],
-            )
-            .expect("portal_cube dense projection rows");
+        helio_components::publish_portal_projection(
+            &mut scene_db.world,
+            &projection_frame,
+            &projection_entities[..projection_frame.portal_views.len()],
+            &projection_entities[..projection_frame.portal_chains.len()],
+            projection_entities[0],
+        )
+        .expect("portal_cube dense projection rows");
         renderer.set_portal_projection_frame(&projection_frame);
 
         // ── A light near the center so every wall reads, plus one per
@@ -575,14 +579,14 @@ impl AppState {
                             PORTAL_RECURSION_DEPTH,
                         );
                     }
-                    projection_frame
-                        .publish_to_world(
-                            &mut self.scene_db.world,
-                            &self.portal_projection_entities[..view_count],
-                            &self.portal_projection_entities[..chain_count],
-                            self.portal_projection_entities[0],
-                        )
-                        .expect("portal_cube visible projection rows");
+                    helio_components::publish_portal_projection(
+                        &mut self.scene_db.world,
+                        &projection_frame,
+                        &self.portal_projection_entities[..view_count],
+                        &self.portal_projection_entities[..chain_count],
+                        self.portal_projection_entities[0],
+                    )
+                    .expect("portal_cube visible projection rows");
                     self.renderer.set_portal_projection_frame(&projection_frame);
                 } else {
                     log::warn!(

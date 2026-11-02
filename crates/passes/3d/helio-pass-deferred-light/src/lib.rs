@@ -17,7 +17,8 @@ const PORTAL_UNMAP_BYTES: u64 = 256 * 64;
 
 mod components;
 pub mod gpu_types;
-pub use components::{ReflectionCaptureComponent, MAX_REFLECTION_CAPTURES};
+pub use components::REFLECTION_CAPTURES;
+pub use components::{ReflectionCaptureRow, MAX_REFLECTION_CAPTURES};
 pub use gpu_types::*;
 
 /// Sampled textures visible to each deferred-light fragment entry point
@@ -128,7 +129,7 @@ pub struct DeferredLightPass {
     caustics_sampler: wgpu::Sampler,
     fallback_water_volumes: wgpu::Buffer,
     /// Bound in place of `"reflection_captures"` when no
-    /// `ReflectionCaptureComponent` has ever been inserted -- SceneDB is the
+    /// `ReflectionCaptureRow` has ever been inserted -- SceneDB is the
     /// only source this pass reads. `reflection_capture_count` is 0
     /// whenever this is bound, so it's never dereferenced.
     fallback_reflection_captures: wgpu::Buffer,
@@ -1211,7 +1212,7 @@ impl RenderPass for DeferredLightPass {
             .map(|handle| &handle.buffer)
             .unwrap_or(&self.fallback_water_volumes);
         // SceneDB is the only reflection-capture source, resolved fresh by
-        // key every frame -- see `ReflectionCaptureComponent`'s doc.
+        // key every frame -- see `ReflectionCaptureRow`'s doc.
         let reflection_captures_buf = ctx
             .scene_buffers
             .get(BufferKey::of("reflection_captures"))

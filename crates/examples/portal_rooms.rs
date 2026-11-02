@@ -31,10 +31,9 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
+use helio_components::PortalComponent;
 use helio_default_passes::build_default_graph_external_with_context;
-use helio_pass_portal_cull::{
-    components::PortalComponent, PortalProjectionBridge, SubLevelContents, SubLevelResolver,
-};
+use helio_pass_portal_cull::{PortalProjectionBridge, SubLevelContents, SubLevelResolver};
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
     box_mesh, flush_scene_db, make_material, new_scene_db_with_gpu_mirror, point_light,
@@ -376,20 +375,20 @@ impl ApplicationHandler for App {
             let entrance = room_center - ROOM_FORWARD * ROOM_HALF_SIZE;
             let b = helio::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
             let (source_entity, target_entity) = authored_portal_entities[i];
-            let source = PortalComponent::new(
+            let source = PortalComponent::from(helio_pass_portal_cull::PortalRow::new(
                 Some(target_entity),
                 a.transform,
                 [HUB_HALF_SIZE, HUB_HALF_SIZE],
-            );
-            let mut target = PortalComponent::new(
+            ));
+            let mut target = PortalComponent::from(helio_pass_portal_cull::PortalRow::new(
                 Some(source_entity),
                 b.transform,
                 [ROOM_HALF_SIZE, ROOM_HALF_SIZE],
-            );
+            ));
             // The room entrance is the peer/content anchor for this demo,
             // not another visible portal opening. It remains authored and
             // peer-linked so the generalized resolver can resolve it.
-            target.flags &= !PortalComponent::FLAG_ENABLED;
+            target.flags &= !helio_pass_portal_cull::PortalRow::FLAG_ENABLED;
             scene_db.world.insert(source_entity, source);
             scene_db.world.insert(target_entity, target);
             authored_portals.push((source_entity, source));
@@ -397,19 +396,22 @@ impl ApplicationHandler for App {
         }
 
         let mut resolver = SubLevelResolver::new();
-        resolver.insert_sublevel(0, SubLevelContents::new([], authored_portals));
+        resolver.insert_sublevel(
+            0,
+            SubLevelContents::new([], authored_portals.iter().map(|(e, p)| (*e, p.row()))),
+        );
         let projection_frame = PortalProjectionBridge::new(1)
             .expect("portal_rooms projection depth")
             .build(&resolver)
             .expect("portal_rooms authored portal graph");
-        projection_frame
-            .publish_to_world(
-                &mut scene_db.world,
-                &projection_entities,
-                &projection_entities,
-                projection_entities[0],
-            )
-            .expect("portal_rooms dense projection rows");
+        helio_components::publish_portal_projection(
+            &mut scene_db.world,
+            &projection_frame,
+            &projection_entities,
+            &projection_entities,
+            projection_entities[0],
+        )
+        .expect("portal_rooms dense projection rows");
         renderer.set_portal_projection_frame(&projection_frame);
 
         // ── A light near the hub's center so its own walls read clearly.
@@ -708,8 +710,7 @@ fn insert_box_panel(
         // Debug mode: keep every target mesh in the portal scene alive
         // through frustum and Hi-Z culling so portal failures are not
         // confused with ordinary scene culling failures.
-        if let Some(mut object) = world.get_mut::<helio_pass_gbuffer::StaticObjectComponent>(entity)
-        {
+        if let Some(mut object) = world.get_mut::<helio_components::StaticObjectComponent>(entity) {
             object.flags |= helio_pass_object_batch::INSTANCE_FLAG_ALWAYS_VISIBLE;
         }
     }

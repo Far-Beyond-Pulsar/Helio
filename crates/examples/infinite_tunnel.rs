@@ -35,9 +35,8 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_pass_portal_cull::{
-    components::PortalComponent, PortalProjectionBridge, SubLevelContents, SubLevelResolver,
-};
+use helio_components::PortalComponent;
+use helio_pass_portal_cull::{PortalProjectionBridge, SubLevelContents, SubLevelResolver};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, flush_scene_db, make_material, new_scene_db_with_gpu_mirror, point_light,
@@ -378,19 +377,19 @@ impl ApplicationHandler for App {
         let far_entity = scene_db.world.spawn();
         scene_db.world.insert(
             near_entity,
-            PortalComponent::new(
+            PortalComponent::from(helio_pass_portal_cull::PortalRow::new(
                 Some(far_entity),
                 pose_near.transform,
                 [HALF_WIDTH, HALF_HEIGHT],
-            ),
+            )),
         );
         scene_db.world.insert(
             far_entity,
-            PortalComponent::new(
+            PortalComponent::from(helio_pass_portal_cull::PortalRow::new(
                 Some(near_entity),
                 pose_far.transform,
                 [HALF_WIDTH, HALF_HEIGHT],
-            ),
+            )),
         );
         let mut resolver = SubLevelResolver::new();
         resolver.insert_sublevel(
@@ -400,7 +399,7 @@ impl ApplicationHandler for App {
                 [
                     (
                         near_entity,
-                        PortalComponent::new(
+                        helio_pass_portal_cull::PortalRow::new(
                             Some(far_entity),
                             pose_near.transform,
                             [HALF_WIDTH, HALF_HEIGHT],
@@ -408,7 +407,7 @@ impl ApplicationHandler for App {
                     ),
                     (
                         far_entity,
-                        PortalComponent::new(
+                        helio_pass_portal_cull::PortalRow::new(
                             Some(near_entity),
                             pose_far.transform,
                             [HALF_WIDTH, HALF_HEIGHT],
@@ -422,14 +421,14 @@ impl ApplicationHandler for App {
             .build(&resolver)
             .expect("portal projection");
         let projection_entities = [near_entity, far_entity];
-        projection
-            .publish_to_world(
-                &mut scene_db.world,
-                &projection_entities,
-                &projection_entities,
-                near_entity,
-            )
-            .expect("portal projection rows");
+        helio_components::publish_portal_projection(
+            &mut scene_db.world,
+            &projection,
+            &projection_entities,
+            &projection_entities,
+            near_entity,
+        )
+        .expect("portal projection rows");
         renderer.set_portal_projection_frame(&projection);
 
         renderer.set_ambient([0.85, 0.9, 1.0], 0.05);

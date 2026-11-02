@@ -5,7 +5,7 @@
 //! (`directional_visibility`).
 
 use super::{
-    ChunkWorld, EditSync, FrameTimings, ResidencyConfig, UpdateStats, VolumeId, residency,
+    residency, ChunkWorld, EditSync, FrameTimings, ResidencyConfig, UpdateStats, VolumeId,
 };
 use crate::engine::{PlanetFrame, SharedPlanetFrame, TerrainAppearance};
 use glam::{DVec3, Mat4, Vec2, Vec3};

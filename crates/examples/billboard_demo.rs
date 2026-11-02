@@ -23,8 +23,8 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
+use helio_components::BillboardComponent;
 use helio_default_passes::build_default_graph_external_with_context;
-use helio_pass_billboard::BillboardComponent;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,

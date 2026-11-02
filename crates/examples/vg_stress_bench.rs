@@ -268,7 +268,7 @@ impl BenchState {
 
     /// Move 1% of the instances (a rotating window of the spawn order) by 2 cm.
     pub fn move_slice(&mut self, world: &mut World, frame: u32) {
-        use helio_pass_gbuffer::StaticObjectComponent;
+        use helio_components::StaticObjectComponent;
         let n = self.entities.len();
         if n == 0 {
             return;

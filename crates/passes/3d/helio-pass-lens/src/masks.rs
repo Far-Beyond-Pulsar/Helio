@@ -73,7 +73,7 @@ impl Rng {
 /// footprint (1 inside a drop, a texel of antialiasing at its rim). Where
 /// drops overlap the higher cap wins. Use alpha as the
 /// [`crate::LensRegion::MaskChannel`] footprint of a
-/// [`crate::LensElementComponent::water_drops`] element on the same layer.
+/// [`crate::LensElementRow::water_drops`] element on the same layer.
 pub fn water_drop_mask(size: u32, drops: u32, radius: [f32; 2], seed: u64) -> Vec<u8> {
     let size = size.max(1);
     let n = size as usize;

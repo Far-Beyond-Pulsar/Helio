@@ -10,9 +10,9 @@ use glam::{Mat4, Vec3};
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig,
 };
+use helio_components::DecalComponent;
+use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
 use helio_default_passes::build_default_graph_external_with_context;
-use helio_pass_decal::DecalComponent;
-use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
 
 /// Passes that need scene content or a debug mode the room does not have.
 const CONTENT_PASSES: &[&str] = &[
@@ -77,12 +77,18 @@ fn floor(world: &mut pulsar_scenedb::World) {
     let mesh = world.spawn();
     world.insert(mesh, MeshComponent { vertices, indices });
     let material = world.spawn();
-    let row = MaterialComponent::new([0.7, 0.7, 0.7, 1.0], 0.8, 0.0, [0.0; 3], 0.0);
+    let row = MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+        [0.7, 0.7, 0.7, 1.0],
+        0.8,
+        0.0,
+        [0.0; 3],
+        0.0,
+    ));
     world.insert(material, row);
     let store = world.gpu_mirror().cloned().unwrap();
     let vertex_range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
     let index_range = MeshComponent::indices_gpu_handle(store.store(), mesh.index()).unwrap();
-    let object = StaticObjectComponent::new(
+    let object = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
         mesh.index(),
         mesh.generation().wrapping_add(1),
         material.index(),
@@ -95,7 +101,7 @@ fn floor(world: &mut pulsar_scenedb::World) {
         row.material_class,
         0,
         0,
-    );
+    ));
     let entity = world.spawn();
     world.insert(entity, object);
 }

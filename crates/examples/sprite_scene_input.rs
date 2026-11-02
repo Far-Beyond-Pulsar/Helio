@@ -5,8 +5,9 @@
 //! own the persistent sprite state.
 
 use bytemuck::Zeroable;
+use helio_components::SpriteComponent;
 use helio_core::{GpuCameraUniforms, SceneBufferProjection, SceneInput};
-use helio_pass_sprite_batch::{SpriteComponent, SpriteHandle, SpriteInstance};
+use helio_pass_sprite_batch::{SpriteHandle, SpriteInstance};
 use pulsar_scenedb::{Entity, SceneDb};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -65,9 +66,10 @@ impl SceneInputAdapter {
 
     pub fn insert_sprite(&mut self, instance: SpriteInstance) -> SpriteHandle {
         let entity = self.scene_db.world.spawn();
-        self.scene_db
-            .world
-            .insert(entity, SpriteComponent::from(instance));
+        self.scene_db.world.insert(
+            entity,
+            SpriteComponent::from(helio_pass_sprite_batch::SpriteRow::from(instance)),
+        );
         let handle = SpriteHandle::from_index(entity.index());
         self.sprite_entities.insert(handle, entity);
         handle
@@ -75,9 +77,10 @@ impl SceneInputAdapter {
 
     pub fn update_sprite(&mut self, handle: SpriteHandle, instance: SpriteInstance) {
         if let Some(&entity) = self.sprite_entities.get(&handle) {
-            self.scene_db
-                .world
-                .insert(entity, SpriteComponent::from(instance));
+            self.scene_db.world.insert(
+                entity,
+                SpriteComponent::from(helio_pass_sprite_batch::SpriteRow::from(instance)),
+            );
         }
     }
 

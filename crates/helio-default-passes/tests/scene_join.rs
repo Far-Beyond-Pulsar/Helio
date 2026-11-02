@@ -3,6 +3,7 @@
 //! replaces (`StaticObjectComponent::new` for meshes, the owner's rotation
 //! of -Y for lights). Needs a GPU adapter (lavapipe works); skips without.
 
+use helio_components::StaticObjectComponent;
 use std::sync::Arc;
 
 use helio_default_passes::scene_join::{
@@ -336,7 +337,7 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
     let scene = base_scene();
     let out = run(&mut join, &device, &queue, &scene, 1);
 
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+    let objects: Vec<helio_components::StaticObjectComponent> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
@@ -350,7 +351,7 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
     let model = model_of(&transform);
     let center = model.transform_point3(glam::Vec3::new(0.5, 0.0, 0.0));
     for (slot, (first, count, base)) in [(0u32, (0u32, 12u32, 0.1f32)), (1, (12, 24, 0.2))] {
-        let expected = helio_pass_gbuffer::StaticObjectComponent::new(
+        let expected = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
             1,
             5 + 1,
             slot,
@@ -363,7 +364,7 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
             0,
             0,
             helio::INSTANCE_FLAG_MOVABLE,
-        );
+        ));
         let got = objects[slot as usize];
         assert_eq!(
             (
@@ -497,7 +498,7 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
             < 1e-6,
         "{offset}"
     );
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+    let objects: Vec<helio_components::StaticObjectComponent> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
@@ -545,7 +546,7 @@ fn camera_relative_frames_get_positions_relative_to_the_world_origin() {
     // A moved origin moves every position, though no input row changed.
     let moved = origin + glam::DVec3::new(0.0, 1.0, 0.0);
     let out = run_at(&mut join, &device, &queue, &scene, 1, moved);
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+    let objects: Vec<helio_components::StaticObjectComponent> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
@@ -568,7 +569,7 @@ fn hiding_the_owner_a_stale_generation_or_a_disabled_light_removes_the_rows() {
     let mut scene = base_scene();
     scene.put(KEYS.hidden, &[1u32, 0, 0, 0]);
     let out = run(&mut join, &device, &queue, &scene, 1);
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+    let objects: Vec<helio_components::StaticObjectComponent> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,
@@ -594,7 +595,7 @@ fn hiding_the_owner_a_stale_generation_or_a_disabled_light_removes_the_rows() {
     let mut scene = base_scene();
     scene.put(KEYS.generations, &[4u32, 5, 7, 9]);
     let out = run(&mut join, &device, &queue, &scene, 2);
-    let objects: Vec<helio_pass_gbuffer::StaticObjectComponent> = read(
+    let objects: Vec<helio_components::StaticObjectComponent> = read(
         &device,
         &queue,
         &out.get(BufferKey::of("static_objects")).unwrap().buffer,

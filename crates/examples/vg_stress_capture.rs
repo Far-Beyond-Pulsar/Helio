@@ -8,6 +8,7 @@
 
 use super::{AppState, TAU_RANGE};
 use helio::Camera;
+use helio_components::{LensComponent, PostProcessVolumeComponent};
 use helio_vg_format::debug_view;
 use helio_vg_stream::VgRuntimeSettings;
 use serde::{Deserialize, Serialize};
@@ -883,7 +884,9 @@ impl PostStack {
             d.blend_weight = if on { 1.0 } else { 0.0 };
             world.insert(
                 *entity,
-                helio_pass_postprocess::PostProcessVolumeComponent::from(d.to_gpu()),
+                PostProcessVolumeComponent::from(
+                    helio_pass_postprocess::PostProcessVolumeRow::from(d.to_gpu()),
+                ),
             );
         }
     }
@@ -894,8 +897,8 @@ pub fn lens_component(
     spec: &LensSpec,
     pose: &Pose,
     aspect: f32,
-) -> (helio_pass_lens::LensComponent, f32) {
-    let mut lens = helio_pass_lens::LensComponent::new(0);
+) -> (helio_components::LensComponent, f32) {
+    let mut lens = LensComponent::from(helio_pass_lens::LensRow::new(0));
     let sensor_h = lens.sensor_width_mm / aspect;
     let fov_deg = match spec.focal_length_mm {
         Some(f) => (2.0 * (sensor_h / (2.0 * f)).atan()).to_degrees(),
@@ -1272,7 +1275,10 @@ impl Capture {
         let aspect = size.0 as f32 / size.1 as f32;
         let (mut lens, fov) = match &shot.lens {
             Some(spec) => lens_component(spec, &pose, aspect),
-            None => (helio_pass_lens::LensComponent::new(0), pose.fov_deg),
+            None => (
+                LensComponent::from(helio_pass_lens::LensRow::new(0)),
+                pose.fov_deg,
+            ),
         };
         lens.enabled = shot.lens.is_some() as u32;
         self.last_lens = Some((
@@ -2073,7 +2079,7 @@ pub fn set_interactive_post(s: &mut AppState, level: u8) {
     if let Some(stack) = &s.post_stack {
         stack.set_on(&mut s.scene_db.world, level >= 1);
     }
-    let mut lens = helio_pass_lens::LensComponent::new(0);
+    let mut lens = LensComponent::from(helio_pass_lens::LensRow::new(0));
     lens.enabled = (level >= 2) as u32;
     lens.f_number = 2.8;
     lens.focal_length_mm = 24.0;

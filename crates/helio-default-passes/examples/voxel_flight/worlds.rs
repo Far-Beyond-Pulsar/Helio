@@ -76,8 +76,9 @@ impl Preset {
     /// `HELIO_VOXEL_FLIGHT_CLOUDS=voxel[:cell_m[,fill]]` voxels (32 m cells
     /// filled from density 0.3). `HELIO_VOXEL_FLIGHT_CLOUD_SEED` picks
     /// another weather.
-    pub fn sky(self, radius: f64) -> Option<helio_pass_sky::AtmosphereComponent> {
-        use helio_pass_sky::{AtmosphereComponent, CloudLayer, CloudRepresentation, PlanetWeather};
+    pub fn sky(self, radius: f64) -> Option<helio_components::AtmosphereComponent> {
+        use helio_components::AtmosphereComponent;
+        use helio_pass_sky::{CloudLayer, CloudRepresentation, PlanetWeather};
         let clouds = std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CLOUDS").is_none();
         let representation = match std::env::var("HELIO_VOXEL_FLIGHT_CLOUDS").ok().as_deref() {
             Some(v) if v.starts_with("voxel") => {
@@ -107,7 +108,9 @@ impl Preset {
             // Earth's air with cumulus, under weather (seed 2) that leaves
             // the spawn broken cumulus rather than inside a deck.
             Preset::Earth => {
-                let sky = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
+                let sky = AtmosphereComponent::from(
+                    helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], radius),
+                );
                 let cumulus = CloudLayer::cumulus();
                 let cumulus = CloudLayer {
                     weather: PlanetWeather {
@@ -117,7 +120,7 @@ impl Preset {
                     ..cumulus
                 };
                 Some(if clouds {
-                    sky.with_clouds(layer(cumulus))
+                    sky.with_clouds(layer(cumulus)).into()
                 } else {
                     sky
                 })
@@ -125,7 +128,7 @@ impl Preset {
             // Dusty air: more and redder aerosols, a sandy ground bouncing
             // light into it, a few high clouds.
             Preset::Desert => {
-                let earth = AtmosphereComponent::earth();
+                let earth = AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth());
                 let sky = AtmosphereComponent {
                     mie_scattering: [9.0e-3, 8.0e-3, 6.5e-3],
                     mie_absorption: [6.0e-3, 7.0e-3, 9.0e-3],
@@ -142,9 +145,9 @@ impl Preset {
                     ..CloudLayer::cumulus()
                 };
                 Some(if clouds {
-                    sky.with_clouds(layer(high))
+                    sky.with_clouds(layer(high)).into()
                 } else {
-                    sky
+                    sky.into()
                 })
             }
         }
@@ -152,8 +155,8 @@ impl Preset {
 
     /// A ground haze thinning with altitude over the planet (none on the
     /// Moon), unless `HELIO_VOXEL_FLIGHT_NO_HAZE`.
-    pub fn haze(self, radius: f64) -> Option<helio_pass_volumetric_fog::GlobalFogComponent> {
-        use helio_pass_volumetric_fog::GlobalFogComponent;
+    pub fn haze(self, radius: f64) -> Option<helio_components::GlobalFogComponent> {
+        use helio_components::GlobalFogComponent;
         if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_HAZE").is_some() {
             return None;
         }
@@ -176,7 +179,7 @@ impl Preset {
                 ..Default::default()
             },
         };
-        Some(haze.around_planet([0.0; 3], radius))
+        Some(haze.around_planet([0.0; 3], radius).into())
     }
 
     /// The light the sky gives where it has no air to scatter it (the

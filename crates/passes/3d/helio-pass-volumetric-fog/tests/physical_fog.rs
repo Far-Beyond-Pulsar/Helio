@@ -1,8 +1,9 @@
 //! Execute production WGSL and the real pass, not a CPU copy of its equations.
-use helio_core::{CommandRecorder, GpuCameraUniforms, SceneBufferProjection, SceneInput};
-use helio_pass_volumetric_fog::{
-    GlobalFogComponent, LocalFogVolumeComponent, VolumetricFogPass, VolumetricFogSettingsComponent,
+use helio_components::{
+    GlobalFogComponent, LocalFogVolumeComponent, VolumetricFogSettingsComponent,
 };
+use helio_core::{CommandRecorder, GpuCameraUniforms, SceneBufferProjection, SceneInput};
+use helio_pass_volumetric_fog::VolumetricFogPass;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -294,16 +295,17 @@ fn native_media_world_space_overlap_transmittance_quality_edits_and_tombstones()
         extinction: 0.1,
         ..Default::default()
     };
-    let local_value = LocalFogVolumeComponent::new(
-        [-2., -2., -12.],
-        [2., 2., -8.],
-        GlobalFogComponent {
-            extinction: 0.8,
-            albedo: [0.25; 3],
-            emission: [0.1, 0.2, 0.3],
-            ..Default::default()
-        },
-    );
+    let local_value =
+        LocalFogVolumeComponent::from(helio_pass_volumetric_fog::LocalFogVolumeRow::new(
+            [-2., -2., -12.],
+            [2., 2., -8.],
+            helio_pass_volumetric_fog::GlobalFogRow {
+                extinction: 0.8,
+                albedo: [0.25; 3],
+                emission: [0.1, 0.2, 0.3],
+                ..Default::default()
+            },
+        ));
     let mut settings_value = VolumetricFogSettingsComponent {
         view_id: 42,
         max_distance: 40.,
@@ -1095,14 +1097,14 @@ fn smooth_case(local: bool) {
     if local {
         world.insert(
             entity,
-            LocalFogVolumeComponent::new(
+            LocalFogVolumeComponent::from(helio_pass_volumetric_fog::LocalFogVolumeRow::new(
                 [-9., -9., -40.],
                 [9., 9., -6.],
-                GlobalFogComponent {
+                helio_pass_volumetric_fog::GlobalFogRow {
                     extinction: 0.15,
                     ..Default::default()
                 },
-            ),
+            )),
         );
     } else {
         world.insert(
@@ -1249,14 +1251,14 @@ fn render_columns(poses: &[glam::Vec3], jitter: bool, half: f32) -> Vec<f32> {
     let settings = world.spawn();
     world.insert(
         entity,
-        LocalFogVolumeComponent::new(
+        LocalFogVolumeComponent::from(helio_pass_volumetric_fog::LocalFogVolumeRow::new(
             [-half, -half, -60.],
             [half, half, -6.],
-            GlobalFogComponent {
+            helio_pass_volumetric_fog::GlobalFogRow {
                 extinction: 0.15,
                 ..Default::default()
             },
-        ),
+        )),
     );
     world.insert(
         settings,

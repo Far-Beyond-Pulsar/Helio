@@ -5,7 +5,7 @@
 //! `shaders/vg_bvh_build.wgsl` so the two agree bit for bit on ordinary scenes.
 
 use crate::gpu_types::*;
-use helio_pass_gbuffer::StaticObjectComponent;
+use helio_pass_gbuffer::StaticObjectRow;
 use helio_vg_format::{GpuVgInstance, INST_ENABLED};
 
 const BIG: f32 = 1.0e30;
@@ -28,7 +28,7 @@ pub struct RefTree {
 /// tree: enabled, object row alive, finite.
 pub fn instance_sphere(
     inst: &GpuVgInstance,
-    objects: &[StaticObjectComponent],
+    objects: &[StaticObjectRow],
 ) -> Option<([f32; 3], f32)> {
     if inst.flags & INST_ENABLED == 0 {
         return None;
@@ -64,11 +64,7 @@ fn morton(c: [f32; 3], bmin: [f32; 3], bmax: [f32; 3]) -> u32 {
 }
 
 /// Full build.
-pub fn build(
-    instances: &[GpuVgInstance],
-    objects: &[StaticObjectComponent],
-    cfg: &BvhConfig,
-) -> RefTree {
+pub fn build(instances: &[GpuVgInstance], objects: &[StaticObjectRow], cfg: &BvhConfig) -> RefTree {
     // Compaction in row order (the GPU's deterministic scan gives the same).
     let mut rows = Vec::new();
     let mut spheres = Vec::new();
@@ -211,7 +207,7 @@ pub fn build(
 }
 
 /// Recompute every bound from the current object bounds, keeping the topology.
-pub fn refit(tree: &mut RefTree, instances: &[GpuVgInstance], objects: &[StaticObjectComponent]) {
+pub fn refit(tree: &mut RefTree, instances: &[GpuVgInstance], objects: &[StaticObjectRow]) {
     if tree.nodes.is_empty() {
         return;
     }
@@ -267,7 +263,7 @@ pub fn validate(
     items: &[u32],
     header: &GpuBvhHeader,
     instances: &[GpuVgInstance],
-    objects: &[StaticObjectComponent],
+    objects: &[StaticObjectRow],
 ) -> Result<(), String> {
     let live: Vec<u32> = instances
         .iter()

@@ -11,7 +11,7 @@ pub mod architectural_materials;
 pub fn warm_up_cathedral(
     scene_db: &SceneDb,
     renderer: &mut Renderer,
-    acceleration: Option<&helio_default_passes::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<&helio_components::ray_tracing::SceneDbRayTracing>,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     camera: &Camera,
@@ -211,12 +211,9 @@ pub fn run_scene_animated(
                 .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
                 && std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off"));
         let mut acceleration = if ray_traced {
-            helio_default_passes::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
+            helio_components::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
         } else {
-            helio_default_passes::ray_tracing::SceneDbRayTracing::partial(
-                device.clone(),
-                queue.clone(),
-            )
+            helio_components::ray_tracing::SceneDbRayTracing::partial(device.clone(), queue.clone())
         };
         let mut scene_handle = crate::v3_demo_common::scene_db_handle(&scene_db);
         let architectural_store =
@@ -238,14 +235,14 @@ pub fn run_scene_animated(
             let slot = register_checker(&device, &queue, &mut store, false);
             let materials: Vec<_> = scene_db
                 .world
-                .query::<(&helio_pass_gbuffer::MaterialComponent,)>()
+                .query::<(&helio_components::MaterialComponent,)>()
                 .filter(|(_, (material,))| material.base_color[3] >= 1.0)
                 .map(|(entity, _)| entity)
                 .collect();
             for entity in materials {
                 scene_db
                     .world
-                    .get_mut::<helio_pass_gbuffer::MaterialComponent>(entity)
+                    .get_mut::<helio_components::MaterialComponent>(entity)
                     .unwrap()
                     .tex_base_color = slot;
             }
@@ -998,38 +995,38 @@ pub fn run_scene_animated(
 /// Include opaque geometry and explicitly authored thin-sheet RT materials.
 pub fn enable_ray_shadows(world: &mut World) {
     let ids: Vec<_> = world
-        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .query::<(&helio_components::LightComponent,)>()
         .map(|(id, _)| id)
         .collect();
     for id in ids {
         let mut component = world
-            .get_mut::<helio_pass_forward_lit::LightComponent>(id)
+            .get_mut::<helio_components::LightComponent>(id)
             .unwrap();
         let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
         light.set_ray_traced_shadows(std::env::var_os("HLFS_UNSHADOWED").is_none());
         *component = light.into();
     }
     let ids: Vec<_> = world
-        .query::<(&helio_pass_gbuffer::StaticObjectComponent,)>()
+        .query::<(&helio_components::StaticObjectComponent,)>()
         .map(|(id, _)| id)
         .collect();
     for id in ids {
         let object = world
-            .get::<helio_pass_gbuffer::StaticObjectComponent>(id)
+            .get::<helio_components::StaticObjectComponent>(id)
             .unwrap();
         let transparent = world
-            .query::<(&helio_pass_gbuffer::MaterialComponent,)>()
+            .query::<(&helio_components::MaterialComponent,)>()
             .any(|(entity, (material,))| {
                 entity.index() == object.material_slot
                     && material.flags & helio_mats::FLAG_ALPHA_BLEND != 0
                     && world
-                        .get::<helio_default_passes::ray_tracing::RayTransmission>(entity)
+                        .get::<helio_components::ray_tracing::RayTransmission>(entity)
                         .is_none()
             });
         // Display alpha alone is not a transmission model.
         if !transparent {
             world
-                .get_mut::<helio_pass_gbuffer::StaticObjectComponent>(id)
+                .get_mut::<helio_components::StaticObjectComponent>(id)
                 .unwrap()
                 .flags |= helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW;
         }

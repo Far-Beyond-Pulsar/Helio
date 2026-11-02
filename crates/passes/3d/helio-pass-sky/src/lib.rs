@@ -1,7 +1,7 @@
 //! The sky: the authored atmosphere (Hillaire 2020) with its clouds, and the
 //! passes that render it.
 //!
-//! [`AtmospherePass`] resolves the first enabled [`AtmosphereComponent`] row
+//! [`AtmospherePass`] resolves the first enabled [`AtmosphereRow`] row
 //! and the first directional light into the atmosphere LUTs and frame that
 //! lighting reads, and the clouds' noise and shadow; [`CloudTracePass`]
 //! marches the clouds seen from the camera; [`AtmosphereCompositePass`]
@@ -14,8 +14,9 @@
 
 pub mod atmosphere;
 pub mod clouds;
+pub use atmosphere::ATMOSPHERES;
 pub use atmosphere::{
-    AtmosphereComponent, AtmosphereCompositePass, AtmospherePass, CloudLayer, CloudRepresentation,
+    AtmosphereCompositePass, AtmospherePass, AtmosphereRow, CloudLayer, CloudRepresentation,
     PlanetWeather,
 };
 pub use clouds::CloudTracePass;
