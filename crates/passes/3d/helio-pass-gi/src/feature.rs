@@ -55,10 +55,7 @@ fn settings(build: &NodeBuild<'_, '_>) -> GiSettings {
 
 /// Whether a feature traces the probes against its terrain this graph.
 fn terrain_traced(build: &NodeBuild<'_, '_>) -> bool {
-    build
-        .env
-        .setting::<helio_gi_api::TerrainTracer>()
-        .is_some()
+    build.env.setting::<helio_gi_api::TerrainTracer>().is_some()
 }
 
 fn node(
