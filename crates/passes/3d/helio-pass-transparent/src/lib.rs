@@ -434,17 +434,18 @@ impl RenderPass for TransparentPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[
-            "depth",
-            "cluster_light_grid",
-            "object_batch",
-            "culled_batch",
-        ]
+        // The scene colour drawn over and the medium are named when the pass
+        // is built, so declared once per distinct list.
+        let mut reads = Vec::with_capacity(7);
+        reads.extend(self.color_target);
+        if let Some(media) = self.media {
+            reads.extend([media.grid, media.parameters]);
+        }
+        reads.extend(["depth", "cluster_light_grid", "object_batch", "culled_batch"]);
+        static_names(&reads)
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        // The scene colour drawn over is the colour chain's: named when the
-        // pass is built, so declared once per distinct list.
         let mut writes = Vec::with_capacity(2);
         writes.extend(self.color_target);
         if self.reactive_mask {
