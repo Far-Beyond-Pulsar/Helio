@@ -102,15 +102,15 @@ same path, like physics).
 | `pulsar.gi` | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | — |
 | `pulsar.fog` | GlobalFog, LocalFogVolume | volumetric fog and its composite | fog composite out of the spine's postprocess crate |
 | `pulsar.post` | PostProcessVolume, CameraPostProcess | volume blend, publishes post settings | PP volume contracts out of the spine |
-| `pulsar.lens` | CameraLens | lens, flare (reads `light_list` via lights api) | `lens_color` names in the spine |
+| `pulsar.lens` | CameraLens | lens, flare (reads `light_list` via lights api) | done (batch 1): `plugins/vendor/lens/` (`lens_component`, `feature/{lens,flare,optics}`, `lens_plugin`, `lens-examples`); the view overscan through `ViewOverscanRegistration` |
 | `pulsar.water` | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | water reads in deferred light |
 | `pulsar.foliage` | Foliage, Wind | placement, drawers | — |
 | `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Pulsar `plugins/vendor/voxel/` with `component` (voxel_component), `api` (helio-voxel-data), `world` (helio-voxel-world), `feature` (helio-pass-voxel-planet, a G-buffer drawer since Phase A), `editor` (voxel_plugin), `examples` (helio-voxel-examples: voxel_craft, voxel_flight, water_world); the Helio repo has no voxel crate. Left: the sculpt tool and terrain panel in `ui_level_editor`, waiting on plugin-provided tool state, undo, commands and save hooks |
-| `pulsar.decals` | Decal | decal drawer (after GBuffer) | — |
-| `pulsar.particles` | ParticleEmitter | corona | `corona_emitters` host input |
-| `pulsar.sprites` | Sprite | sprite cull/batch/simulate, 2D radiance cascades | — |
-| `pulsar.portals` | Portal, SubLevelDisplay | portal cull, draws, projection derivation, view remaps | portal keys in core, `portal_chain_unmap` in deferred light, facade portal setters, `SpaceSync` portal input |
-| `pulsar.splines` | Spline | debug-line drawing through the facade's debug draw | renderer's `debug_set_editor_lines("splines")` call from engine_backend |
+| `pulsar.decals` | Decal | decal drawer (after GBuffer) | done (batch 1): `plugins/vendor/decals/` |
+| `pulsar.particles` | ParticleEmitter | corona | done (batch 1): `plugins/vendor/particles/` (the `corona_emitters` host input is the feature's since Phase A) |
+| `pulsar.sprites` | Sprite | sprite cull/batch/simulate, 2D radiance cascades | done (batch 1): `plugins/vendor/sprites/` |
+| `pulsar.portals` | Portal (SubLevelDisplay stays in the engine: it places level instances, which rigid frames use too) | portal cull, draws, projection derivation, view remaps | done (batch 1): `plugins/vendor/portals/`; counts as the `PORTAL_COUNTS` payload, pairing and projection as a space producer |
+| `pulsar.splines` | Spline | debug-line drawing through the facade's debug draw | done (batch 1): `plugins/vendor/splines/` (component and editor crates; lines through `EditorLinesRegistration`) |
 | `pulsar.physics` | (exists: physics_plugin + pulsar_physics) | water hitbox rows through water's api | — |
 
 Hard cases, and their answer:
@@ -452,6 +452,121 @@ wait in `ui_level_editor`).
 - Helio's preset snapshot loses exactly the moved kinds' passes and host
   inputs; Pulsar's engine adds each plugin's feature back
   (`RenderFeatureRegistration`).
+
+As built, batch 1 (2026-11-02, branch `rewrite/p7-leaf-plugins` in both
+repos): splines, particles, sprites, decals, lens and portals are Pulsar
+plugins; the Helio repo has none of their crates.
+- **Layout** (Pulsar `plugins/vendor/<kind>/`): `component`
+  (`<kind>_component`: the SceneDB components moved from `helio_component`,
+  their methods, their derived source rows and every registration),
+  `feature` (the pass crates moved from the Helio repo, unchanged names:
+  particles `helio-pass-corona`; decals `helio-pass-decal`; sprites
+  `feature/{batch,cull,simulate,radiance-cascades-2d}`; lens
+  `feature/{lens,flare,optics}`; portals `feature/{cull,instances}`),
+  `editor` (`<kind>_plugin`: the plugin's identity, linked by `ui_core`), and
+  `examples` (`<kind>-examples`). Splines have no feature crate: their curve
+  is drawn through the facade's editor debug lines. No kind needed an api
+  crate yet: nothing outside each plugin reads its contracts (the flare reads
+  the lens's from inside the plugin), so the contracts stay in the feature
+  crates until a second reader appears.
+- **Generic engine seams** (Pulsar, `inventory` registrations a plugin's
+  component crate submits; the engine names no kind):
+  - `engine_backend::scene::SceneRowsRegistration`: a kind's source-row
+    columns (registered with the GPU mirror) and its row join (run by the
+    environment join after the engine's own kinds). Particles, sprites,
+    decals and the lens use it.
+  - `engine_backend::scene::SpaceProducerRegistration` / `SpaceProducer`:
+    something besides space-defining objects that takes slots in the
+    frame's one coordinate-space table, publishes payloads about the frame
+    and brings its derivation. `SpaceSync` runs every registered producer;
+    the portals' pairing and projection (`PortalSync`, moved from
+    `engine_backend::scene::portals`) is one. `SpaceSync` lost
+    `portal_input`; `helio_bridge::portal_projection` is gone.
+  - `RenderFeatureRegistration` (from the voxel step) for every plugin's
+    features and settings; the portals bring their own settings group
+    (`helio_pass_portal_cull::settings::PORTALS`, the "portals" toggle that
+    left `helio-settings`' renderer group).
+  - `ViewOverscanRegistration`: how much wider than its frame a view
+    renders (the lens's `camera_lens_view_overscan`; the renderer called it
+    by name, with a TODO asking for this hook).
+  - `EditorLinesRegistration` / `EditorLines`: world-space line sets the
+    editor viewport draws through `debug_set_editor_lines` (the splines'
+    `SplineLines`; the renderer no longer names splines).
+  - `AnimatedContentRegistration`: content that moves on its own keeps a
+    realtime viewport drawing (particle emitters; the renderer queried
+    `ParticleEmitterComponent` itself).
+  - `helio_component::texture_assets::TextureBindingRegistration`: how a
+    component that shows an image takes in a loaded texture asset (sprites,
+    decals); `bind_texture`, `collect_texture` and `texture_slot` are public
+    for them.
+  - View payloads: `HelioEditorMailbox::set_view_payload(key, payload)` /
+    `SceneRenderer::set_view_payload` publish editor-only data for one
+    viewport under a feature's payload contract key, beside the scene's
+    payloads. It replaced the mailbox's `set_portal_debug_texts` /
+    `set_portal_debug_geometry` and their `find_pass_mut` calls: the
+    portal overlay reads `PORTAL_DEBUG_TEXTS` / `PORTAL_DEBUG_GEOMETRY`.
+- **Helio**: the facade lost `RendererConfig::enable_portals` and
+  `set_portal_projection_counts`; helio-core's `RenderFrameInputs` lost
+  `projection_counts`. The portal passes read their live view and chain
+  counts from the payload `helio_pass_portal_cull::PORTAL_COUNTS`, which the
+  portals' space producer publishes each frame (or a standalone host, as the
+  portal examples' `common::set_projection_frame` does).
+  `helio-scene-derivations` lost the portal projection (now
+  `helio_pass_portal_cull::scene_rows`), `helio-components` the kinds' row
+  components (now in the plugins' `examples/common.rs`), presets their
+  features, swap-policy entries and the portal settings bridge.
+- **Component methods**: the spline's edit operations (`reverse`,
+  `auto_tangents`, `smooth`, `resample`, `insert_at`, `total_length_m`) are
+  script methods now; the decal's `fade_by` and the lens's methods already
+  were.
+- **Examples and tests moved**: corona_demo; indoor_cathedral_decals;
+  lens_showcase, lens_flare_demo; portals_demo, infinite_tunnel, portal_cube,
+  portal_rooms; sprite_demo, sprite_stress_test, sprite_10m_demo,
+  sprite_dig_demo (with Helio's `assets/sprites`). Each builds over Helio's
+  deferred preset plus its plugin's features (`common::preset()`). The voxel
+  examples add all seven of the leaf plugins' features, as the engine's
+  `render_features` does, so their graphs keep p6's passes. Tests:
+  `engine_backend`'s camera lens rows, space table and the decal, emitter
+  and sprite cases of its environment join test, and `helio_component`'s
+  texture asset and device-loss tests, moved to the plugins' component
+  crates.
+- Left, with why:
+  - The spline tool mode, panel and assistant tools, the sprite placement
+    helper and the portal diagnostics overlay are still `ui_level_editor`'s
+    (as voxel's sculpt tool): they act through the plugins' component crates
+    and methods, but moving them needs plugin-provided tool modes and
+    viewport overlays.
+  - `row_join.wgsl`'s `POOL_RANGE` placement reads the emitter row's words
+    at fixed offsets (the particles' layout): the next step is each kind
+    bringing its placement as a snippet.
+  - Shader hot reload no longer swaps the moved passes by themselves (the
+    presets' swap policy cannot vouch for an engine's features): a reload of
+    one rebuilds the graph.
+  - `level_migrate` and `pulsar_scene` no longer force-link the portal
+    component (they cannot depend on a plugin); a migration run decodes
+    portal components only if the plugin is linked.
+- **Verified** (against p6 builds of Helio `99b02b21` / Pulsar
+  `7a1ef8ee1`):
+  - Helio's preset snapshot (four configs, every preset) loses exactly the
+    moved passes (Corona, SpriteCull, SpriteBatch, Lens, LensFlare,
+    DecalApply, PortalCull/Mask/Instance/EditorOverlay), the
+    `corona_emitters` input, and the tone map's read of `lens_color`.
+  - Pulsar's `pulsar_game` test `plugin_pass_lists` builds the same
+    presets with the features the engine adds (`plugin_features`, settings
+    through `render_features::configure`) and dumps the same snapshot:
+    byte-identical to p6's (3792 lines).
+  - voxel_craft (alternating p6/p7 bursts, 4 poses): identical graph dump
+    (Lens and LensFlare scheduled); p6-p7 pixel differences within p6-p6
+    run noise.
+  - Examples: lens_showcase's 81 captures and its flare probe, and
+    portal_cube, are bit-identical to p6's. The first lens captures' floor
+    settles differently from run to run in both builds; corona_demo
+    animates on wall-clock time.
+  - The moved crates' unit and GPU tests pass from Pulsar (components,
+    editor crates, features, `engine_backend`'s and `helio_component`'s
+    integration tests); the layer gate is clean. `engine_backend`'s
+    `gpu::tests::readbacks_and_uploads_reuse_their_buffers` (upload pool
+    and readback ring, untouched here) failed once.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
