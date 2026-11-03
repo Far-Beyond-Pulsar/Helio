@@ -6,8 +6,8 @@
 //! and the TSR node's settings; the lighting model is the preset's. Every
 //! other node joins where its feature placed it (a slot, or a phase's
 //! drawers and the compute before them), so a feature (meshes, GI, the
-//! clouds, voxel terrain, portals, foliage, fog, the lens) joins every
-//! preset without a preset naming it, and builds nothing when its own
+//! clouds, portals, foliage, fog, the lens, an engine's object kinds) joins
+//! every preset without a preset naming it, and builds nothing when its own
 //! settings turn it off. Every build,
 //! resizes and shader reloads included, makes the graph again from the
 //! renderer's current config.
@@ -258,6 +258,21 @@ impl Preset {
         self.pipeline_with(registry())
     }
 
+    /// The preset over the default features and an engine's `extra`
+    /// features (a plugin's, for an object kind Helio does not know).
+    pub fn with_features(self, extra: &helio_feature_api::FeatureSet) -> PresetGraph {
+        self.with_registry(Arc::new(crate::graphs::registry_with(extra)))
+    }
+
+    /// The preset over nodes a host made once ([`crate::graphs::registry_with`])
+    /// and shares between its pipelines.
+    pub fn with_registry(self, registry: Arc<NodeRegistry>) -> PresetGraph {
+        PresetGraph {
+            preset: self,
+            registry,
+        }
+    }
+
     /// Builds the preset's graph for `ctx`.
     pub fn build(self, mut ctx: PassBuildContext<'_>) -> RenderGraph {
         ctx.owns_device = false;
@@ -268,6 +283,32 @@ impl Preset {
 impl IntoGraph for Preset {
     fn into_graph(self: Box<Self>, ctx: PassBuildContext<'_>) -> RenderGraph {
         self.build(ctx)
+    }
+}
+
+/// A preset over its own feature list ([`Preset::with_features`]).
+pub struct PresetGraph {
+    preset: Preset,
+    registry: Arc<NodeRegistry>,
+}
+
+impl PresetGraph {
+    /// The nodes it builds from.
+    pub fn registry(&self) -> &Arc<NodeRegistry> {
+        &self.registry
+    }
+
+    /// Builds the preset's graph for `ctx` ([`Preset::build`] over these
+    /// features).
+    pub fn build(self, ctx: PassBuildContext<'_>) -> RenderGraph {
+        Box::new(self).into_graph(ctx)
+    }
+}
+
+impl IntoGraph for PresetGraph {
+    fn into_graph(self: Box<Self>, mut ctx: PassBuildContext<'_>) -> RenderGraph {
+        ctx.owns_device = false;
+        Box::new(self.preset.pipeline_with(self.registry)).into_graph(ctx)
     }
 }
 

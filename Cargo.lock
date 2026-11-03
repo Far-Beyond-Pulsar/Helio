@@ -1108,20 +1108,17 @@ dependencies = [
  "helio-pass-vg-cull",
  "helio-pass-vg-raster",
  "helio-pass-volumetric-fog",
- "helio-pass-voxel-planet",
  "helio-pass-water-sim",
  "helio-presets",
  "helio-scene-derivations",
  "helio-vg-build",
  "helio-vg-format",
  "helio-vg-stream",
- "helio-xr",
  "image",
  "log",
  "microfont",
  "openxr",
  "pollster 0.4.0",
- "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native?rev=45cda191beb316fee0859ae40d59f0dff986a66a)",
  "pulsar_scenedb",
  "rapier3d 0.24.0",
  "rayon",
@@ -1722,7 +1719,6 @@ dependencies = [
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
  "helio-pass-volumetric-fog",
- "helio-pass-voxel-planet",
  "helio-pass-water-sim",
  "helio-scene-derivations",
  "log",
@@ -2530,35 +2526,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-voxel-planet"
-version = "0.1.0"
-dependencies = [
- "ash",
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-foliage-api",
- "helio-frame-api",
- "helio-gi-api",
- "helio-mats",
- "helio-pass-shadow-matrix",
- "helio-pass-tsr",
- "helio-settings",
- "helio-voxel-world",
- "helio-water-api",
- "image",
- "miniz_oxide",
- "naga",
- "pollster 0.4.0",
- "rayon",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-water-sim"
 version = "0.1.0"
 dependencies = [
@@ -2644,7 +2611,6 @@ dependencies = [
  "helio-pass-vg-cull",
  "helio-pass-vg-shade",
  "helio-pass-volumetric-fog",
- "helio-pass-voxel-planet",
  "helio-pass-water-sim",
  "helio-scene-derivations",
  "helio-spine",
@@ -2787,27 +2753,6 @@ dependencies = [
  "pollster 0.4.0",
  "pulsar_scenedb",
  "wgpu",
-]
-
-[[package]]
-name = "helio-voxel-data"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "helio-voxel-world"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "image",
- "rayon",
- "rustc-hash 2.1.3",
- "serde",
- "serde_json",
 ]
 
 [[package]]

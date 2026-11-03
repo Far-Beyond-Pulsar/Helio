@@ -91,11 +91,6 @@ fn is_composed(path: &Path) -> bool {
         "helio-pass-hlfs/shaders/spatial.wgsl",
         "helio-pass-hlfs/shaders/temporal.wgsl",
         "helio-pass-transparent/shaders/transparent_base.wgsl",
-        // Assembled by `helio-pass-voxel-planet`'s `chunks::shader_sources`
-        // (a terrain program generated in Rust, the noise library, walk
-        // templates); validated when the pass builds its pipelines.
-        "helio-pass-voxel-planet/shaders/chunk_generate.wgsl",
-        "helio-pass-voxel-planet/shaders/chunk_draw.wgsl",
         // The virtual geometry's kernels, assembled by their crates from
         // shared declaration pieces (`include_str!` constants joined in
         // Rust); validated when their passes build their pipelines (the
@@ -275,8 +270,7 @@ fn every_wgsl_shader_parses_and_validates() {
 /// them.
 #[test]
 fn composed_shaders_parse_and_validate() {
-    let mut sources = helio_pass_voxel_planet::engine::validation_sources();
-    sources.extend(helio_scene_derivations::validation_sources());
+    let mut sources = helio_scene_derivations::validation_sources();
     sources.push((
         "volumetric_fog.wgsl".into(),
         helio_pass_volumetric_fog::shader_source(),
@@ -307,7 +301,7 @@ fn composed_shaders_parse_and_validate() {
                 .map(|e| format!("{name}: {e:?}"))
         })
         .collect();
-    assert!(sources.len() >= 10, "{} composed shaders", sources.len());
+    assert!(sources.len() >= 2, "{} composed shaders", sources.len());
     assert!(
         failures.is_empty(),
         "{} composed shaders failed:

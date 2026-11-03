@@ -165,6 +165,9 @@ pub struct Renderer {
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
+    /// What the host published for the next frames' features to read
+    /// ([`Self::set_scene_payloads`]).
+    pub(crate) scene_payloads: helio_core::ScenePayloads,
     /// Passes a host installed that survive graph rebuilds, by pass name.
     pub(crate) persistent_passes: Vec<(&'static str, PassFactory)>,
     /// Shader hot-reload bookkeeping (see `shader_reload.rs`).
@@ -587,6 +590,33 @@ impl Renderer {
 
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
+    }
+
+    /// The CPU payloads the scene's content publishes for the features that
+    /// read them ([`helio_core::PayloadContract`]), from the next frame on,
+    /// replacing the previous ones: an engine publishes them every frame.
+    pub fn set_scene_payloads(&mut self, payloads: helio_core::ScenePayloads) {
+        self.scene_payloads = payloads;
+    }
+
+    /// Publish `value` under `contract` (keeping the other payloads).
+    pub fn set_scene_payload<T: std::any::Any + Send + Sync>(
+        &mut self,
+        contract: &helio_core::PayloadContract<T>,
+        value: Arc<T>,
+    ) {
+        self.scene_payloads.insert(contract, value);
+    }
+
+    /// Whether a pass needs more frames to finish what it shows: a host
+    /// that renders on demand keeps rendering while this holds.
+    pub fn needs_frame(&self) -> bool {
+        self.graph.needs_frame()
+    }
+
+    /// The passes' diagnostics lines, for a host's log.
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.graph.diagnostics()
     }
 
     /// Configure passes in the current graph and every graph a rebuild creates.

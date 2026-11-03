@@ -264,7 +264,6 @@ path = "vr/main.rs"
 helio-mesh-api = { workspace = true }
 helio-pass-post-volumes = { workspace = true }
 helio-components = { path = "../helio-components", features = ["bake"] }
-profiling = { workspace = true }
 helio = { workspace = true }
 helio-bake = { path = "../helio-bake" }
 helio-core = { workspace = true }
@@ -281,7 +280,6 @@ helio-pass-sprite-batch = { workspace = true }
 helio-pass-sprite-cull = { workspace = true }
 helio-pass-sprite-simulate = { workspace = true }
 helio-pass-radiance-cascades-2d = { workspace = true }
-helio-xr = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
@@ -298,7 +296,6 @@ helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
-helio-pass-voxel-planet = { path = "../passes/3d/helio-pass-voxel-planet" }
 helio-pass-foliage-place = { workspace = true }
 helio-pass-portal-cull = { workspace = true }
 helio-presets = { path = "../helio-presets" }
@@ -368,18 +365,6 @@ path = "monumental_arch_hlfs.rs"
 name = "technology_gallery_hlfs"
 path = "technology_gallery_hlfs.rs"
 
-# Voxel Craft: a Minecraft-style sandbox on a voxel planet (folder-based example).
-[[bin]]
-name = "voxel_craft"
-path = "voxel_craft/main.rs"
-# Voxel Flight: fly a voxel Earth, Moon or desert (presets in worlds.rs).
-[[bin]]
-name = "voxel_flight"
-path = "voxel_flight/main.rs"
-# Water World: Ultra-Water on a voxel coast (shares voxel_flight's worlds).
-[[bin]]
-name = "water_world"
-path = "water_world.rs"
 [[bin]]
 name = "lens_showcase"
 path = "lens_showcase.rs"

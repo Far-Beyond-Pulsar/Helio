@@ -2,8 +2,7 @@
 //!
 //! Each is a [`Preset`], named so a host can offer them next to
 //! project-authored pipelines (see [`register_builtin_pipelines`]). Features
-//! a host adds (the voxel terrain) join every preset through the renderer
-//! config.
+//! a host adds join every preset ([`crate::Preset::with_features`]).
 
 use std::sync::Arc;
 
@@ -76,11 +75,19 @@ const SPECS: &[Spec] = &[
 ];
 
 /// Registers every shipped pipeline as [`PipelineOrigin::BuiltIn`] and makes
-/// [`DEFAULT`] the registry default.
-pub fn register_builtin_pipelines(registry: &mut RenderPipelineRegistry) {
+/// [`DEFAULT`] the registry default. Each builds from the default features
+/// and the engine's `extra` features (its plugins').
+pub fn register_builtin_pipelines(
+    registry: &mut RenderPipelineRegistry,
+    extra: &helio_feature_api::FeatureSet,
+) {
+    let nodes = Arc::new(crate::graphs::registry_with(extra));
     for spec in SPECS {
         let preset = spec.preset;
-        let factory: PipelineFactory = Arc::new(move || Box::new(preset) as Box<dyn IntoGraph>);
+        let nodes = Arc::clone(&nodes);
+        let factory: PipelineFactory = Arc::new(move || {
+            Box::new(preset.with_registry(Arc::clone(&nodes))) as Box<dyn IntoGraph>
+        });
         registry.register(
             PipelineInfo {
                 id: spec.id.to_string(),
@@ -100,12 +107,11 @@ pub fn register_builtin_pipelines(registry: &mut RenderPipelineRegistry) {
                 .to_string(),
             origin: PipelineOrigin::BuiltIn,
         },
-        Arc::new(|| {
-            let registry = crate::graphs::base_registry();
+        Arc::new(move || {
             Box::new(
                 helio_graph_asset::GraphAssetPipeline::new(
-                    Arc::new(crate::graphs::deferred_graph_asset(&registry)),
-                    Arc::new(registry),
+                    Arc::new(crate::graphs::deferred_graph_asset(&nodes)),
+                    Arc::clone(&nodes),
                     crate::presets::deferred,
                 )
                 .with_swap_policy(crate::default_swap_policy()),
@@ -122,7 +128,7 @@ mod tests {
     #[test]
     fn registers_every_spec_and_a_default() {
         let mut registry = RenderPipelineRegistry::new();
-        register_builtin_pipelines(&mut registry);
+        register_builtin_pipelines(&mut registry, &Default::default());
         assert_eq!(registry.list().len(), SPECS.len() + 1);
         assert_eq!(registry.default_id(), Some(DEFAULT));
         assert_eq!(registry.resolve(Some("missing")), Some(DEFAULT));

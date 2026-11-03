@@ -50,6 +50,11 @@ pub fn registry_for(features: &helio_feature_api::FeatureSet) -> NodeRegistry {
     registry
 }
 
+/// Core nodes, the default features and an engine's `extra` features.
+pub fn registry_with(extra: &helio_feature_api::FeatureSet) -> NodeRegistry {
+    registry_for(&features::default_features().extended(extra))
+}
+
 /// Core nodes and the default features ([`features::default_features`]).
 pub fn base_registry() -> NodeRegistry {
     registry_for(&features::default_features())

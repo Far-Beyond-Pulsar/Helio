@@ -21,7 +21,9 @@ pub use helio_pass_vg::{
     virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
 };
 pub use helio_vg_format::debug_view as vg_debug_view;
-pub use presets::{deferred, deferred_fxaa, forward, hlfs, hlfs_fxaa, registry, simple, Preset};
+pub use presets::{
+    deferred, deferred_fxaa, forward, hlfs, hlfs_fxaa, registry, simple, Preset, PresetGraph,
+};
 pub use virtual_geometry::with_virtual_geometry;
 
 use helio::RendererConfig;
@@ -85,8 +87,8 @@ use helio_spine::BackgroundPass;
 /// in the live and the replacement graph. `GBufferPass`, `ForwardLitPass`
 /// and `TransparentPass` are left out on purpose: they build part of their
 /// WGSL at runtime and keep material/template registrations, so edits to them
-/// rebuild the whole graph. So are passes other features add (the voxel
-/// terrain's), which this crate cannot vouch for.
+/// rebuild the whole graph. So are passes an engine's features add, which
+/// this crate cannot vouch for.
 ///
 /// Dropping the replacement's unswapped passes has no side effects beyond the
 /// ones a resize already has: none of these constructors spawns a thread,

@@ -732,14 +732,139 @@ from host-made `VoxelTerrain` closures. Target and order:
    the components and `VoxelFeature`; Helio, `helio_component` and
    `engine_backend` keep no voxel code.
 
+As built, steps 6.2 to 6.5 (2026-11-02): the voxel terrain reaches the
+renderer, the cameras and the editor only through its component.
+- **One world per terrain** (Pulsar `voxel_runtime`): each enabled terrain
+  instance has a `VoxelTerrainRuntime`, a SceneDB component beside it that
+  is never saved (a copy of the scene, play in editor, builds its own). Its
+  world builds on the runtime's own worker thread: a journal that only grew
+  extends a copy of the world shown (each new edit's yield counted, so block
+  events fire for every edit, the editor's strokes included, from the
+  build), an undo undoes in a copy, anything else rebuilds with the save's
+  kept chunks. Readers see the last world built; a description that does
+  not build keeps it and says why. The backend's world, its `WorldBuilder`
+  and the process-global `WORLDS` cache are gone.
+- **Scene subsystems are SceneDB's**: `VoxelWorlds` is a SceneDB
+  `Subsystem` (it keeps journals on their ground, skies on their terrain,
+  drives the runtimes and stamps sculpt samples). Plugins register scene
+  subsystems (`pulsar_world_registry::SceneSubsystemRegistration`); hosts
+  install them into every scene they step (`install_scene_subsystems`) and
+  `SceneDb::step` runs them. `VoxelWorldSync` left engine_backend.
+- **Edits**: `append_edits` checks edits against the grid (no world needed),
+  appends them and shows them to the brick queries at once; the runtime's
+  build applies them. `record_strokes` is gone: the sculpt tool, scripts and
+  gameplay make the same call. Queries read the world shown (a terrain just
+  added answers once its first world lands; `is_world_ready`).
+- **Queries are component methods**: `ground_altitude`, `ground_up_x/_y/_z`,
+  `ground_lift`, `clip_near`, `clip_far` (world methods, script-callable).
+  Hosts know no terrain: `engine_backend::camera_ground::GroundQueries`
+  calls these methods by name on any component that has them, the way
+  scripts call them (`pulsar_world_registry::components_with_method`); the
+  editor camera, the game's free camera and the clip planes use it.
+  `VoxelGround`, `voxel_ground`, `voxel_altitude`, `lift_out_of_ground` and
+  the backend's camera hooks are gone.
+- **Rendering reads what the component publishes**: Helio's scene input
+  gained CPU payloads, `PayloadContract<T>` (key and type; the CPU half of a
+  buffer contract) and `ScenePayloads`, read by passes from
+  `ctx.scene_buffers.payload(..)` and handed over by hosts
+  (`Renderer::set_scene_payloads`). Plugins register publishers
+  (`pulsar_world_registry::ScenePayloadRegistration`: key, a function of the
+  scene, problems to show, whether the content wants temporal resolve, and
+  whether it is still settling); engine_backend forwards them by key. The
+  voxel runtime publishes `VOXEL_FRAME` (`PlanetFrame`: its volumes with
+  their world, kept chunks, appearance, smoothing and requests, and the
+  scene's sun). `ChunkPass::new(ResidencyConfig)` reads it; the feature is
+  enabled by the feature setting `VoxelSettings`. Deleted: `VoxelTerrain`,
+  `ChunkPassMaker`, `SharedPlanetFrame`, `VoxelRenderBackend`,
+  `VoxelBackendRegistry`, `PlanetVoxelBackend`, `voxel_frame.rs` and the
+  `find_pass_mut` appearance calls (a look change keeps the pass asking for
+  frames until temporal history settles). Two generic pass hooks replace
+  the hosts' downcasts: `RenderPass::needs_frame` and
+  `RenderPass::diagnostics` (`Renderer::needs_frame`/`diagnostics`).
+- **GPU answers come back to the component**: a volume's requests are
+  data in its payload (`VolumeRequests`: picks as world-space rays from a
+  camera's eye, a save's keep request id) and the pass answers into the
+  runtime's inbox (`VolumeAnswers`). A pick is answered by the pass whose
+  camera is at the ray's origin (it projects the ray to its pixel), so split
+  viewports never answer each other's picks. Saves ask the terrain's runtime
+  (`TerrainWorld::kept_chunks`) off the render thread. Deleted:
+  `SharedPicks`, `Picks`, `KeptExport`, `SharedKeptExport`,
+  `VoxelChunkSaves`, the mailbox field, and the renderer's
+  `VoxelBrushRequest`/`VoxelBrushTool`/`VoxelBrushCommit`/brush handling.
+- **Sculpting is a component method**: `voxel_sculpt::sculpt` (script:
+  `sculpt_stroke`) takes a stroke sample (ray, brush, start); near the last
+  stamp it stamps at once over the brick queries, else it asks the drawn
+  world for a pick and the scene step stamps when it is answered (or walks
+  the exact terrain after 150 ms). The editor's sculpt tool hands the
+  renderer a generic `ToolRay` (a closure the render thread calls with the
+  frame camera's pointer ray and the scene), which calls `sculpt`.
+
+As built, step 6.6 (2026-11-02): voxel is the `pulsar.voxel` plugin; Helio,
+its presets, `helio_component` and `engine_backend` keep no voxel code, and
+the Helio repo keeps no voxel crate.
+- **The plugin's crates** are Pulsar's `plugins/voxel/`, one per role
+  (plugin-migration.md section 3):
+  - `api` (`helio-voxel-data`): the contracts the others share: the edit
+    journal, brushes, kept chunks, shared names.
+  - `world` (`helio-voxel-world`): the GPU-free world system (grid,
+    generators, edits, queries, planet maps, features) and its WGSL mirror.
+  - `feature` (`helio-pass-voxel-planet`): the Helio feature
+    (`VoxelFeature`: chunk passes, residency, sun pages, drawers, GI tracer,
+    foliage ground, water terrain), its shaders and GPU tests
+    (`tests/presets.rs` is graph_parity's voxel case; `tests/wgsl.rs`
+    validates its shaders).
+  - `component` (`voxel_component`): the components and their methods,
+    runtime, sync, sculpting, world queries, ready-made worlds, the
+    registrations below, the voxel tests and the editor harness.
+  - `editor` (`voxel_plugin`): the plugin's metadata and the generator and
+    layer-stack inspector editors.
+  - `examples` (`helio-voxel-examples`): voxel_craft, voxel_flight and
+    water_world, with the scene helpers voxel_craft used in `common.rs`.
+  They build in Pulsar's workspace and reach Helio through its workspace
+  dependencies into the Helio submodule. Why there: the plugin owns its
+  kind's code (plugin-migration.md), so the world, the feature and their
+  hosts live with the component, not in a Helio-Voxel folder or repo; GPU
+  tests and hosts that need no editor are crates of the plugin like any
+  other. Helio's crates cannot depend on them (they are outside Helio's
+  workspace).
+- **Engines add features**: `default_features` has no voxel;
+  `Preset::with_features(&FeatureSet)` / `with_registry(Arc<NodeRegistry>)`
+  make a `PresetGraph`, `graphs::registry_with(extra)` the node registry,
+  and `pipelines::register_builtin_pipelines(registry, extra)` builds every
+  shipped pipeline over them (`FeatureSet::extended`). The voxel settings
+  group is `helio_pass_voxel_planet::settings::VOXEL_RESIDENCY`;
+  `helio_settings::GROUPS` is the renderer's alone.
+- **Layer gate**: Helio's workspace has no voxel crate, so the gate has no
+  voxel entry and no sealed groups (a kind's crates leave the repository
+  instead).
+- **Pulsar** (`plugins/voxel/component` and `plugins/voxel/editor`, id
+  `pulsar.voxel`): the components, runtime, sync, sculpting, world queries,
+  generator and stack editors, and ready-made worlds (`presets`) moved in
+  from `helio_component` and `engine_backend`; the sky and haze a
+  world's air derives are the plugin's (`sync::sky_for_air`,
+  `haze_for_air`). Generic seams it registers with: `engine_backend`'s
+  `RenderFeatureRegistration` (features + config; the scene renderer, the
+  pipeline registry and the render-graph node registry build over them),
+  `pulsar_settings`' `SettingsGroupRegistration` (project settings and the
+  graph-settings cache cover every registered group),
+  `helio_component::GroundMaterialNames` (foliage's `grows_on` is a
+  `GroundMaterialList`; the plugin names the terrain's materials). The
+  editor (`ui_core`) links `voxel_plugin`; the game (`pulsar_game`) and
+  `scene_inventory` link `voxel_component`.
+- Not moved: the sculpt tool and terrain panel stay in `ui_level_editor`
+  and act through the plugin's methods; moving them needs generic tool
+  state, undo entries and commands in the level editor first.
+
 Later steps apply the same pattern to every other kind (meshes + VG,
 water, foliage, decals, lights, sky, portals, sprites), one plugin per
 kind, each removing that kind from Helio, the presets, the scene
 derivations and `engine_backend`.
 
 ### Phase 6: repo split
-- Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
-  without a breaking change. Pulsar pins tags.
+- Superseded for voxel (2026-11-02): its crates already left the Helio
+  repo for the `pulsar.voxel` plugin (`plugins/voxel/` in Pulsar, step
+  6.6); every kind follows it (`plugin-migration.md`). What remains is
+  Pulsar pinning Helio core by tag.
 
 ### Mapping to Pulsar #1532
 
@@ -778,8 +903,8 @@ derivations and `engine_backend`.
 
 ## 7. Open decisions
 
-1. **Voxel world home**: Helio-Voxel repo (recommended: it is GPU-heavy
-   engine tech, usable without the editor) or Pulsar.
+1. **Voxel world home**: decided (2026-11-02): Pulsar's `plugins/voxel/`,
+   as every kind's crates (`plugin-migration.md`).
 2. **Which features stay in the Helio repo** vs their own repos. Recommended:
    split only voxel and VG at first; the rest stay in Helio under
    `features/`, with the same layer rules.

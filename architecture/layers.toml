@@ -104,9 +104,6 @@ helio-pass-post-volumes = { layer = "feature", group = "post" }
 helio-pass-water-sim = { layer = "feature", group = "water" }
 helio-pass-foliage-place = { layer = "feature", group = "foliage" }
 helio-pass-foliage-gbuffer = { layer = "feature", group = "foliage" }
-helio-pass-voxel-planet = { layer = "feature", group = "voxel" }
-helio-voxel-data = { layer = "feature", group = "voxel" }
-helio-voxel-world = { layer = "feature", group = "voxel" }
 helio-pass-vg = { layer = "feature", group = "vg" }
 helio-pass-vg-bvh = { layer = "feature", group = "vg" }
 helio-pass-vg-cull = { layer = "feature", group = "vg" }

@@ -100,7 +100,7 @@ Helio core and on other plugins' api crates only.
 | `pulsar.lens` | CameraLens | lens, flare (reads `light_list` via lights api) | `lens_color` names in the spine |
 | `pulsar.water` | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | water reads in deferred light |
 | `pulsar.foliage` | Foliage, Wind | placement, drawers | — |
-| `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | (in progress: layered-rewrite step 6) |
+| `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Pulsar `plugins/voxel/` with `component` (voxel_component), `api` (helio-voxel-data), `world` (helio-voxel-world), `feature` (helio-pass-voxel-planet, a G-buffer drawer since Phase A), `editor` (voxel_plugin), `examples` (helio-voxel-examples: voxel_craft, voxel_flight, water_world); the Helio repo has no voxel crate. Left: the sculpt tool and terrain panel in `ui_level_editor`, waiting on plugin-provided tool state, undo, commands and save hooks |
 | `pulsar.decals` | Decal | decal drawer (after GBuffer) | — |
 | `pulsar.particles` | ParticleEmitter | corona | `corona_emitters` host input |
 | `pulsar.sprites` | Sprite | sprite cull/batch/simulate, 2D radiance cascades | — |
@@ -361,7 +361,8 @@ capture lands at a different flicker phase (not the transmission input).
 Helio repo into it; component methods for every editor/game operation;
 editor moved onto those methods):
 materials, meshes (with LOD, skeletal, VG), lights, sky, gi, fog, post,
-lens, water, foliage, voxel (step 6, in progress), decals, particles,
+lens, water, foliage, voxel (done: `plugins/voxel/`; its sculpt tool and
+terrain panel still wait in `ui_level_editor`), decals, particles,
 sprites, portals, splines. Physics already is one; it gains water's api.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,

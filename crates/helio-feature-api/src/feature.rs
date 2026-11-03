@@ -99,6 +99,15 @@ impl FeatureSet {
         self.features.push(feature);
     }
 
+    /// This set with `other`'s features after its own (an engine's features
+    /// added to a preset's list).
+    pub fn extended(mut self, other: &FeatureSet) -> Self {
+        for feature in &other.features {
+            self.add(feature.clone());
+        }
+        self
+    }
+
     pub fn ids(&self) -> Vec<&'static str> {
         self.features.iter().map(|f| f.id()).collect()
     }

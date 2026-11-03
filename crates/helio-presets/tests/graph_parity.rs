@@ -1,7 +1,8 @@
 //! The shipped pipelines as node graphs: the editor's laid-out template builds
 //! the deferred preset's graph, each preset follows the renderer config (the
-//! anti-aliasing, reflections, portals, foliage), HLFS lights in one format end
-//! to end, and the voxel terrain joins every preset with a G-buffer.
+//! anti-aliasing, reflections, portals, foliage), and HLFS lights in one
+//! format end to end. (An engine's features joining the presets is tested
+//! where they live: the voxel terrain's in its plugin's feature crate.)
 //!
 //! Everything needs a device: the graphs build their passes for real
 //! (pipelines, buffers, bind group layouts). Without one the device-gated
@@ -202,7 +203,7 @@ fn the_template_builds_the_deferred_preset() {
     };
 
     let mut pipelines = RenderPipelineRegistry::new();
-    helio_presets::pipelines::register_builtin_pipelines(&mut pipelines);
+    helio_presets::pipelines::register_builtin_pipelines(&mut pipelines, &Default::default());
     let preset = pipelines
         .create(Some(DEFAULT))
         .expect("default pipeline registered")
@@ -385,51 +386,4 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
             helio_pass_tsr::STOCHASTIC_MASK
         );
     }
-}
-
-#[test]
-fn voxel_terrain_joins_every_preset_with_a_gbuffer() {
-    use helio_pass_voxel_planet::chunks::pass::ChunkPass;
-    use helio_pass_voxel_planet::engine::SharedPlanetFrame;
-
-    let Some(mut fixtures) = fixtures() else {
-        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: voxel terrain node");
-        return;
-    };
-    let source: SharedPlanetFrame = Arc::new(Mutex::new(None));
-    fixtures.config = fixtures
-        .config
-        .clone()
-        .with_tsr_quality(helio::TsrQuality::Quality)
-        .with_feature(helio_pass_voxel_planet::VoxelTerrain::new(move || {
-            ChunkPass::new(source.clone())
-        }));
-    for preset in [Preset::Deferred, Preset::DeferredFxaa, Preset::Hlfs] {
-        let graph = preset.build(fixtures.context());
-        let chunks = graph
-            .find_pass::<ChunkPass>()
-            .unwrap_or_else(|| panic!("{}: the terrain's pass", preset.name()));
-        let place = graph
-            .find_pass::<helio_pass_foliage_place::FoliagePlacePass>()
-            .expect("foliage placement");
-        assert!(
-            Arc::ptr_eq(place.ground(), &chunks.foliage_ground()),
-            "{}: foliage does not grow on the terrain's ground",
-            preset.name()
-        );
-    }
-    // Under TSR the terrain's rotating sun samples are integrated.
-    let graph = Preset::Deferred.build(fixtures.context());
-    let tsr = passes(&graph)
-        .into_iter()
-        .find(|pass| pass.type_name == "helio_pass_tsr::TsrPass")
-        .expect("TSR");
-    assert!(tsr
-        .reads
-        .iter()
-        .any(|read| read.name == helio_pass_tsr::STOCHASTIC_MASK));
-    // The forward preset has no G-buffer to draw into.
-    assert!(!has::<ChunkPass>(
-        &Preset::Forward.build(fixtures.context())
-    ));
 }
