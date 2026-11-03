@@ -87,10 +87,11 @@ first-party plugin lives (physics, skm, input, render_bps, asset_viewer),
 with: a component crate
 (SceneDB component, methods, runtime, file formats), an api crate (its
 contracts: keys, row ABIs, WGSL), a feature crate (Helio feature: nodes,
-passes, its scene derivation), and its editor crate. Plugins depend on
-Helio core and on other plugins' api crates only. During the rewrite each
-plugin stays in Pulsar's tree; in phase C it splits into its own repo
-(`Plugin_<Kind>`, a submodule at the same path, like physics).
+passes, its scene derivation), its editor crate and, when it has any, an
+examples crate. Plugins depend on Helio core and on other plugins' api
+crates only. During the rewrite each plugin stays in Pulsar's tree; in
+phase C it splits into its own repo (`Plugin_<Kind>`, a submodule at the
+same path, like physics).
 
 | Plugin | Components | Feature owns | Leaves Helio/Pulsar today's |
 |---|---|---|---|
@@ -132,8 +133,9 @@ Hard cases, and their answer:
 
 ## 4. Order (do it once)
 
-Phase dependencies run materials -> meshes -> lights; everything else
-hangs off the frame contracts. Each step deletes the old path in the same
+Phase A's frame work runs materials -> meshes -> lights; everything else
+hangs off the frame contracts. Phase B moves crates out of the Helio repo
+in the opposite order (leaves first, see B). Each step deletes the old path in the same
 change, keeps the layer gate at 0, and passes the preset snapshot + real
 frame A/B (voxel_craft, an indoor cathedral, a mesh-heavy scene).
 
@@ -361,21 +363,104 @@ base/new, 4 poses) match to base/base noise (pose means within 0.05);
 frame between runs: its candle flicker follows wall-clock time, so each
 capture lands at a different flicker phase (not the transmission input).
 
-**B. Plugins** (each: Pulsar plugin + its Helio crates move out of the
-Helio repo into it; component methods for every editor/game operation;
-editor moved onto those methods):
-materials, meshes (with LOD, skeletal, VG), lights, sky, gi, fog, post,
-lens, water, foliage, voxel (done: `plugins/vendor/voxel/`; its sculpt tool and
-terrain panel still wait in `ui_level_editor`), decals, particles,
-sprites, portals, splines. Physics already is one; it gains water's api.
+**B. Plugins, leaves first** (each: Pulsar plugin + its Helio crates move
+out of the Helio repo into it; component methods for every editor/game
+operation; editor moved onto those methods).
+
+Pulsar depends on Helio and never the reverse, so a crate can leave the
+Helio repo only once no crate left in Helio depends on it (normal, build
+or dev dependency). Repo moves therefore go consumers-first: a kind moves
+after every kind that reads its crates. The test host (examples,
+`helio-components`, `helio-scene-derivations`' tests, `helio-presets`'
+default feature list and tests, the wasm/web/android demos, helio-core's
+dev-dependencies) does not count: each move drops the kind's entries from
+it.
+
+Reverse dependencies on `rewrite/p6-frame` (2026-11-02, `cargo metadata`,
+test host excluded):
+
+| Crate | Read by (in Helio) |
+|---|---|
+| `helio-mats` | facade, asset-compat, decal, deferred-light, forward-lit, gbuffer, gi, hlfs (dev), portal-instances, sprite-batch, transparent, vg-cull/dense/raster/shade, water |
+| `helio-pass-shadow-matrix` | facade, spine, deferred-light, flare, gbuffer, gi, hlfs, shadow, shadow-cull/dirty, vg-shade, fog |
+| `helio-pass-gbuffer` | facade, asset-compat, snapshot, corona, forward-lit, hlfs, indirect-dispatch, object-batch, occlusion-cull, portal-cull/instances, shadow, shadow-cull/dirty, transparent, vg-bvh, vg-cull (dev), water |
+| `helio-pass-light-cull` | spine, forward-lit, transparent |
+| `helio-pass-deferred-light` | facade, spine, water |
+| `helio-pass-object-batch`, `-occlusion-cull`, `-indirect-dispatch` | spine, water (and each other, hlfs/occlusion dev) |
+| `helio-mesh-api` | asset-compat, bake, gbuffer, gi, hlfs, shadow |
+| `helio-pass-forward-lit` | facade, asset-compat, snapshot, hlfs (dev) |
+| `helio-sky-api` | gi, fog, water (the cloud shadow map) |
+| `helio-gi-api` | hlfs (only `GI_IRRADIANCE`, which is the frame's `INDIRECT_DIFFUSE`) |
+| `helio-foliage-api` | water (the level's wind rows) |
+| `helio-pass-foliage-place` | foliage-gbuffer |
+| `helio-pass-post-volumes` | fog (dev) |
+| `helio-pass-lens` | flare |
+| `helio-pass-portal-cull` | portal-instances |
+| `helio-pass-sprite-cull` | sprite-batch |
+| `helio-pass-postprocess`, `-hiz`, `-tsr` | spine and post passes (spine passes: they stay) |
+
+Order:
+1. **Leaf kinds** (nothing left in Helio reads them): splines (no Helio
+   crate; their lines go through the facade's debug draw like any
+   client's), particles (corona), sprites (sprite cull, batch, simulate,
+   2D radiance cascades), decals, lens (lens optics, lens, flare: flare is
+   the lens's only reader and moves with it), portals (portal cull,
+   portal instances, the portal projection derivation and its facade
+   seam).
+2. **Media and placement**: fog and post volumes (fog's tests read the
+   post volumes' rows: move them together, or fog first), water (reads
+   foliage-api's wind rows), foliage (after water).
+3. **gi, then sky.** gi-api's one reader, hlfs, switches to the frame's
+   `INDIRECT_DIFFUSE` key (the same buffer) so gi-api leaves with gi. The
+   sky goes after gi, fog and water, which read `helio-sky-api`'s cloud
+   shadow; by then they are Pulsar plugins and read the sky plugin's api
+   crate (or the frame's `SUN_VISIBILITY` input, if the cloud shadow
+   becomes it).
+4. **meshes** (with VG, LOD, skeletal, `helio-mesh-api`, asset-compat).
+   First the spine and facade stop depending on mesh crates (the spine
+   keeps phases, Hi-Z, TSR, the tone map; the G-buffer layout is
+   frame-api's; the facade loses `find_pass_mut` users of object batch and
+   G-buffer), then the crates move.
+5. **lights** (light cull, shadow matrix/cull/dirty/atlas, deferred light,
+   forward lit, hlfs, IES). The spine and facade drop shadow-matrix and
+   deferred-light first; by then flare, gi, fog and VG shade already read
+   them from Pulsar.
+6. **materials** (`helio-mats`), last: about fifteen pass crates and the
+   facade read it, all gone from Helio by now.
+
+Physics already is a plugin; it gains water's api in step 2. Voxel is
+done: `plugins/vendor/voxel/` (its sculpt tool and terrain panel still
+wait in `ui_level_editor`).
+
+**Examples and tests move with their kind**, as voxel's did:
+- Examples that exist to show a kind (named after it, or a demo whose
+  subject it is) move to the plugin's `examples` crate
+  (`plugins/vendor/<kind>/examples`, package `<kind>-examples`, one
+  `[[bin]]` each), with a `common.rs` holding the part of Helio's
+  `v3_demo_common` they use; they build from Pulsar
+  (`cargo build -p <kind>-examples --bin <name>`) and add the plugin's
+  feature to their preset (`Preset::with_features`).
+- Examples that use a kind in passing (a benchmark spawning one decal, a
+  capture tool turning on depth of field) drop that use and say so in
+  their docs; they stay in Helio while their own kinds are there.
+- Pass crates keep their own unit and GPU tests. Tests elsewhere in Helio
+  that exercise the kind (preset graph tests, scene-derivation and join
+  tests, shader checks that include its WGSL by path) move into the
+  feature crate's `tests/`, over Helio's presets plus the plugin's
+  feature, or drop their kind-specific cases when the test is about
+  something else.
+- Helio's preset snapshot loses exactly the moved kinds' passes and host
+  inputs; Pulsar's engine adds each plugin's feature back
+  (`RenderFeatureRegistration`).
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
 helio-xr, helio-settings, and a test host (`helio-components` +
-examples, a host-layer crate that depends on plugin feature crates for its
-own demos). Each plugin leaves Pulsar's tree for its own repo
-(`Plugin_<Kind>`), kept at `plugins/vendor/<kind>/` as a submodule. The
-layer gate gains a rule: no crate in the Helio repo may
+examples over what is still in Helio; a plugin's own demos are its
+`examples` crate in Pulsar, since Helio never depends on Pulsar). Each
+plugin leaves Pulsar's tree for its own repo (`Plugin_<Kind>`), kept at
+`plugins/vendor/<kind>/` as a submodule. The layer gate gains a rule: no
+crate in the Helio repo may
 name a kind's contract outside the test host.
 
 **Done when**: Helio's repo has no kind code outside its test host; each
