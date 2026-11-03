@@ -2,8 +2,8 @@ use glam::{Mat4, Vec3};
 use helio::{GpuLight, LightType, Renderer, RendererBuilder, RendererConfig, SceneDbHandle};
 use helio_mesh_api::{MeshUpload, PackedVertex};
 use helio_components::{
-    AtmosphereComponent, CoronaEmitterComponent, DecalComponent, MaterialComponent,
-    PostProcessVolumeComponent, ReflectionCaptureComponent,
+    AtmosphereComponent, MaterialComponent, PostProcessVolumeComponent,
+    ReflectionCaptureComponent,
 };
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
@@ -58,34 +58,12 @@ pub fn new_scene_db_with_gpu_mirror_and(
         4096,
         device,
     );
-    helio_components::PortalComponent::register_gpu_columns_growable(&mut gpu_store, 1024, device);
-    helio_components::PortalViewComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1024,
-        device,
-    );
-    helio_components::PortalChainComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1024,
-        device,
-    );
-    helio_components::PortalProjectionCountsComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1,
-        device,
-    );
     helio_components::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
         helio_pass_forward_lit::MAX_LIGHTS,
         device,
     );
     helio_components::CameraPostProcessComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
-    );
-    helio_components::LensComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_components::LensElementComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
@@ -474,8 +452,7 @@ pub fn spot_light(
 // components — `helio_components::StaticObjectComponent` and
 // `helio_components::LightComponent` — not as example-local structs or
 // entries in a Helio-owned `Vec`/arena. Each is `#[derive(SceneStore)]` +
-// `#[gpu(layout = packed, ...)]`, exactly like the already-shipped
-// `helio_components::CoronaEmitterComponent`: the pass that consumes a kind
+// `#[gpu(layout = packed, ...)]`: the pass that consumes a kind
 // of scene content owns its schema and its generated GPU buffer, and a World
 // row is the only authoritative record of "this exists."
 //
@@ -742,21 +719,6 @@ pub fn spawn_post_process_volume(
     entity
 }
 
-/// Spawn a decal record. `helio_components::DecalComponent` mirrors
-/// `helio_pass_decal::GpuDecal` byte-for-byte, so any already-built `GpuDecal` value
-/// (as constructed for the removed `Scene::insert_texture` bindless-table
-/// path) can be spawned directly -- only per-decal *textures* (an
-/// `albedo_texture_index` other than `u32::MAX`) have no SceneDB-authored
-/// replacement yet, since no component owns a bindless texture table.
-pub fn spawn_decal(world: &mut World, decal: helio_pass_decal::GpuDecal) -> Entity {
-    let entity = world.spawn();
-    world.insert(
-        entity,
-        DecalComponent::from(helio_pass_decal::DecalRow::from(decal)),
-    );
-    entity
-}
-
 /// Spawn an oriented-box reflection-capture influence volume, replacing the
 /// removed `Scene::insert_reflection_capture(ReflectionCaptureDescriptor::
 /// boxed(..))` API. `transform`'s translation/rotation places the box (scale
@@ -959,52 +921,6 @@ pub fn update_light(world: &mut World, entity: Entity, light: GpuLight) {
     }
 }
 
-/// Spawn a corona particle emitter into `slot`.
-///
-/// `slot` selects the range of `helio_pass_corona`'s shared particle pool
-/// this emitter owns: `CORONA_MAX_PARTICLES_PER_EMITTER` particles from
-/// `slot` times that (the engine's environment join allocates ranges by
-/// each emitter's size instead; this demo has no join) — the caller is
-/// responsible for giving each simultaneously-live emitter its own slot.
-/// `emitter.particle_count`/`particle_offset` are overwritten to fit that
-/// slot; `spawn_cursor` is left at whatever `emitter` carries (normally
-/// `0` for a new emitter) since the pass owns advancing it from here via its
-/// own transient `spawn_cursor_buf`, never through this SceneDB row again.
-pub fn spawn_corona_emitter(
-    world: &mut World,
-    slot: u32,
-    emitter: helio_pass_corona::GpuCoronaEmitter,
-) -> Entity {
-    let entity = world.spawn();
-    world.insert(entity, corona_component_for_slot(slot, emitter));
-    entity
-}
-
-/// Update a previously spawned corona emitter's authored parameters (e.g. a
-/// moving emitter's transform). Never touches `spawn_cursor` in the GPU's
-/// own transient buffer -- see `spawn_corona_emitter`'s doc.
-pub fn update_corona_emitter(
-    world: &mut World,
-    entity: Entity,
-    slot: u32,
-    emitter: helio_pass_corona::GpuCoronaEmitter,
-) {
-    if let Some(mut existing) = world.get_mut::<helio_components::CoronaEmitterComponent>(entity) {
-        *existing = corona_component_for_slot(slot, emitter);
-    }
-}
-
-fn corona_component_for_slot(
-    slot: u32,
-    mut emitter: helio_pass_corona::GpuCoronaEmitter,
-) -> helio_components::CoronaEmitterComponent {
-    emitter.particle_count = emitter
-        .particle_count
-        .min(helio_pass_corona::CORONA_MAX_PARTICLES_PER_EMITTER);
-    emitter.particle_offset = slot * helio_pass_corona::CORONA_MAX_PARTICLES_PER_EMITTER;
-    CoronaEmitterComponent::from(helio_pass_corona::CoronaEmitterRow::from(emitter))
-}
-
 /// Builds a cube mesh centred at `center` (mesh-local origin offset) with the
 /// given `half_extent`.  The conventional usage is `[0.0, 0.0, 0.0]` with the
 /// world position supplied via the transform passed to `insert_object`; the
@@ -1164,17 +1080,6 @@ pub fn set_camera_postprocess(
             view_id, settings,
         )),
     );
-}
-
-/// Author one persistent lens row per view (the camera's optics and focus).
-pub fn set_camera_lens(world: &mut World, lens: helio_components::LensComponent) {
-    use helio_components::LensComponent;
-    let existing = world
-        .query::<&LensComponent>()
-        .find(|(_, row)| row.view_id == lens.view_id)
-        .map(|(entity, _)| entity);
-    let entity = existing.unwrap_or_else(|| world.spawn());
-    world.insert(entity, lens);
 }
 
 // ── Participating media and light shafts (component API) ─────────────────────

@@ -8,7 +8,7 @@
 
 use super::{AppState, TAU_RANGE};
 use helio::Camera;
-use helio_components::{LensComponent, PostProcessVolumeComponent};
+use helio_components::PostProcessVolumeComponent;
 use helio_vg_format::debug_view;
 use helio_vg_stream::VgRuntimeSettings;
 use serde::{Deserialize, Serialize};
@@ -228,11 +228,12 @@ impl Default for AmbientSpec {
     }
 }
 
-/// Thin-lens depth of field (the Helio `CameraLensComponent` rows). Focus is
-/// computed from the camera: `focus_target` (a world position), else
-/// `focus_distance_m`, else the `look_at` distance. `focal_length_mm` also sets
-/// the camera field of view (full-frame 36 mm sensor); without it the focal
-/// length follows the shot's `fov_deg`.
+/// A shot's lens. Focus is computed from the camera: `focus_target` (a world
+/// position), else `focus_distance_m`, else the `look_at` distance.
+/// `focal_length_mm` sets the camera field of view (full-frame 36 mm
+/// sensor); without it the focal length follows the shot's `fov_deg`. The
+/// capture records the lens in its report; depth of field is the lens
+/// plugin's (Pulsar `plugins/vendor/lens`), which Helio's hosts do not draw.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct LensSpec {
@@ -892,35 +893,37 @@ impl PostStack {
     }
 }
 
-/// The lens row for `spec` looking from `pose` (focus follows the shot).
-pub fn lens_component(
-    spec: &LensSpec,
-    pose: &Pose,
-    aspect: f32,
-) -> (helio_components::LensComponent, f32) {
-    let mut lens = LensComponent::from(helio_pass_lens::LensRow::new(0));
-    let sensor_h = lens.sensor_width_mm / aspect;
+/// The lens a shot is taken through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ShotLens {
+    pub focal_length_mm: f32,
+    pub f_number: f32,
+    pub focus_distance_m: f32,
+}
+
+/// Full-frame sensor width.
+const SENSOR_WIDTH_MM: f32 = 36.0;
+
+/// The lens for `spec` looking from `pose` (focus follows the shot), and the
+/// field of view it implies.
+pub fn lens_component(spec: &LensSpec, pose: &Pose, aspect: f32) -> (ShotLens, f32) {
+    let sensor_h = SENSOR_WIDTH_MM / aspect;
     let fov_deg = match spec.focal_length_mm {
         Some(f) => (2.0 * (sensor_h / (2.0 * f)).atan()).to_degrees(),
         None => pose.fov_deg,
     };
-    lens.focal_length_mm = spec
-        .focal_length_mm
-        .unwrap_or(sensor_h / (2.0 * (fov_deg.to_radians() * 0.5).tan()));
-    lens.f_number = spec.f_number;
-    lens.focus_distance_m = spec
-        .focus_target
-        .map(|t| (glam::Vec3::from_array(t) - pose.position).length())
-        .or(spec.focus_distance_m)
-        .unwrap_or_else(|| (pose.target - pose.position).length())
-        .max(0.2);
-    lens.quality = 1;
-    if let Some(c) = spec.max_coc_px {
-        lens.max_coc_px = c;
-    }
-    if let Some(b) = spec.aperture_blades {
-        lens.aperture_blades = b;
-    }
+    let lens = ShotLens {
+        focal_length_mm: spec
+            .focal_length_mm
+            .unwrap_or(sensor_h / (2.0 * (fov_deg.to_radians() * 0.5).tan())),
+        f_number: spec.f_number,
+        focus_distance_m: spec
+            .focus_target
+            .map(|t| (glam::Vec3::from_array(t) - pose.position).length())
+            .or(spec.focus_distance_m)
+            .unwrap_or_else(|| (pose.target - pose.position).length())
+            .max(0.2),
+    };
     (lens, fov_deg)
 }
 // ── the runner ───────────────────────────────────────────────────────────────
@@ -1272,25 +1275,20 @@ impl Capture {
         self.ensure_target(&s.device, size);
     }
 
-    /// Write the lens row for this frame (focus computed from the pose) and
-    /// return the pose with the field of view the lens implies.
-    fn lensed(&mut self, s: &mut AppState, shot: &Shot, pose: Pose, size: (u32, u32)) -> Pose {
+    /// Record the shot's lens for this frame (focus computed from the pose)
+    /// and return the pose with the field of view the lens implies.
+    fn lensed(&mut self, _s: &mut AppState, shot: &Shot, pose: Pose, size: (u32, u32)) -> Pose {
         let aspect = size.0 as f32 / size.1 as f32;
-        let (mut lens, fov) = match &shot.lens {
+        let (lens, fov) = match &shot.lens {
             Some(spec) => lens_component(spec, &pose, aspect),
-            None => (
-                LensComponent::from(helio_pass_lens::LensRow::new(0)),
-                pose.fov_deg,
-            ),
+            None => (lens_component(&LensSpec::default(), &pose, aspect).0, pose.fov_deg),
         };
-        lens.enabled = shot.lens.is_some() as u32;
         self.last_lens = Some((
             lens.focal_length_mm,
             lens.f_number,
             lens.focus_distance_m,
-            lens.enabled != 0,
+            shot.lens.is_some(),
         ));
-        super::v3_demo_common::set_camera_lens(&mut s.scene_db.world, lens);
         Pose {
             fov_deg: fov,
             ..pose
@@ -2073,8 +2071,8 @@ mod placement_dump {
 }
 
 /// The interactive post stack (`P`): 0 off, 1 standard (grading volumes, bloom,
-/// vignette), 2 cinematic (plus depth of field with autofocus on the screen centre
-/// and a light haze). Installed lazily; the title shows the level.
+/// vignette), 2 cinematic (plus a light haze; depth of field is the lens
+/// plugin's). Installed lazily; the title shows the level.
 pub fn set_interactive_post(s: &mut AppState, level: u8) {
     if s.post_stack.is_none() {
         s.post_stack = Some(PostStack::install(&mut s.scene_db.world));
@@ -2082,16 +2080,6 @@ pub fn set_interactive_post(s: &mut AppState, level: u8) {
     if let Some(stack) = &s.post_stack {
         stack.set_on(&mut s.scene_db.world, level >= 1);
     }
-    let mut lens = LensComponent::from(helio_pass_lens::LensRow::new(0));
-    lens.enabled = (level >= 2) as u32;
-    lens.f_number = 2.8;
-    lens.focal_length_mm = 24.0;
-    lens.quality = 1;
-    lens.focus_mode = helio_pass_lens::FOCUS_AUTO_POINT;
-    lens.af_u = 0.5;
-    lens.af_v = 0.5;
-    lens.af_speed = 6.0;
-    super::v3_demo_common::set_camera_lens(&mut s.scene_db.world, lens);
     if level >= 2 && s.fog_entity.is_none() {
         super::v3_demo_common::set_volumetric_quality(&mut s.scene_db.world, 1, 200.0);
         s.fog_entity = Some(super::v3_demo_common::spawn_global_fog(

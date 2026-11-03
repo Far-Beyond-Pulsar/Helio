@@ -150,7 +150,7 @@ fn create_indirect_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu
 /// Same as [`create_storage_buffer`] but also usable as a `<uniform>`
 /// binding (the `FrameUniform`/`dispatch_args`-style "write as storage in
 /// one kernel, read as uniform in another" dual-bind trick already used by
-/// `helio-pass-sprite-cull`/`helio-pass-corona`) and as an indirect-dispatch
+/// the sprites and particles plugins' passes) and as an indirect-dispatch
 /// source.
 fn create_dual_buffer(device: &wgpu::Device, label: &str, size: u64) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
@@ -1388,7 +1388,7 @@ impl ObjectBatchPass {
     /// Runs the full pipeline once, outside a `RenderGraph`, blocking until
     /// the GPU is done -- for integration tests that need to read back
     /// results without standing up a full graph + `PassContext`. Mirrors
-    /// `helio-pass-sprite-cull::SpriteCullPass::run_once_for_testing`.
+    /// the sprites plugin's `SpriteCullPass::run_once_for_testing`.
     pub fn run_once_for_testing(
         &mut self,
         device: &wgpu::Device,

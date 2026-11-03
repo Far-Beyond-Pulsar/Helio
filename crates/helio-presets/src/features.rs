@@ -1,13 +1,13 @@
 //! The features Helio's presets are made of, and the renderer's own nodes.
 //!
 //! Every pass node is registered by the crate that owns the pass: the spine's
-//! by `helio-spine`, each feature's by its crate (`helio_pass_decal::
-//! DecalFeature`, …). What is left here is what belongs to the renderer:
+//! by `helio-spine`, each feature's by its crate (`helio_pass_sky::
+//! SkyFeature`, …). What is left here is what belongs to the renderer:
 //!
 //! - the debug-draw nodes, whose pass and state are the renderer's;
 //! - a preparer that turns the renderer's config into the settings the
-//!   features read ([`helio_spine::SpineSettings`], portals' and
-//!   reflections' switches, the perf overlay's mode),
+//!   features read ([`helio_spine::SpineSettings`], the reflections'
+//!   switches, the perf overlay's mode),
 //!   so no feature reads `RendererConfig`;
 //! - [`default_features`], the feature list Helio's presets build from.
 
@@ -34,24 +34,17 @@ pub fn default_features() -> FeatureSet {
         .with(helio_pass_transparent::TransparentDrawers)
         .with(helio_pass_sky::SkyFeature)
         .with(helio_pass_gi::GiFeature)
-        .with(helio_pass_decal::DecalFeature)
         .with(helio_pass_ssr::SsrFeature)
         .with(helio_pass_planar_reflection::PlanarReflectionFeature)
         .with(helio_pass_hlfs::HlfsFeature)
         .with(helio_pass_foliage_gbuffer::FoliageFeature)
         .with(helio_pass_vg::VgFeature)
-        .with(helio_pass_portal_cull::PortalCullFeature)
-        .with(helio_pass_portal_instances::PortalFeature)
         .with(helio_pass_billboard::BillboardFeature)
-        .with(helio_pass_corona::CoronaFeature)
         .with(helio_pass_water_sim::WaterFeature)
         .with(helio_pass_volumetric_fog::FogFeature)
         .with(helio_pass_post_volumes::PostVolumesFeature)
         .with(helio_pass_fxaa::FxaaFeature)
-        .with(helio_pass_lens::LensFeature)
-        .with(helio_pass_flare::LensFlareFeature)
         .with(helio_pass_buffer_view::BufferViewFeature)
-        .with(helio_pass_sprite_batch::SpriteFeature)
         .with(helio_pass_perf_overlay::PerfOverlayFeature)
         .with(helio_pass_simple_cube::SimpleCubeFeature)
         .with(RendererNodes)
@@ -74,9 +67,6 @@ impl Feature for RendererNodes {
                 background_color: config.background_color,
                 debug_mode: config.debug_mode,
                 environment_reflections: config.enable_environment_reflections,
-            });
-            env.insert_setting(helio_pass_portal_cull::PortalSettings {
-                enabled: config.enable_portals,
             });
             env.insert_setting(helio_pass_ssr::SsrSettings {
                 enabled: config.enable_ssr,

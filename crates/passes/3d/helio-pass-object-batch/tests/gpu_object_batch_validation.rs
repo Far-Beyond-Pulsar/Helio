@@ -10,7 +10,7 @@
 //! reference computed the same way `helio::Scene::rebuild_instance_buffers`
 //! groups objects (by `(mesh_slot, material_slot)` into draw calls, by
 //! `(material_class, graph_hash)` into ranges, split by material shading
-//! flags) -- same discipline `helio-pass-sprite-cull`'s own
+//! flags) -- same discipline the sprites plugin's sprite cull's own
 //! `gpu_sort_validation.rs` already established for a comparable pipeline.
 
 use std::collections::{BTreeMap, HashMap};

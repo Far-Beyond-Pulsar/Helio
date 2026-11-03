@@ -680,8 +680,7 @@ impl RenderGraph {
 
     /// Registers `name` as supplied by the host rather than by any pass in
     /// the graph. Called once at graph-build time by whoever writes the
-    /// value every frame (today: `helio`'s `Renderer`, for
-    /// `billboards`/`vg`/`corona_emitters`/`main_scene`).
+    /// value every frame (the host, for the inputs features declare).
     ///
     /// `validate_dependencies()` treats every registered external input as
     /// available from pass index 0, replacing the hardcoded literal list —

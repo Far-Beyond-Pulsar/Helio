@@ -6,7 +6,7 @@
 //! and the TSR node's settings; the lighting model is the preset's. Every
 //! other node joins where its feature placed it (a slot, or a phase's
 //! drawers and the compute before them), so a feature (meshes, GI, the
-//! clouds, portals, foliage, fog, the lens, an engine's object kinds) joins
+//! clouds, foliage, fog, an engine's object kinds) joins
 //! every preset without a preset naming it, and builds nothing when its own
 //! settings turn it off. Every build,
 //! resizes and shader reloads included, makes the graph again from the

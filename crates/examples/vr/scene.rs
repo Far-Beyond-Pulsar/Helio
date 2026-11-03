@@ -2,8 +2,8 @@
 //!
 //! The corridor runs down −Z from the stage origin, divided into bays. Each bay
 //! demonstrates one thing the renderer does — so walking its length is a tour
-//! of the engine: PBR materials, spot lights, lens flare + volumetric fog,
-//! water simulation, GPU particles, emissive/HDR colour,
+//! of the engine: PBR materials, spot lights, volumetric fog,
+//! water simulation, emissive/HDR colour,
 //! and post-process colour grading.
 //!
 //! # Why it is built the way it is
@@ -35,16 +35,14 @@ use glam::{Mat4, Quat, Vec3};
 use helio::{GpuLight, LightType, Renderer};
 use helio_mesh_api::{MeshUpload};
 use helio_asset_compat::{load_scene_bytes_with_config, LoadConfig};
-use helio_pass_corona::CoronaEmitterDescriptor;
 use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use helio_pass_water_sim::WaterSimPass;
 use pulsar_scenedb::{Entity, World};
 
 use crate::v3_demo_common::{
-    box_mesh, cube_mesh, make_material, point_light, spawn_corona_emitter, spawn_light,
-    spawn_material, spawn_mesh, spawn_object, spawn_post_process_volume, spawn_sky,
-    spawn_water_volume, sphere_mesh, spot_light, update_corona_emitter, update_light,
-    update_object_transform, WaterVolumeDescriptor,
+    box_mesh, cube_mesh, make_material, point_light, spawn_light, spawn_material, spawn_mesh,
+    spawn_object, spawn_post_process_volume, spawn_sky, spawn_water_volume, sphere_mesh,
+    spot_light, update_light, update_object_transform, WaterVolumeDescriptor,
 };
 
 /// Interior half-width of the corridor, in metres.
@@ -76,22 +74,6 @@ pub struct Animated {
     pub water_orb: Option<(Entity, Vec3, [f32; 2])>,
     /// Hue-cycling accent lights (emissive / light-count bay).
     pub colour_lights: Vec<(Entity, Vec3, [f32; 3], f32)>,
-    /// Corona emitter, re-uploaded each frame with an orbiting position.
-    pub corona: Option<CoronaAnim>,
-}
-
-/// An orbiting corona emitter, re-uploaded every frame.
-pub struct CoronaAnim {
-    /// The entity carrying its `CoronaEmitterComponent` row.
-    pub entity: Entity,
-    /// Base emitter; `position` is overwritten each frame from `centre`/`radius`.
-    pub emitter: CoronaEmitterDescriptor,
-    /// Orbit centre in world space.
-    pub centre: Vec3,
-    /// Orbit radius in the XZ plane.
-    pub radius: f32,
-    /// Orbit speed in radians/second.
-    pub speed: f32,
 }
 
 fn bay_centre_z(index: usize) -> f32 {
@@ -414,9 +396,9 @@ fn bay_water(
     }
 }
 
-/// Bay 4 — GPU particles: a corona ember fountain, with the emitter re-uploaded
-/// every frame so the source drifts on a slow orbit.
-fn bay_corona(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
+/// Bay 4 — a warm emissive plinth. (Its GPU particle fountain is the
+/// particles plugin's now; Helio's own hosts draw no particles.)
+fn bay_plinth(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
     place(
         world,
         meshes.plinth,
@@ -424,32 +406,6 @@ fn bay_corona(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mu
         Vec3::new(0.0, 0.05, z),
         0.8,
     );
-
-    let emitter = CoronaEmitterDescriptor {
-        max_particles: 65_536,
-        emit_rate: 2400.0,
-        lifetime: 2.2,
-        lifetime_variation: 0.8,
-        start_size: [0.6, 0.6],
-        end_size: [0.03, 0.03],
-        start_color: [1.0, 0.5, 0.2, 1.0],
-        end_color: [0.8, 0.1, 0.05, 0.0],
-        velocity: [0.0, 3.2, 0.0],
-        velocity_variation: [1.6, 1.2, 1.6],
-        gravity: -1.2,
-        shape: helio_pass_corona::CoronaEmitterShape::Point,
-        texture_index: -1,
-        position: [0.0, 0.35, z],
-    };
-    let entity = spawn_corona_emitter(world, 0, emitter.to_gpu());
-
-    anim.corona = Some(CoronaAnim {
-        entity,
-        emitter,
-        centre: Vec3::new(0.0, 0.35, z),
-        radius: 0.5,
-        speed: 0.7,
-    });
 
     spawn_light(world, point_light([0.0, 2.4, z], [1.0, 0.5, 0.2], 3.0, 5.0));
 }
@@ -882,7 +838,6 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
         hand_cubes,
         water_orb: None,
         colour_lights: Vec::new(),
-        corona: None,
     };
 
     for bay in 0..BAY_COUNT {
@@ -892,7 +847,7 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
             1 => bay_spotlights(world, z, &meshes, &mats),
             2 => bay_flare_fog(world, z, &meshes, &mats),
             3 => bay_water(world, renderer, z, &meshes, &mats, &mut anim),
-            4 => bay_corona(world, z, &meshes, &mats, &mut anim),
+            4 => bay_plinth(world, z, &meshes, &mats),
             5 => bay_instancing(world, z, &mats),
             6 => bay_emissive_colour(world, z, &meshes, &mats, &mut anim),
             7 => bay_colour_grade(world, z, &meshes),
@@ -996,16 +951,5 @@ pub fn animate(world: &mut World, renderer: &mut Renderer, animated: &mut Animat
             *id,
             point_light((*position).into(), colour, *base, 6.0),
         );
-    }
-
-    // Corona emitter: drift the source on a slow orbit so the particles visibly follow.
-    if let Some(c) = &mut animated.corona {
-        let a = time * c.speed;
-        c.emitter.position = [
-            c.centre.x + a.cos() * c.radius,
-            c.centre.y + (a * 2.0).sin() * 0.35,
-            c.centre.z + a.sin() * c.radius,
-        ];
-        update_corona_emitter(world, c.entity, 0, c.emitter.to_gpu());
     }
 }

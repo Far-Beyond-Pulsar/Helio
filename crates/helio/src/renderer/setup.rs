@@ -239,7 +239,6 @@ impl Renderer {
             clear_color: [0.02, 0.02, 0.03, 1.0],
             graph_config: config.clone(),
             coordinate_spaces: Vec::new(),
-            portal_projection_counts: None,
             xr_mode: false,
             debug_mode: config.debug_mode,
             editor_mode: false,
