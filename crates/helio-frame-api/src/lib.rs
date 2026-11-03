@@ -10,8 +10,10 @@
 //! - [`media`]: the participating medium integrated along view rays, for
 //!   what composites at its own depth.
 //! - [`lighting`]: the inputs a lighting model reads, as generic contracts
-//!   with stand-ins: indirect diffuse and specular, the sun's visibility,
-//!   transmission, the sky, the light list, view remaps.
+//!   with stand-ins: indirect diffuse and specular, the sun's visibility and
+//!   transmittance, transmission, the sky, the light list, view remaps.
+//! - [`static_names`]: the read lists of a pass whose reads are what a
+//!   publisher named (media, the sun's transmittance).
 //! - [`host_input`]: resources a host supplies every frame, declared by the
 //!   feature that reads them.
 //!
@@ -28,3 +30,19 @@ pub use host::{host_input, host_kind, HOST_INPUTS};
 pub use phase::{
     phase_settings, Attachment, AttachmentFormat, FrameNode, Phase, PhaseList, PhaseViews, Slot,
 };
+
+/// `names` as a `'static` slice, one per distinct list: a graph's passes
+/// declare `'static` read and write lists, and a pass that reads what a
+/// publisher named ([`media`], [`lighting::sun_transmittance`]) knows its
+/// list only when it is built.
+pub fn static_names(names: &[&'static str]) -> &'static [&'static str] {
+    static LISTS: std::sync::OnceLock<std::sync::Mutex<Vec<&'static [&'static str]>>> =
+        std::sync::OnceLock::new();
+    let mut lists = LISTS.get_or_init(Default::default).lock().unwrap();
+    if let Some(list) = lists.iter().find(|list| **list == names) {
+        return list;
+    }
+    let list: &'static [&'static str] = Box::leak(names.to_vec().into_boxed_slice());
+    lists.push(list);
+    list
+}

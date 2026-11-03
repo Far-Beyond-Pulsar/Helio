@@ -8,6 +8,7 @@
 //! | [`INDIRECT_SPECULAR_LAYERS`] | rgba16f textures, straight alpha | SSR, planar reflections | no layer |
 //! | [`ENVIRONMENT_PROBES`] + [`ENVIRONMENT_CUBES`] | probe rows + cube array | reflection captures, bake | sky cube only |
 //! | [`SUN_VISIBILITY`] / [`DIRECTIONAL_VISIBILITY`] | rgba16f, full res | clouds / terrain | fully visible |
+//! | [`sun_transmittance`] | world-space map along the sun + frame | clouds | fully lit |
 //! | [`TRANSMISSION`] | rgba16f, internal res | water caustics | nothing added |
 //! | [`sky`] | atmosphere frame + sky table | the atmosphere | no atmosphere |
 //! | [`LIGHT_LIST`] | SceneDB rows | lights | no lights |
@@ -149,6 +150,88 @@ pub mod sky {
     );
 }
 
+/// The sun's transmittance through the media above the scene at any point,
+/// for what lights points no pixel holds (probes' rays, a medium's froxels);
+/// surfaces read the per-pixel [`SUN_VISIBILITY`], which the publisher folds
+/// it into. A world-space Beer shadow map along the sun round the camera
+/// (`shaders/sun_transmittance.wgsl`): two cascades side by side,
+/// [`FORMAT`] texels, and a frame (`SunTransmittanceFrame` in WGSL,
+/// [`FRAME_BYTES`]).
+///
+/// A medium (clouds) publishes its map and frame by its own resource names
+/// with [`publish`] when its node builds, before the readers' (at
+/// [`crate::Slot::Prepare`]); a reader asks [`current`] when it builds,
+/// declares the read and binds them, or [`stand_in`] when nothing
+/// published: fully lit. Neither side knows the other.
+///
+/// [`FORMAT`]: sun_transmittance::FORMAT
+/// [`FRAME_BYTES`]: sun_transmittance::FRAME_BYTES
+/// [`publish`]: sun_transmittance::publish
+/// [`current`]: sun_transmittance::current
+/// [`stand_in`]: sun_transmittance::stand_in
+pub mod sun_transmittance {
+    use helio_feature_api::BuildEnv;
+
+    /// The resources a medium published: the map (a texture view) and its
+    /// frame (a uniform buffer).
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct SunTransmittance {
+        pub map: &'static str,
+        pub frame: &'static str,
+    }
+
+    pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+    pub const FRAME_BYTES: u64 = 80;
+
+    /// Marker opting a shader into [`SNIPPET`].
+    pub const MARKER: &str = "//!use sun_transmittance";
+    /// `SunTransmittanceFrame` and `sun_transmittance_at(p)`, for a shader
+    /// binding `sun_transmittance_map` and `sun_transmittance_frame`.
+    pub const SNIPPET: helio_core::shader::ShaderSnippet =
+        helio_core::wgsl_snippet!(MARKER, "shaders/sun_transmittance.wgsl");
+
+    struct Published(Option<SunTransmittance>);
+
+    /// Publishes the frame's sun transmittance for the nodes built after
+    /// this one.
+    pub fn publish(env: &mut BuildEnv<'_>, resources: SunTransmittance) {
+        env.shared(|| Published(None)).0 = Some(resources);
+    }
+
+    /// The sun transmittance nodes built so far published, if any.
+    pub fn current(env: &mut BuildEnv<'_>) -> Option<SunTransmittance> {
+        env.shared(|| Published(None)).0
+    }
+
+    /// What a reader binds while nothing publishes: a 1x1 map and a zeroed
+    /// frame (no medium: the sun reaches everywhere).
+    pub fn stand_in(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Buffer) {
+        let map = device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("No sun transmittance"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default());
+        let frame = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("No sun transmittance frame"),
+            size: FRAME_BYTES,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        (map, frame)
+    }
+}
+
 /// How the graph's lighting model takes the indirect-specular layers: a
 /// setting its preset supplies (absent: [`SpecularLayers::Read`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -167,6 +250,29 @@ pub enum SpecularLayers {
 /// The graph's [`SpecularLayers`].
 pub fn specular_layers(env: &BuildEnv<'_>) -> SpecularLayers {
     env.setting::<SpecularLayers>().copied().unwrap_or_default()
+}
+
+/// Where the graph's [`crate::Slot::LightingInputs`] runs relative to its
+/// lighting model: a setting its preset supplies (absent:
+/// [`InputsOrder::BeforeLighting`]). Either way the slot runs once the depth
+/// is complete.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InputsOrder {
+    /// Before the lighting, which reads what the slot publishes (deferred,
+    /// HLFS).
+    #[default]
+    BeforeLighting,
+    /// After a draw phase that lit the scene (forward): only what draws
+    /// later reads the slot's results, so a publisher whose one reader is
+    /// the lighting (indirect diffuse, transmission) builds nothing, while
+    /// one with other readers (clouds seen from the camera, for the sky's
+    /// composite) still builds.
+    AfterLighting,
+}
+
+/// The graph's [`InputsOrder`].
+pub fn inputs_order(env: &BuildEnv<'_>) -> InputsOrder {
+    env.setting::<InputsOrder>().copied().unwrap_or_default()
 }
 
 /// The lighting's own ambient light where nothing better (the sky, indirect
