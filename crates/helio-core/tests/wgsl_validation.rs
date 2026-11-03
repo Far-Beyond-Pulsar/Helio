@@ -59,12 +59,8 @@ fn collect_wgsl(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            // `target` holds vendored deps' shaders, which are not ours to
-            // police; `voxel` is Helio-Voxel, whose crates validate their own.
-            if path
-                .file_name()
-                .is_some_and(|n| n == "target" || n == "voxel")
-            {
+            // `target` holds vendored deps' shaders, which are not ours to police.
+            if path.file_name().is_some_and(|n| n == "target") {
                 continue;
             }
             collect_wgsl(&path, out);

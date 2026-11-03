@@ -19,8 +19,6 @@ members = [
     "crates/passes/3d/*",
     "crates/api/*",
     "crates_other/*",
-    # Helio-Voxel: the voxel world's crates and hosts (its own repo at phase 6).
-    "voxel/*",
 ]
 exclude = [
     "vendor/nebula",
@@ -106,9 +104,6 @@ helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
 helio-pass-decal = { path = "crates/passes/3d/helio-pass-decal" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
-helio-voxel-data = { path = "voxel/helio-voxel-data" }
-helio-voxel-world = { path = "voxel/helio-voxel-world" }
-helio-pass-voxel-planet = { path = "voxel/helio-pass-voxel-planet" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "crates/passes/3d/helio-pass-buffer-view" }
 helio-pass-lens = { path = "crates/passes/3d/helio-pass-lens" }

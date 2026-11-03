@@ -2,7 +2,7 @@
 //! the deferred preset's graph, each preset follows the renderer config (the
 //! anti-aliasing, reflections, portals, foliage), and HLFS lights in one
 //! format end to end. (An engine's features joining the presets is tested
-//! where they live: the voxel terrain's in `helio-pass-voxel-planet`.)
+//! where they live: the voxel terrain's in its plugin's feature crate.)
 //!
 //! Everything needs a device: the graphs build their passes for real
 //! (pipelines, buffers, bind group layouts). Without one the device-gated

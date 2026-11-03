@@ -10,10 +10,6 @@
 # Today's violations are recorded in architecture/layer-violations.txt. That
 # list may only shrink: a new violation fails the check, a fixed one must be
 # removed from the list (`--update`).
-#
-# A sealed group ([sealed_groups]) is an object kind's code that Helio does not
-# own: its crates may only be depended on (normal/build) by crates of the same
-# group, whatever their layers. Breaking that is an error, never recorded.
 
 [layers.leaf]
 about = "No dependency on any other workspace crate."
@@ -104,10 +100,6 @@ helio-pass-volumetric-fog = { layer = "feature", group = "fog" }
 helio-pass-water-sim = { layer = "feature", group = "water" }
 helio-pass-foliage-place = { layer = "feature", group = "foliage" }
 helio-pass-foliage-gbuffer = { layer = "feature", group = "foliage" }
-# Helio-Voxel (voxel/): sealed, see [sealed_groups].
-helio-pass-voxel-planet = { layer = "feature", group = "voxel" }
-helio-voxel-data = { layer = "feature", group = "voxel" }
-helio-voxel-world = { layer = "feature", group = "voxel" }
 helio-pass-vg = { layer = "feature", group = "vg" }
 helio-pass-vg-bvh = { layer = "feature", group = "vg" }
 helio-pass-vg-cull = { layer = "feature", group = "vg" }
@@ -158,15 +150,6 @@ helio-web-demos = { layer = "host" }
 helio-android-demos = { layer = "host" }
 helio-snapshot = { layer = "host" }
 helio-components = { layer = "host" }       # SceneDB components for Helio's own hosts
-helio-voxel-examples = { layer = "host", group = "voxel" }   # voxel_craft, voxel_flight, water_world
-
-[sealed_groups]
-# Group -> why it is sealed. Every object kind is a plugin that owns its
-# feature (docs/architecture/plugin-migration.md): Helio, its presets and its
-# other hosts may not depend on a kind's crates. Helio-Voxel lives in voxel/
-# until it moves out (layered-rewrite.md phase 6); the engine adds its
-# feature (`Preset::with_features`).
-voxel = "Helio-Voxel: the pulsar.voxel plugin's feature, data and hosts (voxel/)"
 
 [budgets]
 # `#[derive(SceneStore)]` structs below the host layer. Components belong to

@@ -800,20 +800,33 @@ renderer, the cameras and the editor only through its component.
   frame camera's pointer ray and the scene), which calls `sculpt`.
 
 As built, step 6.6 (2026-11-02): voxel is the `pulsar.voxel` plugin; Helio,
-its presets, `helio_component` and `engine_backend` keep no voxel code.
-- **Helio-Voxel** is the top-level `voxel/` folder (its own repo at phase
-  6): `helio-voxel-data`, `helio-voxel-world`, `helio-pass-voxel-planet`,
-  and `helio-voxel-examples` (voxel_craft, voxel_flight, water_world, with
-  the scene helpers voxel_craft used copied into `voxel/examples/common.rs`).
-  The voxel tests that need presets live there (`tests/presets.rs` is
-  graph_parity's voxel case); `helio-pass-voxel-planet/tests/wgsl.rs`
-  validates its shaders, and helio-core's WGSL test skips `voxel/`.
-  Why there and not inside the Pulsar plugin: the voxel world and its
-  passes are engine tech with their own hosts and GPU tests that need no
-  editor (open decision 1), and splitting them into their own repo later is
-  a folder move; meanwhile they share Helio's workspace and target dir.
-  The plugin owns them in the sense the rule asks: nothing else depends on
-  them, and Pulsar reaches them only through the plugin.
+its presets, `helio_component` and `engine_backend` keep no voxel code, and
+the Helio repo keeps no voxel crate.
+- **The plugin's crates** are Pulsar's `plugins/voxel/`, one per role
+  (plugin-migration.md section 3):
+  - `api` (`helio-voxel-data`): the contracts the others share: the edit
+    journal, brushes, kept chunks, shared names.
+  - `world` (`helio-voxel-world`): the GPU-free world system (grid,
+    generators, edits, queries, planet maps, features) and its WGSL mirror.
+  - `feature` (`helio-pass-voxel-planet`): the Helio feature
+    (`VoxelFeature`: chunk passes, residency, sun pages, drawers, GI tracer,
+    foliage ground, water terrain), its shaders and GPU tests
+    (`tests/presets.rs` is graph_parity's voxel case; `tests/wgsl.rs`
+    validates its shaders).
+  - `component` (`voxel_component`): the components and their methods,
+    runtime, sync, sculpting, world queries, ready-made worlds, the
+    registrations below, the voxel tests and the editor harness.
+  - `editor` (`voxel_plugin`): the plugin's metadata and the generator and
+    layer-stack inspector editors.
+  - `examples` (`helio-voxel-examples`): voxel_craft, voxel_flight and
+    water_world, with the scene helpers voxel_craft used in `common.rs`.
+  They build in Pulsar's workspace and reach Helio through its workspace
+  dependencies into the Helio submodule. Why there: the plugin owns its
+  kind's code (plugin-migration.md), so the world, the feature and their
+  hosts live with the component, not in a Helio-Voxel folder or repo; GPU
+  tests and hosts that need no editor are crates of the plugin like any
+  other. Helio's crates cannot depend on them (they are outside Helio's
+  workspace).
 - **Engines add features**: `default_features` has no voxel;
   `Preset::with_features(&FeatureSet)` / `with_registry(Arc<NodeRegistry>)`
   make a `PresetGraph`, `graphs::registry_with(extra)` the node registry,
@@ -821,12 +834,13 @@ its presets, `helio_component` and `engine_backend` keep no voxel code.
   shipped pipeline over them (`FeatureSet::extended`). The voxel settings
   group is `helio_pass_voxel_planet::settings::VOXEL_RESIDENCY`;
   `helio_settings::GROUPS` is the renderer's alone.
-- **Layer gate**: `[sealed_groups]` in `architecture/layers.toml`; a crate
-  of a sealed group (`voxel`) may only be depended on (normal/build) by
-  crates of that group. An error, never recorded.
-- **Pulsar** (`plugins/vendor/voxel_plugin`, id `pulsar.voxel`): the
-  components, runtime, sync, sculpting, world queries, generator and stack
-  editors, and ready-made worlds (`presets`) moved in; the sky and haze a
+- **Layer gate**: Helio's workspace has no voxel crate, so the gate has no
+  voxel entry and no sealed groups (a kind's crates leave the repository
+  instead).
+- **Pulsar** (`plugins/voxel/component` and `plugins/voxel/editor`, id
+  `pulsar.voxel`): the components, runtime, sync, sculpting, world queries,
+  generator and stack editors, and ready-made worlds (`presets`) moved in
+  from `helio_component` and `engine_backend`; the sky and haze a
   world's air derives are the plugin's (`sync::sky_for_air`,
   `haze_for_air`). Generic seams it registers with: `engine_backend`'s
   `RenderFeatureRegistration` (features + config; the scene renderer, the
@@ -835,8 +849,8 @@ its presets, `helio_component` and `engine_backend` keep no voxel code.
   graph-settings cache cover every registered group),
   `helio_component::GroundMaterialNames` (foliage's `grows_on` is a
   `GroundMaterialList`; the plugin names the terrain's materials). The
-  editor (`ui_core`), the game (`pulsar_game`) and `scene_inventory` link
-  it.
+  editor (`ui_core`) links `voxel_plugin`; the game (`pulsar_game`) and
+  `scene_inventory` link `voxel_component`.
 - Not moved: the sculpt tool and terrain panel stay in `ui_level_editor`
   and act through the plugin's methods; moving them needs generic tool
   state, undo entries and commands in the level editor first.
@@ -847,8 +861,10 @@ kind, each removing that kind from Helio, the presets, the scene
 derivations and `engine_backend`.
 
 ### Phase 6: repo split
-- Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
-  without a breaking change. Pulsar pins tags.
+- Superseded for voxel (2026-11-02): its crates already left the Helio
+  repo for the `pulsar.voxel` plugin (`plugins/voxel/` in Pulsar, step
+  6.6); every kind follows it (`plugin-migration.md`). What remains is
+  Pulsar pinning Helio core by tag.
 
 ### Mapping to Pulsar #1532
 
@@ -887,8 +903,8 @@ derivations and `engine_backend`.
 
 ## 7. Open decisions
 
-1. **Voxel world home**: Helio-Voxel repo (recommended: it is GPU-heavy
-   engine tech, usable without the editor) or Pulsar.
+1. **Voxel world home**: decided (2026-11-02): Pulsar's `plugins/voxel/`,
+   as every kind's crates (`plugin-migration.md`).
 2. **Which features stay in the Helio repo** vs their own repos. Recommended:
    split only voxel and VG at first; the rest stay in Helio under
    `features/`, with the same layer rules.

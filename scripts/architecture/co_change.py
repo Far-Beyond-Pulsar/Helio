@@ -6,8 +6,11 @@ spine, renderer, preset), from architecture/layers.toml. Host crates
 (examples, demos) are left out unless --include-hosts. Crates that no longer
 exist count as their own unit.
 
-The rewrite's phase-4 exit metric is the `voxel` row: commits touching voxel
+The rewrite's phase-4 exit metric was the `voxel` row: commits touching voxel
 that also touched another unit < 10% (docs/architecture/layered-rewrite.md).
+Voxel's crates left this repository at phase 5 step 6.6 (they are the
+pulsar.voxel plugin's, in Pulsar's plugins/voxel/); their history here counts
+under their old crate names.
 
 Usage: python scripts/architecture/co_change.py [--since 2026-10-01] [REV_RANGE]
        [--include-hosts] [--unit voxel]
@@ -21,17 +24,14 @@ from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CRATE_DIR = re.compile(r"^(?:crates/passes/[23]d|crates|crates_other|voxel)/([^/]+)/")
-# Folders whose name is not their crate's.
-DIR_CRATE = {"voxel/examples/": "helio-voxel-examples"}
+CRATE_DIR = re.compile(r"^(?:crates/passes/[23]d|crates|crates_other)/([^/]+)/")
 
 
 def unit_of(path, crates, renamed, include_hosts):
     m = CRATE_DIR.match(path)
     if not m:
         return None
-    name = next((c for d, c in DIR_CRATE.items() if path.startswith(d)), m.group(1))
-    name = renamed.get(name, name)
+    name = renamed.get(m.group(1), m.group(1))
     entry = crates.get(name)
     if entry is None:
         return name
