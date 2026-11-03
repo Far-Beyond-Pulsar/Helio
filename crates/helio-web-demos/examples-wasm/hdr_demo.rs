@@ -4,9 +4,8 @@ use crate::common::{
 };
 use glam::Vec3;
 use helio::{Camera, Renderer};
-use helio_components::CameraPostProcessComponent;
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
-use pulsar_scenedb::{Entity, SceneDb};
+use pulsar_scenedb::SceneDb;
 use std::sync::Arc;
 
 const LOOK_SENS: f32 = 0.0024;
@@ -16,7 +15,6 @@ pub struct Demo {
     // This host's update callback has no World argument. Retain the authored
     // database here so interactive controls can update its persistent rows.
     scene_db: SceneDb,
-    settings_entity: Entity,
     cam_pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
@@ -128,21 +126,7 @@ impl HelioWasmApp for Demo {
             point_light([3.0, 4.0, -3.0], [1.0, 0.9, 0.7], 20.0, 15.0),
         );
 
-        helio_components::CameraPostProcessComponent::register_gpu_columns_growable(
-            scene_db.world.gpu_mirror().expect("GPU mirror").store(),
-            4096,
-            renderer.device(),
-        );
-        let settings_entity = scene_db.world.spawn();
-        scene_db.world.insert(
-            settings_entity,
-            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
-                0,
-                &helio_pass_postprocess::PostProcessSettings::default(),
-            )),
-        );
         Self {
-            settings_entity,
             scene_db: std::mem::take(scene_db),
             cam_pos: Vec3::new(0.0, 3.0, 6.0),
             cam_yaw: 0.0,
@@ -223,13 +207,8 @@ impl HelioWasmApp for Demo {
                 settings.tonemap_operator = helio::TonemapOperator::None;
             }
         }
-        self.scene_db.world.insert(
-            self.settings_entity,
-            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
-                camera.view_id,
-                &settings,
-            )),
-        );
+        // The host's post settings: the tone map's baseline.
+        renderer.set_scene_payload(&helio_pass_postprocess::POST_BASELINE, Arc::new(settings));
         self.scene_db.world.flush_gpu_mirror(renderer.queue());
         camera
     }

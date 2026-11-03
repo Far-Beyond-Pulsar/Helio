@@ -62,10 +62,6 @@ fn build(
     runtime: Option<&VgRuntime>,
 ) -> helio::Renderer {
     let mut config = RendererConfig::new(320, 180, wgpu::TextureFormat::Rgba8Unorm);
-    config
-        .features
-        .edit::<helio_pass_foliage_place::FoliageSettings>()
-        .enabled = false;
     if let Some(runtime) = runtime {
         config = helio_presets::with_virtual_geometry(config, runtime);
     }

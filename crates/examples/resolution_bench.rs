@@ -7,13 +7,13 @@
 //!
 //! Every run is deterministic: a fixed frame delta, a fixed frame count and a
 //! fixed camera, so the same build renders the same pixels. Temporal effects
-//! (volumetric fog accumulation, TSR/FXAA history, exposure adaptation) are
-//! given `--warmup` frames to settle before measuring.
+//! (TSR/FXAA history, exposure adaptation) are given `--warmup` frames to
+//! settle before measuring.
 //!
 //! Scenes:
 //!
-//! * `fog_hall`        -- colonnade with a shadowed volumetric sun, local fog,
-//!                        point lights, metallic/rough spheres, emissive
+//! * `fog_hall`        -- colonnade with a shadowed volumetric sun, point
+//!                        lights, metallic/rough spheres, emissive
 //!                        fixtures (bloom) and alpha-blended glass panes.
 //! * `cathedral_large` -- the HLFS large cathedral (416k tris, many lights,
 //!                        stained glass) with its chandelier and candle lights.
@@ -29,8 +29,8 @@
 //! ```
 //!
 //! `--pulsar-columns` registers the SceneDB columns Pulsar-Native's editor
-//! registers up front (billboards, water volumes and hitboxes), so
-//! their buffers exist while empty, as they do in the editor.
+//! registers up front (billboards), so their buffers exist while empty, as
+//! they do in the editor.
 //!
 //! `--movability static|movable|mixed` re-tags objects so shadow casters land
 //! in the static atlas (default), the dynamic one, or both.
@@ -43,13 +43,12 @@
 //! components do by default (`cast_shadows: true`); without it no light
 //! requests a shadow map and the shadow allocator never runs.
 //!
-//! `--water` adds a water pool (surface, simulation and caustics).
-//!
-//! `--global-fog` adds a uniform global fog medium, and `--pp-fog` enables
-//! the camera post-process fog block; both give every scene a medium.
+//! Fog and water left Helio with their plugins (Pulsar `plugins/vendor/fog`,
+//! `plugins/vendor/water`): `fog_hall` no longer has its haze, and
+//! `--global-fog`, `--pp-fog` and `--water` are gone.
 //!
 //! `--bloom` enables bloom and `--auto-exposure` auto exposure through the
-//! camera's post-process settings (they can be combined). (The camera lens
+//! host's post-process baseline (they can be combined). (The camera lens
 //! is the lens plugin's; its examples measure it.)
 //!
 //! `--billboards` places a billboard (editor light icon) over every point light.
@@ -80,9 +79,7 @@ mod v3_demo_common;
 
 use glam::{Mat4, Vec3};
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
-use helio_components::{
-    GlobalFogComponent, LocalFogVolumeComponent, StaticObjectComponent,
-};
+use helio_components::StaticObjectComponent;
 use pulsar_scenedb::{SceneDb, World};
 use std::io::Write;
 use std::sync::Arc;
@@ -118,9 +115,6 @@ struct Args {
     movability: String,
     bloom: bool,
     auto_exposure: bool,
-    global_fog: bool,
-    pp_fog: bool,
-    water: bool,
     ssr: bool,
     orbit: bool,
     shadows: bool,
@@ -144,9 +138,6 @@ fn parse_args() -> Args {
         movability: "static".into(),
         bloom: false,
         auto_exposure: false,
-        global_fog: false,
-        pp_fog: false,
-        water: false,
         ssr: false,
         orbit: false,
         shadows: false,
@@ -163,9 +154,6 @@ fn parse_args() -> Args {
             "--billboards" => Some(&mut args.billboards),
             "--bloom" => Some(&mut args.bloom),
             "--auto-exposure" => Some(&mut args.auto_exposure),
-            "--global-fog" => Some(&mut args.global_fog),
-            "--pp-fog" => Some(&mut args.pp_fog),
-            "--water" => Some(&mut args.water),
             "--ssr" => Some(&mut args.ssr),
             "--orbit" => Some(&mut args.orbit),
             "--shadows" => Some(&mut args.shadows),
@@ -317,22 +305,6 @@ fn fog_hall(world: &mut World, aspect: f32) -> Camera {
             SHADOW_BASES[0],
         ),
     );
-    let mut haze =
-        LocalFogVolumeComponent::from(helio_pass_volumetric_fog::LocalFogVolumeRow::new(
-            [-HALF_X - 2.0, 0.0, -HALF_Z - 2.0],
-            [HALF_X + 2.0, ROOF_Y + 1.0, HALF_Z + 2.0],
-            helio_pass_volumetric_fog::GlobalFogRow {
-                extinction: 0.04,
-                albedo: [0.62, 0.70, 0.85],
-                anisotropy: 0.35,
-                height_falloff: 0.25,
-                ..Default::default()
-            },
-        ));
-    haze.edge_fade = 1.5;
-    let entity = world.spawn();
-    world.insert(entity, haze);
-    set_volumetric_quality(world, 1, 120.0);
 
     let eye = Vec3::new(0.0, 2.0, 16.0);
     Camera::perspective_look_at(
@@ -514,30 +486,11 @@ fn run(
     let build_start = Instant::now();
     // Pulsar-Native's editor registers these columns up front (see
     // engine_backend's helio_bridge), so their buffers exist while empty.
-    let (pulsar_columns, billboards, water) = (args.pulsar_columns, args.billboards, args.water);
+    let (pulsar_columns, billboards) = (args.pulsar_columns, args.billboards);
     let mut scene_db: SceneDb = new_scene_db_with_gpu_mirror_and(device, queue, |store| {
-        if water && !pulsar_columns {
-            helio_components::WaterVolumeComponent::register_gpu_columns_growable(
-                store, 64, device,
-            );
-            helio_components::WaterHitboxComponent::register_gpu_columns_growable(
-                store, 256, device,
-            );
-        }
-        if billboards && !pulsar_columns {
+        if billboards || pulsar_columns {
             helio_components::BillboardComponent::register_gpu_columns_growable(
                 store, 1024, device,
-            );
-        }
-        if pulsar_columns {
-            helio_components::BillboardComponent::register_gpu_columns_growable(
-                store, 1024, device,
-            );
-            helio_components::WaterVolumeComponent::register_gpu_columns_growable(
-                store, 64, device,
-            );
-            helio_components::WaterHitboxComponent::register_gpu_columns_growable(
-                store, 256, device,
             );
         }
     });
@@ -555,36 +508,6 @@ fn run(
         spawn_light_billboards(&mut scene_db.world);
     }
     apply_movability(&mut scene_db.world, &args.movability);
-    if args.water {
-        // A pool in front of the camera, surface just above the floor, with
-        // caustics, so the simulation, surface and caustics all contribute.
-        spawn_water_volume(
-            &mut scene_db.world,
-            WaterVolumeDescriptor {
-                bounds_min: [-6.0, -1.0, -8.0],
-                bounds_max: [6.0, 0.3, 6.0],
-                surface_height: 0.3,
-                caustics_enabled: true,
-                ..Default::default()
-            },
-        );
-    }
-    if args.global_fog {
-        spawn_global_fog(
-            &mut scene_db.world,
-            GlobalFogComponent::from(helio_pass_volumetric_fog::GlobalFogRow::default()),
-        );
-    }
-    if args.bloom || args.auto_exposure || args.pp_fog {
-        // Camera-baseline post-process settings.
-        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
-        settings.bloom_enabled = args.bloom;
-        if args.auto_exposure {
-            settings.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
-        }
-        settings.fog_enabled = args.pp_fog;
-        set_camera_postprocess(&mut scene_db.world, 0, &settings);
-    }
     let mut config = RendererConfig::new(width, height, FORMAT).with_render_scale(args.scale);
     if args.tsr {
         config = config
@@ -607,6 +530,15 @@ fn run(
             intensity: 1.0,
         });
     renderer.set_frame_delta_override(Some(1.0 / 60.0));
+    if args.bloom || args.auto_exposure {
+        // The host's post-process baseline.
+        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
+        settings.bloom_enabled = args.bloom;
+        if args.auto_exposure {
+            settings.exposure_mode = helio_pass_postprocess::ExposureMode::Auto;
+        }
+        set_post_baseline(&mut renderer, &settings);
+    }
 
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("resolution_bench target"),

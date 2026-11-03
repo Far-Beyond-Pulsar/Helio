@@ -25,8 +25,6 @@ helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "../passes/3d/helio-pass-buffer-view" }
-helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
-helio-pass-foliage-gbuffer = { path = "../passes/3d/helio-pass-foliage-gbuffer" }
 helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
 helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
 helio-pass-indirect-dispatch = { path = "../passes/3d/helio-pass-indirect-dispatch" }
@@ -44,12 +42,9 @@ helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 helio-pass-gi = { workspace = true }
 helio-pass-tsr = { workspace = true }
-helio-pass-volumetric-fog = { workspace = true }
-helio-pass-post-volumes = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
-helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-vg-format = { path = "../helio-vg-format" }
 helio-vg-stream = { path = "../helio-vg-stream" }
 

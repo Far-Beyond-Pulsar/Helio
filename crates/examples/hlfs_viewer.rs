@@ -1,4 +1,6 @@
 //! Small shared interactive host for architectural RT scenes.
+//! Post-process volumes left Helio with their plugin (Pulsar
+//! `plugins/vendor/post`); the viewer no longer outlines them.
 use crate::v3_demo_common::*;
 use glam::Vec3;
 use helio::{
@@ -54,7 +56,7 @@ impl ApplicationHandler for App {
             return;
         }
         let window=Arc::new(event_loop.create_window(Window::default_attributes()
-            .with_title(format!("Helio - {} | A/D orbit, W/S zoom, Q/E height | F fog, G quality, L lens, O occluder, M motion, P profile",self.scene.name))
+            .with_title(format!("Helio - {} | A/D orbit, W/S zoom, Q/E height | G quality, L lens, O occluder, M motion, P profile",self.scene.name))
             .with_inner_size(winit::dpi::LogicalSize::new(1280u32,720u32))).expect("window"));
         let size = window.inner_size();
         let mut graphics = pollster::block_on(HelioGraphicsContext::new(
@@ -207,23 +209,6 @@ impl ApplicationHandler for App {
                     return;
                 }
                 flush_scene_db(&s.scene_db, &s.queue);
-                // The post-process volume is authored in SceneDB and mirrored
-                // to the GPU, but editor wireframes are a separate Helio debug
-                // stream. Keep that stream synchronized from the same rows so
-                // the editor overlay has actual volume vertices to draw.
-                let volume_bounds: Vec<[glam::DVec3; 2]> = s
-                    .scene_db
-                    .world
-                    .query::<&helio_components::PostProcessVolumeComponent>()
-                    .filter_map(|(_, volume)| {
-                        if volume.blend_weight <= 0.0 || volume.unbound != 0 {
-                            return None;
-                        }
-                        let corner = |c: [f32; 4]| glam::Vec3::from_slice(&c[..3]).as_dvec3();
-                        Some([corner(volume.bounds_min), corner(volume.bounds_max)])
-                    })
-                    .collect();
-                s.renderer.debug_set_editor_volume_bounds(&volume_bounds);
                 if let Some(acceleration) = &mut s.acceleration {
                     acceleration
                         .prepare(&s.scene_db.world)

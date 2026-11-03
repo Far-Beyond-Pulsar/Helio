@@ -23,8 +23,6 @@ pollster = { workspace = true }
 
 [dev-dependencies]
 helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
-helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
-helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-components = { path = "../helio-components" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 pulsar_scenedb = { workspace = true }

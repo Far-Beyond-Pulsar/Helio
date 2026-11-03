@@ -144,9 +144,16 @@ impl LocalExposureGrid {
 /// Graph key of the post settings the tone map reads this frame (a
 /// `GpuPostProcessUniforms` buffer, uniform and storage): the post-settings
 /// contract. Whoever resolves the scene's post settings (post-process
-/// volumes) publishes it; without it the tone map uses
-/// `PostProcessSettings::default()`.
+/// volumes) publishes it; without it the tone map uses the host's
+/// [`POST_BASELINE`].
 pub const POST_SETTINGS: &str = "postprocess_uniforms";
+
+/// The host's post settings: what the frame's post settings are where
+/// nothing overrides them. The tone map's stand-in for [`POST_SETTINGS`],
+/// and the base a publisher of those (post-process volumes) blends over.
+/// Without it, `PostProcessSettings::default()`.
+pub const POST_BASELINE: helio_core::PayloadContract<PostProcessSettings> =
+    helio_core::PayloadContract::new("post_settings_baseline");
 
 /// The camera's 3D colour-grading LUT (a renderer config's `features`):
 /// `Rgba16Float`, `TextureDimension::D3`. Without it grading uses the
@@ -222,9 +229,12 @@ pub struct UserEffectEntry {
 pub struct PostProcessPass {
     color_input: &'static str,
     color_alias: Option<&'static str>,
-    /// `PostProcessSettings::default()`: the post settings while nothing
-    /// publishes [`POST_SETTINGS`].
+    /// The host's [`POST_BASELINE`] (`PostProcessSettings::default()`
+    /// without one): the post settings while nothing publishes
+    /// [`POST_SETTINGS`].
     default_settings: wgpu::Buffer,
+    /// The baseline `default_settings` holds.
+    baseline: GpuPostProcessUniforms,
     uber_timing_query: Option<wgpu::QuerySet>,
     compute_timing_query: Option<wgpu::QuerySet>,
     avg_luminance_buf: wgpu::Buffer,
@@ -975,7 +985,9 @@ impl PostProcessPass {
             &wgpu::util::BufferInitDescriptor {
                 label: Some("PostProcess Default Settings"),
                 contents: bytemuck::bytes_of(&PostProcessSettings::default().to_gpu()),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::STORAGE,
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST,
             },
         );
 
@@ -983,6 +995,7 @@ impl PostProcessPass {
             color_input: "pre_aa",
             color_alias: None,
             default_settings,
+            baseline: PostProcessSettings::default().to_gpu(),
             uber_timing_query: None,
             compute_timing_query: None,
             avg_luminance_buf,
@@ -1541,6 +1554,15 @@ impl PostProcessPass {
             bytemuck::cast_slice(&adaptation),
         );
         self.exposure_history = true;
+
+        let baseline = ctx
+            .scene_buffers
+            .payload(&POST_BASELINE)
+            .map_or_else(|| PostProcessSettings::default().to_gpu(), |b| b.to_gpu());
+        if bytemuck::bytes_of(&baseline) != bytemuck::bytes_of(&self.baseline) {
+            ctx.write_buffer(&self.default_settings, 0, bytemuck::bytes_of(&baseline));
+            self.baseline = baseline;
+        }
 
         // Deferred shader rebuild: if a snippet was queued, apply it now.
         if self.pending_shader_snippet.is_some() {

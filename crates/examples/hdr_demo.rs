@@ -387,11 +387,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                v3_demo_common::set_camera_postprocess(
-                    &mut state.scene_db.world,
-                    camera.view_id,
-                    &settings,
-                );
+                v3_demo_common::set_post_baseline(&mut state.renderer, &settings);
                 v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
                 if let Err(e) = state.renderer.render_window_frame(&camera, &state.surface) {
                     log::error!("Render error: {:?}", e);

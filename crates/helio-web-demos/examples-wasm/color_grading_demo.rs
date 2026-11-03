@@ -4,10 +4,9 @@ use crate::common::{
 };
 use glam::Vec3;
 use helio::{Camera, Renderer, TonemapOperator};
-use helio_components::CameraPostProcessComponent;
 use helio_pass_postprocess::LutBuilder;
 use helio_wasm::{HelioWasmApp, InputState, KeyCode};
-use pulsar_scenedb::{Entity, SceneDb};
+use pulsar_scenedb::SceneDb;
 use std::sync::Arc;
 
 const LOOK_SENS: f32 = 0.0024;
@@ -17,7 +16,9 @@ pub struct Demo {
     // This host's update callback has no World argument. Retain the authored
     // database here so interactive controls can update its persistent rows.
     scene_db: SceneDb,
-    settings_entity: Entity,
+    /// The settings the LUT is built from (this host's, as the tone map's
+    /// baseline sees them).
+    settings_buffer: wgpu::Buffer,
     cam_pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
@@ -119,21 +120,16 @@ impl HelioWasmApp for Demo {
 
         let lut_builder = LutBuilder::new(&device, 16);
 
-        helio_components::CameraPostProcessComponent::register_gpu_columns_growable(
-            scene_db.world.gpu_mirror().expect("GPU mirror").store(),
-            4096,
-            renderer.device(),
-        );
-        let settings_entity = scene_db.world.spawn();
-        scene_db.world.insert(
-            settings_entity,
-            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
-                0,
-                &helio_pass_postprocess::PostProcessSettings::default(),
-            )),
-        );
+        let settings_buffer = renderer.device().create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Color Grading Demo Settings"),
+            size: std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         Self {
-            settings_entity,
+            settings_buffer,
             scene_db: std::mem::take(scene_db),
             cam_pos: Vec3::new(0.0, 3.0, 6.0),
             cam_yaw: 0.0,
@@ -236,11 +232,12 @@ impl HelioWasmApp for Demo {
             }
         }
 
-        let resolved = renderer
-            .find_pass_mut::<helio_pass_post_volumes::PostProcessVolumeBlendPass>()
-            .expect("postprocess blend pass")
-            .resolved_uniforms()
-            .clone();
+        renderer.queue().write_buffer(
+            &self.settings_buffer,
+            0,
+            bytemuck::bytes_of(&settings.to_gpu()),
+        );
+        let resolved = self.settings_buffer.clone();
         if let Some(ref mut builder) = self.lut_builder {
             let rebuilt = builder.build_if_needed(
                 renderer.device(),
@@ -259,13 +256,8 @@ impl HelioWasmApp for Demo {
             }
         }
 
-        self.scene_db.world.insert(
-            self.settings_entity,
-            CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
-                camera.view_id,
-                &settings,
-            )),
-        );
+        // The host's post settings: the tone map's baseline.
+        renderer.set_scene_payload(&helio_pass_postprocess::POST_BASELINE, Arc::new(settings));
         self.scene_db.world.flush_gpu_mirror(renderer.queue());
         camera
     }

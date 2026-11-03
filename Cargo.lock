@@ -1082,7 +1082,6 @@ dependencies = [
  "helio-pass-billboard",
  "helio-pass-debug-overlay",
  "helio-pass-deferred-light",
- "helio-pass-foliage-place",
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
@@ -1090,7 +1089,6 @@ dependencies = [
  "helio-pass-light-cull",
  "helio-pass-object-batch",
  "helio-pass-perf-overlay",
- "helio-pass-post-volumes",
  "helio-pass-postprocess",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
@@ -1099,8 +1097,6 @@ dependencies = [
  "helio-pass-vg-bvh",
  "helio-pass-vg-cull",
  "helio-pass-vg-raster",
- "helio-pass-volumetric-fog",
- "helio-pass-water-sim",
  "helio-presets",
  "helio-scene-derivations",
  "helio-vg-build",
@@ -1665,15 +1661,11 @@ dependencies = [
  "helio-mesh-api",
  "helio-pass-billboard",
  "helio-pass-deferred-light",
- "helio-pass-foliage-place",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
  "helio-pass-object-batch",
- "helio-pass-post-volumes",
  "helio-pass-postprocess",
  "helio-pass-sky",
- "helio-pass-volumetric-fog",
- "helio-pass-water-sim",
  "helio-scene-derivations",
  "helio-vg-stream",
  "log",
@@ -1700,13 +1692,10 @@ dependencies = [
  "bytemuck",
  "glam 0.33.5",
  "helio-mats",
- "helio-pass-foliage-place",
  "helio-pass-gi",
  "helio-pass-hiz",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
- "helio-pass-volumetric-fog",
- "helio-pass-water-sim",
  "helio-scene-derivations",
  "log",
  "naga",
@@ -1727,16 +1716,6 @@ dependencies = [
  "serde",
  "serde_json",
  "wgpu",
-]
-
-[[package]]
-name = "helio-foliage-api"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "pulsar_scenedb",
 ]
 
 [[package]]
@@ -1836,37 +1815,6 @@ dependencies = [
  "helio-pass-shadow-matrix",
  "pulsar_reflection",
  "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-foliage-gbuffer"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-pass-foliage-place",
- "log",
- "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-foliage-place"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-foliage-api",
- "helio-scene-join",
- "helio-settings",
- "log",
- "pulsar_reflection",
- "pulsar_scenedb",
- "serde_json",
  "wgpu",
 ]
 
@@ -2052,21 +2000,6 @@ dependencies = [
  "helio-feature-api",
  "helio-frame-api",
  "log",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-post-volumes"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-pass-postprocess",
- "helio-scene-join",
- "pollster 0.4.0",
- "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -2330,54 +2263,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-volumetric-fog"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-components",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-pass-post-volumes",
- "helio-pass-postprocess",
- "helio-pass-shadow-matrix",
- "helio-scene-join",
- "helio-sky-api",
- "pollster 0.4.0",
- "pulsar_reflection",
- "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-water-sim"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-foliage-api",
- "helio-frame-api",
- "helio-mats",
- "helio-pass-deferred-light",
- "helio-pass-gbuffer",
- "helio-pass-hiz",
- "helio-pass-indirect-dispatch",
- "helio-pass-object-batch",
- "helio-pass-occlusion-cull",
- "helio-scene-join",
- "helio-sky-api",
- "helio-water-api",
- "pollster 0.4.0",
- "pulsar_reflection",
- "pulsar_scenedb",
- "rayon",
- "wgpu",
-]
-
-[[package]]
 name = "helio-passes"
 version = "0.0.0"
 
@@ -2400,8 +2285,6 @@ dependencies = [
  "helio-pass-buffer-view",
  "helio-pass-debug-overlay",
  "helio-pass-deferred-light",
- "helio-pass-foliage-gbuffer",
- "helio-pass-foliage-place",
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
@@ -2414,7 +2297,6 @@ dependencies = [
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
- "helio-pass-post-volumes",
  "helio-pass-postprocess",
  "helio-pass-shadow",
  "helio-pass-shadow-dirty",
@@ -2427,8 +2309,6 @@ dependencies = [
  "helio-pass-vg",
  "helio-pass-vg-cull",
  "helio-pass-vg-shade",
- "helio-pass-volumetric-fog",
- "helio-pass-water-sim",
  "helio-scene-derivations",
  "helio-spine",
  "helio-vg-build",
@@ -2455,11 +2335,9 @@ dependencies = [
  "helio-frame-api",
  "helio-mats",
  "helio-mesh-api",
- "helio-pass-foliage-place",
  "helio-pass-gbuffer",
  "helio-pass-light-cull",
  "helio-pass-object-batch",
- "helio-pass-water-sim",
  "helio-scene-join",
  "log",
  "pollster 0.4.0",
@@ -2595,13 +2473,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-water-api"
-version = "0.1.0"
-
-[[package]]
 name = "helio-web-demos"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "env_logger",
  "getrandom 0.2.17",
  "getrandom 0.3.4",
@@ -2614,7 +2489,6 @@ dependencies = [
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
- "helio-pass-post-volumes",
  "helio-pass-postprocess",
  "helio-pass-sdf",
  "helio-presets",

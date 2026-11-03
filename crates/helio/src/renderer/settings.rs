@@ -143,10 +143,8 @@ mod tests {
                 let is_default =
                     setting.default == helio_settings::Value::Text(option.value.into());
                 let unchanged = format!("{configured:?}") == format!("{default:?}");
-                // `tsr_quality` is resolved by the host, not the config;
-                // `foliage_quality` lands in the foliage feature's settings
-                // (`FoliageSettings::with_host_settings`, tested there).
-                if !["tsr_quality", "foliage_quality"].contains(&setting.key) {
+                // `tsr_quality` is resolved by the host, not the config.
+                if setting.key != "tsr_quality" {
                     assert_eq!(unchanged, is_default, "{} = {}", setting.key, option.value);
                 }
             }

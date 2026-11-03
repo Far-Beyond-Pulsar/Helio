@@ -3,6 +3,8 @@
 //! From `crates/renderer/helio`, run `cargo vg-stress` (alias for `cargo run -p examples --features vg-stress --bin vg_stress --release`).
 //! Controls: WASD move, Space/Shift rise/fall, left click grabs the mouse,
 //! Escape releases it (or exits when released).
+//! Fog left Helio with its plugin (Pulsar `plugins/vendor/fog`); the museum
+//! no longer has a medium.
 
 #![recursion_limit = "512"]
 
@@ -508,7 +510,6 @@ struct AppState {
     post_stack: Option<vg_stress_capture::PostStack>,
     post_level: u8,
     sun_light: Option<Entity>,
-    fog_entity: Option<Entity>,
     adapter_name: String,
     tau: f32,
     vg_expected: usize,
@@ -663,16 +664,6 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             directional_light([0.35, -0.8, -0.3], [1.0, 0.94, 0.82], 3.0),
         );
-        let fog_entity = capture_options.as_ref().map(|_| {
-            v3_demo_common::set_volumetric_quality(&mut scene_db.world, 1, 260.0);
-            v3_demo_common::spawn_global_fog(
-                &mut scene_db.world,
-                v3_demo_common::GlobalFogComponent {
-                    enabled: 0,
-                    ..Default::default()
-                },
-            )
-        });
         for light in &layout.lights {
             let direction = glam::Vec3::from_array(light.direction)
                 .normalize_or_zero()
@@ -828,7 +819,6 @@ impl ApplicationHandler for App {
             post_stack: None,
             post_level: 0,
             sun_light: Some(sun_light),
-            fog_entity,
             adapter_name,
             tau,
             vg_expected,

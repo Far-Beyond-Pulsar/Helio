@@ -21,7 +21,7 @@ pub(crate) fn main() {
         );
     } else {
         hlfs_viewer::run(hlfs_viewer::Scene {
-            name: "Monumental Arch – Volumetric Fog",
+            name: "Monumental Arch",
             populate: Box::new(monumental_arch::populate),
             update: None,
             key: None,

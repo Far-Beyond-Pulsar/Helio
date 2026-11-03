@@ -416,39 +416,6 @@ pub static RENDERER: Group = Group {
             "Metres between the finest GI probes (each coarser level doubles it); 0: the renderer's choice \
              (1 m over voxel terrain, 0.5 m in mesh scenes)",
         ),
-        toggle("foliage", "Foliage", "Foliage", true, "Draw scattered foliage (grass, flowers)"),
-        pick(
-            "foliage_quality",
-            "Foliage Quality",
-            "Foliage",
-            QUALITY_TIERS,
-            "medium",
-            "Foliage range, density and LOD distances",
-        ),
-        number(
-            "foliage_range",
-            "Foliage Range",
-            "Foliage",
-            (0.0, 4000.0, 10.0),
-            0.0,
-            "Metres foliage reaches; 0: the quality's",
-        ),
-        number(
-            "foliage_tufts_per_m2",
-            "Foliage Max Density",
-            "Foliage",
-            (0.0, 64.0, 0.5),
-            0.0,
-            "Densest foliage in tufts a square metre (denser types are thinned); 0: 16",
-        ),
-        number(
-            "foliage_blades_per_tuft",
-            "Foliage Blades per Tuft",
-            "Foliage",
-            (0.0, 64.0, 1.0),
-            0.0,
-            "Blades a tuft averages, sizing the near band; 0: 10",
-        ),
         pick(
             "hdr_output_mode",
             "HDR Output",
@@ -516,20 +483,20 @@ mod tests {
             "render_scale" => Some(Value::Number(4.0)),
             "shadow_updates_per_frame" => Some(Value::Text("64".into())),
             "shadow_quality" => Some(Value::Text("bogus".into())),
-            "foliage" => Some(Value::Number(1.0)),
+            "planar_reflections" => Some(Value::Number(1.0)),
             _ => None,
         });
         assert_eq!(r.number("render_scale"), 1.0);
         assert_eq!(r.number("shadow_updates_per_frame"), 64.0);
         assert_eq!(r.text("shadow_quality"), "medium");
-        assert!(r.bool("foliage"));
+        assert!(r.bool("planar_reflections"));
     }
 
     #[test]
     fn live_settings_do_not_rebuild() {
         let a = RENDERER.defaults();
         let b = RENDERER.resolve(|key| (key == "render_scale").then_some(Value::Number(0.5)));
-        let c = RENDERER.resolve(|key| (key == "foliage").then_some(Value::Bool(false)));
+        let c = RENDERER.resolve(|key| (key == "planar_reflections").then_some(Value::Bool(true)));
         assert!(a.same_graph(&b));
         assert!(!a.same_graph(&c));
     }
