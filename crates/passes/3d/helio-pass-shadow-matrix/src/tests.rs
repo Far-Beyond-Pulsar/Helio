@@ -52,8 +52,8 @@ fn production_shadow_shaders_validate() {
                 "../../helio-frame-api/src/shaders/atmosphere_sky_table.wgsl",
             ),
             (
-                "//!use cloud_shadow",
-                "../../api/helio-sky-api/src/shaders/cloud_shadow.wgsl",
+                "//!use sun_transmittance",
+                "../../helio-frame-api/src/shaders/sun_transmittance.wgsl",
             ),
             (
                 "//!use view_remap",

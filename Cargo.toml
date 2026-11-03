@@ -99,8 +99,6 @@ helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "crates/passes/3d/helio-pass-buffer-view" }
-helio-pass-sky = { path = "crates/passes/3d/helio-pass-sky" }
-helio-pass-gi = { path = "crates/passes/3d/helio-pass-gi" }
 helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
 helio-pass-shadow-matrix = { path = "crates/passes/3d/helio-pass-shadow-matrix" }
 helio-pass-forward-lit = { path = "crates/passes/3d/helio-pass-forward-lit" }

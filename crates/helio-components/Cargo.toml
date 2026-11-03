@@ -36,7 +36,6 @@ helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
-helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 
 [dev-dependencies]
 helio = { path = "../helio" }

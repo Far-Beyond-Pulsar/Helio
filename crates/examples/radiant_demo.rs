@@ -3,6 +3,9 @@
 //   Tier 1 — Feature flags on the default PBR uber-shader
 //   Tier 2 — Hand-authored surface templates (clear coat, SSS, anisotropic, skin)
 //   Tier 3 — Full custom template (iridescent thin-film surface)
+//
+// The sky and GI left Helio with their plugins (Pulsar `plugins/vendor/sky`,
+// `plugins/vendor/gi`): no atmosphere or GI probes here.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -21,7 +24,7 @@ use helio_mats::{
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky, sphere_mesh,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object, sphere_mesh,
     update_light,
 };
 use winit::{
@@ -476,7 +479,6 @@ impl ApplicationHandler for App {
 
         // ── Sky: nearly black — reflections visible only from lights ──────────
 
-        spawn_sky(&mut scene_db.world, [0.02, 0.02, 0.04]);
         renderer.set_feature_live(helio::AmbientLight {
             color: [0.01, 0.01, 0.02],
             intensity: 0.03,

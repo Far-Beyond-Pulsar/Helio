@@ -579,7 +579,7 @@ jobs:
             
             # Find example binaries (handle both with and without .exe extension)
             BINARIES=()
-            for pattern in "render_v2_basic" "render_v2_sky"; do
+            for pattern in "render_v2_basic"; do
               if [ -f "$BIN_DIR/$pattern.exe" ]; then
                 BINARIES+=("$pattern.exe")
               elif [ -f "$BIN_DIR/$pattern" ]; then

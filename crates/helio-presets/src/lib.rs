@@ -6,7 +6,7 @@
 //!   feature crate's nodes), the renderer's own nodes and the config bridge.
 //! - [`graphs`]: node registries, the editor's template, the pin probe.
 //! - [`pipelines`]: the presets as named pipelines for a host's registry.
-//! - Config helpers: [`with_virtual_geometry`], [`config_with_host_settings`].
+//! - Config helper: [`with_virtual_geometry`].
 //!
 //! The presets name no feature beyond the feature list: each feature declares
 //! what it needs of the others (GI's terrain tracer, TSR's stochastic mask)
@@ -26,12 +26,10 @@ pub use presets::{
 };
 pub use virtual_geometry::with_virtual_geometry;
 
-use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_debug_overlay::DebugOverlayPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_gi::{GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
@@ -46,7 +44,6 @@ use helio_pass_postprocess::PostProcessPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
-use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_spine::BackgroundPass;
@@ -83,12 +80,6 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<ObjectBatchPass>()
         .independent::<IndirectDispatchPass>()
         .independent::<BackgroundPass>()
-        .independent::<AtmospherePass>()
-        .independent::<GiPass>()
-        .independent::<GiMeshTracePass>()
-        .independent::<GiResolvePass>()
-        .independent::<CloudTracePass>()
-        .independent::<AtmosphereCompositePass>()
         .independent::<LightCullPass>()
         .independent::<SsrPass>()
         .independent::<helio_pass_ssr::SsrCompositePass>()
@@ -126,20 +117,4 @@ pub(crate) fn convert_perf_mode(
         H::TileLightCount => P::TileLightCount,
         H::PassOutput => P::PassOutput,
     }
-}
-
-/// A renderer config with a host's [`helio::helio_settings::RENDERER`]
-/// values: the renderer's own, and the default features' settings (GI).
-/// Engines build their config with this rather than
-/// `RendererConfig::with_settings`, which knows no feature.
-pub fn config_with_host_settings(
-    config: RendererConfig,
-    settings: &helio::helio_settings::Resolved,
-) -> RendererConfig {
-    let mut config = config.with_settings(settings);
-    config
-        .features
-        .edit::<helio_pass_gi::GiSettings>()
-        .probe_spacing = settings.optional("gi_probe_spacing").map(|m| m as f32);
-    config
 }

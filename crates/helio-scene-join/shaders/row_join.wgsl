@@ -81,7 +81,7 @@ const EMITTER_COUNT_WORD: u32 = 46u;
 const EMITTER_IDENTITY_WORD: u32 = 47u;
 // The pool's range alignment (the particles plugin's `CORONA_RANGE_ALIGNMENT`).
 const EMITTER_RANGE_ALIGNMENT: u32 = 256u;
-// `helio_pass_sky::atmosphere::placement::CENTER`.
+// The sky plugin's `atmosphere::placement::CENTER`.
 const PLACEMENT_CENTER: u32 = 1u;
 const NO_GATE_WORD: u32 = 0xffffffffu;
 const WORKGROUP: u32 = 64u;
@@ -439,7 +439,7 @@ fn write_row(row: u32, slot: u32) {
     if (u.flags & SPRITE) != 0u {
         write_sprite_placement(row, output);
     }
-    // Planet centres are world anchors (`AtmosphereComponent::center`),
+    // Planet centres are world anchors (an atmosphere row's `center`),
     // which the pass rebases.
     if (u.flags & CENTERED) != 0u && sources[source + 3u] == PLACEMENT_CENTER {
         let center = object_position(transforms[owners[row].owner_index]);

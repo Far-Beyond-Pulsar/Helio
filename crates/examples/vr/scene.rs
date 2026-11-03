@@ -41,7 +41,7 @@ use pulsar_scenedb::{Entity, World};
 
 use crate::v3_demo_common::{
     box_mesh, cube_mesh, make_material, point_light, spawn_light, spawn_material, spawn_mesh,
-    spawn_object, spawn_sky, sphere_mesh, spot_light, update_light, update_object_transform,
+    spawn_object, sphere_mesh, spot_light, update_light, update_object_transform,
 };
 
 /// Interior half-width of the corridor, in metres.
@@ -767,9 +767,6 @@ pub fn build(world: &mut World) -> Animated {
         point_light([0.0, HALL_HEIGHT - 0.6, 1.5], [0.6, 0.7, 1.0], 6.0, 8.0),
     );
 
-    // Indoors, but the sky still drives ambient. `AtmospherePass` is in every graph and
-    // reads this row from SceneDB each frame, so it can be spawned at any time.
-    spawn_sky(world, [0.05, 0.07, 0.11]);
 
     anim
 }

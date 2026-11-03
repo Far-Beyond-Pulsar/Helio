@@ -117,7 +117,7 @@ struct ShadowCasterCounts {
 }
 @group(0) @binding(8) var<storage, read> shadow_caster_counts: ShadowCasterCounts;
 
-// The atmosphere resolved this frame (helio-pass-sky's AtmospherePass), or
+// The atmosphere resolved this frame (the frame's `sky` contract), or
 // a zeroed frame (planet.w = 0) without one. A uniform: the fragment stage
 // is at its storage-buffer limit. The sun reaches surfaces through the air
 // between them and space, and the sky lights them; the air between them and
@@ -233,8 +233,8 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 @group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
 // Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, numeric surface_flags
 @group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
-// The sun's visibility at each pixel (helio-pass-sky's `sun_visibility`: the
-// clouds' shadow times the voxel terrain's `directional_visibility`), x the
+// The sun's visibility at each pixel (the frame's `sun_visibility`: media's
+// shadow times the occluders' `directional_visibility`), x the
 // visibility and yzw the sun's direction it holds for; zero where none is
 // published.
 @group(1) @binding(10) var sun_visibility: texture_2d<f32>;
@@ -318,9 +318,9 @@ fn terrain_light_visibility(at: u32, slot: u32) -> f32 {
     }
     return f32((local_visibility[at + 2u] >> slot) & 1u);
 }
-// The GI probes' irradiance / pi a pixel (rows of the frame, helio-pass-gi's
-// `gi_resolve`): rgb and how much the probes hold the point, half floats.
-// One entry (none held): no GI pass.
+// The frame's indirect diffuse / pi a pixel (`indirect_diffuse`): rgb and
+// how much its publisher holds the point, half floats. One entry (none
+// held): nothing publishes it.
 @group(3) @binding(3) var<storage, read> gi_irradiance: array<vec2<u32>>;
 // cluster bindings removed - GPU-driven architecture
 

@@ -17,6 +17,11 @@
 //!   Space/Shift — move up/down
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 
 mod architectural_mesh;
 mod cathedral_detail;
@@ -30,8 +35,7 @@ use helio::{
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
-    new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_indoor_cathedral_sky,
-    spawn_light, update_light,
+    new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_light, update_light,
 };
 
 use std::io::{self, BufRead};
@@ -620,7 +624,6 @@ fn smoothstep(value: f32) -> f32 {
 }
 
 fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    spawn_indoor_cathedral_sky(world);
     cathedral_detail::populate(world);
 
     // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
