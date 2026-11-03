@@ -82,11 +82,15 @@ Helio takes Bevy's line, with Unity's injection events as its slots.
 
 ## 3. The plugins
 
-Each plugin is `plugins/<kind>/` (Pulsar) with: a component crate
+Each plugin is `plugins/vendor/<kind>/` (Pulsar), where every shipped
+first-party plugin lives (physics, skm, input, render_bps, asset_viewer),
+with: a component crate
 (SceneDB component, methods, runtime, file formats), an api crate (its
 contracts: keys, row ABIs, WGSL), a feature crate (Helio feature: nodes,
 passes, its scene derivation), and its editor crate. Plugins depend on
-Helio core and on other plugins' api crates only.
+Helio core and on other plugins' api crates only. During the rewrite each
+plugin stays in Pulsar's tree; in phase C it splits into its own repo
+(`Plugin_<Kind>`, a submodule at the same path, like physics).
 
 | Plugin | Components | Feature owns | Leaves Helio/Pulsar today's |
 |---|---|---|---|
@@ -100,7 +104,7 @@ Helio core and on other plugins' api crates only.
 | `pulsar.lens` | CameraLens | lens, flare (reads `light_list` via lights api) | `lens_color` names in the spine |
 | `pulsar.water` | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | water reads in deferred light |
 | `pulsar.foliage` | Foliage, Wind | placement, drawers | — |
-| `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Pulsar `plugins/voxel/` with `component` (voxel_component), `api` (helio-voxel-data), `world` (helio-voxel-world), `feature` (helio-pass-voxel-planet, a G-buffer drawer since Phase A), `editor` (voxel_plugin), `examples` (helio-voxel-examples: voxel_craft, voxel_flight, water_world); the Helio repo has no voxel crate. Left: the sculpt tool and terrain panel in `ui_level_editor`, waiting on plugin-provided tool state, undo, commands and save hooks |
+| `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Pulsar `plugins/vendor/voxel/` with `component` (voxel_component), `api` (helio-voxel-data), `world` (helio-voxel-world), `feature` (helio-pass-voxel-planet, a G-buffer drawer since Phase A), `editor` (voxel_plugin), `examples` (helio-voxel-examples: voxel_craft, voxel_flight, water_world); the Helio repo has no voxel crate. Left: the sculpt tool and terrain panel in `ui_level_editor`, waiting on plugin-provided tool state, undo, commands and save hooks |
 | `pulsar.decals` | Decal | decal drawer (after GBuffer) | — |
 | `pulsar.particles` | ParticleEmitter | corona | `corona_emitters` host input |
 | `pulsar.sprites` | Sprite | sprite cull/batch/simulate, 2D radiance cascades | — |
@@ -361,7 +365,7 @@ capture lands at a different flicker phase (not the transmission input).
 Helio repo into it; component methods for every editor/game operation;
 editor moved onto those methods):
 materials, meshes (with LOD, skeletal, VG), lights, sky, gi, fog, post,
-lens, water, foliage, voxel (done: `plugins/voxel/`; its sculpt tool and
+lens, water, foliage, voxel (done: `plugins/vendor/voxel/`; its sculpt tool and
 terrain panel still wait in `ui_level_editor`), decals, particles,
 sprites, portals, splines. Physics already is one; it gains water's api.
 
@@ -369,7 +373,9 @@ sprites, portals, splines. Physics already is one; it gains water's api.
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
 helio-xr, helio-settings, and a test host (`helio-components` +
 examples, a host-layer crate that depends on plugin feature crates for its
-own demos). The layer gate gains a rule: no crate in the Helio repo may
+own demos). Each plugin leaves Pulsar's tree for its own repo
+(`Plugin_<Kind>`), kept at `plugins/vendor/<kind>/` as a submodule. The
+layer gate gains a rule: no crate in the Helio repo may
 name a kind's contract outside the test host.
 
 **Done when**: Helio's repo has no kind code outside its test host; each
