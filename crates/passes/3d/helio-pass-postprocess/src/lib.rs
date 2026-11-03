@@ -221,6 +221,7 @@ pub struct UserEffectEntry {
 
 pub struct PostProcessPass {
     color_input: &'static str,
+    color_alias: Option<&'static str>,
     /// `PostProcessSettings::default()`: the post settings while nothing
     /// publishes [`POST_SETTINGS`].
     default_settings: wgpu::Buffer,
@@ -379,6 +380,13 @@ impl PostProcessPass {
 
     pub fn with_color_input(mut self, key: &'static str) -> Self {
         self.color_input = key;
+        self
+    }
+
+    /// The image the colour input may be a view of
+    /// (`helio_frame_api::color::alias`), read too so it stays alive.
+    pub fn with_color_alias(mut self, alias: Option<&'static str>) -> Self {
+        self.color_alias = alias;
         self
     }
     /// Consume the linear HDR intermediate published by FXAA.
@@ -973,6 +981,7 @@ impl PostProcessPass {
 
         Self {
             color_input: "pre_aa",
+            color_alias: None,
             default_settings,
             uber_timing_query: None,
             compute_timing_query: None,
@@ -1455,10 +1464,10 @@ impl RenderPass for PostProcessPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
-        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
-        // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == "fogged_hdr" {
-            builder.read("pre_aa");
+        // The input may be a view of an earlier image
+        // (`helio_frame_api::color::alias`); keep the pool from reusing it.
+        if let Some(alias) = self.color_alias {
+            builder.read(alias);
         }
         // The frame's post settings; the defaults without a publisher.
         builder.read(POST_SETTINGS);

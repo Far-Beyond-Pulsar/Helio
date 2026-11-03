@@ -1,11 +1,13 @@
 //! Fog as a feature: the volumetric medium and its composite over the scene
-//! colour, at the frame's media slot. The composite advances the colour
-//! chain to the fogged colour.
+//! colour, at the frame's media slot. The medium is published as the frame's
+//! participating media (`helio_frame_api::media`); the composite advances
+//! the colour chain to the fogged colour, which is its input's view when no
+//! fog is possible (`color::advance_aliasing`).
 
 use helio_feature_api::{pass_node, Feature, FeatureRegistrar};
-use helio_frame_api::{color, FrameNode, Slot};
+use helio_frame_api::{color, media, FrameNode, Slot};
 
-use crate::{FogCompositePass, VolumetricFogPass, FOGGED_HDR};
+use crate::{FogCompositePass, VolumetricFogPass, FOGGED_HDR, FOG_ACCUM, FOG_PARAMETERS};
 
 /// Volumetric fog ([`crate`]).
 pub struct FogFeature;
@@ -25,6 +27,13 @@ impl Feature for FogFeature {
                 |build| {
                     let pass = VolumetricFogPass::new(build.env.device);
                     build.graph.add_pass(Box::new(pass));
+                    media::publish(
+                        build.env,
+                        media::MediaResources {
+                            grid: FOG_ACCUM,
+                            parameters: FOG_PARAMETERS,
+                        },
+                    );
                     Ok(())
                 },
             )
@@ -43,7 +52,7 @@ impl Feature for FogFeature {
                         FogCompositePass::with_format(build.env.device, build.env.scene_format())
                             .with_color_input(input);
                     build.graph.add_pass(Box::new(pass));
-                    color::advance(build.env, FOGGED_HDR);
+                    color::advance_aliasing(build.env, FOGGED_HDR, input);
                     Ok(())
                 },
             )

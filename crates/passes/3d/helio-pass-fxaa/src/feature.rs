@@ -23,6 +23,7 @@ impl Feature for FxaaFeature {
                 let format = build.env.scene_format();
                 let pass = FxaaPass::new(build.env.device, format)
                     .with_color_input(color::current(build.env))
+                    .with_color_alias(color::alias(build.env))
                     .with_intermediate_target(format);
                 build.graph.add_pass(Box::new(pass));
                 color::advance(build.env, crate::FXAA_COLOR);

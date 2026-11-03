@@ -41,6 +41,11 @@ pub use feature::FogFeature;
 mod fog_composite;
 pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
 
+/// The integrated medium and its parameters, published as the frame's
+/// participating media (`helio_frame_api::media`).
+pub const FOG_ACCUM: &str = "fog_accum";
+pub const FOG_PARAMETERS: &str = "fog_parameters";
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
@@ -785,7 +790,7 @@ impl RenderPass for VolumetricFogPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["fog_accum", "fog_parameters"]
+        &[FOG_ACCUM, FOG_PARAMETERS]
     }
 
     fn reads(&self) -> &'static [&'static str] {
@@ -808,13 +813,13 @@ impl RenderPass for VolumetricFogPass {
         // over here rather than routed by name.
         let view: &'a wgpu::TextureView = unsafe { std::mem::transmute(&self.integrated_view) };
         frame.write_texture_view(
-            helio_core::ResourceKey::new("fog_accum"),
+            helio_core::ResourceKey::new(FOG_ACCUM),
             view,
             "VolumetricFogPass",
         );
         let parameters: &'a wgpu::Buffer = unsafe { std::mem::transmute(&self.fog_uniform_buf) };
         frame.write_buffer(
-            helio_core::ResourceKey::new("fog_parameters"),
+            helio_core::ResourceKey::new(FOG_PARAMETERS),
             parameters,
             "VolumetricFogPass",
         );

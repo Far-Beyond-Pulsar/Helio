@@ -8,7 +8,7 @@
 //!
 //! ```text
 //! opaque lighting -> VolumetricFogPass -> FogCompositePass -> Transparent
-//!   (with_fogged_target: each fragment fogged at its own depth)
+//!   (through the published media: each fragment fogged at its own depth)
 //!   -> TSR/FXAA -> LensFlarePass -> PostProcessPass (meter, bloom, lens, tonemap)
 //! ```
 //!
@@ -19,9 +19,10 @@
 //!
 //! When no source can put a medium in the grid (checked on the CPU, below),
 //! the composite would be exactly that copy, so the pass draws nothing and
-//! publishes its input's view as `fogged_hdr` instead. Readers of
-//! `fogged_hdr` also declare a read of `pre_aa`, so the pool never reuses
-//! the input's memory while they may still see it.
+//! publishes its input's view as `fogged_hdr` instead. The feature advances
+//! the colour chain with `color::advance_aliasing`, so readers of
+//! `fogged_hdr` also declare a read of the input and the pool never reuses
+//! its memory while they may still see it.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult};
@@ -221,8 +222,8 @@ impl FogCompositePass {
         &self,
         resources: &helio_core::ResourceRegistry<'a>,
     ) -> Option<&'a wgpu::TextureView> {
-        // Readers of fogged_hdr extend pre_aa's lifetime, not other inputs'.
-        if !self.fog_quiet || self.input != "pre_aa" {
+        // Readers of fogged_hdr extend the input's lifetime (the chain alias).
+        if !self.fog_quiet {
             return None;
         }
         let input = resources.get::<&wgpu::TextureView>(ResourceKey::new(self.input))?;
@@ -242,7 +243,7 @@ impl RenderPass for FogCompositePass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa", "depth", "fog_accum", "fog_parameters"]
+        &["depth", crate::FOG_ACCUM, crate::FOG_PARAMETERS]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -273,8 +274,8 @@ impl RenderPass for FogCompositePass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.input);
-        builder.read("fog_accum");
-        builder.read("fog_parameters");
+        builder.read(crate::FOG_ACCUM);
+        builder.read(crate::FOG_PARAMETERS);
         builder.write_color_raw(FOGGED_HDR, self.format, ResourceSize::MatchSurface);
     }
 
@@ -325,11 +326,11 @@ impl RenderPass for FogCompositePass {
             })?;
         let medium = ctx
             .registry
-            .get::<&wgpu::TextureView>(ResourceKey::new("fog_accum"))
+            .get::<&wgpu::TextureView>(ResourceKey::new(crate::FOG_ACCUM))
             .unwrap_or(&self.fallback_medium);
         let parameters = ctx
             .registry
-            .get::<&wgpu::Buffer>(ResourceKey::new("fog_parameters"))
+            .get::<&wgpu::Buffer>(ResourceKey::new(crate::FOG_PARAMETERS))
             .unwrap_or(&self.fallback_parameters);
         let key = (
             input.clone(),

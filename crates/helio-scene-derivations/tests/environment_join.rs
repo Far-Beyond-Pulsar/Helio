@@ -31,7 +31,7 @@ const KEYS: RowJoinKeys = RowJoinKeys {
     hidden: BufferKey::of("t_hidden"),
     transforms: BufferKey::of("t_transforms"),
     mesh_bounds: BufferKey::of("t_mesh_bounds"),
-    lights: BufferKey::of("scene_lights"),
+    directional_light: BufferKey::of("directional_light"),
 };
 const WATER_VOLUMES: BufferKey = BufferKey::of("t_water_volumes");
 const FOLIAGE: BufferKey = BufferKey::of("t_foliage");
