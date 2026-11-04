@@ -20,10 +20,8 @@ helio-feature-api = { path = "../helio-feature-api" }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }
 helio-mats = { workspace = true }
-helio-pass-forward-lit = { workspace = true }
+helio-pass-light-cull = { workspace = true }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
-helio-pass-object-batch = { workspace = true }
-helio-pass-gbuffer = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
 helio-bake-types = { workspace = true }
 log = { workspace = true }

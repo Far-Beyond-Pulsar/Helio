@@ -64,8 +64,7 @@ pub fn type_in_crate(type_name: &str, crate_name: &str) -> bool {
 /// | resource | passes holding it |
 /// |---|---|
 /// | shadow dirty-flag buffer | `ShadowMatrixPass`, `ShadowDirtyPass` |
-/// | shadow face dirty / geometry-count buffers | `ShadowDirtyPass`, `ShadowCullPass`, `ShadowPass` |
-/// | shadow face indirect / count buffers | `ShadowCullPass`, `ShadowPass` |
+/// | shadow face dirty / geometry-count buffers | `ShadowDirtyPass`, `ShadowPass` |
 /// | Hi-Z sampler | `HiZBuildPass`, `OcclusionCullPass` |
 /// | foliage arena / tile / blade / indirect buffers | `FoliagePlacePass`, `FoliageGBufferPass` |
 /// | perf-overlay shared state | every perf-overlay pass |

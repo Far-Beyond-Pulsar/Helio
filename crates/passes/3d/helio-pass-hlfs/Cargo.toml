@@ -6,7 +6,6 @@ description = "Helio render pass: Hierarchical Light-Field Sampling (HLFS)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio-mesh-api = { workspace = true }
 helio-bake-types = { workspace = true }
 helio-feature-api = { path = "../../../helio-feature-api" }
 helio-frame-api = { path = "../../../helio-frame-api" }
@@ -14,16 +13,17 @@ helio-core  = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
 glam      = { workspace = true }
-helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-pass-shadow-matrix = { workspace = true }
 
 [dev-dependencies]
+helio-mesh-api = { workspace = true }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-components = { path = "../../../helio-components" }
 pollster = { workspace = true }
 naga = { version = "30", features = ["wgsl-in"] }
 image = { workspace = true }
 half = "2"
-helio-pass-forward-lit = { workspace = true }
+helio-pass-light-cull = { workspace = true }
 # The SceneDB projection tests in `tests/gpu_hlfs_rt.rs` drive the frontend's
 # `helio_default_passes::ray_tracing` adapter; the pass itself reads no World.
 helio-presets = { workspace = true }

@@ -489,7 +489,7 @@ fn enable_ray_shadows(world: &mut World, objects: &[Entity]) {
         let mut component = world
             .get_mut::<helio_components::LightComponent>(id)
             .unwrap();
-        let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
+        let mut light: helio_pass_light_cull::GpuLight = (*component).into();
         light.set_ray_traced_shadows(true);
         *component = light.into();
     }
@@ -542,7 +542,7 @@ fn move_lights(world: &mut World, lights: &[(Entity, [f32; 3])], frame: usize) {
         let mut light = world
             .get_mut::<helio_components::LightComponent>(entity)
             .expect("light row");
-        let mut gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+        let mut gpu: helio_pass_light_cull::GpuLight = (*light).into();
         gpu.position_range[1] = origin[1] + dy * if i % 2 == 0 { 1.0 } else { -1.0 };
         *light = gpu.into();
     }
@@ -654,7 +654,7 @@ impl Bench {
                 .poll(wgpu::PollType::wait_indefinitely())
                 .expect("device poll");
             timing.rt_gpu = ms(t);
-            self.renderer.set_ray_tracing_frame(acceleration.frame());
+            acceleration.publish(&mut self.renderer);
         }
 
         let t = Instant::now();
@@ -890,7 +890,7 @@ fn build_bench(
         .world
         .query::<(&helio_components::LightComponent,)>()
         .map(|(entity, (light,))| {
-            let gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+            let gpu: helio_pass_light_cull::GpuLight = (*light).into();
             (
                 entity,
                 [

@@ -77,7 +77,7 @@ fn leaf_opacity_casts_identical_cutout_shadows_from_both_sides() {
             layout: &layout0,
             entries: &entries,
         });
-        let mut material = MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+        let mut material = MaterialComponent::from(helio_mats::MaterialRow::new(
             [1.0; 4], 0.8, 0.0, [0.0; 3], 0.0,
         ));
         material.flags = 5; // double-sided + alpha-test

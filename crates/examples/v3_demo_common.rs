@@ -56,7 +56,7 @@ pub fn new_scene_db_with_gpu_mirror_and(
     );
     helio_components::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
-        helio_pass_forward_lit::MAX_LIGHTS,
+        helio_pass_light_cull::MAX_LIGHTS,
         device,
     );
     register_extra(&mut gpu_store);
@@ -142,7 +142,7 @@ impl SceneRays {
             return;
         };
         match projection.prepare(world) {
-            Ok(_) => renderer.set_ray_tracing_frame(projection.frame()),
+            Ok(_) => projection.publish(renderer),
             Err(error) => {
                 if !std::mem::replace(&mut self.failed, true) {
                     log::warn!("scene rays: {error}");
@@ -331,7 +331,7 @@ pub fn make_material(
     emissive: [f32; 3],
     emissive_strength: f32,
 ) -> helio_components::MaterialComponent {
-    MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+    MaterialComponent::from(helio_mats::MaterialRow::new(
         base_color,
         roughness,
         metallic,
@@ -619,7 +619,7 @@ pub fn spawn_light(world: &mut World, light: GpuLight) -> Entity {
     let entity = world.spawn();
     world.insert(
         entity,
-        LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+        LightComponent::from(helio_pass_light_cull::LightRow::from(light)),
     );
     entity
 }
@@ -629,7 +629,7 @@ pub fn spawn_light(world: &mut World, light: GpuLight) -> Entity {
 /// resubmission step exists to call anymore.
 pub fn update_light(world: &mut World, entity: Entity, light: GpuLight) {
     if let Some(mut existing) = world.get_mut::<LightComponent>(entity) {
-        *existing = LightComponent::from(helio_pass_forward_lit::LightRow::from(light));
+        *existing = LightComponent::from(helio_pass_light_cull::LightRow::from(light));
     }
 }
 

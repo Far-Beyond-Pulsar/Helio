@@ -129,7 +129,7 @@ async fn run_default_graph(
     if label == "Budgeted shadows" {
         for i in 0..200 {
             let entity = scene_db.world.spawn();
-            let light = helio_pass_forward_lit::GpuLight {
+            let light = helio_pass_light_cull::GpuLight {
                 position_range: [(i % 20) as f32 * 0.2 - 2.0, 1.0, (i / 20) as f32 * 0.2, 3.0],
                 direction_outer: [0.0, -1.0, 0.0, 0.7],
                 shadow_index: 0,
@@ -138,7 +138,7 @@ async fn run_default_graph(
             };
             scene_db.world.insert(
                 entity,
-                LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+                LightComponent::from(helio_pass_light_cull::LightRow::from(light)),
             );
         }
     }
@@ -276,7 +276,7 @@ fn scene_db_with_gpu_mirror(
     helio_components::StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
     helio_components::LightComponent::register_gpu_columns_growable(
         &mut store,
-        helio_pass_forward_lit::MAX_LIGHTS,
+        helio_pass_light_cull::MAX_LIGHTS,
         device,
     );
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(store), queue.clone());

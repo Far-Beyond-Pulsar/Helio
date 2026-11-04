@@ -48,6 +48,7 @@ ies_demo            = []
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
+helio-mats = { workspace = true }
 helio-mesh-api = { workspace = true }
 bytemuck = { workspace = true }
 helio-components = { path = "../helio-components" }
@@ -58,7 +59,7 @@ helio-presets = { workspace = true }
 helio-asset-compat  = { workspace = true }
 pulsar_scenedb      = { workspace = true }
 helio-pass-gbuffer  = { workspace = true }
-helio-pass-forward-lit = { workspace = true }
+helio-pass-light-cull = { workspace = true }
 helio-pass-sdf      = { workspace = true, optional = true }
 helio-pass-fxaa     = { workspace = true, optional = true }
 helio-pass-postprocess = { workspace = true, optional = true }

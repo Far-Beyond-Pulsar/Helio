@@ -82,7 +82,6 @@ helio-pass-object-batch = { layer = "spine" }
 helio-pass-light-cull = { layer = "spine" }
 helio-pass-shadow = { layer = "spine" }
 helio-pass-shadow-matrix = { layer = "spine" }
-helio-pass-shadow-cull = { layer = "spine" }
 helio-pass-shadow-dirty = { layer = "spine" }
 helio-pass-hiz = { layer = "spine" }
 helio-pass-occlusion-cull = { layer = "spine" }

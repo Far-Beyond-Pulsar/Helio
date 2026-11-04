@@ -19,5 +19,6 @@ log       = { workspace = true }
 
 [dev-dependencies]
 helio-components = { path = "../../../helio-components" }
+helio-mats = { workspace = true }
 pollster = { workspace = true }
 glam = { workspace = true }

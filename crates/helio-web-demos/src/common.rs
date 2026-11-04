@@ -17,7 +17,7 @@ pub fn make_material(
     emissive: [f32; 3],
     emissive_strength: f32,
 ) -> helio_components::MaterialComponent {
-    MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+    MaterialComponent::from(helio_mats::MaterialRow::new(
         base_color,
         roughness,
         metallic,
@@ -141,7 +141,7 @@ pub fn spawn_light(world: &mut World, light: GpuLight) -> Entity {
     let entity = world.spawn();
     world.insert(
         entity,
-        LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+        LightComponent::from(helio_pass_light_cull::LightRow::from(light)),
     );
     entity
 }

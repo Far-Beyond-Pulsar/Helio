@@ -677,7 +677,7 @@ impl AppState {
 
         v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
         if let Some(acceleration) = &self.acceleration {
-            renderer.set_ray_tracing_frame(acceleration.frame());
+            acceleration.publish(&mut renderer);
         }
         if let Err(e) = renderer.render_window_frame(&camera, &self.surface) {
             log::error!("Render error: {:?}", e);

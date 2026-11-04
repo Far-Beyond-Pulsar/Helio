@@ -20,7 +20,7 @@ use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
 
 /// Fixed capacity for the `"scene_lights"` SceneDB buffer, kept equal to
-/// `helio_pass_forward_lit::MAX_LIGHTS`/`helio_pass_light_cull::MAX_LIGHTS`
+/// `helio_pass_light_cull::MAX_LIGHTS`/`helio_pass_light_cull::MAX_LIGHTS`
 /// by construction (all three are literally `DEFAULT_AUTO_REGISTER_CAPACITY`).
 const MAX_LIGHTS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 

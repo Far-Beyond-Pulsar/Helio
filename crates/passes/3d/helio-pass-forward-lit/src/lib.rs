@@ -9,11 +9,7 @@ use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 
-mod components;
-pub mod gpu_types;
-pub use components::SCENE_LIGHTS;
-pub use components::{LightRow, MAX_LIGHTS};
-pub use gpu_types::*;
+use helio_pass_light_cull::{GpuLight, MAX_LIGHTS, SCENE_LIGHTS};
 use pulsar_scenedb::gpu::BufferKey;
 
 const TILE_SIZE: u32 = 16;

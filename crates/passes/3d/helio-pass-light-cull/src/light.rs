@@ -1,11 +1,10 @@
-//! GPU light types.
+//! The light list's row: the GPU light ABI ([`GpuLight`]) and the SceneDB
+//! row engines author it as ([`LightRow`], under [`SCENE_LIGHTS`]).
 //!
-//! Owned by `helio-pass-forward-lit`: forward-lit is the pass most directly
-//! tied to per-light shading data, per the project's "only individual passes
-//! know about specific types" mandate. Other passes that also shade against
-//! lights (deferred-light, light-cull, hlfs, shadow-matrix, voxel-planet)
-//! depend on this crate for the shape, the same way they
-//! already depend on `helio-pass-gbuffer` for materials.
+//! Owned by the lights (this crate bins them and joins them): every pass
+//! that shades against lights (deferred lighting, HLFS, the shadow views,
+//! the meshes' forward and transparent drawers, the voxel terrain) reads
+//! the shape from here.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -229,5 +228,77 @@ mod ray_shadow_tests {
         light.shadow_index = 0;
         assert!(!light.ray_traced_shadows());
         assert_eq!(std::mem::size_of::<GpuLight>(), 128);
+    }
+}
+
+// ── The authored row ──────────────────────────────────────────────────────
+
+/// A placed light, authored as a SceneDB component. Field-for-field
+/// identical to [`GpuLight`] (enforced by the size/align test
+/// below) so conversion is a zero-cost `bytemuck::cast`, matching
+/// `CoronaEmitterRow`'s relationship to `GpuCoronaEmitter`.
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct LightRow {
+    pub position_range: [f32; 4],
+    pub direction_outer: [f32; 4],
+    pub color_intensity: [f32; 4],
+    pub shadow_index: u32,
+    pub light_type: u32,
+    pub inner_angle: f32,
+    pub _pad: u32,
+    pub god_rays_enabled: u32,
+    pub god_rays_density: f32,
+    pub god_rays_weight: f32,
+    pub god_rays_decay: f32,
+    pub god_rays_exposure: f32,
+    pub flare_enabled: u32,
+    pub flare_type: u32,
+    pub flare_intensity: f32,
+    pub flare_scale: f32,
+    pub flare_tint_r: f32,
+    pub flare_tint_g: f32,
+    pub flare_tint_b: f32,
+    pub ies_profile_index: i32,
+    pub light_function_index: i32,
+    pub ies_angle_scale: f32,
+    pub ies_angle_offset: f32,
+}
+
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for LightRow {}
+
+/// The buffer the renderer reads [`LightRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const SCENE_LIGHTS: helio_core::BufferContract<LightRow> =
+    helio_core::BufferContract::new("scene_lights");
+
+impl From<GpuLight> for LightRow {
+    fn from(value: GpuLight) -> Self {
+        bytemuck::cast(value)
+    }
+}
+
+impl From<LightRow> for GpuLight {
+    fn from(value: LightRow) -> Self {
+        bytemuck::cast(value)
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::{GpuLight, LightRow};
+
+    #[test]
+    fn scene_record_matches_light_gpu_abi() {
+        assert_eq!(
+            std::mem::size_of::<LightRow>(),
+            std::mem::size_of::<GpuLight>()
+        );
+        assert_eq!(
+            std::mem::align_of::<LightRow>(),
+            std::mem::align_of::<GpuLight>()
+        );
     }
 }

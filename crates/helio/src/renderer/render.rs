@@ -208,6 +208,11 @@ impl Renderer {
     /// single-layer desktop target. Sampling passes use `depth_sampler_view`,
     /// which exposes layer 0 as a plain D2 view in XR.
     fn submit_frame(&mut self, target: &wgpu::TextureView, multiview: bool) -> HelioResult<()> {
+        // The frame's ray-traced scene, if its builder published one for this
+        // frame (`helio_frame_api::rays`): good for this frame only.
+        let rays = self
+            .scene_payloads
+            .take(&helio_frame_api::rays::SCENE_RAYS);
         helio_core::cpu_scope!("Helio::Renderer::submit_frame");
         self.last_submission = None;
         #[cfg(not(target_arch = "wasm32"))]
@@ -363,42 +368,17 @@ impl Renderer {
                 clear_color: self.clear_color,
                 ambient_color: ambient.color,
                 ambient_intensity: ambient.intensity,
-                tlas: self.ray_frame.tlas(self.frame_count),
+                tlas: rays.as_deref().map(|rays| &rays.tlas),
             },
             "Renderer",
         );
-        if let Some(transmission) = self.ray_frame.transmission(self.frame_count) {
-            resource_registry.write(
-                helio_core::ResourceKey::new("ray_transmission"),
-                transmission,
-                "Renderer",
-            );
+        for (key, buffer) in rays.iter().flat_map(|rays| rays.buffers.iter()) {
+            resource_registry.write(helio_core::ResourceKey::new(*key), buffer, "Renderer");
         }
-        if let Some(instances) = self.ray_frame.instances(self.frame_count) {
-            resource_registry.write(
-                helio_core::ResourceKey::new(helio_core::RAY_INSTANCES),
-                instances,
-                "Renderer",
-            );
-        }
-        if let Some((vertices, indices)) = self.ray_frame.proxies(self.frame_count) {
-            resource_registry.write(
-                helio_core::ResourceKey::new(helio_core::RAY_PROXY_VERTICES),
-                vertices,
-                "Renderer",
-            );
-            resource_registry.write(
-                helio_core::ResourceKey::new(helio_core::RAY_PROXY_INDICES),
-                indices,
-                "Renderer",
-            );
-        }
-        // Every instance
-        // implicitly uses `space_id = 0` (identity) until a real portal/
-        // sublevel producer exists. Without this, `OcclusionCullPass`/
-        // `IndirectDispatchPass`/`ShadowPass`/`ShadowCullPass`/both portal
-        // passes all hard-require this resource and silently never dispatch
-        // without it -- stalling the entire GPU-driven cull pipeline.
+        // Content without a coordinate space of its own uses `space_id = 0`
+        // (identity). Passes that place content by space (an object kind's
+        // culling and drawers, the portals) hard-require this resource and
+        // would never dispatch without it.
         resource_registry.write(
             helio_core::resource_keys::coordinate_spaces(),
             coordinate_spaces,

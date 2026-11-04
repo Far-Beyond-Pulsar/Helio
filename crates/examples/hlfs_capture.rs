@@ -22,7 +22,7 @@ pub fn warm_up_cathedral(
     for _ in 0..4 {
         crate::v3_demo_common::flush_scene_db(scene_db, queue);
         if let Some(acceleration) = acceleration {
-            renderer.set_ray_tracing_frame(acceleration.frame());
+            acceleration.publish(renderer);
         }
         renderer
             .render(camera, target)
@@ -559,7 +559,7 @@ pub fn run_scene_animated(
                 acceleration
                     .prepare(&scene_db.world)
                     .expect("animated capture geometry");
-                renderer.set_ray_tracing_frame(acceleration.frame());
+                acceleration.publish(&mut renderer);
             }
             let after_rt = std::time::Instant::now();
             renderer.render(&camera, &view).expect("cathedral frame");
@@ -951,7 +951,7 @@ pub fn enable_ray_shadows(world: &mut World) {
         let mut component = world
             .get_mut::<helio_components::LightComponent>(id)
             .unwrap();
-        let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
+        let mut light: helio_pass_light_cull::GpuLight = (*component).into();
         light.set_ray_traced_shadows(std::env::var_os("HLFS_UNSHADOWED").is_none());
         *component = light.into();
     }

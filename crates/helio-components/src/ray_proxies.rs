@@ -15,7 +15,7 @@
 //! alpha-tested material is tested on it as on a classic mesh.
 //!
 //! The proxies live in one pool of packed vertices (position, then uv0) and
-//! indices (the `RayProxies` a frame publishes), used directly as BLAS input
+//! indices (the proxy pool a frame publishes, `helio_mesh_api::RAY_PROXY_VERTICES`), used directly as BLAS input
 //! and by shaders that read hit triangles. It only grows by appending; when full it
 //! is reallocated at twice the live size and the live proxies are copied in,
 //! packed (their BLASes rebuild: their input moved). An asset no object uses
@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// Bytes of a pool vertex: a `Float32x3` position, then a `Float32x2` uv0.
-const VERTEX_BYTES: u64 = helio_core::RAY_PROXY_VERTEX_BYTES;
+const VERTEX_BYTES: u64 = helio_mesh_api::RAY_PROXY_VERTEX_BYTES;
 /// The cache's accounting budget for proxies not yet uploaded. Every proxy
 /// an object uses stays (live ones are pinned); this only bounds a single
 /// build ([`ProxyOptions::TRACE_MAX_TRIANGLES`] keeps it far below).

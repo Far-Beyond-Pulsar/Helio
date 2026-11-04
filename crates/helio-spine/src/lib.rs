@@ -1,32 +1,27 @@
 //! Helio's spine as a feature: the core pipeline every preset is built around
 //! and its extension points' neighbours.
 //!
-//! [`SpineFeature`] registers one node per spine pass: scene prep (object
-//! batches, the lights' shadow views, the background, culling, light
-//! binning), deferred lighting, TSR and the tone map, plus the host inputs
-//! they read. Everything else joins at the frame's slots and draw phases
-//! (`helio_frame_api`): the meshes' drawers register from their own crates
-//! (`helio_pass_gbuffer::GBufferDrawers`, …), fog and post-process volumes
-//! from theirs. TSR and the tone map work on the scene colour the colour
-//! chain hands them.
+//! [`SpineFeature`] registers one node per spine pass: scene prep (the
+//! lights' shadow views, the background, the depth pyramid, light binning),
+//! deferred lighting, TSR and the tone map, plus the host inputs they read.
+//! Everything else joins at the frame's slots and draw phases
+//! (`helio_frame_api`): an object kind's batches, culling and drawers
+//! register from its own crates (a meshes plugin's object batch in
+//! `Slot::Prepare`, its culling around the pyramid in `Slot::Visibility`,
+//! its drawers in the phases). TSR and the tone map work on the scene colour
+//! the colour chain hands them.
 //!
 //! The spine knows no renderer: its nodes read the build environment,
 //! [`SpineSettings`] and the lights' `ShadowSettings`, which a graph's builder
 //! sets (Helio's presets map their renderer config into them).
 
-use std::sync::Arc;
-
-use helio_feature_api::{missing, pass_node, BuildEnv, Feature, FeatureRegistrar, ParamDesc};
-use helio_frame_api::{color, host_input};
+use helio_feature_api::{pass_node, BuildEnv, Feature, FeatureRegistrar, ParamDesc};
+use helio_frame_api::{color, host_input, FrameNode, Slot};
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_hiz::HiZBuildPass;
-use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_light_cull::LightCullPass;
-use helio_pass_object_batch::ObjectBatchPass;
-use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_postprocess::PostProcessPass;
-use helio_pass_shadow_dirty::ShadowDirtyPass;
-use helio_pass_shadow_matrix::{ShadowMatrixPass, ShadowSettings};
+use helio_pass_shadow_matrix::{LightDirtyFlags, ShadowMatrixPass, ShadowSettings};
 use helio_pass_tsr::{TsrPass, TsrQuality};
 
 mod background;
@@ -107,9 +102,6 @@ fn tsr_quality(name: &str) -> TsrQuality {
     }
 }
 
-/// The shadow-dirty flags the shadow matrix pass fills and the dirty pass reads.
-struct ShadowDirtyBuffer(Arc<wgpu::Buffer>);
-
 /// The spine's nodes and host inputs.
 pub struct SpineFeature;
 
@@ -130,18 +122,6 @@ impl Feature for SpineFeature {
 
 fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
     const CATEGORY: &str = "Passes: Scene Prep";
-
-    registry.node(pass_node(
-        "object_batch",
-        "Scene: Object Batches",
-        CATEGORY,
-        "Gathers the scene's objects into GPU-driven batches every other pass reads.",
-        |build| {
-            let pass = ObjectBatchPass::new(build.env.device);
-            build.graph.add_pass(Box::new(pass));
-            Ok(())
-        },
-    ));
 
     registry.node(pass_node(
         "shadow_matrix",
@@ -168,14 +148,7 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
                     | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             });
-            let dirty = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Shadow Dirty Flags"),
-                size: helio_pass_shadow_matrix::MAX_SHADOW_CASTERS as u64 * 4,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            let dirty = LightDirtyFlags::new(device);
             let hashes = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Shadow Hashes"),
                 size: helio_pass_shadow_matrix::MAX_SHADOW_CASTERS as u64 * 4,
@@ -189,30 +162,13 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
                     &lights.buffer,
                     &matrices,
                     build.env.camera_buffer,
-                    &dirty,
+                    &dirty.0,
                     &hashes,
                     atlas_size,
                 )
                 .with_budget(budget, ih),
             ));
-            build.env.shared(|| ShadowDirtyBuffer(dirty));
-            Ok(())
-        },
-    ));
-
-    registry.node(pass_node(
-        "shadow_dirty",
-        "Shadows: Find Stale Faces",
-        CATEGORY,
-        "Marks which shadow faces need re-rendering this frame.",
-        |build| {
-            let dirty = build
-                .env
-                .shared_existing::<ShadowDirtyBuffer>()
-                .map(|shared| Arc::clone(&shared.0))
-                .ok_or_else(|| missing("Shadow Dirty Flags", "Shadow Matrices"))?;
-            let pass = ShadowDirtyPass::new(build.env.device, dirty);
-            build.graph.add_pass(Box::new(pass));
+            build.env.shared(|| dirty);
             Ok(())
         },
     ));
@@ -232,55 +188,21 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
         },
     ));
 
-    registry.node(pass_node(
-        "indirect_dispatch",
-        "Culling: Prepare Dispatch",
-        CATEGORY,
-        "Prepares the indirect dispatch arguments the culling passes use.",
-        |build| {
-            let pass =
-                IndirectDispatchPass::new(build.env.device, build.env.cull_stats_buffer.clone());
-            build.graph.add_pass(Box::new(pass));
-            Ok(())
-        },
-    ));
-
-    registry.node(pass_node(
-        "hiz",
-        "Culling: Depth Pyramid (Hi-Z)",
-        CATEGORY,
-        "Builds the hierarchical depth pyramid occlusion culling tests against.",
-        |build| {
-            let (iw, ih) = build.env.internal_size();
-            let pass = HiZBuildPass::new(build.env.device, build.env.queue, iw, ih);
-            build.graph.add_pass(Box::new(pass));
-            Ok(())
-        },
-    ));
-
-    registry.node(pass_node(
-        "occlusion_cull",
-        "Culling: Frustum + Occlusion",
-        CATEGORY,
-        "Frustum and Hi-Z occlusion culling of the object batch.",
-        |build| {
-            let (iw, ih) = build.env.internal_size();
-            let sampler = build
-                .graph
-                .find_pass::<HiZBuildPass>()
-                .map(|hiz| Arc::clone(&hiz.hiz_sampler))
-                .ok_or_else(|| missing("Occlusion Cull", "Hi-Z Build"))?;
-            let pass = OcclusionCullPass::new(
-                build.env.device,
-                sampler,
-                iw,
-                ih,
-                build.env.cull_stats_buffer.clone(),
-            );
-            build.graph.add_pass(Box::new(pass));
-            Ok(())
-        },
-    ));
+    registry.node(
+        pass_node(
+            "hiz",
+            "Culling: Depth Pyramid (Hi-Z)",
+            CATEGORY,
+            "Builds the hierarchical depth pyramid occlusion culling tests against.",
+            |build| {
+                let (iw, ih) = build.env.internal_size();
+                let pass = HiZBuildPass::new(build.env.device, build.env.queue, iw, ih);
+                build.graph.add_pass(Box::new(pass));
+                Ok(())
+            },
+        )
+        .in_slot(Slot::Visibility, 0),
+    );
 
     registry.node(pass_node(
         "light_cull",

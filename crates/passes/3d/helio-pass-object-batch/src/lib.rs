@@ -19,6 +19,8 @@
 //! step, tracked apart from this crate.
 
 pub mod scene_join;
+pub mod feature;
+pub use feature::ObjectBatchFeature;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};

@@ -383,7 +383,7 @@ impl AppState {
                 .get_mut::<helio_components::LightComponent>(self.light_p0_entity)
                 .expect("SceneDB animated light disappeared")
                 .clone_from(&LightComponent::from(
-                    helio_pass_forward_lit::LightRow::from(point_light(
+                    helio_pass_light_cull::LightRow::from(point_light(
                         p0,
                         [1.0, 0.55, 0.15],
                         6.0,

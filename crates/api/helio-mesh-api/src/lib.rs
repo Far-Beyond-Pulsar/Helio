@@ -1,12 +1,28 @@
 //! The meshes' public contract: what their components author (the packed
-//! vertex layout and mesh uploads) and the rows their ray-tracing projection
-//! publishes after the frame's TLAS (`helio_core::RAY_INSTANCES`). No state;
-//! a feature that reads meshes depends on this crate, never on the meshes'
-//! passes.
+//! vertex layout and mesh uploads) and the buffers their ray-tracing
+//! projection publishes beside the frame's TLAS
+//! (`helio_frame_api::rays::SceneRays`): the instance rows
+//! ([`RAY_INSTANCES`]) and the proxy pool ([`RAY_PROXY_VERTICES`],
+//! [`RAY_PROXY_INDICES`]). No state; a feature that reads meshes depends on
+//! this crate, never on the meshes' passes.
 
 mod asset_types;
 
 pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
+
+/// Graph key of the rows that follow the frame's TLAS instance order, a
+/// [`RayInstance`] an instance.
+pub const RAY_INSTANCES: &str = "ray_instances";
+/// Graph key of the proxy pool's vertices: the triangles of the instances
+/// traced through a proxy ([`RAY_INSTANCE_PROXY`]), packed vertices of
+/// [`RAY_PROXY_VERTEX_BYTES`] (a `Float32x3` position, then a `Float32x2`
+/// UV), addressed as the mesh pools are (`first_index + 3p`, plus
+/// `base_vertex`).
+pub const RAY_PROXY_VERTICES: &str = "ray_proxy_vertices";
+/// Graph key of the proxy pool's mesh-local `u32` indices.
+pub const RAY_PROXY_INDICES: &str = "ray_proxy_indices";
+/// Bytes of a proxy pool vertex: position, then UV.
+pub const RAY_PROXY_VERTEX_BYTES: u64 = 20;
 
 /// The surface of a TLAS instance, for shading ray hits without a G-buffer
 /// (`ray_instances` rows, indexed by TLAS instance index): where its
@@ -27,7 +43,7 @@ pub use asset_types::{MeshUpload, PackedVertex, SectionedMeshUpload};
 ///
 /// An instance flagged [`RAY_INSTANCE_PROXY`] is traced through a proxy of
 /// its geometry (a coarse cut of a virtual-geometry asset): its triangles are
-/// in the frame's proxy pool (`helio_core::RayProxies`) instead, positions and UVs
+/// in the frame's proxy pool ([`RAY_PROXY_VERTICES`]) instead, positions and UVs
 /// only, and a hit's normal is its triangle's face (the winding says
 /// outside).
 #[repr(C)]
@@ -50,7 +66,7 @@ pub struct RayInstance {
 }
 
 /// [`RayInstance::flags`]: the instance's triangles are in the frame's proxy
-/// pool (`helio_core::RayProxies`), not the scene's mesh pools.
+/// pool ([`RAY_PROXY_VERTICES`]), not the scene's mesh pools.
 pub const RAY_INSTANCE_PROXY: u32 = 1;
 /// [`RayInstance::flags`]: an alpha-tested cut-out (see [`RayInstance`]).
 pub const RAY_INSTANCE_MASKED: u32 = 2;

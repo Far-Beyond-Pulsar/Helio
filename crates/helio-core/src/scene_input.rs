@@ -184,6 +184,20 @@ impl ScenePayloads {
             .and_then(|(_, value)| value.clone().downcast::<T>().ok())
     }
 
+    /// Removes and returns the payload published under `contract`: a
+    /// payload good for one frame.
+    pub fn take<T: std::any::Any + Send + Sync>(
+        &mut self,
+        contract: &PayloadContract<T>,
+    ) -> Option<Arc<T>> {
+        let index = self.entries.iter().position(|(k, _)| *k == contract.key)?;
+        self.entries
+            .remove(index)
+            .1
+            .downcast::<T>()
+            .ok()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -366,4 +380,22 @@ pub trait SceneInput {
     /// f32-pair world positions). Planet centres are the one exception:
     /// world anchors, which the passes rebase by this origin.
     fn world_origin(&self) -> glam::DVec3;
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::*;
+
+    const ONE_FRAME: PayloadContract<u32> = PayloadContract::new("one_frame");
+    const KEPT: PayloadContract<u32> = PayloadContract::new("kept");
+
+    #[test]
+    fn a_taken_payload_is_gone_and_the_others_stay() {
+        let mut payloads = ScenePayloads::default();
+        payloads.insert(&ONE_FRAME, Arc::new(7));
+        payloads.insert(&KEPT, Arc::new(9));
+        assert_eq!(payloads.take(&ONE_FRAME).as_deref(), Some(&7));
+        assert!(payloads.take(&ONE_FRAME).is_none(), "good for one frame");
+        assert_eq!(payloads.get(&KEPT).as_deref(), Some(&9));
+    }
 }

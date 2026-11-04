@@ -213,7 +213,7 @@ impl ApplicationHandler for App {
                     acceleration
                         .prepare(&s.scene_db.world)
                         .expect("scene acceleration");
-                    s.renderer.set_ray_tracing_frame(acceleration.frame());
+                    acceleration.publish(&mut s.renderer);
                 }
                 s.renderer
                     .render_window_frame(&camera, &s.surface)

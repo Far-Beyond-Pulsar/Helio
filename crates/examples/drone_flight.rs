@@ -568,7 +568,7 @@ impl AppState {
             acceleration
                 .prepare(&self.scene_db.world)
                 .expect("cathedral RT geometry");
-            renderer.set_ray_tracing_frame(acceleration.frame());
+            acceleration.publish(&mut renderer);
         }
         if let Err(e) = renderer.render_window_frame(&camera, &self.surface) {
             log::error!("Render error: {:?}", e);

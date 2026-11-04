@@ -28,6 +28,8 @@ pub use helio_frame_api::{host_kind, HOST_INPUTS};
 pub fn default_features() -> FeatureSet {
     FeatureSet::new()
         .with(helio_spine::SpineFeature)
+        .with(helio_pass_object_batch::ObjectBatchFeature)
+        .with(helio_pass_occlusion_cull::MeshCulling)
         .with(helio_pass_gbuffer::GBufferDrawers)
         .with(helio_pass_shadow::ShadowDrawers)
         .with(helio_pass_forward_lit::ForwardDrawers)

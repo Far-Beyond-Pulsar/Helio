@@ -17,6 +17,9 @@
 
 use std::sync::Arc;
 
+pub mod feature;
+pub use feature::MeshCulling;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 

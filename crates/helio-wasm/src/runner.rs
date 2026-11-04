@@ -551,7 +551,7 @@ fn new_scene_db_with_gpu_mirror(
     );
     helio_components::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
-        helio_pass_forward_lit::MAX_LIGHTS,
+        helio_pass_light_cull::MAX_LIGHTS,
         device,
     );
 

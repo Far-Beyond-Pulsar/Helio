@@ -42,8 +42,8 @@ pub mod draw_slots;
 mod indirect_draw;
 mod object_batch_frame_data;
 pub use components::{
-    MaterialRow, RenderGroupRow, StaticObjectRow, SubLevelActorRow, SubLevelIndex,
-    DEFAULT_SUBLEVEL_INDEX, MATERIALS, MESH_INDICES, MESH_VERTICES, RENDER_GROUPS, STATIC_OBJECTS,
+    RenderGroupRow, StaticObjectRow, SubLevelActorRow, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX,
+    MESH_INDICES, MESH_VERTICES, RENDER_GROUPS, STATIC_OBJECTS,
 };
 pub use coordinate_spaces_frame_data::CoordinateSpacesFrameData;
 pub use culled_batch_frame_data::CulledBatchFrameData;
@@ -137,7 +137,7 @@ pub struct GBufferPass {
     /// Portal/sublevel-local transforms, indexed by an instance's `space_id`.
     /// Pass-owned (not `Renderer`-owned): every consumer of `"coordinate_
     /// spaces"` (`OcclusionCullPass`, `IndirectDispatchPass`, `ShadowPass`,
-    /// `ShadowCullPass`, both portal passes) needs `space_id 0` to always
+    /// both portal passes) needs `space_id 0` to always
     /// resolve to identity even when nothing authors portal/sublevel content,
     /// and `GBufferPass` is the one pass guaranteed present in every graph --
     /// see `helio_pass_gbuffer::CoordinateSpacesFrameData`'s doc for the

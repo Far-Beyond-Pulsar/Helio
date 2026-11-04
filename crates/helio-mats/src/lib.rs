@@ -9,12 +9,13 @@
 //! pass owning it centrally or the host reaching into a specific pass.
 //!
 //! Holds no scene storage of its own: persistent material authoring is a
-//! SceneDB component (`engine_backend::scene::MaterialRow` /
-//! `helio_pass_gbuffer::MaterialRow`); this crate only defines the GPU
-//! row layout and shading/template machinery those components project into.
+//! SceneDB component storing a [`MaterialRow`] under [`MATERIALS`]; this
+//! crate only defines the row layout and shading/template machinery those
+//! components project into.
 
 pub mod material;
 pub mod radiant;
+pub mod row;
 pub mod shader;
 pub mod texture_mips;
 pub mod vg_alpha;
@@ -28,6 +29,7 @@ pub use material::{
     MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_CUSTOM, MATERIAL_CLASS_DEFAULT, MATERIAL_CLASS_SKIN,
     MATERIAL_CLASS_SUBSURFACE, MAX_MATERIAL_TEXTURES,
 };
+pub use row::{MaterialRow, MATERIALS};
 pub use radiant::{
     graph_source, register_graph_source, RadiantGraphRegistry, RadiantShaderCache,
     RadiantShaderKey, RadiantTemplate, RadiantTemplateRegistry, SharedTemplateRegistry,

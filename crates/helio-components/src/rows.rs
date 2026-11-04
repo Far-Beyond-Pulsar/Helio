@@ -103,7 +103,7 @@ pub struct LightComponent {
     #[gpu]
     pub ies_angle_offset: f32,
 }
-same_layout!(LightComponent, helio_pass_forward_lit::LightRow, helio_pass_forward_lit::SCENE_LIGHTS, "scene_lights"; position_range, direction_outer, color_intensity, shadow_index, light_type, inner_angle, _pad, god_rays_enabled, god_rays_density, god_rays_weight, god_rays_decay, god_rays_exposure, flare_enabled, flare_type, flare_intensity, flare_scale, flare_tint_r, flare_tint_g, flare_tint_b, ies_profile_index, light_function_index, ies_angle_scale, ies_angle_offset);
+same_layout!(LightComponent, helio_pass_light_cull::LightRow, helio_pass_light_cull::SCENE_LIGHTS, "scene_lights"; position_range, direction_outer, color_intensity, shadow_index, light_type, inner_angle, _pad, god_rays_enabled, god_rays_density, god_rays_weight, god_rays_decay, god_rays_exposure, flare_enabled, flare_type, flare_intensity, flare_scale, flare_tint_r, flare_tint_g, flare_tint_b, ies_profile_index, light_function_index, ies_angle_scale, ies_angle_offset);
 
 /// A material authored as a SceneDB component.
 ///
@@ -140,7 +140,7 @@ pub struct MaterialComponent {
     #[gpu]
     pub class_params: [f32; 4],
 }
-same_layout!(MaterialComponent, helio_pass_gbuffer::MaterialRow, helio_pass_gbuffer::MATERIALS, "materials"; base_color, emissive, roughness_metallic, tex_base_color, tex_normal, tex_roughness, tex_emissive, tex_occlusion, workflow, flags, material_class, class_params);
+same_layout!(MaterialComponent, helio_mats::MaterialRow, helio_mats::MATERIALS, "materials"; base_color, emissive, roughness_metallic, tex_base_color, tex_normal, tex_roughness, tex_emissive, tex_occlusion, workflow, flags, material_class, class_params);
 
 /// Stable group membership. `group_mask == 0` means always visible.
 #[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
@@ -257,27 +257,27 @@ impl From<ReflectionCaptureComponent> for helio_pass_deferred_light::GpuReflecti
     }
 }
 
-impl From<helio_pass_forward_lit::GpuLight> for LightComponent {
-    fn from(value: helio_pass_forward_lit::GpuLight) -> Self {
-        helio_pass_forward_lit::LightRow::from(value).into()
+impl From<helio_pass_light_cull::GpuLight> for LightComponent {
+    fn from(value: helio_pass_light_cull::GpuLight) -> Self {
+        helio_pass_light_cull::LightRow::from(value).into()
     }
 }
 
-impl From<LightComponent> for helio_pass_forward_lit::GpuLight {
+impl From<LightComponent> for helio_pass_light_cull::GpuLight {
     fn from(value: LightComponent) -> Self {
-        helio_pass_forward_lit::LightRow::from(value).into()
+        helio_pass_light_cull::LightRow::from(value).into()
     }
 }
 
 impl From<helio_mats::GpuMaterial> for MaterialComponent {
     fn from(value: helio_mats::GpuMaterial) -> Self {
-        helio_pass_gbuffer::MaterialRow::from(value).into()
+        helio_mats::MaterialRow::from(value).into()
     }
 }
 
 impl From<MaterialComponent> for helio_mats::GpuMaterial {
     fn from(value: MaterialComponent) -> Self {
-        helio_pass_gbuffer::MaterialRow::from(value).into()
+        helio_mats::MaterialRow::from(value).into()
     }
 }
 

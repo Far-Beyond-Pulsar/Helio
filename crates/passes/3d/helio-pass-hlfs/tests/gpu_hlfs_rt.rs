@@ -69,7 +69,7 @@ fn empty_scene(f: &mut Fixture) {
     f.queue.submit([encoder.finish()]);
 }
 
-fn light() -> helio_pass_forward_lit::GpuLight {
+fn light() -> helio_pass_light_cull::GpuLight {
     let mut light = point([10.0, 0.0, 2.0], [1.0, 1.0, 1.0], 10000.0);
     light.position_range[3] = 100.0;
     light.shadow_index = u32::MAX;
@@ -1595,8 +1595,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();
-            f.ray_frame
-                .publish(f.scene.frame_count, acceleration.frame());
+            f.rays = acceleration.scene_rays();
             f.frame();
             mean(&f.read())
         };
@@ -1625,7 +1624,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         let material = db.world.spawn();
         db.world.insert(
             material,
-            MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+            MaterialComponent::from(helio_mats::MaterialRow::new(
                 [1.0; 4], 0.5, 0.0, [0.0; 3], 0.0,
             )),
         );
@@ -1665,7 +1664,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         let opaque_material = db.world.spawn();
         db.world.insert(
             opaque_material,
-            MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+            MaterialComponent::from(helio_mats::MaterialRow::new(
                 [1.0; 4], 0.5, 0.0, [0.0; 3], 0.0,
             )),
         );
@@ -1776,8 +1775,7 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
                       db: &pulsar_scenedb::SceneDb| {
             db.world.flush_gpu_mirror(&f.queue);
             acceleration.prepare(&db.world).unwrap();
-            f.ray_frame
-                .publish(f.scene.frame_count, acceleration.frame());
+            f.rays = acceleration.scene_rays();
             f.frame();
             mean(&f.read())
         };
@@ -1803,7 +1801,7 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
         let material = db.world.spawn();
         db.world.insert(
             material,
-            MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+            MaterialComponent::from(helio_mats::MaterialRow::new(
                 [1.0; 4], 0.5, 0.0, [0.0; 3], 0.0,
             )),
         );

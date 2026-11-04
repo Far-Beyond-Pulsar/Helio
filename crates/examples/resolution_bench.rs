@@ -393,7 +393,7 @@ fn cast_shadows_from_every_light(world: &mut World) {
         .collect();
     for entity in entities {
         if let Some(light) = world.get::<helio_components::LightComponent>(entity) {
-            let mut gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+            let mut gpu: helio_pass_light_cull::GpuLight = (*light).into();
             gpu.shadow_index = 0;
             update_light(world, entity, gpu);
         }
@@ -405,7 +405,7 @@ fn spawn_light_billboards(world: &mut World) {
     let positions: Vec<[f32; 4]> = world
         .query::<(&helio_components::LightComponent,)>()
         .map(|(_, (light,))| {
-            let gpu: helio_pass_forward_lit::GpuLight = (*light).into();
+            let gpu: helio_pass_light_cull::GpuLight = (*light).into();
             gpu.position_range
         })
         .filter(|p| p[3] < f32::MAX)

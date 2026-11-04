@@ -688,7 +688,7 @@ fn upload_scene_rows(
 }
 
 fn fallback_material() -> MaterialComponent {
-    MaterialComponent::from(helio_pass_gbuffer::MaterialRow::from(GpuMaterial {
+    MaterialComponent::from(helio_mats::MaterialRow::from(GpuMaterial {
         base_color: [0.7, 0.65, 0.55, 1.0],
         emissive: [0.0; 4],
         roughness_metallic: [0.6, 0.0, 1.5, 0.0],
@@ -748,7 +748,7 @@ fn insert_light(world: &mut World, light: GpuLight) -> Entity {
     let entity = world.spawn();
     world.insert(
         entity,
-        LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+        LightComponent::from(helio_pass_light_cull::LightRow::from(light)),
     );
     entity
 }
@@ -1072,7 +1072,7 @@ impl SnapshotBatch {
             let light = self.scene_db.world.spawn();
             self.scene_db.world.insert(
                 light,
-                LightComponent::from(helio_pass_forward_lit::LightRow::from(GpuLight {
+                LightComponent::from(helio_pass_light_cull::LightRow::from(GpuLight {
                     position_range: [0.0, 0.0, 0.0, f32::MAX],
                     direction_outer: [dir.x, dir.y, dir.z, 0.0],
                     color_intensity: [color[0], color[1], color[2], intensity],

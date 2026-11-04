@@ -269,18 +269,33 @@ impl SceneDbRayTracing {
         self.tlas.tlas()
     }
 
-    /// The frame to publish (`Renderer::set_ray_tracing_frame`): the TLAS
-    /// and its rows, valid after a successful preparation.
-    pub fn frame(&self) -> helio_core::RayFrame<'_> {
-        let tlas = self.tlas();
-        helio_core::RayFrame {
-            tlas,
-            transmission: tlas.and(self.transmission()),
-            instances: tlas.and(self.instances_buffer.as_ref()),
-            proxies: tlas
-                .and(self.vg.as_ref())
-                .and_then(VgRayProxies::buffers)
-                .map(|(vertices, indices)| helio_core::RayProxies { vertices, indices }),
+    /// The frame's ray-traced scene (`helio_frame_api::rays::SCENE_RAYS`):
+    /// the TLAS and the buffers that follow it, after a successful
+    /// preparation.
+    pub fn scene_rays(&self) -> Option<helio_frame_api::rays::SceneRays> {
+        let mut rays = helio_frame_api::rays::SceneRays::new(self.tlas()?.clone());
+        if let Some(transmission) = self.transmission() {
+            rays = rays.with(helio_frame_api::rays::RAY_TRANSMISSION, transmission.clone());
+        }
+        if let Some(instances) = &self.instances_buffer {
+            rays = rays.with(helio_mesh_api::RAY_INSTANCES, instances.clone());
+        }
+        if let Some((vertices, indices)) = self.vg.as_ref().and_then(VgRayProxies::buffers) {
+            rays = rays
+                .with(helio_mesh_api::RAY_PROXY_VERTICES, vertices.clone())
+                .with(helio_mesh_api::RAY_PROXY_INDICES, indices.clone());
+        }
+        Some(rays)
+    }
+
+    /// Publishes [`Self::scene_rays`] for `renderer`'s next frame (nothing
+    /// when the preparation failed: that frame has no TLAS).
+    pub fn publish(&self, renderer: &mut helio::Renderer) {
+        if let Some(rays) = self.scene_rays() {
+            renderer.set_scene_payload(
+                &helio_frame_api::rays::SCENE_RAYS,
+                std::sync::Arc::new(rays),
+            );
         }
     }
 
@@ -554,7 +569,7 @@ impl SceneDbRayTracing {
                                     vertices,
                                     first_vertex: range.first_vertex,
                                     vertex_count: range.vertex_count,
-                                    vertex_stride: helio_core::RAY_PROXY_VERTEX_BYTES,
+                                    vertex_stride: helio_mesh_api::RAY_PROXY_VERTEX_BYTES,
                                     indices: Some(proxy_indices),
                                     first_index: range.first_index,
                                     index_count: range.index_count,

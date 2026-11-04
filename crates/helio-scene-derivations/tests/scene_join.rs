@@ -299,7 +299,7 @@ fn base_scene() -> Scene {
             [0.0, 0.0, 0.0, 1.0],
         ],
     );
-    scene.put(KEYS.mesh_flags, &[0u32, helio::INSTANCE_FLAG_MOVABLE, 0, 0]);
+    scene.put(KEYS.mesh_flags, &[0u32, helio_pass_object_batch::INSTANCE_FLAG_MOVABLE, 0, 0]);
     scene.put(KEYS.section_handles, &[[0u32, 0], [0, 2], [0, 0], [2, 1]]);
     let section = |first_index, index_count, base| Section {
         first_index,
@@ -384,7 +384,7 @@ fn placed_instances_are_joined_with_their_owner_and_nothing_else_is() {
             100,
             0,
             0,
-            helio::INSTANCE_FLAG_MOVABLE,
+            helio_pass_object_batch::INSTANCE_FLAG_MOVABLE,
         ));
         let got = objects[slot as usize];
         assert_eq!(

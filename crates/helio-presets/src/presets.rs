@@ -150,16 +150,14 @@ impl Preset {
         }
         let aa = self.aa(config);
 
-        // Scene prep: batches, per-frame tables, the lights' shadow views and
-        // their casters, culling.
-        nodes.pass("object_batch");
+        // Scene prep: per-frame tables (an object kind's batches first), the
+        // lights' shadow views and what casts into them, the background,
+        // visibility against the depth pyramid.
         nodes.slot(Slot::Prepare);
         nodes.pass("shadow_matrix");
-        nodes.pass("shadow_dirty");
         nodes.phase(Phase::ShadowCasters);
-        for name in ["background", "indirect_dispatch", "hiz", "occlusion_cull"] {
-            nodes.pass(name);
-        }
+        nodes.pass("background");
+        nodes.slot(Slot::Visibility);
         if !self.hlfs() {
             nodes.pass("light_cull");
         }

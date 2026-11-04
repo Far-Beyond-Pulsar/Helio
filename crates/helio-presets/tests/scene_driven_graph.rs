@@ -67,7 +67,7 @@ fn floor(world: &mut pulsar_scenedb::World) {
     let mesh = world.spawn();
     world.insert(mesh, MeshComponent { vertices, indices });
     let material = world.spawn();
-    let row = MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+    let row = MaterialComponent::from(helio_mats::MaterialRow::new(
         [0.7, 0.7, 0.7, 1.0],
         0.8,
         0.0,

@@ -16,6 +16,7 @@ helio-mesh-api = { workspace = true }
 helio = { path = "../helio" }
 helio-bake = { path = "../helio-bake", optional = true }
 helio-core = { workspace = true }
+helio-frame-api = { path = "../helio-frame-api" }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
 # `#[derive(SceneStore)]` expands to `::serde_json`, `::wgpu` and reflection paths.
@@ -33,7 +34,7 @@ helio-scene-derivations = { path = "../helio-scene-derivations" }
 helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
 helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
-helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
+helio-pass-light-cull = { workspace = true }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 

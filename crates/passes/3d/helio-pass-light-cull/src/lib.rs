@@ -18,13 +18,16 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 pub mod gpu_types;
 pub use gpu_types::*;
+pub mod light;
+pub use light::{GpuLight, LightRow, LightType, SCENE_LIGHTS};
 use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
 
 pub const TILE_SIZE: u32 = 16;
 pub const MAX_LIGHTS_PER_TILE: u32 = 64;
-/// Initial capacity of the `"scene_lights"` SceneDB buffer (equal to
-/// `helio_pass_forward_lit::MAX_LIGHTS`). The buffer grows past it; passes
-/// iterate its live `BufferHandle::row_capacity()`, never this constant.
+/// Initial capacity of the `"scene_lights"` buffer ([`SCENE_LIGHTS`]):
+/// `World`'s own auto-registration capacity, and the capacity frontends
+/// register it with. The buffer grows past it; passes iterate its live
+/// `BufferHandle::row_capacity()`, never this constant.
 pub const MAX_LIGHTS: u32 = DEFAULT_AUTO_REGISTER_CAPACITY;
 
 #[cfg(test)]
