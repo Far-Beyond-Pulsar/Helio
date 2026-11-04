@@ -331,7 +331,7 @@ impl Renderer {
             .map(|v| v as &wgpu::TextureView)
         {
             resource_registry.write(
-                helio_core::ResourceKey::new("full_res_depth"),
+                helio_core::ResourceKey::new(helio_frame_api::depth::FULL_RES_DEPTH),
                 v,
                 "Renderer",
             );

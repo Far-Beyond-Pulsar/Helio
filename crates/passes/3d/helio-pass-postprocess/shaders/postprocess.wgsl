@@ -1,9 +1,7 @@
 //!use helio_prelude
 // ── Helio Post-Processing Pipeline ─────────────────────────────────────────────
 //
-// Opts into the prelude for the froxel depth<->slice mapping, which the fog
-// composite must perform *identically* to the fog pass that fills the grid. The
-// prelude's `Camera` is unused here — this file keeps its own `CameraUniforms`.
+// Opts into the prelude for the frame's `Camera` and depth conventions.
 //
 // Bind groups:
 //   @group(0) — main: uniforms, samplers, hdr/depth inputs, bloom sampled, avg_lum,
@@ -47,21 +45,11 @@ const WG_EXPOSURE_Y: u32 = 16u;
 // (no exposure, bloom, grade or tone curve). Set per pipeline.
 override DEBUG_VIEW: bool = false;
 
-struct CameraUniforms {
-    view:           mat4x4<f32>,
-    proj:           mat4x4<f32>,
-    view_proj:      mat4x4<f32>,
-    inv_view_proj:  mat4x4<f32>,
-    position_near:  vec4<f32>,
-    forward_far:    vec4<f32>,
-    jitter_frame:   vec4<f32>,
-    prev_view_proj: mat4x4<f32>,
-}
 
 // ── Group 0: main bindings ─────────────────────────────────────────────────────
 
 @group(0) @binding(0)  var<uniform>            postprocess:  GpuPostProcessUniforms;
-@group(0) @binding(1)  var<storage, read> cameras: array<CameraUniforms, 2>;
+@group(0) @binding(1)  var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(2)  var                     hdr_input:    texture_2d<f32>;
 @group(0) @binding(3)  var                     depth_input:  texture_depth_2d;
 @group(0) @binding(4)  var                     linear_samp:  sampler;
@@ -83,10 +71,10 @@ struct CameraUniforms {
 @group(0) @binding(12) var                     noise_tex:    texture_2d<f32>;
 @group(0) @binding(13) var                     noise_samp:   sampler;
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
-// Scene-linear lens response (fs_uber only), published by LensFlarePass at
-// reduced resolution from the same pre-exposure image. Participating media are
-// already composited into hdr_input by FogCompositePass. Bound to a 1x1 black
-// fallback when no lens pass is in the graph.
+// The frame's glare (fs_uber only; `helio_frame_api::color::glare`): a
+// scene-linear optical response, usually at reduced resolution from the same
+// pre-exposure image. Participating media are already composited into
+// hdr_input. Bound to a 1x1 black fallback when nothing published glare.
 @group(0) @binding(17) var                     lens_input:   texture_2d<f32>;
 // Local exposure's bilateral grid: (sum of EV, weight) per screen cell and
 // luminance bin as gathered (cs_local_exposure_grid) and blurred

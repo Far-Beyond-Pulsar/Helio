@@ -1,3 +1,4 @@
+//!use helio_prelude
 // SDF Ray March — fullscreen triangle fragment shader
 //
 // Sphere-traces through the clip-map SDF volume, reading trilinearly-
@@ -5,24 +6,10 @@
 // colour and depth so the SDF integrates with the deferred pipeline.
 //
 // Bind group 0:
-//   b0:  storage read  cameras array<CameraUniform, 2>
+//   b0:  storage read  cameras array<Camera, 2>
 //   b1:  uniform  clip map params (SdfClipMapParams)
 //   b2-b9:  storage read  atlas buffer per level (8 levels)
 //   b10: storage read  all_brick_indices (concatenated per-level)
-
-// ── Camera storage ─────────────────────────────────────────────────────────
-
-// Must match libhelio::camera::GpuCameraUniforms exactly.
-struct CameraUniform {
-    view: mat4x4<f32>,
-    proj: mat4x4<f32>,
-    view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    position_near: vec4<f32>,   // xyz = pos, w = near
-    forward_far: vec4<f32>,     // xyz = forward, w = far
-    jitter_frame: vec4<f32>,    // xy = jitter, z = frame, w = pad
-    prev_view_proj: mat4x4<f32>,
-};
 
 // ── Clip config (static, matches sdf_scroll.wgsl ClipConfig exactly) ───────
 
@@ -59,7 +46,7 @@ struct ScrollState {
 
 // ── Bindings ────────────────────────────────────────────────────────────────
 
-@group(0) @binding(0)  var<storage, read> cameras: array<CameraUniform, 2>;
+@group(0) @binding(0)  var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(1)  var<uniform>         clip_config:      ClipConfig;
 @group(0) @binding(2)  var<storage, read>   scroll_state:     ScrollState;
 
@@ -386,7 +373,7 @@ fn fs_main(in: VsOutput) -> FsOutput {
     // Reversed depth: NDC z = 0 is infinitely far, so its unprojection has
     // w = 0. Taken homogeneously (minus w times the eye) it is the ray
     // direction itself, with no division to blow up.
-    let far_h = cameras[0].inv_view_proj * vec4<f32>(ndc, 0.0, 1.0);
+    let far_h = cameras[0].view_proj_inv * vec4<f32>(ndc, 0.0, 1.0);
     let ray_origin = cameras[0].position_near.xyz;
     let ray_dir = normalize(far_h.xyz - far_h.w * ray_origin);
 

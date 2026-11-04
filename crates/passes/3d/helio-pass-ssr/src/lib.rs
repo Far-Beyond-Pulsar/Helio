@@ -164,7 +164,10 @@ impl SsrPass {
                 device,
                 "SSR RT Trace Shader",
                 helio_core::include_wgsl!("../shaders/ssr_trace_rt.wgsl"),
-                &[helio_pass_hiz::HIZ_SNIPPET],
+                &[
+                    helio_pass_hiz::HIZ_SNIPPET,
+                    helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
+                ],
             );
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -232,7 +235,7 @@ impl RenderPass for SsrPass {
         _ctx: &helio_core::PrepareContext,
         demands: &mut helio_core::FrameDemands,
     ) {
-        demands.demand("hiz_nearest");
+        demands.demand(helio_frame_api::depth::HIZ_NEAREST);
     }
 
     fn name(&self) -> &'static str {
@@ -241,12 +244,12 @@ impl RenderPass for SsrPass {
 
     fn reads(&self) -> &'static [&'static str] {
         &[
-            "gbuffer",
-            "depth",
-            "hiz_nearest",
-            "pre_aa",
-            "render_environment",
-            "ray_transmission",
+            helio_frame_api::gbuffer::GROUP,
+            helio_frame_api::gbuffer::DEPTH,
+            helio_frame_api::depth::HIZ_NEAREST,
+            helio_frame_api::color::SCENE_COLOR,
+            helio_core::resource_keys::RENDER_ENVIRONMENT,
+            helio_frame_api::rays::RAY_TRANSMISSION,
         ]
     }
 
@@ -282,7 +285,7 @@ impl RenderPass for SsrPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let gbuffer = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
-            helio_core::ResourceKey::new("gbuffer"),
+            helio_core::ResourceKey::new(helio_frame_api::gbuffer::GROUP),
             "SsrPass",
         ) {
             Some(g) => g,
@@ -291,11 +294,11 @@ impl RenderPass for SsrPass {
 
         let depth_view = ctx.depth;
         let pre_aa_view: &wgpu::TextureView =
-            match ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
+            match ctx.registry.get(helio_core::ResourceKey::new(helio_frame_api::color::SCENE_COLOR)) {
                 Some(v) => v,
                 None => return Ok(()),
             };
-        let hiz_nearest_view = match ctx.resource_pool.get_view("hiz_nearest") {
+        let hiz_nearest_view = match ctx.resource_pool.get_view(helio_frame_api::depth::HIZ_NEAREST) {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -351,7 +354,7 @@ impl RenderPass for SsrPass {
             if let Some(tlas_binding) = tlas {
                 let transmission = ctx
                     .registry
-                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("ray_transmission"))
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(helio_frame_api::rays::RAY_TRANSMISSION))
                     .unwrap_or(&self.transmission_fallback);
                 let rt_key = (tlas_binding.clone(), transmission.clone());
 

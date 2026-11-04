@@ -10,6 +10,10 @@
 
 use crate::{ResourceKey, ResourceRegistry};
 
+/// The scene depth: the graph-owned depth target the executor resolves
+/// [`crate::graph::AttachmentSlot::Depth`] to (the frame's G-buffer depth,
+/// `helio_frame_api::gbuffer::DEPTH`).
+pub const DEPTH: &str = "depth";
 /// Current coordinate-space table published for culling and geometry passes.
 pub const COORDINATE_SPACES: &str = "coordinate_spaces";
 /// Previous-frame coordinate-space table, when exposed as an independent resource.

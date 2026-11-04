@@ -1003,6 +1003,7 @@ dependencies = [
  "half",
  "helio-bake-types",
  "helio-core",
+ "helio-frame-api",
  "log",
  "nebula",
  "pollster 0.4.0",
@@ -1132,6 +1133,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-frame-api",
  "log",
  "pollster 0.4.0",
  "wgpu",
@@ -1180,6 +1182,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "helio-core",
+ "helio-frame-api",
  "log",
  "wgpu",
 ]
@@ -1191,6 +1194,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-feature-api",
+ "helio-frame-api",
  "log",
  "wgpu",
 ]

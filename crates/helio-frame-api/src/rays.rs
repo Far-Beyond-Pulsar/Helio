@@ -29,6 +29,15 @@ pub const SCENE_RAYS: helio_core::PayloadContract<SceneRays> =
 /// instances use RGB zero. Absent: every hit is opaque.
 pub const RAY_TRANSMISSION: &str = "ray_transmission";
 
+/// Marker opting a shader into [`RAY_TRANSMISSION_SNIPPET`].
+pub const RAY_TRANSMISSION_MARKER: &str = "//!use frame_ray_transmission";
+/// [`RAY_TRANSMISSION`]'s WGSL: `RayTransmissionData`, the header flag
+/// `RAY_TRANSMISSION_OPACITY_MATCHES`, `ray_transmission_count()` and
+/// `ray_transmission_of(instance)`, for a shader binding the buffer as
+/// `ray_transmission`.
+pub const RAY_TRANSMISSION_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(RAY_TRANSMISSION_MARKER, "shaders/ray_transmission.wgsl");
+
 /// One frame's ray-traced scene ([`SCENE_RAYS`]).
 #[derive(Clone)]
 pub struct SceneRays {

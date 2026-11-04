@@ -124,7 +124,7 @@ impl FxaaPass {
         );
 
         Self {
-            color_input: "pre_aa",
+            color_input: helio_frame_api::color::SCENE_COLOR,
             color_alias: None,
             intermediate_format: None,
             pipeline,

@@ -52,7 +52,7 @@ pub fn resolve_attachment_view<'a>(
 ) -> Option<&'a wgpu::TextureView> {
     match slot {
         AttachmentSlot::Target => Some(target),
-        AttachmentSlot::Depth => Some(pool.get_view("depth").unwrap_or(depth)),
+        AttachmentSlot::Depth => Some(pool.get_view(crate::resource_keys::DEPTH).unwrap_or(depth)),
         AttachmentSlot::Named(name) => pool.get_view(name),
     }
 }
@@ -72,7 +72,7 @@ pub fn attachment_format(
 ) -> Option<wgpu::TextureFormat> {
     match slot {
         AttachmentSlot::Target => None,
-        AttachmentSlot::Depth => pool.get_texture("depth").map(|t| t.format()),
+        AttachmentSlot::Depth => pool.get_texture(crate::resource_keys::DEPTH).map(|t| t.format()),
         AttachmentSlot::Named(name) => pool.get_texture(name).map(|t| t.format()),
     }
 }

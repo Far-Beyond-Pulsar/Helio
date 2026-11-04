@@ -53,7 +53,7 @@ fn settings(env: &BuildEnv<'_>) -> SpineSettings {
 /// Resources the renderer supplies every frame that the spine's passes read
 /// (features declare their own, `helio_frame_api::host_input`, and may
 /// supply them: the materials' texture table).
-const HOST_INPUTS: [&str; 1] = ["render_environment"];
+const HOST_INPUTS: [&str; 1] = [helio_core::resource_keys::RENDER_ENVIRONMENT];
 
 fn tsr_quality(name: &str) -> TsrQuality {
     match name {
@@ -231,6 +231,7 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                     )
                     .with_color_input(input)
                     .with_color_alias(alias)
+                    .with_glare(color::glare(build.env))
                     .with_color_grading_lut(
                         build
                             .env

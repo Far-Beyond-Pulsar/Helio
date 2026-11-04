@@ -92,12 +92,12 @@ impl RenderPass for UnlitPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &[gbuffer::GROUP, gbuffer::DEPTH, "pre_aa"]
+        &[gbuffer::GROUP, gbuffer::DEPTH, helio_frame_api::color::SCENE_COLOR]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(gbuffer::GROUP);
-        builder.read("pre_aa");
+        builder.read(helio_frame_api::color::SCENE_COLOR);
     }
 
     fn render_pass_descriptor_with_storage<'a>(
@@ -107,7 +107,7 @@ impl RenderPass for UnlitPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let target = resources.read(ResourceKey::new("pre_aa"), "Unlit")?;
+        let target = resources.read(ResourceKey::new(helio_frame_api::color::SCENE_COLOR), "Unlit")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
             .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,

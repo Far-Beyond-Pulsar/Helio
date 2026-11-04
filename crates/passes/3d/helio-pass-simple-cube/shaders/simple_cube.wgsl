@@ -1,15 +1,9 @@
+//!use helio_prelude
 // Simple cube pass WGSL shader.
 //
 // Renders a single hardcoded cube with per-face colors at full brightness
 // (no lighting calculation — the color IS the final lit value).
 
-// Minimal camera view — only the fields we need (view_proj is at byte 128
-// of the real CameraUniform, which is larger; reading a prefix is safe).
-struct Camera {
-    view:      mat4x4<f32>,
-    proj:      mat4x4<f32>,
-    view_proj: mat4x4<f32>,
-}
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 

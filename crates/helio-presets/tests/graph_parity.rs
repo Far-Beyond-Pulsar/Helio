@@ -287,8 +287,8 @@ fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
             .into_iter()
             .find(|pass| pass.type_name == "helio_spine::unlit::UnlitPass")
             .unwrap_or_else(|| panic!("{} draws no unlit stand-in", preset.name()));
-        assert!(unlit.reads.iter().any(|read| read.name == "gbuffer"));
-        assert!(unlit.writes.iter().all(|write| write.name != "gbuffer"));
+        assert!(unlit.reads.iter().any(|read| read.name == helio_frame_api::gbuffer::GROUP));
+        assert!(unlit.writes.iter().all(|write| write.name != helio_frame_api::gbuffer::GROUP));
     }
 
     // A lighting model at the deferred point replaces the stand-in.
@@ -330,7 +330,7 @@ fn the_light_field_preset_writes_one_scene_format() {
     let formats: HashSet<_> = passes(&graph)
         .iter()
         .flat_map(|pass| pass.writes.iter())
-        .filter(|write| write.name == "pre_aa")
+        .filter(|write| write.name == helio_frame_api::color::SCENE_COLOR)
         .filter_map(|write| write.format)
         .collect();
     assert_eq!(formats.len(), 1, "pre_aa is written as {formats:?}");
@@ -389,9 +389,9 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
             .expect("the tsr node's graph holds a TsrPass");
         let reads: HashSet<&str> = tsr.reads.iter().map(|read| read.name).collect();
         assert!(
-            reads.contains(helio_pass_tsr::MOTION_VECTORS),
+            reads.contains(helio_frame_api::gbuffer::VELOCITY),
             "TSR reads {}: {tsr:?}",
-            helio_pass_tsr::MOTION_VECTORS
+            helio_frame_api::gbuffer::VELOCITY
         );
         assert_eq!(
             reads.contains(helio_pass_tsr::STOCHASTIC_MASK),

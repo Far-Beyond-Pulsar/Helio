@@ -21,7 +21,10 @@ fn reflected_segment_filters_only_sheets_before_nearest_opaque_hit() {
         // Exercise the production query function verbatim, independently of
         // screen radiance availability or the reflection composition pass.
         let source = include_str!("../shaders/ssr_trace_rt.wgsl");
-        let start = source.find("struct RayTransmissionData").unwrap();
+        let start = source
+            .find("@group(2) @binding(2) var<storage, read> ray_transmission")
+            .unwrap();
+        let transmission = helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET.source;
         let end = source.find("// Screen color").unwrap();
         let query = source[start..end].replace("@group(2) @binding(2)", "@group(0) @binding(1)");
         let shader=device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -31,6 +34,7 @@ fn reflected_segment_filters_only_sheets_before_nearest_opaque_hit() {
                 @group(0) @binding(0) var acc_struct: acceleration_structure;
                 @group(0) @binding(2) var<storage,read_write> result: array<vec4<f32>,2>;
                 const MAX_RAY_DIST: f32=100.0;
+                {transmission}
                 {query}
                 @compute @workgroup_size(1) fn main() {{
                     let hit=ray_query_hit_position(vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(1.0,0.0,0.0));

@@ -2583,7 +2583,7 @@ impl RenderGraph {
             });
             tex.create_view(&wgpu::TextureViewDescriptor::default())
         };
-        let dummy_depth = self.pool.get_view("depth").cloned().unwrap_or_else(|| {
+        let dummy_depth = self.pool.get_view(crate::resource_keys::DEPTH).cloned().unwrap_or_else(|| {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Lock Dummy Depth"),
                 size: wgpu::Extent3d {

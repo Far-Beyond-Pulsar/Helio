@@ -450,25 +450,25 @@ impl RenderPass for HiZBuildPass {
     fn reads(&self) -> &'static [&'static str] {
         // The signature orders this pass after every depth-draw producer, so
         // `execute` sees this frame's value.
-        &["depth", helio_core::resource_keys::DEPTH_DRAW_SIGNATURE]
+        &[helio_frame_api::gbuffer::DEPTH, helio_core::resource_keys::DEPTH_DRAW_SIGNATURE]
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["hiz", "hiz_nearest", "hiz_sampler"]
+        &[helio_frame_api::depth::HIZ, helio_frame_api::depth::HIZ_NEAREST, helio_frame_api::depth::HIZ_SAMPLER]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         // Both are R32Float, which the resource pool automatically gives a full
         // mip chain (see graph::resource_lifetime).
         builder.write_color_raw(
-            "hiz",
+            helio_frame_api::depth::HIZ,
             wgpu::TextureFormat::R32Float,
             ResourceSize::MatchSurface,
         );
         builder
             .with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_DST);
         builder.write_color_raw(
-            "hiz_nearest",
+            helio_frame_api::depth::HIZ_NEAREST,
             wgpu::TextureFormat::R32Float,
             ResourceSize::MatchSurface,
         );
@@ -519,7 +519,7 @@ impl RenderPass for HiZBuildPass {
         if self.mip_views.is_empty() {
             let hiz_texture = ctx
                 .resource_pool
-                .get_texture("hiz")
+                .get_texture(helio_frame_api::depth::HIZ)
                 .expect("HiZ texture 'hiz' must be declared as a graph resource");
             let mip_count = mip_levels(self.width, self.height).min(MAX_MIP_LEVELS);
 
@@ -575,7 +575,7 @@ impl RenderPass for HiZBuildPass {
         if self.nearest_mip_views.is_empty() {
             let tex = ctx
                 .resource_pool
-                .get_texture("hiz_nearest")
+                .get_texture(helio_frame_api::depth::HIZ_NEAREST)
                 .expect("HiZ texture 'hiz_nearest' must be declared as a graph resource");
             let mip_count = mip_levels(self.width, self.height).min(MAX_MIP_LEVELS);
 
@@ -627,11 +627,11 @@ impl RenderPass for HiZBuildPass {
 
         let hiz_texture = ctx
             .resource_pool
-            .get_texture("hiz")
+            .get_texture(helio_frame_api::depth::HIZ)
             .expect("HiZ texture 'hiz' must be declared as a graph resource");
         let hiz_nearest_texture = ctx
             .resource_pool
-            .get_texture("hiz_nearest")
+            .get_texture(helio_frame_api::depth::HIZ_NEAREST)
             .expect("HiZ texture 'hiz_nearest' must be declared as a graph resource");
         let copy_extent = wgpu::Extent3d {
             width: self.width.max(1),
@@ -649,7 +649,7 @@ impl RenderPass for HiZBuildPass {
         // read it, and they declare that before the frame executes. The depth
         // copy feeds both pyramids, so it is needed only when one of them is
         // rebuilt this frame.
-        let nearest_wanted = helio_core::is_demanded(ctx.registry, "hiz_nearest");
+        let nearest_wanted = helio_core::is_demanded(ctx.registry, helio_frame_api::depth::HIZ_NEAREST);
         let farthest_rebuild = self.farthest_source.begin_frame(DepthInputs {
             camera_generation: ctx.camera_generation,
             scene_signature: ctx.scene_buffers.content_signature(),
@@ -791,7 +791,7 @@ impl RenderPass for HiZBuildPass {
         // We only need to publish the sampler (not owned by the graph).
         let hiz_sampler: &'a wgpu::Sampler = unsafe { std::mem::transmute(&*self.hiz_sampler) };
         frame.write(
-            helio_core::ResourceKey::new("hiz_sampler"),
+            helio_core::ResourceKey::new(helio_frame_api::depth::HIZ_SAMPLER),
             hiz_sampler,
             "HiZBuild",
         );

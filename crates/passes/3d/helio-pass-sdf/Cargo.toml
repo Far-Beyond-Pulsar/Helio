@@ -6,6 +6,7 @@ description = "Helio render pass: sparse SDF terrain with clip-map LOD, brick at
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-core = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }

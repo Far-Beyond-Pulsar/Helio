@@ -5,7 +5,13 @@ fn raster_and_ray_query_sources_validate_with_shared_gbuffer_contract() {
         include_str!("../shaders/ssr_trace_rt.wgsl"),
         include_str!("../shaders/ssr_compose.wgsl"),
     ] {
-        let resolved = helio_core::shader::resolve_with(source, &[helio_pass_hiz::HIZ_SNIPPET]);
+        let resolved = helio_core::shader::resolve_with(
+            source,
+            &[
+                helio_pass_hiz::HIZ_SNIPPET,
+                helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
+            ],
+        );
         let module = naga::front::wgsl::parse_str(&resolved)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&resolved)));
         naga::valid::Validator::new(
