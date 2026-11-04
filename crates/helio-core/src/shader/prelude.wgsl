@@ -1,7 +1,9 @@
 // Helio shader prelude — the canonical camera layout and the depth/G-buffer
 // conventions that go with it.
 //
-// Prepended to any shader whose first lines contain `//!use helio_prelude`.
+// Prepended to any shader that opts in with the `helio_prelude` marker (the
+// `MARKER` of helio_core::shader). The marker is never written out here: text
+// that holds it would opt in again when a composed source is resolved.
 // See helio_core::shader.
 //
 // This exists because every pass used to re-derive this math from scratch, and
@@ -12,11 +14,11 @@
 // is not per-pass policy, so it does not live in per-pass code.
 
 // ── Camera ──────────────────────────────────────────────────────────────────
-// Field-for-field mirror of helio_core / libhelio `GpuCameraUniforms` (256 B).
+// Field-for-field mirror of helio_core `GpuCameraUniforms` (368 B).
 // Shaders declare their OWN binding (the group/binding varies per pass) but must
 // use this struct rather than redeclaring it:
 //
-//     //!use helio_prelude
+//     (opt in with the helio_prelude marker)
 //     @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 //
 struct Camera {
