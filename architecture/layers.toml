@@ -62,7 +62,6 @@ helio-passes = { layer = "leaf" }
 helio-core = { layer = "core" }
 
 # scene
-helio-mats = { layer = "scene" }
 helio-scene-join = { layer = "scene" }
 
 # feature api

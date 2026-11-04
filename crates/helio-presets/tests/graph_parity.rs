@@ -50,7 +50,6 @@ fn mirror(
             max_cells_metadata: 0,
         },
     );
-    helio_components::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
     GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(queue))
 }
 

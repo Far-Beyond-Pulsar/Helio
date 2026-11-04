@@ -43,24 +43,6 @@ use super::debug::DebugDrawState;
 /// Mono, stereo, and a few application-owned auxiliary views.
 const MAX_VIEW_HISTORY: usize = 16;
 
-/// Backend-only fallback bindings for the material sampling contract.
-///
-/// Material parameters and texture references are authored in SceneDB. The
-/// renderer keeps only the descriptor objects required by the passes to bind
-/// that data. SceneDB texture-store slots supply cached views; vacant slots use the white
-/// fallback. Frontends must clear material slot references before freeing them.
-pub(crate) struct MaterialBindingResources {
-    pub(crate) _fallback_texture: wgpu::Texture,
-    pub(crate) fallback_view: wgpu::TextureView,
-    pub(crate) fallback_sampler: wgpu::Sampler,
-    /// The materials' `MaterialSampler` setting `fallback_sampler` was made
-    /// from (`None`: the default sampler).
-    pub(crate) sampler_setting: Option<helio_mats::MaterialSampler>,
-    pub(crate) texture_count: usize,
-    pub(crate) version: u64,
-    pub(crate) scene_views: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
-}
-
 pub(crate) enum CullStatsReadbackState {
     Idle,
     Mapping(Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>),
@@ -102,7 +84,6 @@ pub struct Renderer {
     pub(crate) surface_format: wgpu::TextureFormat,
     pub(crate) debug_camera_buffer: wgpu::Buffer,
     pub(crate) cull_stats_buffer: wgpu::Buffer,
-    pub(crate) material_bindings: MaterialBindingResources,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
     /// rebuild (a config change, shader reload) hands the graph builder, so the new
@@ -372,7 +353,7 @@ impl Renderer {
     }
 
     /// Sets a feature setting whose readers read it every frame (the
-    /// frame's `AmbientLight`, the materials' `MaterialSampler`), without
+    /// frame's `AmbientLight`), without
     /// rebuilding the graph. A setting read when the graph builds needs
     /// [`Self::set_feature`].
     pub fn set_feature_live<T: std::any::Any + Send + Sync>(&mut self, setting: T) {

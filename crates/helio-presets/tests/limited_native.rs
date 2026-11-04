@@ -1,11 +1,8 @@
 use std::sync::Arc;
 
 use glam::Vec3;
-use helio::{
-    required_wgpu_limits, Camera, MaterialBindingConfig, MaterialBindingMode, RendererBuilder,
-    RendererConfig, BINDLESS_MATERIAL_FEATURES, EXPANDED_MATERIAL_TEXTURE_RESERVE,
-    MAX_MATERIAL_TEXTURES,
-};
+use helio::{required_wgpu_limits, Camera, RendererBuilder, RendererConfig};
+use helio_core::TEXTURE_BINDING_ARRAYS;
 
 const PORTABLE_SAMPLED_TEXTURE_LIMIT: u32 = 16;
 
@@ -34,8 +31,6 @@ fn default_graph_renders_on_a_native_non_bindless_device_at_the_16_texture_bound
             adapter,
             wgpu::Features::INDIRECT_FIRST_INSTANCE,
             limits,
-            MaterialBindingMode::Expanded,
-            PORTABLE_SAMPLED_TEXTURE_LIMIT as usize - EXPANDED_MATERIAL_TEXTURE_RESERVE,
             "Limited Native",
         )
         .await;
@@ -43,7 +38,7 @@ fn default_graph_renders_on_a_native_non_bindless_device_at_the_16_texture_bound
 }
 
 #[test]
-fn default_graph_retains_the_bindless_material_tier_when_supported() {
+fn default_graph_renders_on_a_device_with_texture_binding_arrays() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = request_test_adapter(&instance).await else {
@@ -51,24 +46,13 @@ fn default_graph_retains_the_bindless_material_tier_when_supported() {
             return;
         };
         let required_features =
-            wgpu::Features::INDIRECT_FIRST_INSTANCE | BINDLESS_MATERIAL_FEATURES;
+            wgpu::Features::INDIRECT_FIRST_INSTANCE | TEXTURE_BINDING_ARRAYS;
         if !adapter.features().contains(required_features) {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_BINDLESS_TIER: bindless native default graph");
             return;
         }
         let limits = required_wgpu_limits(adapter.limits());
-        let expected_max = MAX_MATERIAL_TEXTURES
-            .min(limits.max_sampled_textures_per_shader_stage as usize)
-            .min(limits.max_samplers_per_shader_stage as usize);
-        run_default_graph(
-            adapter,
-            required_features,
-            limits,
-            MaterialBindingMode::BindingArray,
-            expected_max,
-            "Bindless Native",
-        )
-        .await;
+        run_default_graph(adapter, required_features, limits, "Bindless Native").await;
     });
 }
 
@@ -76,8 +60,6 @@ async fn run_default_graph(
     adapter: wgpu::Adapter,
     required_features: wgpu::Features,
     required_limits: wgpu::Limits,
-    expected_mode: MaterialBindingMode,
-    expected_max_textures: usize,
     label: &'static str,
 ) {
     let (device, queue) = adapter
@@ -89,16 +71,10 @@ async fn run_default_graph(
             ..Default::default()
         })
         .await
-        .expect("the selected native material capability tier must create a device");
+        .expect("the selected native capability tier must create a device");
     let device = Arc::new(device);
     let queue = Arc::new(queue);
     let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-
-    // The material binding tier is chosen from the device, as the renderer
-    // does at construction.
-    let binding = MaterialBindingConfig::for_device(&device);
-    assert_eq!(binding.mode, expected_mode);
-    assert_eq!(binding.max_textures, expected_max_textures);
 
     let scene_db = scene_db_with_gpu_mirror(&device, &queue);
     let config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
@@ -197,7 +173,6 @@ fn scene_db_with_gpu_mirror(
             max_cells_metadata: 0,
         },
     );
-    helio_components::MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(store), queue.clone());
     scene_db.world.attach_gpu_mirror(mirror);
     scene_db

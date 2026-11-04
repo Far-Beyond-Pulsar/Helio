@@ -308,7 +308,7 @@ mod tests {
             .iter()
             .map(|d| d.kind.clone())
             .collect();
-        for host in ["material_textures", "render_environment"] {
+        for host in ["render_environment"] {
             assert!(hosts.contains(&host_kind(host)), "{host}: {hosts:?}");
         }
         assert!(registry.get(core_nodes::ON_FRAME_START).is_some());
@@ -398,14 +398,14 @@ mod tests {
             kind("unlit"),
             pins(
                 vec![
-                    PinDesc::resource(PinType::BUFFER, format!("{SCENEDB_PREFIX}materials")),
-                    PinDesc::resource(PinType::SCENE, "material_textures"),
+                    PinDesc::resource(PinType::BUFFER, format!("{SCENEDB_PREFIX}rows")),
+                    PinDesc::resource(PinType::SCENE, "render_environment"),
                     PinDesc::resource(PinType::TEXTURE, "hiz"),
                 ],
                 vec![output_pin(PinType::DEPTH, "depth")],
             ),
         );
-        probe.scene_buffers = vec!["materials".into()];
+        probe.scene_buffers = vec!["rows".into()];
         apply_probe(&mut registry, &probe);
 
         let asset = deferred_graph_asset(&registry);
@@ -434,8 +434,8 @@ mod tests {
             ("set:depth@unlit", "depth")
         ));
         assert!(has(
-            ("get:scenedb.materials@unlit", "scenedb.materials"),
-            ("unlit", "scenedb.materials")
+            ("get:scenedb.rows@unlit", "scenedb.rows"),
+            ("unlit", "scenedb.rows")
         ));
         // Nothing is wired from one pass to another but the chain's flow wire.
         assert!(all
@@ -476,7 +476,7 @@ mod tests {
                 .unwrap()
                 .position[0]
         };
-        assert!(x("get:scenedb.materials@unlit") < x("unlit"));
+        assert!(x("get:scenedb.rows@unlit") < x("unlit"));
         assert!(x("set:depth@unlit") > x("unlit"));
     }
 }

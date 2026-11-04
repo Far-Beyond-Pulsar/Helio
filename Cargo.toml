@@ -57,7 +57,6 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
 helio-scene-join = { path = "crates/helio-scene-join" }
 helio-settings = { path = "crates/helio-settings" }
-helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "017252c3c84331a29e53eaa627185597954a3241", features = ["gpu"] }
 pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "017252c3c84331a29e53eaa627185597954a3241" }

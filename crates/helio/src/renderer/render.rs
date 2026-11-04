@@ -240,106 +240,20 @@ impl Renderer {
         if let Ok(mut state) = self.debug_state.lock() {
             state.world_origin = self.world_origin;
         }
-        // SceneDB owns texture residency. Retain descriptor views by GPU handle
-        // identity, including slot replacement/removal; no duplicate uploads.
-        let texture_store = self.scene_db.texture_store();
-        let texture_guard = {
-            // Shared with SceneDB's texture streaming/upload side, which takes
-            // the write half; a long wait here is streaming holding the store.
-            helio_core::cpu_scope!("Helio: wait SceneDB texture store lock");
-            texture_store
-                .as_ref()
-                .map(|store| {
-                    store.read().map_err(|_| {
-                        helio_core::Error::InvalidPassConfig(
-                            "SceneDB texture store lock poisoned".into(),
-                        )
-                    })
-                })
-                .transpose()?
-        };
-        let bind_textures_scope = helio_core::CpuScope::new("Helio: bind material textures");
-        // The materials' sampler setting changed (`Renderer::set_feature`):
-        // new sampler, and the binding version refreshes passes' caches.
-        let sampler_setting = self
-            .graph_config
-            .features
-            .get::<helio_mats::MaterialSampler>()
-            .cloned();
-        if sampler_setting != self.material_bindings.sampler_setting {
-            let default = wgpu::SamplerDescriptor {
-                label: Some("Default Material Sampler"),
-                ..Default::default()
-            };
-            self.material_bindings.fallback_sampler = self.device.create_sampler(
-                sampler_setting
-                    .as_ref()
-                    .map_or(&default, |setting| &setting.0),
-            );
-            self.material_bindings.sampler_setting = sampler_setting;
-            self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
-        }
-        if texture_guard
-            .as_ref()
-            .is_some_and(|store| store.slot_count() as usize > self.material_bindings.texture_count)
-        {
-            return Err(helio_core::Error::InvalidPassConfig(
-                "SceneDB texture slots exceed the device material binding capacity".into(),
-            ));
-        }
-        for (slot, cached) in self.material_bindings.scene_views.iter_mut().enumerate() {
-            let texture = texture_guard
-                .as_ref()
-                .and_then(|store| store.texture(slot as u32));
-            if cached.as_ref().map(|(texture, _)| texture) == texture {
-                continue;
-            }
-            if let Some(texture) = texture {
-                if texture.dimension() != wgpu::TextureDimension::D2
-                    || texture.depth_or_array_layers() != 1
-                    || texture.sample_count() != 1
-                    || !texture
-                        .usage()
-                        .contains(wgpu::TextureUsages::TEXTURE_BINDING)
-                    || texture
-                        .format()
-                        .sample_type(None, Some(self.device.features()))
-                        != Some(wgpu::TextureSampleType::Float { filterable: true })
-                {
-                    return Err(helio_core::Error::InvalidPassConfig(format!(
-                        "SceneDB material texture slot {slot} requires a filterable, single-layer, single-sample 2D texture"
-                    )));
-                }
-                *cached = Some((texture.clone(), texture.create_view(&Default::default())));
-            } else {
-                *cached = None;
-            }
-            self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
-        }
-        drop(texture_guard);
-        drop(bind_textures_scope);
-        let material_texture_views: Vec<_> = self
-            .material_bindings
-            .scene_views
-            .iter()
-            .map(|entry| {
-                entry
-                    .as_ref()
-                    .map(|(_, view)| view)
-                    .unwrap_or(&self.material_bindings.fallback_view)
-            })
-            .collect();
-        let material_samplers =
-            vec![&self.material_bindings.fallback_sampler; self.material_bindings.texture_count];
+        // Frame inputs features supply (the materials' texture table):
+        // refreshed before anything is published.
+        self.graph.update_frame_inputs(&helio_core::FrameInputContext {
+            device: &self.device,
+            queue: &self.queue,
+            camera: &self.camera_data,
+            frame_num: self.frame_count,
+        })?;
         let mut resource_registry = helio_core::ResourceRegistry::empty();
         // Pass-owned buffers are published through the graph before any pass
         // executes. The renderer only consumes the generic contracts and no
         // longer downcasts into GBufferPass to discover its storage.
         self.graph
             .publish_frame_inputs(&self.camera_data, &mut resource_registry);
-        let material_textures_buf = resource_registry
-            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("material_texture_fallback"))
-            .unwrap_or(&self.camera_buffer);
         let coordinate_spaces = resource_registry
             .get::<helio_core::CoordinateSpacesFrameData<'_>>(
                 helio_core::resource_keys::coordinate_spaces(),
@@ -348,16 +262,6 @@ impl Renderer {
                 coordinate_spaces: &self.camera_buffer,
                 coordinate_spaces_prev: &self.camera_buffer,
             });
-        resource_registry.write(
-            helio_mats::material_textures(),
-            helio_mats::MaterialTextureBindings {
-                material_textures: material_textures_buf,
-                texture_views: &material_texture_views,
-                samplers: &material_samplers,
-                version: self.material_bindings.version,
-            },
-            "Renderer",
-        );
         let ambient = self
             .graph_config
             .features

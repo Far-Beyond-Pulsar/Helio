@@ -31,7 +31,6 @@ helio-pass-tsr = { workspace = true }
 
 [dev-dependencies]
 bytemuck = { workspace = true }
-helio-mats = { workspace = true }
 pulsar_scenedb = { workspace = true }
 helio-components = { path = "../helio-components" }
 env_logger = { workspace = true }

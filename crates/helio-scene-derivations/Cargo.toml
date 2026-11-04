@@ -11,7 +11,6 @@ helio-frame-api = { path = "../helio-frame-api" }
 helio = { path = "../helio" }
 helio-core = { workspace = true }
 helio-scene-join = { workspace = true }
-helio-mats = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }

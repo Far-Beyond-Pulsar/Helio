@@ -974,7 +974,6 @@ dependencies = [
  "helio-core",
  "helio-feature-api",
  "helio-frame-api",
- "helio-mats",
  "helio-pass-postprocess",
  "helio-pass-tsr",
  "helio-settings",
@@ -1026,7 +1025,6 @@ dependencies = [
  "helio",
  "helio-bake",
  "helio-core",
- "helio-mats",
  "log",
  "pulsar_reflection",
  "pulsar_scenedb",
@@ -1050,7 +1048,6 @@ dependencies = [
  "bytemuck",
  "glam",
  "helio-frame-api",
- "helio-mats",
  "helio-pass-hiz",
  "helio-pass-postprocess",
  "helio-scene-derivations",
@@ -1095,19 +1092,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "wgpu",
-]
-
-[[package]]
-name = "helio-mats"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "image",
- "log",
- "naga",
- "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -1256,7 +1240,6 @@ dependencies = [
  "helio-feature-api",
  "helio-frame-api",
  "helio-graph-asset",
- "helio-mats",
  "helio-pass-buffer-view",
  "helio-pass-debug-overlay",
  "helio-pass-fxaa",
@@ -1286,7 +1269,6 @@ dependencies = [
  "helio",
  "helio-core",
  "helio-frame-api",
- "helio-mats",
  "helio-scene-join",
  "log",
  "pollster 0.4.0",

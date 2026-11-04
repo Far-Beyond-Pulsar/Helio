@@ -1,5 +1,4 @@
-use crate::material::MAX_TEXTURES;
-use helio_mats::BINDLESS_MATERIAL_FEATURES;
+use helio_core::{TEXTURE_BINDING_ARRAYS, TEXTURE_TABLE_LIMIT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -122,8 +121,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         optional |= VIRTUAL_GEOMETRY_INT64_FEATURES;
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
-        optional |= BINDLESS_MATERIAL_FEATURES;
+    if adapter_features.contains(TEXTURE_BINDING_ARRAYS) {
+        optional |= TEXTURE_BINDING_ARRAYS;
     }
     // Request ray tracing if available (native only, requires Vulkan)
     #[cfg(not(target_arch = "wasm32"))]
@@ -175,7 +174,7 @@ pub fn required_experimental_features(
 #[cfg(test)]
 mod tests {
     use super::{ray_queries_usable, required_wgpu_features, RendererConfig};
-    use helio_mats::BINDLESS_MATERIAL_FEATURES;
+    use helio_core::TEXTURE_BINDING_ARRAYS;
 
     fn adapter(name: &str, driver: &str, device_type: wgpu::DeviceType) -> wgpu::AdapterInfo {
         wgpu::AdapterInfo {
@@ -226,15 +225,15 @@ mod tests {
     }
 
     #[test]
-    fn complete_material_binding_array_capability_is_requested_together() {
-        let requested = required_wgpu_features(BINDLESS_MATERIAL_FEATURES);
-        assert!(requested.contains(BINDLESS_MATERIAL_FEATURES));
+    fn complete_texture_binding_array_capability_is_requested_together() {
+        let requested = required_wgpu_features(TEXTURE_BINDING_ARRAYS);
+        assert!(requested.contains(TEXTURE_BINDING_ARRAYS));
     }
 
     #[test]
-    fn partial_material_binding_array_capability_is_not_requested() {
+    fn partial_texture_binding_array_capability_is_not_requested() {
         let requested = required_wgpu_features(wgpu::Features::TEXTURE_BINDING_ARRAY);
-        assert!(!requested.intersects(BINDLESS_MATERIAL_FEATURES));
+        assert!(!requested.intersects(TEXTURE_BINDING_ARRAYS));
     }
 
     #[test]
@@ -247,9 +246,9 @@ mod tests {
 
 pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
-        max_sampled_textures_per_shader_stage: (MAX_TEXTURES as u32)
+        max_sampled_textures_per_shader_stage: (TEXTURE_TABLE_LIMIT as u32)
             .min(adapter_limits.max_sampled_textures_per_shader_stage),
-        max_samplers_per_shader_stage: (MAX_TEXTURES as u32)
+        max_samplers_per_shader_stage: (TEXTURE_TABLE_LIMIT as u32)
             .min(adapter_limits.max_samplers_per_shader_stage),
         // Clamped to 4 GiB - 1 because wgpu-core's indirect-draw validation asserts
         // `max_buffer_size <= u32::MAX` while building its helper pipelines, and that

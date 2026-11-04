@@ -2,7 +2,7 @@
 name = "helio-components"
 version = "0.1.0"
 edition = "2021"
-description = "SceneDB components for Helio's standalone hosts (examples, demos, wasm, tests) of the kinds Helio still has (materials). Engines register their own; the renderer never depends on this crate."
+description = "Row-component helpers for Helio's standalone hosts and the plugins' host rows (same_layout!, WorldRows) and the lightmap bake. Engines register their own components; the renderer never depends on this crate."
 license = "MIT OR Apache-2.0"
 
 [features]
@@ -23,7 +23,6 @@ serde_json = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam = { workspace = true }
-helio-mats = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
