@@ -29,7 +29,7 @@
 //! ```
 //!
 //! `--pulsar-columns` registers the SceneDB columns Pulsar-Native's editor
-//! registers up front (billboards, decals, water volumes and hitboxes), so
+//! registers up front (billboards, water volumes and hitboxes), so
 //! their buffers exist while empty, as they do in the editor.
 //!
 //! `--movability static|movable|mixed` re-tags objects so shadow casters land
@@ -48,9 +48,9 @@
 //! `--global-fog` adds a uniform global fog medium, and `--pp-fog` enables
 //! the camera post-process fog block; both give every scene a medium.
 //!
-//! `--lens` gives the camera a lens focused 6 m out (defocus through
-//! `helio-pass-lens`), `--bloom` enables bloom and `--auto-exposure` auto
-//! exposure through the camera's post-process settings (they can be combined).
+//! `--bloom` enables bloom and `--auto-exposure` auto exposure through the
+//! camera's post-process settings (they can be combined). (The camera lens
+//! is the lens plugin's; its examples measure it.)
 //!
 //! `--billboards` places a billboard (editor light icon) over every point light.
 //!
@@ -81,7 +81,7 @@ mod v3_demo_common;
 use glam::{Mat4, Vec3};
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_components::{
-    GlobalFogComponent, LensComponent, LocalFogVolumeComponent, StaticObjectComponent,
+    GlobalFogComponent, LocalFogVolumeComponent, StaticObjectComponent,
 };
 use pulsar_scenedb::{SceneDb, World};
 use std::io::Write;
@@ -116,7 +116,6 @@ struct Args {
     pulsar_columns: bool,
     billboards: bool,
     movability: String,
-    lens: bool,
     bloom: bool,
     auto_exposure: bool,
     global_fog: bool,
@@ -143,7 +142,6 @@ fn parse_args() -> Args {
         pulsar_columns: false,
         billboards: false,
         movability: "static".into(),
-        lens: false,
         bloom: false,
         auto_exposure: false,
         global_fog: false,
@@ -163,7 +161,6 @@ fn parse_args() -> Args {
             "--no-ray-query" => Some(&mut args.no_ray_query),
             "--pulsar-columns" => Some(&mut args.pulsar_columns),
             "--billboards" => Some(&mut args.billboards),
-            "--lens" => Some(&mut args.lens),
             "--bloom" => Some(&mut args.bloom),
             "--auto-exposure" => Some(&mut args.auto_exposure),
             "--global-fog" => Some(&mut args.global_fog),
@@ -536,7 +533,6 @@ fn run(
             helio_components::BillboardComponent::register_gpu_columns_growable(
                 store, 1024, device,
             );
-            helio_components::DecalComponent::register_gpu_columns_growable(store, 256, device);
             helio_components::WaterVolumeComponent::register_gpu_columns_growable(
                 store, 64, device,
             );
@@ -578,12 +574,6 @@ fn run(
             &mut scene_db.world,
             GlobalFogComponent::from(helio_pass_volumetric_fog::GlobalFogRow::default()),
         );
-    }
-    if args.lens {
-        // Focused a few metres out so near and far both blur.
-        let mut lens = LensComponent::from(helio_pass_lens::LensRow::new(0));
-        lens.focus_distance_m = 6.0;
-        set_camera_lens(&mut scene_db.world, lens);
     }
     if args.bloom || args.auto_exposure || args.pp_fog {
         // Camera-baseline post-process settings.

@@ -6,10 +6,6 @@ fn texture_consumers_validate_with_scene_owned_slot_defaults() {
             "forward",
             include_str!("../../helio-pass-forward-lit/shaders/forward_lit.wgsl"),
         ),
-        (
-            "portal",
-            include_str!("../../helio-pass-portal-instances/shaders/gbuffer_portal.wgsl"),
-        ),
     ] {
         let resolved = helio_core::shader::resolve_with(
             source,

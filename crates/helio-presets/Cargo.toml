@@ -21,11 +21,6 @@ image = { workspace = true, features = ["png"] }
 wgpu = { workspace = true }
 serde_json = { workspace = true }
 helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
-helio-pass-corona = { path = "../passes/3d/helio-pass-corona" }
-helio-pass-flare = { path = "../passes/3d/helio-pass-flare" }
-helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
-helio-pass-sprite-batch = { path = "../passes/2d/helio-pass-sprite-batch" }
-helio-pass-sprite-cull = { path = "../passes/2d/helio-pass-sprite-cull" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
@@ -38,8 +33,6 @@ helio-pass-indirect-dispatch = { path = "../passes/3d/helio-pass-indirect-dispat
 helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
 helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
 helio-pass-occlusion-cull = { path = "../passes/3d/helio-pass-occlusion-cull" }
-helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
-helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
@@ -57,7 +50,6 @@ helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
-helio-pass-lens = { workspace = true }
 helio-vg-format = { path = "../helio-vg-format" }
 helio-vg-stream = { path = "../helio-vg-stream" }
 

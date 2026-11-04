@@ -550,22 +550,6 @@ fn new_scene_db_with_gpu_mirror(
         4096,
         device,
     );
-    helio_components::PortalComponent::register_gpu_columns_growable(&mut gpu_store, 1024, device);
-    helio_components::PortalViewComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1024,
-        device,
-    );
-    helio_components::PortalChainComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1024,
-        device,
-    );
-    helio_components::PortalProjectionCountsComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1,
-        device,
-    );
     helio_components::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
         helio_pass_forward_lit::MAX_LIGHTS,

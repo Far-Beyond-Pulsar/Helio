@@ -1,8 +1,8 @@
-//! The default graph follows the scene: in a mesh room with no water,
-//! emitters, billboards, decals, portals or sprites, and no debug mode, those
-//! passes are dormant (no prepare, no execute, no content resources). Each
-//! joins when its content appears: a debug line, a debug view, a decal row
-//! in a column the host registered up front. A resize keeps every pass.
+//! The default graph follows the scene: in a mesh room with no water or
+//! billboards and no debug mode, those passes are dormant (no prepare, no
+//! execute, no content resources). Each joins when its content appears: a
+//! debug line, a debug view, a billboard row in a column the host registered
+//! up front. A resize keeps every pass.
 
 use std::sync::Arc;
 
@@ -10,21 +10,13 @@ use glam::{Mat4, Vec3};
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig,
 };
-use helio_components::DecalComponent;
+use helio_components::BillboardComponent;
 use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
 
 /// Passes that need scene content or a debug mode the room does not have.
 const CONTENT_PASSES: &[&str] = &[
     "WaterSim",
-    "Corona",
     "Billboard",
-    "DecalApply",
-    "PortalCull",
-    "PortalMask",
-    "PortalInstance",
-    "PortalEditorOverlay",
-    "SpriteCull",
-    "SpriteBatch",
     "BufferView",
     "DebugDraw",
     "PerfOverlay",
@@ -46,9 +38,9 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
     MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
     MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
     StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
-    // Registered before any decal exists, as editors do: the column's
-    // presence alone must not wake the decal pass.
-    DecalComponent::register_gpu_columns_growable(&mut store, 64, device);
+    // Registered before any billboard exists, as editors do: the column's
+    // presence alone must not wake the billboard pass.
+    BillboardComponent::register_gpu_columns_growable(&mut store, 64, device);
     scene_db
         .world
         .attach_gpu_mirror(pulsar_scenedb::gpu::GpuMirrorHandle::new(
@@ -207,20 +199,20 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
     frames(&mut renderer, &mut scene, &view, 1);
     assert!(!has(&renderer, "BufferView"));
 
-    // A decal row in the up-front column: the decal pass joins once the row
-    // has been read back (a frame or two).
-    let decal = scene.world.spawn();
+    // A billboard row in the up-front column: the billboard pass joins once
+    // the row has been read back (a frame or two).
+    let billboard = scene.world.spawn();
     scene.world.insert(
-        decal,
-        DecalComponent {
-            transform: Mat4::from_scale(Vec3::splat(2.0)).to_cols_array(),
+        billboard,
+        BillboardComponent {
+            world_pos: [0.0, 1.0, 0.0, 0.0],
+            scale_flags: [1.0, 1.0, 0.0, 0.0],
             color: [1.0, 0.0, 0.0, 1.0],
-            ..bytemuck::Zeroable::zeroed()
         },
     );
     frames(&mut renderer, &mut scene, &view, 4);
     assert!(
-        has(&renderer, "DecalApply"),
+        has(&renderer, "Billboard"),
         "{:?}",
         renderer.graph_members()
     );

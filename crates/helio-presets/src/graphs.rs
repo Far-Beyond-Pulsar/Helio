@@ -28,8 +28,7 @@ use helio_frame_api::HOST_INPUTS;
 use crate::features;
 
 /// The config the editor's template and the pin probe use: the renderer's
-/// defaults (FXAA, portals and foliage on, no screen-space or planar
-/// reflections).
+/// defaults (FXAA and foliage on, no screen-space or planar reflections).
 pub fn template_config() -> helio::RendererConfig {
     helio::RendererConfig::new(1920, 1080, wgpu::TextureFormat::Rgba8UnormSrgb)
 }
@@ -309,12 +308,7 @@ mod tests {
             .iter()
             .map(|d| d.kind.clone())
             .collect();
-        for host in [
-            "material_textures",
-            "render_environment",
-            "billboards",
-            "corona_emitters",
-        ] {
+        for host in ["material_textures", "render_environment", "billboards"] {
             assert!(hosts.contains(&host_kind(host)), "{host}: {hosts:?}");
         }
         assert!(registry.get(core_nodes::ON_FRAME_START).is_some());
@@ -347,7 +341,6 @@ mod tests {
         assert!(at("start") < at("object_batch"));
         assert!(at("shadow_matrix") < at("shadow_dirty") && at("shadow_dirty") < at("shadow"));
         assert!(at("hiz") < at("occlusion_cull"));
-        assert!(at("portal_cull") < at("portal_instance"));
         assert!(at("gbuffer") < at("deferred_light"));
         assert!(at("deferred_light") < at("post_process"));
         // The execution chain — the nodes with flow pins — ends at the Output; the

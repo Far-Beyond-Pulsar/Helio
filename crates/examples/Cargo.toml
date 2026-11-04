@@ -52,22 +52,6 @@ name = "sublevels_demo"
 path = "sublevels_demo.rs"
 
 [[bin]]
-name = "portals_demo"
-path = "portals_demo.rs"
-
-[[bin]]
-name = "infinite_tunnel"
-path = "infinite_tunnel.rs"
-
-[[bin]]
-name = "portal_cube"
-path = "portal_cube.rs"
-
-[[bin]]
-name = "portal_rooms"
-path = "portal_rooms.rs"
-
-[[bin]]
 name = "outdoor_night"
 path = "outdoor_night.rs"
 
@@ -189,16 +173,8 @@ path = "oil_rig_night.rs"
 
 
 [[bin]]
-name = "corona_demo"
-path = "corona_demo.rs"
-
-[[bin]]
 name = "indoor_cathedral_pp_volumes"
 path = "indoor_cathedral_pp_volumes.rs"
-
-[[bin]]
-name = "indoor_cathedral_decals"
-path = "indoor_cathedral_decals.rs"
 
 [[bin]]
 name = "volumetric_fog_demo"
@@ -237,10 +213,6 @@ path = "two_million_dynamic.rs"
 
 
 [[bin]]
-name = "lens_flare_demo"
-path = "lens_flare_demo.rs"
-
-[[bin]]
 name = "hdr_demo"
 path = "hdr_demo.rs"
 
@@ -276,20 +248,13 @@ helio-pass-vg-raster = { path = "../passes/3d/helio-pass-vg-raster" }
 helio-mats = { workspace = true }
 helio-pass-object-batch = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
-helio-pass-sprite-batch = { workspace = true }
-helio-pass-sprite-cull = { workspace = true }
-helio-pass-sprite-simulate = { workspace = true }
-helio-pass-radiance-cascades-2d = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
-helio-pass-corona = { workspace = true }
 helio-pass-billboard = { workspace = true }
-helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
-helio-pass-lens = { path = "../passes/3d/helio-pass-lens" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
 helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
@@ -297,7 +262,6 @@ helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 helio-pass-foliage-place = { workspace = true }
-helio-pass-portal-cull = { workspace = true }
 helio-presets = { path = "../helio-presets" }
 helio-scene-derivations = { path = "../helio-scene-derivations" }
 helio-controls = { workspace = true, features = ["winit"] }
@@ -330,22 +294,6 @@ flate2 = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 
 [[bin]]
-name = "sprite_demo"
-path = "sprite_demo.rs"
-
-[[bin]]
-name = "sprite_stress_test"
-path = "sprite_stress_test.rs"
-
-[[bin]]
-name = "sprite_10m_demo"
-path = "sprite_10m_demo.rs"
-
-[[bin]]
-name = "sprite_dig_demo"
-path = "sprite_dig_demo.rs"
-
-[[bin]]
 name = "foliage_demo"
 path = "foliage_demo.rs"
 
@@ -364,10 +312,6 @@ path = "monumental_arch_hlfs.rs"
 [[bin]]
 name = "technology_gallery_hlfs"
 path = "technology_gallery_hlfs.rs"
-
-[[bin]]
-name = "lens_showcase"
-path = "lens_showcase.rs"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 openxr = "0.21"

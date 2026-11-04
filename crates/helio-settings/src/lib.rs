@@ -466,7 +466,6 @@ pub static RENDERER: Group = Group {
             default: Value::Color([0.0, 0.0, 0.0, 1.0]),
             applies: Applies::Rebuild,
         },
-        toggle("portals", "Portals", "Advanced", true, "Portal passes (about 10 MB of GPU memory)"),
         pick(
             "perf_overlay",
             "Performance Overlay",

@@ -1,6 +1,6 @@
 //! SceneDB-owned light primitive.
 //!
-//! Mirrors `helio-pass-corona::CoronaEmitterRow`'s recipe exactly: the
+//! Mirrors the particles plugin's `CoronaEmitterRow` recipe exactly: the
 //! pass that consumes a kind of scene content owns that content's schema.
 //! SceneDB owns the packed CPU column and its GPU projection; this crate
 //! never holds a second, renderer-local copy of "what lights exist."

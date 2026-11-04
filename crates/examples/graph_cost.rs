@@ -4,7 +4,8 @@
 //! `graph_cost <out dir> [room|content] [width height]`
 //!
 //! - `room`: `indoor_room`'s scene (a furnished room, three point lights).
-//! - `content`: the room plus a water volume, a corona emitter and a decal.
+//! - `content`: the room plus a water volume (particles and decals are
+//!   plugins' kinds now; their own examples measure them).
 //!
 //! Renders 120 frames to settle, times `Renderer::render` over 300 more
 //! (waiting for the GPU between frames, outside the timing), writes every
@@ -21,7 +22,7 @@ use glam::{Mat4, Vec3};
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, RendererConfig};
 use v3_demo_common::{
     box_mesh, build_default_renderer, flush_scene_db, make_material, new_scene_db_with_gpu_mirror,
-    plane_mesh, point_light, spawn_corona_emitter, spawn_light, spawn_material, spawn_mesh,
+    plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh,
     spawn_object, spawn_water_volume, WaterVolumeDescriptor,
 };
 
@@ -85,7 +86,7 @@ fn room(world: &mut pulsar_scenedb::World) {
     );
 }
 
-/// Water, a corona fountain and a decal in the room.
+/// Water in the room.
 fn content(world: &mut pulsar_scenedb::World) {
     spawn_water_volume(
         world,
@@ -94,42 +95,6 @@ fn content(world: &mut pulsar_scenedb::World) {
             bounds_max: [3.0, 0.4, 3.0],
             surface_height: 0.4,
             ..Default::default()
-        },
-    );
-    let fountain = helio_pass_corona::CoronaEmitterDescriptor {
-        max_particles: 65_536,
-        emit_rate: 4000.0,
-        lifetime: 2.0,
-        lifetime_variation: 0.5,
-        start_size: [0.1, 0.1],
-        end_size: [0.02, 0.02],
-        start_color: [0.2, 0.6, 1.0, 1.0],
-        end_color: [0.0, 1.0, 1.0, 0.0],
-        velocity: [0.0, 3.0, 0.0],
-        velocity_variation: [1.0, 1.0, 1.0],
-        gravity: -5.0,
-        shape: helio_pass_corona::CoronaEmitterShape::Point,
-        texture_index: -1,
-        position: [1.5, 0.8, 1.5],
-    };
-    spawn_corona_emitter(world, 0, fountain.to_gpu());
-    let decal = world.spawn();
-    world.insert(
-        decal,
-        helio_components::DecalComponent {
-            transform: Mat4::from_scale_rotation_translation(
-                Vec3::new(1.0, 1.0, 0.02),
-                glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
-                Vec3::new(0.0, 0.0, 2.0),
-            )
-            .inverse()
-            .to_cols_array(),
-            color: [1.0, 0.2, 0.1, 0.9],
-            albedo_texture_index: u32::MAX,
-            normal_texture_index: u32::MAX,
-            roughness_texture_index: u32::MAX,
-            metalness_texture_index: u32::MAX,
-            ..bytemuck::Zeroable::zeroed()
         },
     );
 }

@@ -28,11 +28,8 @@ pub use virtual_geometry::with_virtual_geometry;
 
 use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
-use helio_pass_corona::CoronaPass;
 use helio_pass_debug_overlay::DebugOverlayPass;
-use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
-use helio_pass_flare::LensFlarePass;
 use helio_pass_foliage_gbuffer::FoliageGBufferPass;
 use helio_pass_foliage_place::FoliagePlacePass;
 use helio_pass_fxaa::FxaaPass;
@@ -40,7 +37,6 @@ use helio_pass_gi::{GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
-use helio_pass_lens::LensPass;
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_object_batch::ObjectBatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
@@ -48,16 +44,12 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
-use helio_pass_portal_cull::PortalCullPass;
-use helio_pass_portal_instances::{PortalEditorOverlayPass, PortalInstancePass, PortalMaskPass};
 use helio_pass_post_volumes::PostProcessVolumeBlendPass;
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
-use helio_pass_sprite_batch::SpriteBatchPass;
-use helio_pass_sprite_cull::SpriteCullPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_volumetric_fog::{FogCompositePass, VolumetricFogPass};
@@ -75,11 +67,9 @@ use helio_spine::BackgroundPass;
 /// * shadows: `ShadowMatrixPass` + `ShadowDirtyPass` (dirty-flag buffer),
 ///   `ShadowDirtyPass` + `ShadowPass` (face dirty and geometry count buffers)
 /// * `HiZBuildPass` + `OcclusionCullPass` (Hi-Z sampler)
-/// * `PortalCullPass` + `PortalInstancePass` (portal output buffers)
 /// * `FoliagePlacePass` + `FoliageGBufferPass` (blade arena, tile table,
 ///   visible blades, indirect buffer)
 /// * every perf-overlay pass (one shared `PerfOverlayShared`)
-/// * `SpriteCullPass` + `SpriteBatchPass` (draw order and indirect buffers)
 ///
 /// Everything else listed as independent takes only renderer-owned handles
 /// (camera, debug camera and cull-stats buffers, debug-draw state, SceneDB,
@@ -107,16 +97,12 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<CloudTracePass>()
         .independent::<AtmosphereCompositePass>()
         .independent::<LightCullPass>()
-        .independent::<DecalPass>()
         .independent::<SsrPass>()
         .independent::<helio_pass_ssr::SsrCompositePass>()
         .independent::<PlanarReflectionPass>()
         .independent::<DeferredLightPass>()
         .independent::<HlfsPass>()
-        .independent::<PortalMaskPass>()
-        .independent::<PortalEditorOverlayPass>()
         .independent::<BillboardPass>()
-        .independent::<CoronaPass>()
         .independent::<WaterSimPass>()
         .independent::<WaterTransmissionPass>()
         .independent::<helio::DebugDrawPass>()
@@ -126,8 +112,6 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<FogCompositePass>()
         .independent::<TsrPass>()
         .independent::<FxaaPass>()
-        .independent::<LensPass>()
-        .independent::<LensFlarePass>()
         .independent::<PostProcessPass>()
         .group_types(&[
             name::<ShadowMatrixPass>(),
@@ -135,14 +119,12 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
             name::<ShadowPass>(),
         ])
         .group_types(&[name::<HiZBuildPass>(), name::<OcclusionCullPass>()])
-        .group_types(&[name::<PortalCullPass>(), name::<PortalInstancePass>()])
         .group_types(&[name::<FoliagePlacePass>(), name::<FoliageGBufferPass>()])
         .group_types(&[
             name::<PerfOverlayAnalyzerPass>(),
             name::<PerfOverlayCostAnalyzerPass>(),
             name::<PerfOverlayPass>(),
         ])
-        .group_types(&[name::<SpriteCullPass>(), name::<SpriteBatchPass>()])
 }
 
 pub(crate) fn convert_perf_mode(
