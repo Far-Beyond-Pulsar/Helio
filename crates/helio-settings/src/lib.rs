@@ -407,15 +407,6 @@ pub static RENDERER: Group = Group {
         ),
         toggle("screen_space_reflections", "Screen Space Reflections", "Reflections", false, "Screen-space reflections"),
         toggle("planar_reflections", "Planar Reflections", "Reflections", false, "Render authored planar reflection surfaces"),
-        number(
-            "gi_probe_spacing",
-            "GI Probe Spacing",
-            "Global Illumination",
-            (0.0, 8.0, 0.25),
-            0.0,
-            "Metres between the finest GI probes (each coarser level doubles it); 0: the renderer's choice \
-             (1 m over voxel terrain, 0.5 m in mesh scenes)",
-        ),
         pick(
             "hdr_output_mode",
             "HDR Output",

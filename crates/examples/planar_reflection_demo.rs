@@ -2,6 +2,9 @@
 // A glossy floor plane with coloured objects above it, demonstrating the
 // planar reflection capture system.
 //
+// The sky and GI left Helio with their plugins (Pulsar `plugins/vendor/sky`,
+// `plugins/vendor/gi`): no atmosphere or GI probes here.
+//
 // Controls:
 //   WASD        — move
 //   Space/Shift — up/down
@@ -10,7 +13,6 @@
 
 mod v3_demo_common;
 
-use helio_components::AtmosphereComponent;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -222,13 +224,8 @@ impl ApplicationHandler for App {
 
         // ── Sky ────────────────────────────────────────────────────────────
         // `ambient_color` from the removed `SkyActor` builder is now the
-        // renderer's own ambient term (`set_ambient`, below). The sky is
-        // Earth's air, lit by the directional light below.
-        let sky_entity = scene_db.world.spawn();
-        scene_db.world.insert(
-            sky_entity,
-            AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth()),
-        );
+        // renderer's own ambient term (`set_ambient`, below). The atmosphere
+        // is the sky plugin's (Pulsar); this scene has none.
 
         // ── Lights ─────────────────────────────────────────────────────────
         spawn_light(

@@ -153,7 +153,7 @@ pub(crate) struct Inputs<'a> {
     /// albedo, normal, ORM, emissive, depth, lightmap UV, lightmap, pre-AA, velocity
     pub textures: [&'a wgpu::TextureView; 9],
     pub lightmap_sampler: &'a wgpu::Sampler,
-    /// The GI probes' irradiance at each pixel (`helio_pass_gi`), or a
+    /// The frame's indirect diffuse at each pixel (`INDIRECT_DIFFUSE`), or a
     /// buffer holding none.
     pub gi_irradiance: &'a wgpu::Buffer,
 }

@@ -17,6 +17,11 @@
 //!   F3          — toggle debug overlay (FPS, timings, texture stats)
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 
 mod v3_demo_common;
 
@@ -30,7 +35,7 @@ use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
-    scene_db_handle, spawn_indoor_cathedral_sky, spawn_light, spawn_material, spawn_mesh,
+    scene_db_handle, spawn_light, spawn_material, spawn_mesh,
     spawn_object, update_light, SceneRays, SurfaceCapture,
 };
 
@@ -221,7 +226,6 @@ impl ApplicationHandler for App {
             make_material([0.75, 0.72, 0.68, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0),
         );
 
-        spawn_indoor_cathedral_sky(&mut scene_db.world);
 
         // Lights are spawned BEFORE any mesh/material/object entity, not just
         // grouped here for readability: `LightComponent`'s "scene_lights" GPU

@@ -1091,7 +1091,6 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-postprocess",
  "helio-pass-shadow-matrix",
- "helio-pass-sky",
  "helio-pass-transparent",
  "helio-pass-tsr",
  "helio-pass-vg-bvh",
@@ -1665,7 +1664,6 @@ dependencies = [
  "helio-pass-gbuffer",
  "helio-pass-object-batch",
  "helio-pass-postprocess",
- "helio-pass-sky",
  "helio-scene-derivations",
  "helio-vg-stream",
  "log",
@@ -1691,11 +1689,10 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.33.5",
+ "helio-frame-api",
  "helio-mats",
- "helio-pass-gi",
  "helio-pass-hiz",
  "helio-pass-shadow-matrix",
- "helio-pass-sky",
  "helio-scene-derivations",
  "log",
  "naga",
@@ -1725,16 +1722,6 @@ dependencies = [
  "helio-core",
  "helio-feature-api",
  "wgpu",
-]
-
-[[package]]
-name = "helio-gi-api"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-frame-api",
 ]
 
 [[package]]
@@ -1870,24 +1857,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-gi"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-gi-api",
- "helio-mats",
- "helio-mesh-api",
- "helio-pass-shadow-matrix",
- "helio-sky-api",
- "pollster 0.4.0",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-hiz"
 version = "0.1.0"
 dependencies = [
@@ -1909,7 +1878,7 @@ dependencies = [
  "helio-components",
  "helio-core",
  "helio-feature-api",
- "helio-gi-api",
+ "helio-frame-api",
  "helio-mats",
  "helio-mesh-api",
  "helio-pass-forward-lit",
@@ -2092,25 +2061,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-sky"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-components",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-scene-join",
- "helio-sky-api",
- "naga",
- "pollster 0.4.0",
- "pulsar_reflection",
- "pulsar_scenedb",
- "serde_json",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-ssr"
 version = "0.1.0"
 dependencies = [
@@ -2288,7 +2238,6 @@ dependencies = [
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
- "helio-pass-gi",
  "helio-pass-hiz",
  "helio-pass-hlfs",
  "helio-pass-indirect-dispatch",
@@ -2302,7 +2251,6 @@ dependencies = [
  "helio-pass-shadow-dirty",
  "helio-pass-shadow-matrix",
  "helio-pass-simple-cube",
- "helio-pass-sky",
  "helio-pass-ssr",
  "helio-pass-transparent",
  "helio-pass-tsr",
@@ -2359,15 +2307,6 @@ dependencies = [
 [[package]]
 name = "helio-settings"
 version = "0.1.0"
-
-[[package]]
-name = "helio-sky-api"
-version = "0.1.0"
-dependencies = [
- "helio-core",
- "helio-frame-api",
- "wgpu",
-]
 
 [[package]]
 name = "helio-snapshot"
@@ -2459,7 +2398,6 @@ dependencies = [
  "helio-components",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
- "helio-pass-sky",
  "helio-presets",
  "js-sys",
  "log",

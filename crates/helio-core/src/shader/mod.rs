@@ -252,7 +252,7 @@ impl TextSource for Embedded {
 ///
 /// Declared as a `const` by whichever pass crate owns the snippet's content
 /// (e.g. `helio-pass-hiz`'s Hi-Z traversal, `helio-pass-gbuffer`'s PBR
-/// evaluation library, `helio-pass-sky`'s atmosphere) and passed
+/// evaluation library, `helio-frame-api`'s atmosphere) and passed
 /// explicitly to [`resolve_with`]/[`module_with`] by the pass that wants it.
 /// `helio-core` never declares one itself and never hardcodes a marker or
 /// source string belonging to a specific domain — only this generic shape.

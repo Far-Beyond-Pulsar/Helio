@@ -4,11 +4,15 @@
 //! This is an original procedural interpretation, not a surveyed replica.
 //! Its smoke post-process volume left Helio with its plugin (Pulsar
 //! `plugins/vendor/post`); this scene no longer has one.
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 use crate::{architectural_mesh::Mesh, v3_demo_common::*};
 use glam::{Mat4, Vec2, Vec3};
 use helio::{Camera};
 use helio_mesh_api::{MeshUpload};
-use helio_components::AtmosphereComponent;
 use pulsar_scenedb::{Entity, World};
 
 // Extrude a counter-clockwise polygon along depth. Rotating the entire prism
@@ -113,12 +117,6 @@ pub fn camera(t: f32, aspect: f32) -> Camera {
 }
 
 pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    let environment = world.spawn();
-    // Earth's air; its sun is the scene's directional light.
-    world.insert(
-        environment,
-        AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth()),
-    );
     let mut meshes: Vec<Mesh> = (0..7).map(|_| Mesh::default()).collect();
     // Four piers preserve both intersecting passages down to the plaza.
     for side in [-1.0, 1.0] {

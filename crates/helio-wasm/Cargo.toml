@@ -13,7 +13,6 @@ helio = { workspace = true }
 helio-presets = { path = "../helio-presets" }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-forward-lit = { workspace = true }
-helio-pass-sky = { workspace = true }
 pulsar_scenedb = { workspace = true }
 wgpu = { workspace = true, features = ["webgpu"] }
 winit = { workspace = true }

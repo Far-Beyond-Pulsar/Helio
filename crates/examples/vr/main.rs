@@ -23,6 +23,11 @@
 //! Without a headset (or without OpenXR + a Vulkan-capable GPU) the demo logs a
 //! warning and runs the desktop path; with one, `renderer.render_window_frame()`
 //! drives the headset and mirrors its stereo output each frame.
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 
 mod input;
 mod scene;

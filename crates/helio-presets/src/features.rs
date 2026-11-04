@@ -1,8 +1,8 @@
 //! The features Helio's presets are made of, and the renderer's own nodes.
 //!
 //! Every pass node is registered by the crate that owns the pass: the spine's
-//! by `helio-spine`, each feature's by its crate (`helio_pass_sky::
-//! SkyFeature`, …). What is left here is what belongs to the renderer:
+//! by `helio-spine`, each feature's by its crate (`helio_pass_ssr::
+//! SsrFeature`, …). What is left here is what belongs to the renderer:
 //!
 //! - the debug-draw nodes, whose pass and state are the renderer's;
 //! - a preparer that turns the renderer's config into the settings the
@@ -32,8 +32,6 @@ pub fn default_features() -> FeatureSet {
         .with(helio_pass_shadow::ShadowDrawers)
         .with(helio_pass_forward_lit::ForwardDrawers)
         .with(helio_pass_transparent::TransparentDrawers)
-        .with(helio_pass_sky::SkyFeature)
-        .with(helio_pass_gi::GiFeature)
         .with(helio_pass_ssr::SsrFeature)
         .with(helio_pass_planar_reflection::PlanarReflectionFeature)
         .with(helio_pass_hlfs::HlfsFeature)

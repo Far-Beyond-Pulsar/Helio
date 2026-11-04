@@ -44,7 +44,6 @@ fn mirror(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> GpuMirrorHand
             max_cells_metadata: 0,
         },
     );
-    helio_components::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
     helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
     helio_components::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
     helio_components::StaticObjectComponent::register_gpu_columns_growable(

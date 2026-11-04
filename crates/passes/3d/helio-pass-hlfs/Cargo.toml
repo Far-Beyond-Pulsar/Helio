@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 helio-mesh-api = { workspace = true }
 helio-bake-types = { workspace = true }
 helio-feature-api = { path = "../../../helio-feature-api" }
-helio-gi-api = { path = "../../../api/helio-gi-api" }
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-core  = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }

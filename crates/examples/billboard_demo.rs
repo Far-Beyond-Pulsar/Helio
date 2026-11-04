@@ -42,8 +42,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Spawns a billboard directly as a SceneDB `BillboardComponent` row --
-/// mirrors `v3_demo_common`'s `spawn_sky` idiom
-/// (`world.spawn()` + `world.insert(entity, component)`), which no helper
+/// the usual idiom (`world.spawn()` + `world.insert(entity, component)`),
+/// which no helper
 /// exists for yet since no example has used billboards before this one.
 ///
 /// `scale` is the quad's world-space (or screen-space, see `screen_scale`)

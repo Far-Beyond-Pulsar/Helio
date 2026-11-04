@@ -15,7 +15,7 @@
 //! Sources go through `helio_core::shader::resolve_with` first — the same call
 //! (modulo which snippets a given pass registers) the runtime makes — so a
 //! prelude/snippet-using shader is validated as the GPU will see it, not as
-//! the bare file on disk. The snippet list here (HIZ, PBR, sky) is this
+//! the bare file on disk. The snippet list here (HIZ, PBR, the frame's sky) is this
 //! test's own aggregation of every pass-owned snippet in the workspace, not
 //! something `helio-core` itself knows about — `resolve_with` never fails
 //! for a marker with no matching snippet, so listing all of them here is
@@ -27,12 +27,9 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_hiz::HIZ_SNIPPET,
     helio_mats::PBR_EVAL_SNIPPET,
     helio_mats::SPECULAR_AA_SNIPPET,
-    helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
-    helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE_SNIPPET,
-    helio_pass_sky::clouds::CLOUD_SHADOW_SNIPPET,
-    helio_pass_sky::clouds::CLOUDS_SNIPPET,
-    helio_pass_gi::GI_COMMON_SNIPPET,
-    helio_pass_gi::GI_SAMPLE_SNIPPET,
+    helio_frame_api::lighting::sky::ATMOSPHERE_SNIPPET,
+    helio_frame_api::lighting::sky::ATMOSPHERE_SKY_TABLE_SNIPPET,
+    helio_frame_api::lighting::sun_transmittance::SNIPPET,
     helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
 ];
 
@@ -109,10 +106,6 @@ fn is_composed(path: &Path) -> bool {
         "helio-pass-vg-shade/shaders/vg_debug.wgsl",
         "helio-pass-vg-shade/shaders/vg_resolve.wgsl",
         "helio-pass-vg-shade/shaders/vg_shade.wgsl",
-        // Prefixed with the cut-outs' alpha evaluator (`helio_mats::vg_alpha`,
-        // in the device's material binding mode); validated composed, both
-        // modes, by `helio-pass-gi`'s `shaders_validate`.
-        "helio-pass-gi/shaders/gi_mesh_trace.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
