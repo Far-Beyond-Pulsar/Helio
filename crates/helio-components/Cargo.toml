@@ -2,7 +2,7 @@
 name = "helio-components"
 version = "0.1.0"
 edition = "2021"
-description = "SceneDB components for Helio's standalone hosts (examples, demos, wasm, tests) of the kinds Helio still has (lights, materials, billboards, reflection captures). Engines register their own; the renderer never depends on this crate."
+description = "SceneDB components for Helio's standalone hosts (examples, demos, wasm, tests) of the kinds Helio still has (materials). Engines register their own; the renderer never depends on this crate."
 license = "MIT OR Apache-2.0"
 
 [features]
@@ -25,9 +25,6 @@ bytemuck = { workspace = true, features = ["derive"] }
 glam = { workspace = true }
 helio-mats = { workspace = true }
 log = { workspace = true }
-helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
-helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
-helio-pass-light-cull = { workspace = true }
 
 [dev-dependencies]
 helio = { path = "../helio" }

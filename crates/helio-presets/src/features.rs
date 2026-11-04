@@ -29,13 +29,8 @@ pub use helio_frame_api::{host_kind, HOST_INPUTS};
 pub fn default_features() -> FeatureSet {
     FeatureSet::new()
         .with(helio_spine::SpineFeature)
-        .with(helio_pass_shadow_matrix::ShadowViewsFeature)
-        .with(helio_pass_light_cull::LightCullFeature)
-        .with(helio_pass_deferred_light::DeferredLightingFeature)
         .with(helio_pass_ssr::SsrFeature)
         .with(helio_pass_planar_reflection::PlanarReflectionFeature)
-        .with(helio_pass_hlfs::HlfsFeature)
-        .with(helio_pass_billboard::BillboardFeature)
         .with(helio_pass_fxaa::FxaaFeature)
         .with(helio_pass_buffer_view::BufferViewFeature)
         .with(helio_pass_perf_overlay::PerfOverlayFeature)

@@ -32,7 +32,6 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_frame_api::lighting::sky::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
     helio_frame_api::lighting::VIEW_REMAP_SNIPPET,
-    helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
 ];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -72,23 +71,6 @@ fn is_fragment(source: &str) -> bool {
     !(source.contains("@vertex") || source.contains("@fragment") || source.contains("@compute"))
 }
 
-/// An entry-point-bearing piece its crate assembles with shared declarations
-/// (or a terrain program, or a row stride): validated as composed, by
-/// `composed_shaders_parse_and_validate` or by its pass, not on its own.
-/// Keep this implementation detail in the validator rather than adding
-/// test-only comments to production shader sources.
-fn is_composed(path: &Path) -> bool {
-    const COMPOSED: &[&str] = &[
-        "helio-pass-hlfs/shaders/composite.wgsl",
-        "helio-pass-hlfs/shaders/light_grid.wgsl",
-        "helio-pass-hlfs/shaders/sample.wgsl",
-        "helio-pass-hlfs/shaders/spatial.wgsl",
-        "helio-pass-hlfs/shaders/temporal.wgsl",
-    ];
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
-}
-
 /// Assembles the shaders their passes build from more than one piece, the
 /// same way the pass does, so they are validated as the GPU sees them.
 fn compose(path: &Path, source: String) -> String {
@@ -99,7 +81,6 @@ fn compose(path: &Path, source: String) -> String {
     const JOINS: &[&str] = &[
         "hierarchy_resolve.wgsl",
         "row_join.wgsl",
-        "scene_join_lights.wgsl",
     ];
     if path
         .file_name()
@@ -153,9 +134,6 @@ fn every_wgsl_shader_parses_and_validates() {
         let source = std::fs::read_to_string(path).expect("shader should be readable");
         let source = compose(path, source);
 
-        if is_composed(path) {
-            continue;
-        }
         if is_fragment(&source) {
             skipped.push(rel.display().to_string());
             continue;
