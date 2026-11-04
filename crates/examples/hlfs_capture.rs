@@ -255,9 +255,9 @@ pub fn run_scene_animated(
             .with_editor_mode(false)
             .with_pass_build_context(Box::new(move |ctx| {
                 if fxaa {
-                    helio_default_passes::build_fxaa_hlfs_graph_with_context(ctx)
+                    helio_presets::hlfs_fxaa(ctx)
                 } else {
-                    helio_default_passes::build_hlfs_graph_with_context(ctx)
+                    helio_presets::hlfs(ctx)
                 }
             }))
             .build(device.clone(), queue.clone(), width, height, format);

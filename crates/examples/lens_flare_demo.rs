@@ -16,7 +16,6 @@ use helio::{
     HelioGraphicsConfig, HelioGraphicsContext, LightType, Renderer, RendererBuilder,
     RendererConfig,
 };
-use helio_default_passes::build_default_graph_external_with_context;
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, scene_db_handle,
     spawn_light, spawn_material, spawn_mesh, spawn_object,
@@ -331,7 +330,7 @@ fn build_scene(
     let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
     let graph_scene_db = scene_db_handle(&scene_db);
     let builder = RendererBuilder::new(config, graph_scene_db.clone())
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context));
+        .with_pass_build_context(Box::new(helio_presets::deferred));
     let mut renderer = if let Some(graphics) = graphics {
         builder
             .build_with_graphics_context(graphics)

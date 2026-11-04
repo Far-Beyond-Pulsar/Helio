@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 helio-components = { path = "../../crates/helio-components" }
 helio-asset-compat = { workspace = true }
 helio              = { workspace = true }
-helio-default-passes = { workspace = true }
+helio-presets = { workspace = true }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-forward-lit = { workspace = true }
 pulsar_scenedb = { workspace = true }

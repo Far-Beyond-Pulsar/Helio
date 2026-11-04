@@ -10,6 +10,8 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
+helio-feature-api = { path = "../../../helio-feature-api" }
+image = { workspace = true, features = ["png"] }
 pulsar_reflection = { workspace = true }
 helio-core  = { workspace = true }
 wgpu      = { workspace = true }

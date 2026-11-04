@@ -4,6 +4,9 @@
 //! Instance buffer is GPU-side; CPU uploads billboard data once per frame and issues
 //! a single instanced draw call. O(1) CPU.
 
+pub mod feature;
+pub use feature::BillboardFeature;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};

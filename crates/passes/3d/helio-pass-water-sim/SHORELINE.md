@@ -57,7 +57,7 @@ and coherence, curvature, Green's-law shoaling and ray-tube convergence follow
 Ultra-Water's `shoreMap.js` pipeline.
 
 Water names no terrain. Helio's voxel terrain's provider is
-`helio_default_passes::water_shore::VoxelShoreTerrain` (and
+`helio_presets::water_shore::VoxelShoreTerrain` (and
 `shore_map_from_voxel_planet`, which bakes with it), where the two features
 meet: it samples the voxel world's canonical `Matter::Ground` column query,
 including terrain edits. For sphere-shaped planets, it follows the planet's

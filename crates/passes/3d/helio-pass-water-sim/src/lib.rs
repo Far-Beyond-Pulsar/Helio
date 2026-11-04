@@ -1,3 +1,6 @@
+pub mod feature;
+pub use feature::WaterFeature;
+
 pub mod pipeline;
 pub mod simulation;
 

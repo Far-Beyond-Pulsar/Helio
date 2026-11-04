@@ -52,7 +52,7 @@ helio-components = { path = "../helio-components" }
 helio-wasm          = { path = "../helio-wasm" }
 helio               = { workspace = true }
 helio-core          = { workspace = true }
-helio-default-passes = { workspace = true }
+helio-presets = { workspace = true }
 helio-asset-compat  = { workspace = true }
 pulsar_scenedb      = { workspace = true }
 helio-pass-gbuffer  = { workspace = true }

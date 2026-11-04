@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-core = { workspace = true }
+helio-feature-api = { path = "../../../helio-feature-api" }
 helio-sky-api = { path = "../../../api/helio-sky-api" }
 helio-gi-api = { path = "../../../api/helio-gi-api" }
 helio-pass-shadow-matrix = { workspace = true }

@@ -89,7 +89,6 @@ impl RendererConfig {
         self.enable_environment_reflections = settings.bool("environment_reflections");
         self.enable_ssr = settings.bool("screen_space_reflections");
         self.enable_planar_reflections = settings.bool("planar_reflections");
-        self.gi_probe_spacing = settings.optional("gi_probe_spacing").map(|m| m as f32);
         self.hdr_output_mode = match settings.text("hdr_output_mode") {
             "hdr10" => HdrOutputMode::Hdr10,
             "scrgb" => HdrOutputMode::ScRgb,

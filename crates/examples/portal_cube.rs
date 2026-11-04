@@ -27,7 +27,6 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::PortalComponent;
-use helio_default_passes::build_default_graph_external_with_context;
 use helio_pass_portal_cull::{
     PortalProjectionBridge, PortalProjectionConfig, SubLevelContents, SubLevelResolver,
     MAX_PORTAL_CHAINS,
@@ -170,7 +169,7 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;
@@ -324,7 +323,7 @@ impl ApplicationHandler for App {
             projection_entities[0],
         )
         .expect("portal_cube dense projection rows");
-        helio_default_passes::portals::set_projection_frame(&mut renderer, &projection_frame);
+        helio_scene_derivations::portals::set_projection_frame(&mut renderer, &projection_frame);
 
         // ── A light near the center so every wall reads, plus one per
         // doorway direction so the receding reflections don't go flat black.
@@ -587,7 +586,7 @@ impl AppState {
                         self.portal_projection_entities[0],
                     )
                     .expect("portal_cube visible projection rows");
-                    helio_default_passes::portals::set_projection_frame(&mut self.renderer, &projection_frame);
+                    helio_scene_derivations::portals::set_projection_frame(&mut self.renderer, &projection_frame);
                 } else {
                     log::warn!(
                         "[portal_cube] visible projection rows exceed dense row arena: views={} chains={} capacity={}",

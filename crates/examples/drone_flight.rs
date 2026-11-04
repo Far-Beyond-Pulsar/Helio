@@ -27,7 +27,6 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     HelioAction, HelioCommandBridge, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_hlfs_graph_with_context;
 use helio_pass_perf_overlay::PerfOverlayMode;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
@@ -187,7 +186,7 @@ impl ApplicationHandler for App {
         }
         let mut renderer = RendererBuilder::new(config, scene_handle)
             .with_editor_mode(true)
-            .with_pass_build_context(Box::new(build_hlfs_graph_with_context))
+            .with_pass_build_context(Box::new(helio_presets::hlfs))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

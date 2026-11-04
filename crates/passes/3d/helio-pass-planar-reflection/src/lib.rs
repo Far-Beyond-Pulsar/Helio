@@ -1,3 +1,6 @@
+pub mod feature;
+pub use feature::PlanarReflectionFeature;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};

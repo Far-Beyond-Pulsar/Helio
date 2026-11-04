@@ -705,6 +705,19 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// while they are members. The graph also asks once at lock, with no
     /// scene: content questions answer "none" then.
     ///
+    /// Whether the pass needs more frames to finish what it shows (content
+    /// streaming in, a request it answers a few frames later): a host that
+    /// renders on demand keeps rendering while any pass says so.
+    fn needs_frame(&self) -> bool {
+        false
+    }
+
+    /// One line on the pass's state for a host's diagnostics log, if it
+    /// keeps any (residency, timings).
+    fn diagnostics(&self) -> Option<String> {
+        None
+    }
+
     /// Default: always a member.
     fn is_member(&mut self, _scene: &mut crate::graph::SceneContent<'_>) -> bool {
         true

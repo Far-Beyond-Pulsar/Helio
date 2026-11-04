@@ -91,17 +91,17 @@ impl HelioWasmApp for Demo {
         let light_ids = [ids.remove(0), ids.remove(0), ids.remove(0)];
 
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
-        let graph = helio_default_passes::build_hlfs_graph(
-            &device,
-            &queue,
-            renderer.camera_buf(),
-            renderer.renderer_config(),
-            renderer.debug_state(),
-            renderer.debug_camera_buf(),
-            renderer.cull_stats_buf(),
-            None,
-            renderer.scene_db(),
-        );
+        let graph = helio_presets::hlfs(helio::PassBuildContext {
+            device: &device,
+            queue: &queue,
+            config: renderer.renderer_config(),
+            debug_state: renderer.debug_state(),
+            camera_buffer: renderer.camera_buf(),
+            debug_camera_buffer: renderer.debug_camera_buf(),
+            cull_stats_buffer: renderer.cull_stats_buf(),
+            owns_device: true,
+            scene_db: renderer.scene_db(),
+        });
         renderer.set_graph(graph);
 
         Self {

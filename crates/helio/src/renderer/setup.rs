@@ -266,6 +266,7 @@ impl Renderer {
             cull_stats_buffer,
             graph_rebuilder,
             graph_rebuild_hook: None,
+            scene_payloads: Default::default(),
             persistent_passes: Vec::new(),
             #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
             shader_reload: Default::default(),

@@ -2,6 +2,9 @@
 //! the frame plus analytic lens sources from scene lights. See README.md for
 //! the optical model and the `postprocess_uniforms` -> `lens_output` contract.
 
+pub mod feature;
+pub use feature::LensFlareFeature;
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{CommandRecorder, PassContext, RenderPass, ResourceKey, Result as HelioResult};
 use helio_pass_lens::{ResolvedLens, RESOLVED_KEY};

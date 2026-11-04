@@ -28,7 +28,7 @@ helio-vg-stream = { path = "../helio-vg-stream" }
 helio-asset-compat = { path = "../helio-asset-compat" }
 log = { workspace = true }
 twox-hash = { version = "2.1.3", default-features = false, features = ["alloc", "xxhash3_64"] }
-helio-default-passes = { path = "../helio-default-passes" }
+helio-scene-derivations = { path = "../helio-scene-derivations" }
 helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
 helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
 helio-pass-corona = { path = "../passes/3d/helio-pass-corona" }

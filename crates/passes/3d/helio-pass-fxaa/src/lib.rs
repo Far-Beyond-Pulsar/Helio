@@ -7,6 +7,9 @@
 //! ## O(1) guarantee
 //! `execute()` records exactly one `draw(0..3, 0..1)`.
 
+pub mod feature;
+pub use feature::FxaaFeature;
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 

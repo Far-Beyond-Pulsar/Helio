@@ -79,6 +79,12 @@ mod temporal_quality_tests;
 
 // ── Quality presets ───────────────────────────────────────────────────────────
 
+/// A setting a feature inserts (in a preparer) when it rotates samples over
+/// blocks of pixels for TSR to integrate (the voxel terrain's sun samples):
+/// a graph's TSR then reads the stochastic mask.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StochasticSamples;
+
 /// Temporal Super-Resolution quality presets: the internal / display
 /// resolution ratio. The resolve is the same for all of them; fewer input
 /// samples per output pixel make it integrate proportionally more frames.

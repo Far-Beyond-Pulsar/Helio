@@ -12,7 +12,6 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_asset_compat::load_scene_file_with_config;
-use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     new_scene_db_with_gpu_mirror, point_light, scene_db_handle, spawn_light, spawn_material,
@@ -131,7 +130,7 @@ impl ApplicationHandler for App {
         let config = RendererConfig::new(size.width, size.height, surface_format);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

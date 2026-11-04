@@ -72,6 +72,9 @@
 //! pass nor be skipped over by the chain scan (it is a raster pass, not
 //! `chain_transparent`). Placing foliage after VG makes the fusion impossible.
 
+pub mod feature;
+pub use feature::FoliageFeature;
+
 mod geometry;
 
 pub use geometry::*;
@@ -404,7 +407,7 @@ pub fn lod_draws(level: u32, distance: f32, boundary: f32, band: f32, unit: f32)
 /// Rasterises grass blades and cards into the shared G-buffer.
 ///
 /// Construct it with the four buffers `FoliagePlacePass` owns, following the
-/// `ShadowDirtyPass` → `ShadowCullPass` handoff in `helio-default-passes`: the producer
+/// `ShadowDirtyPass` → `ShadowCullPass` handoff in `helio-presets`: the producer
 /// pass is built first and its `Arc<wgpu::Buffer>` fields are cloned into the consumer.
 pub struct FoliageGBufferPass {
     pipeline: wgpu::RenderPipeline,
