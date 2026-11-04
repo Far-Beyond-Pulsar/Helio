@@ -174,7 +174,10 @@ pub fn run_scene_animated(
             // Capture resolution denotes native internal rendering by default.
             // Do not silently inherit the renderer's interactive 75% preset.
             .with_render_scale(1.0)
-            .with_shadow_quality(helio::ShadowQuality::High)
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::High,
+                ..Default::default()
+            })
             .with_ssr(std::env::var_os("HLFS_SSR").is_some());
         if std::env::var_os("HLFS_TSR_NATIVE").is_some() {
             assert!(!fxaa, "select one AA method for a controlled capture");
@@ -276,14 +279,14 @@ pub fn run_scene_animated(
                 .expect("TSR pass")
                 .set_reactivity(value);
         }
-        renderer.set_ambient(
-            if name.starts_with("cathedral") {
+        renderer.set_feature_live(helio::AmbientLight {
+            color: if name.starts_with("cathedral") {
                 [0.10, 0.09, 0.085]
             } else {
                 [0.05, 0.05, 0.08]
             },
-            1.0,
-        );
+            intensity: 1.0,
+        });
         // Camera motion advances by frame index. Temporal filters and animated
         // passes must use the same fixed clock, independent of capture readback.
         renderer.set_frame_delta_override(Some(1.0 / 60.0));
@@ -454,7 +457,7 @@ pub fn run_scene_animated(
         // HLFS_NO_LOCAL_EXPOSURE: post-process defaults without local exposure.
         if std::env::var_os("HLFS_NO_LOCAL_EXPOSURE").is_some() {
             let blend = renderer
-                .find_pass_mut::<helio_pass_postprocess::PostProcessVolumeBlendPass>()
+                .find_pass_mut::<helio_pass_post_volumes::PostProcessVolumeBlendPass>()
                 .expect("post-process resolver");
             let mut settings = blend.defaults().clone();
             settings.local_exposure_highlight_contrast = 1.0;

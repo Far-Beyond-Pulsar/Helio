@@ -43,6 +43,8 @@
 //! usable inside a `RenderGraph` that carries no 3D scene data at all.
 
 pub mod feature;
+pub mod scene_rows;
+
 pub use feature::SpriteFeature;
 
 use bytemuck::{Pod, Zeroable};
@@ -1187,7 +1189,7 @@ impl RenderPass for SpriteBatchPass {
             let Some(textures) = ctx
                 .registry
                 .read::<helio_mats::MaterialTextureBindings<'_>>(
-                    helio_core::resource_keys::material_textures(),
+                    helio_mats::material_textures(),
                     "SpriteBatch",
                 )
             else {

@@ -83,7 +83,10 @@ impl HelioWasmApp for Demo {
             );
         }
 
-        renderer.set_ambient([0.05, 0.08, 0.15], 0.03);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.05, 0.08, 0.15],
+            intensity: 0.03,
+        });
         renderer.set_clear_color([0.01, 0.01, 0.04, 1.0]);
 
         Self {

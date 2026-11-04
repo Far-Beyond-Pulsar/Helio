@@ -50,11 +50,15 @@ fn production_shadow_shaders_validate() {
         for (marker, file) in [
             (
                 "//!use atmosphere_sky_table",
-                "helio-pass-sky/src/shaders/atmosphere_sky_table.wgsl",
+                "../../helio-frame-api/src/shaders/atmosphere_sky_table.wgsl",
             ),
             (
                 "//!use cloud_shadow",
-                "helio-pass-sky/src/shaders/cloud_shadow.wgsl",
+                "../../api/helio-sky-api/src/shaders/cloud_shadow.wgsl",
+            ),
+            (
+                "//!use view_remap",
+                "../../helio-frame-api/src/shaders/view_remap.wgsl",
             ),
         ] {
             if source.contains(marker) {
@@ -70,7 +74,7 @@ fn production_shadow_shaders_validate() {
             source = format!(
                 "{}\n{}",
                 std::fs::read_to_string(
-                    root.join("helio-pass-sky/src/shaders/atmosphere_common.wgsl")
+                    root.join("../../helio-frame-api/src/shaders/atmosphere_common.wgsl")
                 )
                 .unwrap(),
                 source

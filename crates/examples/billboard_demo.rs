@@ -224,7 +224,10 @@ impl ApplicationHandler for App {
             true,
         ); // screen_scale
 
-        renderer.set_ambient([1.0, 0.97, 0.92], 0.15);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [1.0, 0.97, 0.92],
+            intensity: 0.15,
+        });
         renderer.set_clear_color([0.02, 0.02, 0.06, 1.0]);
 
         self.state = Some(AppState {

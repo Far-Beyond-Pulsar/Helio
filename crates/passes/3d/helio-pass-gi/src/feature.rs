@@ -1,11 +1,12 @@
 //! GI as a feature: its settings and the nodes it adds to preset graphs.
 //!
-//! The probes' update and the meshes' tracer join at
-//! [`Slot::Geometry`] (the update first, every other tracer between them);
-//! the resolve joins at [`Slot::LightingInputs`], before deferred lighting
-//! reads `gi_irradiance`.
+//! The probes' update runs before the G-buffer phase (it reads no G-buffer,
+//! and a terrain drawer traces its rays while it draws); the meshes' tracer
+//! joins at [`Slot::Geometry`]; the resolve at [`Slot::LightingInputs`],
+//! publishing the frame's indirect diffuse.
 
-use helio_feature_api::{Feature, FeatureRegistrar, NodeBuild, NodeDescriptor, ParamDesc, Slot};
+use helio_feature_api::{Feature, FeatureRegistrar, NodeBuild, NodeDescriptor, ParamDesc};
+use helio_frame_api::{FrameNode, Phase, Slot};
 
 use crate::{mesh_rays_supported, GiConfig, GiMeshTracePass, GiPass, GiResolvePass};
 
@@ -97,7 +98,7 @@ impl Feature for GiFeature {
                     Ok(())
                 },
             )
-            .in_slot(Slot::Geometry, 0),
+            .before_phase(Phase::GBuffer, 10),
         );
         registrar.node(
             node(

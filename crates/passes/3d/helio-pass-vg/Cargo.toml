@@ -7,6 +7,7 @@ description = "Virtual geometry's graph glue as a Helio feature: the pass chain,
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-core = { workspace = true }
 helio-feature-api = { path = "../../../helio-feature-api" }
 wgpu = { workspace = true }

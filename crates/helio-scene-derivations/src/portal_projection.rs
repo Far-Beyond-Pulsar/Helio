@@ -36,12 +36,13 @@ pub const PORTAL_CHAIN_HANDLE_ROW_BYTES: u64 = 8;
 /// One chain's content-from-host matrix (`mat4x4<f32>`).
 pub const PORTAL_CHAIN_UNMAP_ROW_BYTES: u64 = 64;
 /// Per chain: the matrix taking a point in the host world back into the world
-/// of the content that chain shows. Lighting uses it to shade a portal pixel in
-/// the content's own world (its sun, sky, reflections and lights), not the host's.
-/// Chains the unmap table holds. Fixed, since lighting binds it as a uniform of
-/// exactly this size.
-pub const PORTAL_CHAIN_UNMAP_CAPACITY: u64 = 256 * PORTAL_CHAIN_UNMAP_ROW_BYTES;
-pub const PORTAL_CHAIN_UNMAP_KEY: BufferKey = BufferKey::of("portal_chain_unmap");
+/// of the content that chain shows, published as the frame's view remaps
+/// (`helio_frame_api::lighting::VIEW_REMAPS`). Lighting uses it to shade a
+/// portal pixel in the content's own world (its sun, sky, reflections and
+/// lights), not the host's. Fixed size, since lighting binds it as a uniform
+/// of exactly this size.
+pub const PORTAL_CHAIN_UNMAP_CAPACITY: u64 = helio_frame_api::lighting::VIEW_REMAPS_BYTES;
+pub const PORTAL_CHAIN_UNMAP_KEY: BufferKey = BufferKey::of(helio_frame_api::lighting::VIEW_REMAPS);
 
 #[derive(Default)]
 struct Rows {

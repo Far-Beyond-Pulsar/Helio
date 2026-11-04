@@ -7,25 +7,27 @@ description = "Scene derivations Helio's hosts run between the SceneDB snapshot 
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-mesh-api = { workspace = true }
+helio-frame-api = { path = "../helio-frame-api" }
 helio = { path = "../helio" }
 helio-core = { workspace = true }
+helio-scene-join = { workspace = true }
+helio-pass-object-batch = { workspace = true }
+helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
 helio-mats = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 pollster = { workspace = true }
-helio-pass-corona = { path = "../passes/3d/helio-pass-corona" }
-helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
-helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
-helio-pass-lens = { workspace = true }
-helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
-helio-pass-sprite-batch = { path = "../passes/2d/helio-pass-sprite-batch" }
-helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
 helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
 
 [dev-dependencies]
+helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
+helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
+helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
+helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-components = { path = "../helio-components" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 pulsar_scenedb = { workspace = true }

@@ -612,7 +612,10 @@ fn run(
             helio_presets::deferred,
         ))
         .build(device.clone(), queue.clone(), width, height, FORMAT);
-    renderer.set_ambient([0.08, 0.08, 0.09], 1.0);
+    renderer.set_feature_live(helio::AmbientLight {
+            color: [0.08, 0.08, 0.09],
+            intensity: 1.0,
+        });
     renderer.set_frame_delta_override(Some(1.0 / 60.0));
 
     let target = device.create_texture(&wgpu::TextureDescriptor {

@@ -1,4 +1,4 @@
-//! The environment join in a camera-relative frame: the tables its passes
+//! Kinds' row joins in a camera-relative frame: the tables their passes
 //! draw in the frame's space (water volumes, decals, foliage layers) are placed relative to
 //! the world origin, water rows carry the origin's world phase, and a moved
 //! origin re-derives them. Needs a GPU adapter (lavapipe works); skips
@@ -6,10 +6,12 @@
 
 use std::sync::Arc;
 
-use helio_scene_derivations::environment_join::{
-    BufferHandle, BufferKey, EnvironmentJoin, EnvironmentJoinKeys, SceneBufferProjection,
-    SceneDerivation, SceneDerivationContext, DECALS_KEY, DECAL_SOURCE_ROW_BYTES,
-    FOLIAGE_LAYERS_KEY, FOLIAGE_SOURCE_ROW_BYTES, WATER_VOLUMES_KEY, WATER_VOLUME_SOURCE_ROW_BYTES,
+use helio_pass_decal::scene_rows::{DECALS_KEY, DECAL_SOURCE_ROW_BYTES};
+use helio_pass_foliage_place::scene_rows::{FOLIAGE_LAYERS_KEY, FOLIAGE_SOURCE_ROW_BYTES};
+use helio_pass_water_sim::scene_rows::{WATER_VOLUMES_KEY, WATER_VOLUME_SOURCE_ROW_BYTES};
+use helio_scene_join::{
+    BufferHandle, BufferKey, RowJoin, RowJoinKeys, SceneBufferProjection, SceneDerivation,
+    SceneDerivationContext,
 };
 
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
@@ -24,26 +26,41 @@ fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
     Some((Arc::new(device), Arc::new(queue)))
 }
 
-const KEYS: EnvironmentJoinKeys = EnvironmentJoinKeys {
+const KEYS: RowJoinKeys = RowJoinKeys {
     owners: BufferKey::of("t_owners"),
     generations: BufferKey::of("t_generations"),
     hidden: BufferKey::of("t_hidden"),
     transforms: BufferKey::of("t_transforms"),
-    global_fog: BufferKey::of("t_global_fog"),
-    local_fog: BufferKey::of("t_local_fog"),
-    post_process_volumes: BufferKey::of("t_post_process_volumes"),
-    camera_post_process: BufferKey::of("t_camera_post_process"),
-    camera_lens: BufferKey::of("t_camera_lens"),
-    water_volumes: BufferKey::of("t_water_volumes"),
-    foliage: BufferKey::of("t_foliage"),
-    atmospheres: BufferKey::of("t_atmospheres"),
-    decals: BufferKey::of("t_decals"),
-    corona_emitters: BufferKey::of("t_corona_emitters"),
-    wind: BufferKey::of("t_wind"),
-    water_hitboxes: BufferKey::of("t_water_hitboxes"),
     mesh_bounds: BufferKey::of("t_mesh_bounds"),
-    sprites: BufferKey::of("t_sprites"),
+    lights: BufferKey::of("scene_lights"),
 };
+const WATER_VOLUMES: BufferKey = BufferKey::of("t_water_volumes");
+const FOLIAGE: BufferKey = BufferKey::of("t_foliage");
+const DECALS: BufferKey = BufferKey::of("t_decals");
+
+/// The row joins of the kinds under test: water, decals, foliage.
+fn joins(device: &wgpu::Device) -> Vec<RowJoin> {
+    vec![
+        helio_pass_water_sim::scene_rows::scene_rows(
+            device,
+            KEYS,
+            helio_pass_water_sim::WaterRowSources {
+                water_volumes: WATER_VOLUMES,
+                wind: BufferKey::of("t_wind"),
+                water_hitboxes: BufferKey::of("t_water_hitboxes"),
+            },
+        ),
+        helio_pass_decal::scene_rows::scene_rows(device, KEYS, DECALS),
+        helio_pass_foliage_place::scene_rows::scene_rows(
+            device,
+            KEYS,
+            helio_pass_foliage_place::FoliageRowSources {
+                foliage: FOLIAGE,
+                wind: BufferKey::of("t_wind"),
+            },
+        ),
+    ]
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -129,17 +146,17 @@ fn scene(device: &wgpu::Device, queue: &wgpu::Queue, far: Transform) -> SceneBuf
             std::mem::size_of::<Transform>() as u64,
         ),
         (
-            KEYS.water_volumes,
+            WATER_VOLUMES,
             bytemuck::cast_slice(&water).to_vec(),
             WATER_VOLUME_SOURCE_ROW_BYTES,
         ),
         (
-            KEYS.decals,
+            DECALS,
             bytemuck::cast_slice(&decal).to_vec(),
             DECAL_SOURCE_ROW_BYTES,
         ),
         (
-            KEYS.foliage,
+            FOLIAGE,
             bytemuck::cast_slice(&foliage).to_vec(),
             FOLIAGE_SOURCE_ROW_BYTES,
         ),
@@ -185,27 +202,29 @@ fn read(device: &wgpu::Device, queue: &wgpu::Queue, buffer: &wgpu::Buffer) -> Ve
 
 /// The first water row, decal row and foliage layer after a join at `origin`.
 fn derive(
-    join: &mut EnvironmentJoin,
+    joins: &mut [RowJoin],
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     inputs: &SceneBufferProjection,
     origin: glam::DVec3,
 ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     let mut encoder = device.create_command_encoder(&Default::default());
-    let output = join.derive(
-        &SceneDerivationContext {
-            device,
-            queue,
-            inputs,
-            world_origin: origin,
-        },
-        &mut encoder,
-    );
-    queue.submit([encoder.finish()]);
     let mut projection = SceneBufferProjection::default();
-    for (key, handle) in output.buffers {
-        projection.insert(key, handle);
+    for join in joins.iter_mut() {
+        let output = join.derive(
+            &SceneDerivationContext {
+                device,
+                queue,
+                inputs,
+                world_origin: origin,
+            },
+            &mut encoder,
+        );
+        for (key, handle) in output.buffers {
+            projection.insert(key, handle);
+        }
     }
+    queue.submit([encoder.finish()]);
     let water = read(
         device,
         queue,
@@ -235,10 +254,10 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     let far_world =
         glam::Vec3::from_array(far.position_hi) + glam::Vec3::from_array(far.position_lo);
     let inputs = scene(&device, &queue, far);
-    let mut join = EnvironmentJoin::new(&device, KEYS);
+    let mut join = joins(&device);
 
     // The frame's origin at the world's: rows at the owner, no water phase.
-    let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, glam::DVec3::ZERO);
+    let (water, decal, layer) = derive(&mut join[..], &device, &queue, &inputs, glam::DVec3::ZERO);
     assert_eq!(
         &layer,
         &[
@@ -270,7 +289,7 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
     // An origin near the owner: the same rows, less the f64 origin, exact for
     // these small offsets where world positions are 0.5 m out.
     let origin = glam::DVec3::new(1000.25, 6_371_000.125, -290.0);
-    let (water, decal, layer) = derive(&mut join, &device, &queue, &inputs, origin);
+    let (water, decal, layer) = derive(&mut join[..], &device, &queue, &inputs, origin);
     let offset = (glam::DVec3::from_array(far_position) - origin).as_vec3();
     assert!(
         (offset - glam::Vec3::new(-0.25, 2.246, -10.0))
@@ -324,7 +343,7 @@ fn camera_relative_frames_place_water_decals_and_foliage_layers_relative_to_the_
 
     // A moved origin re-derives them, though no input row changed.
     let moved = origin + glam::DVec3::new(1024.0, 0.0, 0.0);
-    let (water, _, layer) = derive(&mut join, &device, &queue, &inputs, moved);
+    let (water, _, layer) = derive(&mut join[..], &device, &queue, &inputs, moved);
     assert_eq!(layer[0], offset.x - 1024.0 - 8.0);
     assert_eq!(water[0], offset.x - 1024.0 - 2.0);
     assert_eq!(water[60], 134.25, "(1000.25 + 1024) mod 270");

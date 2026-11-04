@@ -236,7 +236,10 @@ impl ApplicationHandler for App {
         // to the "scene_lights" buffer on insert, above, and
         // `ForwardLitPass` resolves that buffer by key every frame on its
         // own -- no renderer call needed at all.
-        renderer.set_ambient([0.08, 0.10, 0.18], 0.6);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.08, 0.10, 0.18],
+            intensity: 0.6,
+        });
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);
 
         // ── Floor plane ─────────────────────────────────────────────────────

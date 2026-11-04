@@ -284,26 +284,21 @@ pub fn missing(node: &str, needs: &str) -> String {
     format!("{node} needs the {needs} node to be built before it")
 }
 
-/// Where in the frame a feature's node runs: the spine's extension points.
-/// A preset graph places the nodes registered for each slot there (by order,
-/// then kind), so a feature joins the pipeline without the preset naming it.
+/// A named place in a preset graph where features' nodes join it (an
+/// extension point: a slot or a draw phase's stage, which `helio-frame-api`
+/// defines). A preset places the nodes registered at a point there, by order,
+/// then kind, so a feature joins the pipeline without the preset naming it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Slot {
-    /// After the spine's G-buffer is complete, before decals: G-buffer
-    /// contributors that need its depth (voxel terrain) and the tracers that
-    /// read it (GI probe updates and their tracers).
-    Geometry,
-    /// After decals, before deferred lighting: what lighting reads that is
-    /// not the G-buffer (GI irradiance, the clouds' sun visibility).
-    LightingInputs,
-    /// After the scene is lit, before the overlays, fog and transparency:
-    /// resolves that write the lit colour and keep the pixels they do not
-    /// touch.
-    Lighting,
-    /// After everything drawn over the final image: consumers of the
-    /// finished frame (captures, readbacks).
-    Output,
-}
+pub struct ExtensionPoint(pub &'static str);
+
+/// Checks the passes a node added (their indices in the graph) once it has
+/// built: where a node type enforces a contract on what its passes declare
+/// (a draw phase's attachments, say).
+pub type CheckFn = Arc<
+    dyn Fn(&BuildEnv<'_>, &RenderGraph, std::ops::Range<usize>) -> Result<(), String>
+        + Send
+        + Sync,
+>;
 
 /// A node type.
 #[derive(Clone)]
@@ -332,9 +327,10 @@ pub struct NodeDescriptor {
     pub unsupported: Option<&'static str>,
     /// The extension point the node joins a preset graph at, and its order
     /// there (lower first). `None`: the preset places it by name.
-    pub slot: Option<(Slot, i32)>,
+    pub placement: Option<(ExtensionPoint, i32)>,
     pins: PinsFn,
     build: BuildFn,
+    checks: Vec<CheckFn>,
 }
 
 impl NodeDescriptor {
@@ -356,17 +352,24 @@ impl NodeDescriptor {
             data_only: false,
             alternative_inputs: Vec::new(),
             unsupported: None,
-            slot: None,
+            placement: None,
             pins: Arc::new(|_| NodePins::default()),
             build: Arc::new(build),
+            checks: Vec::new(),
         }
     }
 
-    /// Joins preset graphs at `slot`, `order` among the slot's nodes. A
-    /// preset chains its nodes by flow pins, so a slotted node needs them
+    /// Joins preset graphs at `point`, `order` among the point's nodes. A
+    /// preset chains its nodes by flow pins, so a placed node needs them
     /// (`with_generated_pins`).
-    pub fn in_slot(mut self, slot: Slot, order: i32) -> Self {
-        self.slot = Some((slot, order));
+    pub fn at(mut self, point: ExtensionPoint, order: i32) -> Self {
+        self.placement = Some((point, order));
+        self
+    }
+
+    /// Adds a check run on the passes the node added, once it has built.
+    pub fn with_check(mut self, check: CheckFn) -> Self {
+        self.checks.push(check);
         self
     }
 
@@ -446,9 +449,15 @@ impl NodeDescriptor {
         (self.pins)(&self.effective_params(params))
     }
 
-    /// Adds the node's passes to `build.graph`.
+    /// Adds the node's passes to `build.graph`, then runs its checks on them.
     pub fn run(&self, build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
-        (self.build)(build)
+        let first = build.graph.pass_count();
+        (self.build)(build)?;
+        let added = first..build.graph.pass_count();
+        for check in &self.checks {
+            check(build.env, build.graph, added.clone())?;
+        }
+        Ok(())
     }
 }
 
@@ -578,16 +587,16 @@ impl NodeRegistry {
         &self.finishers
     }
 
-    /// The node types registered for `slot`, by order then kind.
-    pub fn slotted(&self, slot: Slot) -> Vec<Arc<NodeDescriptor>> {
+    /// The node types placed at `point`, by order then kind.
+    pub fn placed(&self, point: ExtensionPoint) -> Vec<Arc<NodeDescriptor>> {
         let mut nodes: Vec<_> = self
             .nodes
             .values()
-            .filter(|d| d.slot.is_some_and(|(s, _)| s == slot))
+            .filter(|d| d.placement.is_some_and(|(p, _)| p == point))
             .cloned()
             .collect();
         nodes.sort_by(|a, b| {
-            (a.slot.map(|(_, o)| o), &a.kind).cmp(&(b.slot.map(|(_, o)| o), &b.kind))
+            (a.placement.map(|(_, o)| o), &a.kind).cmp(&(b.placement.map(|(_, o)| o), &b.kind))
         });
         nodes
     }

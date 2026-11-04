@@ -106,7 +106,10 @@ impl ApplicationHandler for App {
         let surface_format = format;
 
         let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::High);
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::High,
+                ..Default::default()
+            });
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(helio_presets::deferred))
@@ -261,7 +264,10 @@ impl ApplicationHandler for App {
         }
 
         // Optional faint moon as directional component-like sky bloom (general ambient control)
-        renderer.set_ambient([0.045, 0.06, 0.08], 0.08);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.045, 0.06, 0.08],
+            intensity: 0.08,
+        });
         renderer.set_clear_color([0.0025, 0.0035, 0.01, 1.0]);
 
         self.state = Some(AppState {

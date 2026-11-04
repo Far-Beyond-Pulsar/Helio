@@ -9,6 +9,7 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
+helio-scene-join = { path = "../../../helio-scene-join" }
 helio-settings = { workspace = true }
 pulsar_reflection = { workspace = true }
 glam = { workspace = true }

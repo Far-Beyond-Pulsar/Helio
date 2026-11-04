@@ -196,7 +196,10 @@ impl ApplicationHandler for App {
         let surface_format = format;
 
         let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra)
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::Ultra,
+                ..Default::default()
+            })
             .with_tsr_quality(TsrQuality::Quality);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
@@ -519,7 +522,10 @@ impl ApplicationHandler for App {
                 point_light([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0),
             ));
         }
-        renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.65, 0.7, 0.85],
+            intensity: 0.015,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         // Bake static/stationary lights so they're excluded from the real-time

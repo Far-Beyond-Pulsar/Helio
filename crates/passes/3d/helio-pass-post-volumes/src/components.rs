@@ -4,7 +4,7 @@
 //! blend weight, and every exposure/tonemap/fog/color-grading knob) authors
 //! exactly one packed row here -- there is no separate "settings" component,
 //! the whole editor property set is this one GPU-facing struct, field for
-//! field identical to `crate::GpuPostProcessVolume`'s ABI.
+//! field identical to `helio_pass_postprocess::GpuPostProcessVolume`'s ABI.
 
 #[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
@@ -27,7 +27,7 @@ pub struct PostProcessVolumeRow {
     pub override_mask_1: u32,
     pub override_mask_2: u32,
     pub override_mask_3: u32,
-    /// `crate::GpuPostProcessUniforms`'s raw bytes, split at byte 464:
+    /// `helio_pass_postprocess::GpuPostProcessUniforms`'s raw bytes, split at byte 464:
     /// reflection registers `[u32; 116]` and `[f32; 16]` but no 132-word
     /// array. `settings` is bytes 0..464 (including the first eight words of
     /// the lens block); `lens` is the remaining 64 bytes as raw bits, not
@@ -51,11 +51,11 @@ pub const POST_PROCESS_VOLUMES: helio_core::BufferContract<PostProcessVolumeRow>
 const SPLIT: usize = std::mem::size_of::<[u32; 116]>();
 const _: () = assert!(
     SPLIT + std::mem::size_of::<[f32; 16]>()
-        == std::mem::size_of::<crate::GpuPostProcessUniforms>()
+        == std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>()
 );
 
 /// Split `GpuPostProcessUniforms` into the reflection-supported row parts.
-fn split_settings(settings: &crate::GpuPostProcessUniforms) -> ([u32; 116], [f32; 16]) {
+fn split_settings(settings: &helio_pass_postprocess::GpuPostProcessUniforms) -> ([u32; 116], [f32; 16]) {
     let bytes = bytemuck::bytes_of(settings);
     let mut head = [0u32; 116];
     let mut lens = [0f32; 16];
@@ -64,20 +64,20 @@ fn split_settings(settings: &crate::GpuPostProcessUniforms) -> ([u32; 116], [f32
     (head, lens)
 }
 
-fn join_settings(head: &[u32; 116], lens: &[f32; 16]) -> crate::GpuPostProcessUniforms {
-    let mut settings: crate::GpuPostProcessUniforms = bytemuck::Zeroable::zeroed();
+fn join_settings(head: &[u32; 116], lens: &[f32; 16]) -> helio_pass_postprocess::GpuPostProcessUniforms {
+    let mut settings: helio_pass_postprocess::GpuPostProcessUniforms = bytemuck::Zeroable::zeroed();
     let bytes = bytemuck::bytes_of_mut(&mut settings);
     bytes[..SPLIT].copy_from_slice(bytemuck::bytes_of(head));
     bytes[SPLIT..].copy_from_slice(bytemuck::bytes_of(lens));
     settings
 }
 
-impl From<crate::GpuPostProcessVolume> for PostProcessVolumeRow {
-    fn from(v: crate::GpuPostProcessVolume) -> Self {
+impl From<helio_pass_postprocess::GpuPostProcessVolume> for PostProcessVolumeRow {
+    fn from(v: helio_pass_postprocess::GpuPostProcessVolume) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<PostProcessVolumeRow> for crate::GpuPostProcessVolume {
+impl From<PostProcessVolumeRow> for helio_pass_postprocess::GpuPostProcessVolume {
     fn from(v: PostProcessVolumeRow) -> Self {
         bytemuck::cast(v)
     }
@@ -88,7 +88,7 @@ mod tests {
     use super::*;
     #[test]
     fn settings_split_round_trips_every_byte() {
-        let mut settings = crate::PostProcessSettings::default();
+        let mut settings = helio_pass_postprocess::PostProcessSettings::default();
         settings.lens_flare.enabled = true;
         settings.lens_flare.ghost_count = 7;
         settings.lens_flare.field_margin = 0.25;
@@ -101,7 +101,7 @@ mod tests {
         );
         assert_eq!(camera.view_id, 3);
 
-        let mut descriptor = crate::PostProcessVolumeDescriptor::default();
+        let mut descriptor = helio_pass_postprocess::PostProcessVolumeDescriptor::default();
         descriptor.settings = settings;
         descriptor.override_mask = [1, 2, 3, 4];
         let row = PostProcessVolumeRow::from(descriptor.to_gpu());
@@ -114,7 +114,7 @@ mod tests {
             ],
             [1, 2, 3, 4]
         );
-        let back = crate::GpuPostProcessVolume::from(row);
+        let back = helio_pass_postprocess::GpuPostProcessVolume::from(row);
         assert_eq!(bytemuck::bytes_of(&back.settings), bytemuck::bytes_of(&gpu));
     }
 
@@ -126,7 +126,7 @@ mod tests {
         // structs' internal shapes differ (nested struct vs. flat `u32`s).
         assert_eq!(
             std::mem::size_of::<PostProcessVolumeRow>(),
-            std::mem::size_of::<crate::GpuPostProcessVolume>()
+            std::mem::size_of::<helio_pass_postprocess::GpuPostProcessVolume>()
         );
     }
 }
@@ -162,10 +162,10 @@ unsafe impl pulsar_scenedb::Pod for CameraPostProcessRow {}
 pub const CAMERA_POSTPROCESS: helio_core::BufferContract<CameraPostProcessRow> =
     helio_core::BufferContract::new("camera_postprocess");
 impl CameraPostProcessRow {
-    pub fn new(view_id: u32, settings: &crate::PostProcessSettings) -> Self {
+    pub fn new(view_id: u32, settings: &helio_pass_postprocess::PostProcessSettings) -> Self {
         Self::from_gpu(view_id, &settings.to_gpu())
     }
-    pub fn from_gpu(view_id: u32, settings: &crate::GpuPostProcessUniforms) -> Self {
+    pub fn from_gpu(view_id: u32, settings: &helio_pass_postprocess::GpuPostProcessUniforms) -> Self {
         let (settings, lens) = split_settings(settings);
         Self {
             view_id,
@@ -176,7 +176,7 @@ impl CameraPostProcessRow {
             lens,
         }
     }
-    pub fn settings(&self) -> crate::GpuPostProcessUniforms {
+    pub fn settings(&self) -> helio_pass_postprocess::GpuPostProcessUniforms {
         join_settings(&self.settings, &self.lens)
     }
 }

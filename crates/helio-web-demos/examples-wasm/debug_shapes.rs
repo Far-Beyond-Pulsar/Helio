@@ -41,7 +41,10 @@ impl HelioWasmApp for Demo {
         _h: u32,
     ) -> Self {
         renderer.set_clear_color([0.12, 0.12, 0.16, 1.0]);
-        renderer.set_ambient([0.20, 0.22, 0.30], 0.18);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.20, 0.22, 0.30],
+            intensity: 0.18,
+        });
         renderer.set_editor_mode(true);
 
         Self {

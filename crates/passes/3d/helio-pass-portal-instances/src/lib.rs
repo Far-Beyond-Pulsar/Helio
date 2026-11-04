@@ -623,7 +623,7 @@ impl RenderPass for PortalInstancePass {
         let material_textures = ctx
             .registry
             .read::<helio_mats::MaterialTextureBindings<'_>>(
-                helio_core::resource_keys::material_textures(),
+                helio_mats::material_textures(),
                 "PortalInstance",
             );
         if ctx.frame_num < 3 {

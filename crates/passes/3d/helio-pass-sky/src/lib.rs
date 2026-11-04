@@ -13,6 +13,7 @@
 //! ([`CloudLayer`], the [`clouds`] module).
 
 pub mod atmosphere;
+pub mod scene_rows;
 pub mod clouds;
 mod feature;
 pub use atmosphere::ATMOSPHERES;

@@ -173,7 +173,10 @@ impl ApplicationHandler for App {
         let surface_format = format;
 
         let config = RendererConfig::new(size.width, size.height, format)
-            .with_shadow_quality(helio::ShadowQuality::Ultra);
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::Ultra,
+                ..Default::default()
+            });
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let (chandelier_light_ids, candle_light_ids) = populate_cathedral(&mut scene_db.world);
 
@@ -214,7 +217,10 @@ impl ApplicationHandler for App {
         } else {
             None
         };
-        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.05, 0.05, 0.08],
+            intensity: 1.0,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         let renderer = Arc::new(Mutex::new(renderer));

@@ -64,7 +64,10 @@ impl RendererConfig {
             "forward_only" => RenderMode::ForwardOnly,
             _ => RenderMode::Deferred,
         };
-        self.shadow_quality = tier(
+        let shadows = self
+            .features
+            .edit::<helio_pass_shadow_matrix::ShadowSettings>();
+        shadows.quality = tier(
             settings.text("shadow_quality"),
             [
                 ShadowQuality::Low,
@@ -73,7 +76,7 @@ impl RendererConfig {
                 ShadowQuality::Ultra,
             ],
         );
-        let budget = &mut self.shadow_budget;
+        let budget = &mut shadows.budget;
         budget.memory_bytes = (settings.number("shadow_memory_mb") * 1024.0 * 1024.0) as u64;
         budget.max_resolution = settings
             .text("shadow_max_resolution")

@@ -23,7 +23,9 @@ use helio_graph_asset::{
     NodeRegistry, PinDesc, PinKind, PinRef, PinType, Probe, SCENEDB_PREFIX,
 };
 
-use crate::features::{self, host_kind, HOST_INPUTS};
+use helio_frame_api::HOST_INPUTS;
+
+use crate::features;
 
 /// The config the editor's template and the pin probe use: the renderer's
 /// defaults (FXAA, portals and foliage on, no screen-space or planar
@@ -85,6 +87,13 @@ fn add_buffer_node(asset: &mut GraphAsset, id: &str, kind: &str, buffer: &str) {
     });
 }
 
+/// A node for every host input the registry's features declared.
+fn add_host_inputs(asset: &mut GraphAsset, registry: &NodeRegistry) {
+    for descriptor in registry.placed(HOST_INPUTS) {
+        add_node(asset, &descriptor.kind.replace('.', "_"), &descriptor.kind);
+    }
+}
+
 fn connect(asset: &mut GraphAsset, from: (&str, &str), to: (&str, &str)) {
     asset.connections.push(Connection {
         from: PinRef::new(from.0, from.1),
@@ -102,9 +111,7 @@ fn probe_asset(registry: &NodeRegistry) -> GraphAsset {
         ..Default::default()
     };
     add_node(&mut asset, "start", core_nodes::ON_FRAME_START);
-    for name in HOST_INPUTS {
-        add_node(&mut asset, &format!("host_{name}"), &host_kind(name));
-    }
+    add_host_inputs(&mut asset, registry);
     let mut placed: Vec<String> = Vec::new();
     for (id, kind) in deferred_nodes(registry) {
         add_node(&mut asset, &id, &kind);
@@ -202,9 +209,7 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
     );
 
     if !wired {
-        for name in HOST_INPUTS {
-            add_node(&mut asset, &format!("host_{name}"), &host_kind(name));
-        }
+        add_host_inputs(&mut asset, registry);
         auto_layout(&mut asset, registry);
         helio_graph_asset::sections::sectionize(&mut asset, registry);
         return asset;
@@ -269,9 +274,7 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
 
     // The host declares what the renderer supplies; the Gets of those are left
     // unresolved on purpose (the renderer supplies them each frame).
-    for name in HOST_INPUTS {
-        add_node(&mut asset, &format!("host_{name}"), &host_kind(name));
-    }
+    add_host_inputs(&mut asset, registry);
 
     // Lay out once so the lanes (runs of one category) are known, then make each lane a
     // section: a collapsed node holding its passes and the buffers around them.
@@ -284,6 +287,7 @@ pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
 mod tests {
     use super::*;
     use crate::features::kind;
+    use helio_frame_api::host_kind;
     use helio_graph_asset::{validate, NodePins, Severity};
 
     #[test]
@@ -300,8 +304,18 @@ mod tests {
                 );
             }
         }
-        for host in HOST_INPUTS {
-            assert!(registry.get(&host_kind(host)).is_some());
+        let hosts: Vec<String> = registry
+            .placed(HOST_INPUTS)
+            .iter()
+            .map(|d| d.kind.clone())
+            .collect();
+        for host in [
+            "material_textures",
+            "render_environment",
+            "billboards",
+            "corona_emitters",
+        ] {
+            assert!(hosts.contains(&host_kind(host)), "{host}: {hosts:?}");
         }
         assert!(registry.get(core_nodes::ON_FRAME_START).is_some());
         assert!(registry.marker().is_some());

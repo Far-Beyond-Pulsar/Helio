@@ -14,7 +14,7 @@ pub struct FloorMaterial;
 pub struct WoodMaterial;
 
 pub fn configure_sampler(renderer: &mut helio::Renderer) {
-    renderer.set_material_sampler(&wgpu::SamplerDescriptor {
+    renderer.set_feature_live(helio_mats::MaterialSampler(wgpu::SamplerDescriptor {
         label: Some("Architectural repeat trilinear sampler"),
         address_mode_u: wgpu::AddressMode::Repeat,
         address_mode_v: wgpu::AddressMode::Repeat,
@@ -23,7 +23,7 @@ pub fn configure_sampler(renderer: &mut helio::Renderer) {
         mipmap_filter: wgpu::MipmapFilterMode::Linear,
         anisotropy_clamp: 8,
         ..Default::default()
-    });
+    }));
 }
 
 pub fn load(

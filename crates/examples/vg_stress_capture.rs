@@ -885,7 +885,7 @@ impl PostStack {
             world.insert(
                 *entity,
                 PostProcessVolumeComponent::from(
-                    helio_pass_postprocess::PostProcessVolumeRow::from(d.to_gpu()),
+                    helio_pass_post_volumes::PostProcessVolumeRow::from(d.to_gpu()),
                 ),
             );
         }
@@ -1233,7 +1233,10 @@ impl Capture {
             .ambient
             .clone()
             .unwrap_or_else(|| self.default_ambient.clone());
-        s.renderer.set_ambient(ambient.color, ambient.intensity);
+        s.renderer.set_feature_live(helio::AmbientLight {
+            color: ambient.color,
+            intensity: ambient.intensity,
+        });
         let clear = shot
             .clear_color
             .map_or(self.default_clear, |c| [c[0], c[1], c[2], 1.0]);

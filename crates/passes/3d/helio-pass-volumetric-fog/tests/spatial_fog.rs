@@ -84,7 +84,7 @@ fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
         };
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+            PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
                 descriptor.to_gpu(),
             )),
         );
@@ -164,11 +164,7 @@ fn cs_probe() {
 }"#
         );
         let shader = helio_core::shader::module(&device, "fog probes", &probe_source);
-        let blend_shader = helio_core::shader::module(
-            &device,
-            "fog blend regression",
-            include_str!("../../helio-pass-postprocess/shaders/postprocess.wgsl"),
-        );
+        let blend_shader = helio_pass_post_volumes::volume_blend_shader(&device);
         let pipeline = |shader: &wgpu::ShaderModule, entry| {
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
@@ -301,7 +297,7 @@ fn cs_probe() {
         descriptor.settings.fog_density = 0.3;
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+            PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
                 descriptor.to_gpu(),
             )),
         );
@@ -312,7 +308,7 @@ fn cs_probe() {
         descriptor.settings.fog_mode = FogMode::Smoke;
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+            PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
                 descriptor.to_gpu(),
             )),
         );
@@ -329,7 +325,7 @@ fn cs_probe() {
         assert_eq!(removed[3], 0.0, "removed rows must stop injecting fog");
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+            PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
                 descriptor.to_gpu(),
             )),
         );

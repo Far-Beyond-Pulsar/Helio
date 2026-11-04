@@ -63,3 +63,7 @@ impl<'a> BakedPvsRef<'a> {
         Some(dx as usize + dy as usize * gx as usize + dz as usize * gx as usize * gy as usize)
     }
 }
+
+/// Graph key of the baked lightmap atlas view the bake's inject pass
+/// publishes (lighting samples it where a surface has lightmap UVs).
+pub const BAKED_LIGHTMAP: &str = "baked_lightmap";

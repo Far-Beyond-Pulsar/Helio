@@ -10,10 +10,8 @@ mod common;
 
 use common::{pack, probe};
 use glam::{DVec3, Vec3};
-use helio_core::{
-    BlasGeometry, BlasManager, RayInstance, TlasInstanceInput, TlasManager, RAY_INSTANCE_MASKED,
-    RAY_INSTANCE_TWO_SIDED,
-};
+use helio_core::{BlasGeometry, BlasManager, TlasInstanceInput, TlasManager};
+use helio_mesh_api::{RayInstance, RAY_INSTANCE_MASKED, RAY_INSTANCE_TWO_SIDED};
 use helio_pass_gi::{Clipmap, GiConfig, GiMeshTracePass, GiPass, PROBES, RAYS};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;

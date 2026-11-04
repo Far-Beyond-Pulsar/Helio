@@ -1,9 +1,11 @@
-//! Foliage as a feature: placement before the G-buffer, the blades' draw into
-//! it, and the step that grows placement on a terrain's ground.
+//! Foliage as a feature: placement before the G-buffer phase, the blades'
+//! drawer in it, and the step that grows placement on a terrain's ground.
+//! Builds nothing while [`FoliageSettings::enabled`] is off.
 
 use std::sync::Arc;
 
 use helio_feature_api::{missing, pass_node, Feature, FeatureRegistrar};
+use helio_frame_api::{FrameNode, Phase};
 use helio_pass_foliage_place::{FoliagePlacePass, FoliageRange, FoliageSettings, OfferedGrounds};
 
 use crate::{FoliageBoxesPass, FoliageGBufferPass};
@@ -68,41 +70,57 @@ impl Feature for FoliageFeature {
 
         const CATEGORY: &str = "Passes: Geometry";
 
-        registrar.node(pass_node(
-            "foliage_place",
-            "Foliage: Place Blades",
-            CATEGORY,
-            "Places foliage blades on the GPU. Must come before the GBuffer so subpass fusion holds.",
-            |build| {
-                let settings = build
-                    .env
-                    .setting::<FoliageSettings>()
-                    .cloned()
-                    .unwrap_or_default();
-                // The draw shares placement's buffers and its boxes run before the
-                // G-buffer: made here, the draw waits for the Foliage GBuffer node.
-                let (place, boxes, draw) = foliage_passes(build.env.device, &settings);
-                build.graph.add_pass(Box::new(place));
-                build.graph.add_pass(Box::new(boxes));
-                build.env.shared(|| PendingFoliageDraw(None)).0 = Some(draw);
-                Ok(())
-            },
-        ));
+        registrar.node(
+            pass_node(
+                "foliage_place",
+                "Foliage: Place Blades",
+                CATEGORY,
+                "Places foliage blades on the GPU, before the G-buffer phase so its drawers fuse.",
+                |build| {
+                    let settings = build
+                        .env
+                        .setting::<FoliageSettings>()
+                        .cloned()
+                        .unwrap_or_default();
+                    if !settings.enabled {
+                        return Ok(());
+                    }
+                    // The draw shares placement's buffers and its boxes run before the
+                    // G-buffer: made here, the draw waits for the Foliage GBuffer node.
+                    let (place, boxes, draw) = foliage_passes(build.env.device, &settings);
+                    build.graph.add_pass(Box::new(place));
+                    build.graph.add_pass(Box::new(boxes));
+                    build.env.shared(|| PendingFoliageDraw(None)).0 = Some(draw);
+                    Ok(())
+                },
+            )
+            .before_phase(Phase::GBuffer, 0),
+        );
 
-        registrar.node(pass_node(
-            "foliage_gbuffer",
-            "Foliage: Draw to GBuffer",
-            CATEGORY,
-            "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
-            |build| {
-                let draw = build
-                    .env
-                    .shared_existing::<PendingFoliageDraw>()
-                    .and_then(|pending| pending.0.take())
-                    .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
-                build.graph.add_pass(Box::new(draw));
-                Ok(())
-            },
-        ));
+        registrar.node(
+            pass_node(
+                "foliage_gbuffer",
+                "Foliage: Draw to GBuffer",
+                CATEGORY,
+                "Rasterises placed foliage into the GBuffer. Needs Foliage Placement before it.",
+                |build| {
+                    let enabled = build
+                        .env
+                        .setting::<FoliageSettings>()
+                        .is_none_or(|settings| settings.enabled);
+                    if !enabled {
+                        return Ok(());
+                    }
+                    let draw = build
+                        .env
+                        .shared_existing::<PendingFoliageDraw>()
+                        .and_then(|pending| pending.0.take())
+                        .ok_or_else(|| missing("Foliage GBuffer", "Foliage Placement"))?;
+                    build.graph.add_pass(Box::new(draw));
+                    Ok(())
+                },
+            )
+            .drawer(Phase::GBuffer, 20),
+        );
     }
 }

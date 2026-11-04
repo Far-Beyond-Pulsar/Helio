@@ -6,6 +6,7 @@ description = "Helio render pass: GPU-native post-processing pipeline (bloom, to
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
 pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
 wgpu = { workspace = true }

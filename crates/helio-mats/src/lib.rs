@@ -36,3 +36,43 @@ pub use shader::{
     apply_webgpu_decal_bindings, apply_webgpu_material_bindings, PBR_EVAL, PBR_EVAL_SNIPPET,
     PBR_MARKER, SPECULAR_AA, SPECULAR_AA_MARKER, SPECULAR_AA_SNIPPET,
 };
+
+/// The material templates surfaces compile from (a renderer config's
+/// `features`): the opaque registry the G-buffer drawer reads and the
+/// transparent one. Shared handles: a host registers templates into them
+/// whenever it likes (`radiant_demo`). Without the setting the passes use
+/// the built-in templates.
+#[derive(Clone)]
+pub struct MaterialTemplates {
+    pub opaque: SharedTemplateRegistry,
+    pub transparent: SharedTemplateRegistry,
+}
+
+impl Default for MaterialTemplates {
+    fn default() -> Self {
+        let registry = || {
+            std::sync::Arc::new(std::sync::RwLock::new(
+                radiant::RadiantTemplateRegistry::new(),
+            ))
+        };
+        Self {
+            opaque: registry(),
+            transparent: registry(),
+        }
+    }
+}
+
+/// The sampler material texture slots are read with (a renderer config's
+/// `features`); the default sampler without.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialSampler(pub wgpu::SamplerDescriptor<'static>);
+
+/// Graph key of the material texture bindings (`MaterialTextureBindings`)
+/// published every frame for the passes that sample material textures.
+pub const MATERIAL_TEXTURES: &str = "material_textures";
+
+/// [`MATERIAL_TEXTURES`] as a typed key.
+#[inline]
+pub const fn material_textures<T>() -> helio_core::ResourceKey<T> {
+    helio_core::ResourceKey::new(MATERIAL_TEXTURES)
+}

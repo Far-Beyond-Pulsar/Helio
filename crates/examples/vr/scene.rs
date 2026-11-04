@@ -32,7 +32,8 @@
 //! crate stack.
 
 use glam::{Mat4, Quat, Vec3};
-use helio::{GpuLight, LightType, MeshUpload, Renderer};
+use helio::{GpuLight, LightType, Renderer};
+use helio_mesh_api::{MeshUpload};
 use helio_asset_compat::{load_scene_bytes_with_config, LoadConfig};
 use helio_pass_corona::CoronaEmitterDescriptor;
 use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};

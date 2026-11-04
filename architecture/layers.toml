@@ -24,8 +24,8 @@ about = "Buffer contracts and the scene-input projection; materials ABI. No comp
 may_use = ["core", "leaf"]
 
 [layers.feature_api]
-about = "What a feature registers: node types, contracts, settings. Knows no renderer and no feature."
-may_use = ["scene", "core", "leaf"]
+about = "What a feature registers (node types, contracts, settings) and the frame it registers into (helio-frame-api: slots, draw phases, lighting inputs, the colour chain). Knows no renderer, no feature and no kind of object."
+may_use = ["feature_api", "scene", "core", "leaf"]
 
 [layers.api]
 about = "A feature's public contract: graph keys, row ABIs, WGSL snippets, stand-ins. No state. Any feature may read another's api."
@@ -65,15 +65,18 @@ helio-core = { layer = "core" }
 
 # scene
 helio-mats = { layer = "scene" }
+helio-scene-join = { layer = "scene" }
 
 # feature api
 helio-feature-api = { layer = "feature_api" }
+helio-frame-api = { layer = "feature_api" }
 
 # feature contracts (api)
 helio-sky-api = { layer = "api" }
 helio-gi-api = { layer = "api" }
 helio-foliage-api = { layer = "api" }
 helio-water-api = { layer = "api" }
+helio-mesh-api = { layer = "api" }
 
 # spine
 helio-pass-gbuffer = { layer = "spine" }
@@ -97,6 +100,7 @@ helio-spine = { layer = "spine" }
 helio-pass-sky = { layer = "feature", group = "sky" }
 helio-pass-gi = { layer = "feature", group = "gi" }
 helio-pass-volumetric-fog = { layer = "feature", group = "fog" }
+helio-pass-post-volumes = { layer = "feature", group = "post" }
 helio-pass-water-sim = { layer = "feature", group = "water" }
 helio-pass-foliage-place = { layer = "feature", group = "foliage" }
 helio-pass-foliage-gbuffer = { layer = "feature", group = "foliage" }

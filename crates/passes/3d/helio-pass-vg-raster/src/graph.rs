@@ -203,7 +203,7 @@ fn record_phase(
     let masked = match (
         ctx.scene_buffers.get(BufferKey::of("materials")),
         ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(
-            helio_core::resource_keys::material_textures(),
+            helio_mats::material_textures(),
         ),
     ) {
         (Some(materials), Some(material_textures)) => Some(VgMaskedInputs {

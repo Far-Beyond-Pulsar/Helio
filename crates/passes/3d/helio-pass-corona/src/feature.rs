@@ -1,6 +1,7 @@
 //! Light coronas as a feature.
 
 use helio_feature_api::{pass_node, Feature, FeatureRegistrar};
+use helio_frame_api::{host_input, FrameNode, Phase};
 
 use crate::CoronaPass;
 
@@ -13,6 +14,8 @@ impl Feature for CoronaFeature {
     }
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        // The host supplies the rows every frame.
+        registrar.node(host_input("corona_emitters"));
         registrar.node(
             pass_node(
                 "corona",
@@ -30,7 +33,8 @@ impl Feature for CoronaFeature {
                     Ok(())
                 },
             )
-            .with_marker_after(),
+            .with_marker_after()
+            .drawer(Phase::Overlay, 10),
         );
     }
 }

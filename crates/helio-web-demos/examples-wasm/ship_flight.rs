@@ -271,7 +271,7 @@ impl HelioWasmApp for Demo {
                         }
                         let mesh_id = crate::common::spawn_mesh(
                             world,
-                            helio::MeshUpload {
+                            helio_mesh_api::MeshUpload {
                                 vertices,
                                 indices: mesh.indices.clone(),
                             },
@@ -415,7 +415,10 @@ impl HelioWasmApp for Demo {
             world,
             directional_light([0.6, 0.2, -0.7], [0.2, 0.25, 0.4], 0.04),
         );
-        renderer.set_ambient([0.04, 0.05, 0.08], 0.003);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.04, 0.05, 0.08],
+            intensity: 0.003,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         let initial_pos = Vec3::new(0.0, 0.0, 0.0);

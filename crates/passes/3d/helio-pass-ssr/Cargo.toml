@@ -6,6 +6,7 @@ description = "Helio render pass: screen-space reflections"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-feature-api = { path = "../../../helio-feature-api" }
 log = { workspace = true }
 helio-core = { workspace = true }

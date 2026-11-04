@@ -302,7 +302,10 @@ impl ApplicationHandler for App {
                 point_light(p, [r, g, b], 3.0, 12.0),
             ));
         }
-        renderer.set_ambient([0.5, 0.5, 0.55], 0.06);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.5, 0.5, 0.55],
+            intensity: 0.06,
+        });
         renderer.set_clear_color([0.55, 0.65, 0.9, 1.0]);
 
         self.state = Some(AppState {

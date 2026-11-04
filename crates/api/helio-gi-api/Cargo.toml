@@ -6,6 +6,7 @@ description = "The GI feature's public contract: the probe clipmap's layout, the
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../../helio-frame-api" }
 helio-core = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam = { workspace = true }

@@ -238,7 +238,10 @@ fn add_showcase_lighting(world: &mut World, renderer: &mut Renderer, bounds: Sce
         world,
         directional_light([0.15, -1.0, 0.1], [0.07, 0.09, 0.14], 0.3),
     );
-    renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
+    renderer.set_feature_live(helio::AmbientLight {
+            color: [0.0, 0.0, 0.0],
+            intensity: 0.0,
+        });
 }
 
 struct App {
@@ -405,7 +408,7 @@ impl ApplicationHandler for App {
                 .fold(0.5, f32::max);
             let mesh_id = spawn_mesh(
                 &mut scene_db.world,
-                helio::MeshUpload {
+                helio_mesh_api::MeshUpload {
                     vertices: mesh.vertices,
                     indices: mesh.indices,
                 },

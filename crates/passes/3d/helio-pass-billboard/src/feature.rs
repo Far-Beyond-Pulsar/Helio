@@ -2,6 +2,7 @@
 //! editor's light icon as the default sprite.
 
 use helio_feature_api::{pass_node, Feature, FeatureRegistrar};
+use helio_frame_api::{host_input, FrameNode, Phase};
 
 use crate::BillboardPass;
 
@@ -17,6 +18,8 @@ impl Feature for BillboardFeature {
     }
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        // The host supplies the rows every frame.
+        registrar.node(host_input("billboards"));
         registrar.node(
             pass_node(
                 "billboard",
@@ -42,7 +45,8 @@ impl Feature for BillboardFeature {
                     Ok(())
                 },
             )
-            .with_marker_after(),
+            .with_marker_after()
+            .drawer(Phase::Overlay, 50),
         );
     }
 }

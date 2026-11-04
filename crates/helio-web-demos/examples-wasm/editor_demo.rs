@@ -76,7 +76,10 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         renderer.set_editor_mode(true);
         renderer.set_clear_color([0.08, 0.09, 0.12, 1.0]);
-        renderer.set_ambient([0.12, 0.14, 0.18], 0.25);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.12, 0.14, 0.18],
+            intensity: 0.25,
+        });
 
         let mut picker = ScenePicker::new();
 

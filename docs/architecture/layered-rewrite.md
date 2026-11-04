@@ -802,7 +802,7 @@ renderer, the cameras and the editor only through its component.
 As built, step 6.6 (2026-11-02): voxel is the `pulsar.voxel` plugin; Helio,
 its presets, `helio_component` and `engine_backend` keep no voxel code, and
 the Helio repo keeps no voxel crate.
-- **The plugin's crates** are Pulsar's `plugins/voxel/`, one per role
+- **The plugin's crates** are Pulsar's `plugins/vendor/voxel/`, one per role
   (plugin-migration.md section 3):
   - `api` (`helio-voxel-data`): the contracts the others share: the edit
     journal, brushes, kept chunks, shared names.
@@ -837,7 +837,7 @@ the Helio repo keeps no voxel crate.
 - **Layer gate**: Helio's workspace has no voxel crate, so the gate has no
   voxel entry and no sealed groups (a kind's crates leave the repository
   instead).
-- **Pulsar** (`plugins/voxel/component` and `plugins/voxel/editor`, id
+- **Pulsar** (`plugins/vendor/voxel/component` and `plugins/vendor/voxel/editor`, id
   `pulsar.voxel`): the components, runtime, sync, sculpting, world queries,
   generator and stack editors, and ready-made worlds (`presets`) moved in
   from `helio_component` and `engine_backend`; the sky and haze a
@@ -862,7 +862,7 @@ derivations and `engine_backend`.
 
 ### Phase 6: repo split
 - Superseded for voxel (2026-11-02): its crates already left the Helio
-  repo for the `pulsar.voxel` plugin (`plugins/voxel/` in Pulsar, step
+  repo for the `pulsar.voxel` plugin (`plugins/vendor/voxel/` in Pulsar, step
   6.6); every kind follows it (`plugin-migration.md`). What remains is
   Pulsar pinning Helio core by tag.
 
@@ -903,7 +903,7 @@ derivations and `engine_backend`.
 
 ## 7. Open decisions
 
-1. **Voxel world home**: decided (2026-11-02): Pulsar's `plugins/voxel/`,
+1. **Voxel world home**: decided (2026-11-02): Pulsar's `plugins/vendor/voxel/`,
    as every kind's crates (`plugin-migration.md`).
 2. **Which features stay in the Helio repo** vs their own repos. Recommended:
    split only voxel and VG at first; the rest stay in Helio under

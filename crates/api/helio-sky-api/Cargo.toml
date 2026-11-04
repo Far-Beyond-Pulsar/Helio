@@ -2,10 +2,11 @@
 name = "helio-sky-api"
 version = "0.1.0"
 edition = "2021"
-description = "The sky feature's public contract: the frame resources it publishes (atmosphere frame, sky table, cloud shadow, sun visibility) and the WGSL that reads them."
+description = "The sky feature's public contract: the cloud shadow it publishes and the WGSL that reads it; re-exports the frame's sky lighting inputs it publishes (atmosphere frame, sky table, sun visibility)."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-core = { workspace = true }
+helio-frame-api = { path = "../../helio-frame-api" }
 wgpu = { workspace = true }
 

@@ -17,7 +17,7 @@
 //! reflection detail rather than display pixels.
 
 pub mod feature;
-pub use feature::SsrFeature;
+pub use feature::{SsrFeature, SsrSettings};
 
 mod compose;
 pub use compose::SsrCompositePass;
@@ -47,6 +47,9 @@ pub struct SsrPass {
 
     width: u32,
     height: u32,
+    /// The texture the trace writes: an indirect-specular layer of the frame
+    /// (`helio_frame_api::lighting::INDIRECT_SPECULAR_LAYERS`).
+    output: &'static str,
 }
 
 impl SsrPass {
@@ -206,7 +209,19 @@ impl SsrPass {
             use_rt,
             width: width.div_ceil(2),
             height: height.div_ceil(2),
+            output: helio_frame_api::lighting::INDIRECT_SPECULAR_LAYERS[0],
         }
+    }
+
+    /// Writes the trace into `layer` instead of the first specular layer.
+    pub fn with_output(mut self, layer: &'static str) -> Self {
+        self.output = layer;
+        self
+    }
+
+    /// The texture the trace writes.
+    pub fn output(&self) -> &'static str {
+        self.output
     }
 }
 
@@ -237,7 +252,7 @@ impl RenderPass for SsrPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw(
-            "ssr_trace",
+            self.output,
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::ScaledInternal { divisor: 2 },
         );
@@ -284,7 +299,7 @@ impl RenderPass for SsrPass {
             Some(v) => v,
             None => return Ok(()),
         };
-        let ssr_trace = match ctx.resource_pool.get_view("ssr_trace") {
+        let ssr_trace = match ctx.resource_pool.get_view(self.output) {
             Some(v) => v,
             None => return Ok(()),
         };

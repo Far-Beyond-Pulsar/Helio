@@ -59,7 +59,7 @@ fn spawn_box(world: &mut pulsar_scenedb::World, centre: Vec3, half: Vec3, colour
             let base = vertices.len() as u32;
             for (a, b) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
                 let p = (n + u * a + v * b) * half;
-                vertices.push(helio::PackedVertex::from_components(
+                vertices.push(helio_mesh_api::PackedVertex::from_components(
                     p.to_array(),
                     n.to_array(),
                     [0.0; 2],

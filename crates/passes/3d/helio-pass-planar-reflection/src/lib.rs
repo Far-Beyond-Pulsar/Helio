@@ -1,5 +1,5 @@
 pub mod feature;
-pub use feature::PlanarReflectionFeature;
+pub use feature::{PlanarReflectionFeature, PlanarReflectionSettings};
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
@@ -27,6 +27,9 @@ pub struct PlanarReflectionPass {
     globals_buf: wgpu::Buffer,
     width: u32,
     height: u32,
+    /// The indirect-specular layer it writes
+    /// (`helio_frame_api::lighting::INDIRECT_SPECULAR_LAYERS`).
+    output: &'static str,
 }
 
 impl PlanarReflectionPass {
@@ -118,7 +121,14 @@ impl PlanarReflectionPass {
             globals_buf,
             width: 0,
             height: 0,
+            output: helio_frame_api::lighting::INDIRECT_SPECULAR_LAYERS[1],
         }
+    }
+
+    /// Writes the reflections into `layer`.
+    pub fn with_output(mut self, layer: &'static str) -> Self {
+        self.output = layer;
+        self
     }
 }
 
@@ -133,7 +143,7 @@ impl RenderPass for PlanarReflectionPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw(
-            "planar_reflection",
+            self.output,
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
@@ -193,7 +203,7 @@ impl RenderPass for PlanarReflectionPass {
             Some(v) => v,
             None => return Ok(()),
         };
-        let planar_tex = match ctx.resource_pool.get_view("planar_reflection") {
+        let planar_tex = match ctx.resource_pool.get_view(self.output) {
             Some(v) => v,
             None => return Ok(()),
         };

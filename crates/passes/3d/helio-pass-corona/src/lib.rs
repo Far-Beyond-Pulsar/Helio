@@ -31,6 +31,8 @@
 //! (`spawn_cursor_buf`).
 
 pub mod feature;
+pub mod scene_rows;
+
 pub use feature::CoronaFeature;
 
 use bytemuck::{Pod, Zeroable};

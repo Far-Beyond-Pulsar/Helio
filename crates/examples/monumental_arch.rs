@@ -4,7 +4,8 @@
 //! This is an original procedural interpretation, not a surveyed replica.
 use crate::{architectural_mesh::Mesh, v3_demo_common::*};
 use glam::{Mat4, Vec2, Vec3};
-use helio::{Camera, MeshUpload};
+use helio::{Camera};
+use helio_mesh_api::{MeshUpload};
 use helio_components::{AtmosphereComponent, PostProcessVolumeComponent};
 use helio_pass_postprocess::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, World};
@@ -339,7 +340,7 @@ pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
     let fog = world.spawn();
     world.insert(
         fog,
-        PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+        PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
             PostProcessVolumeDescriptor {
                 bounds_min: [-8.5, 8.0, -14.0],
                 bounds_max: [8.5, 29.0, 14.0],
