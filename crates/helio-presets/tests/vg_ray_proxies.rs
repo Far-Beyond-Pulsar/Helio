@@ -419,11 +419,7 @@ impl Harness {
         let mut scene = scene_db(&device, &queue);
         let runtime = VgRuntime::default();
         build(&mut scene.world, &runtime);
-        let mut config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
-        config
-            .features
-            .edit::<helio_pass_foliage_place::FoliageSettings>()
-            .enabled = false;
+        let config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
         let renderer =
             RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
                 .with_pass_build_context(Box::new(helio_presets::deferred))

@@ -15,7 +15,7 @@
 //! Sources go through `helio_core::shader::resolve_with` first — the same call
 //! (modulo which snippets a given pass registers) the runtime makes — so a
 //! prelude/snippet-using shader is validated as the GPU will see it, not as
-//! the bare file on disk. The snippet list here (HIZ, PBR, wind) is this
+//! the bare file on disk. The snippet list here (HIZ, PBR, sky) is this
 //! test's own aggregation of every pass-owned snippet in the workspace, not
 //! something `helio-core` itself knows about — `resolve_with` never fails
 //! for a marker with no matching snippet, so listing all of them here is
@@ -27,8 +27,6 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_hiz::HIZ_SNIPPET,
     helio_mats::PBR_EVAL_SNIPPET,
     helio_mats::SPECULAR_AA_SNIPPET,
-    helio_pass_foliage_place::WIND_SNIPPET,
-    helio_pass_foliage_place::COMMON_SNIPPET,
     helio_pass_sky::atmosphere::ATMOSPHERE_SNIPPET,
     helio_pass_sky::atmosphere::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_pass_sky::clouds::CLOUD_SHADOW_SNIPPET,
@@ -36,9 +34,6 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_gi::GI_COMMON_SNIPPET,
     helio_pass_gi::GI_SAMPLE_SNIPPET,
     helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
-    helio_pass_water_sim::pipeline::WATER_SHORE_SNIPPET,
-    helio_pass_water_sim::pipeline::WATER_SKY_SNIPPET,
-    helio_pass_water_sim::surface_query::WATER_QUERY_SNIPPET,
 ];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
@@ -118,9 +113,6 @@ fn is_composed(path: &Path) -> bool {
         // in the device's material binding mode); validated composed, both
         // modes, by `helio-pass-gi`'s `shaders_validate`.
         "helio-pass-gi/shaders/gi_mesh_trace.wgsl",
-        // The water surface's query kernel, a snippet of `surface.wgsl`
-        // (`//!use water_query`): validated composed with it.
-        "helio-pass-water-sim/shaders/water_query.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
@@ -156,14 +148,6 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
             "{material}
 {source}"
         );
-    }
-    // `helio_pass_volumetric_fog::shader_source` sizes the post-process row's
-    // words around its fog block from its Rust ABI; any lengths validate the
-    // same.
-    if normalized.ends_with("helio-pass-volumetric-fog/shaders/volumetric_fog.wgsl") {
-        return source
-            .replace("__PP_HEAD_VEC4__", "1")
-            .replace("__PP_TAIL_VEC4__", "1");
     }
     source
 }
@@ -270,21 +254,11 @@ fn every_wgsl_shader_parses_and_validates() {
 /// them.
 #[test]
 fn composed_shaders_parse_and_validate() {
-    let mut sources = helio_scene_derivations::validation_sources();
-    sources.push((
-        "volumetric_fog.wgsl".into(),
-        helio_pass_volumetric_fog::shader_source(),
-    ));
+    let sources = helio_scene_derivations::validation_sources();
     let failures: Vec<String> = sources
         .iter()
         .filter_map(|(name, source)| {
-            // The fog's source holds its snippets already (`shader_source`):
-            // its pass resolves the prelude alone.
-            let source = if name == "volumetric_fog.wgsl" {
-                helio_core::shader::resolve(source).into_owned()
-            } else {
-                helio_core::shader::resolve_with(source, SNIPPETS).into_owned()
-            };
+            let source = helio_core::shader::resolve_with(source, SNIPPETS).into_owned();
             let module = match naga::front::wgsl::parse_str(&source) {
                 Ok(module) => module,
                 Err(e) => {

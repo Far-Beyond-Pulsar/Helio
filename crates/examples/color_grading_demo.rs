@@ -74,6 +74,9 @@ struct AppState {
 
     // GPU LUT builder (manual dispatch before render)
     lut_builder: Option<LutBuilder>,
+    /// The settings the LUT is built from (this host's, as the tone map's
+    /// baseline sees them).
+    settings_buffer: wgpu::Buffer,
 }
 
 impl App {
@@ -210,6 +213,14 @@ impl ApplicationHandler for App {
 
         // Create LUT builder
         let lut_builder = LutBuilder::new(&device, 16);
+        let settings_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Color Grading Demo Settings"),
+            size: std::mem::size_of::<helio_pass_postprocess::GpuPostProcessUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         self.state = Some(AppState {
             window,
@@ -233,6 +244,7 @@ impl ApplicationHandler for App {
             lut_size: 16,
             lut_generation: 1,
             lut_builder: Some(lut_builder),
+            settings_buffer,
         });
 
         App::update_title(self.state.as_ref().unwrap());
@@ -444,13 +456,12 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // Clone the pass-owned buffer handle before borrowing the renderer again.
-                let resolved = state
-                    .renderer
-                    .find_pass_mut::<helio_pass_post_volumes::PostProcessVolumeBlendPass>()
-                    .expect("postprocess blend pass")
-                    .resolved_uniforms()
-                    .clone();
+                state.queue.write_buffer(
+                    &state.settings_buffer,
+                    0,
+                    bytemuck::bytes_of(&settings.to_gpu()),
+                );
+                let resolved = state.settings_buffer.clone();
                 // Build LUT if needed
                 if let Some(ref mut builder) = state.lut_builder {
                     let rebuilt = builder.build_if_needed(
@@ -474,11 +485,7 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                v3_demo_common::set_camera_postprocess(
-                    &mut state.scene_db.world,
-                    camera.view_id,
-                    &settings,
-                );
+                v3_demo_common::set_post_baseline(&mut state.renderer, &settings);
                 v3_demo_common::flush_scene_db(&state.scene_db, &state.queue);
                 if let Err(e) = state.renderer.render_window_frame(&camera, &state.surface) {
                     log::error!("Render error: {:?}", e);

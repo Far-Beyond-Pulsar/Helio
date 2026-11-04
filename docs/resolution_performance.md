@@ -1,5 +1,9 @@
 # High-resolution rendering performance
 
+> Fog and water left Helio for Pulsar plugins (2026-11-03): `resolution_bench`
+> no longer has `--global-fog`, `--pp-fog` or `--water`, and the fog hall has
+> no medium. The measurements below predate that.
+
 Measured optimizations to the default deferred graph, focused on how cost
 scales from 1080p to 4K. Every change was compared frame by frame against the
 build before it. Nearly all are bit-identical; the few that change pixels are

@@ -1,4 +1,6 @@
 //! Deterministic offscreen camera path through a populated scene.
+//! Fog left Helio with its plugin (Pulsar `plugins/vendor/fog`), and with it
+//! `HLFS_FOG_TIMINGS`.
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
 use pulsar_scenedb::{Entity, SceneDb, World};
 use std::sync::Arc;
@@ -412,27 +414,6 @@ pub fn run_scene_animated(
             (query, resolve, read)
         });
         let mut timing_csv = String::from("frame,coarse_ms,fine_ms,sampling_ms,temporal_ms,spatial_ms,composite_ms,hlfs_only_ms\n");
-        let fog_timing = std::env::var_os("HLFS_FOG_TIMINGS").map(|_| {
-            let pass = renderer
-                .find_pass_mut::<helio_pass_volumetric_fog::VolumetricFogPass>()
-                .expect("fog pass");
-            assert!(pass.enable_timing(&device), "GPU timestamps unavailable");
-            let query = pass.timing_query().unwrap().clone();
-            let resolve = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Fog timestamps"),
-                size: 32,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            });
-            let read = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Fog timing readback"),
-                size: 32,
-                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            (query, resolve, read)
-        });
-        let mut fog_timing_csv = String::from("frame,classify_ms,inject_ms,integrate_ms,fog_ms\n");
         let tsr_timing = std::env::var_os("HLFS_TSR_TIMINGS").map(|_| {
             let pass = renderer
                 .find_pass_mut::<helio_pass_tsr::TsrPass>()
@@ -456,14 +437,11 @@ pub fn run_scene_animated(
         let mut tsr_timing_csv = String::from("frame,resolve_ms,copies_ms,blit_ms,tsr_ms\n");
         // HLFS_NO_LOCAL_EXPOSURE: post-process defaults without local exposure.
         if std::env::var_os("HLFS_NO_LOCAL_EXPOSURE").is_some() {
-            let blend = renderer
-                .find_pass_mut::<helio_pass_post_volumes::PostProcessVolumeBlendPass>()
-                .expect("post-process resolver");
-            let mut settings = blend.defaults().clone();
+            let mut settings = helio_pass_postprocess::PostProcessSettings::default();
             settings.local_exposure_highlight_contrast = 1.0;
             settings.local_exposure_shadow_contrast = 1.0;
             settings.local_exposure_detail_strength = 1.0;
-            blend.set_defaults(&queue, &settings);
+            crate::v3_demo_common::set_post_baseline(&mut renderer, &settings);
         }
         let postprocess_timing = std::env::var_os("HLFS_POSTPROCESS_TIMINGS").map(|_| {
             let pass = renderer
@@ -748,31 +726,6 @@ pub fn run_scene_animated(
                 drop(bytes);
                 read.unmap();
             }
-            if let Some((query, resolve, read)) = &fog_timing {
-                let mut encoder = device.create_command_encoder(&Default::default());
-                encoder.resolve_query_set(query, 0..4, resolve, 0);
-                encoder.copy_buffer_to_buffer(resolve, 0, read, 0, 32);
-                queue.submit([encoder.finish()]);
-                let (tx, rx) = std::sync::mpsc::channel();
-                read.slice(..)
-                    .map_async(wgpu::MapMode::Read, move |r| tx.send(r).unwrap());
-                device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-                rx.recv().unwrap().unwrap();
-                let bytes = read.slice(..).get_mapped_range().unwrap();
-                let ticks: &[u64] = bytemuck::cast_slice(&bytes);
-                let stages: [f64; 3] = std::array::from_fn(|i| {
-                    (ticks[i + 1] - ticks[i]) as f64 * queue.get_timestamp_period() as f64 / 1e6
-                });
-                fog_timing_csv.push_str(&format!(
-                    "{frame},{},{},{},{}\n",
-                    stages[0],
-                    stages[1],
-                    stages[2],
-                    stages.iter().sum::<f64>()
-                ));
-                drop(bytes);
-                read.unmap();
-            }
             if let Some((query, resolve, read)) = &tsr_timing {
                 let mut encoder = device.create_command_encoder(&Default::default());
                 encoder.resolve_query_set(query, 0..4, resolve, 0);
@@ -927,13 +880,6 @@ pub fn run_scene_animated(
             std::fs::write(
                 std::path::Path::new(directory).join("hlfs-gpu-timings.csv"),
                 timing_csv,
-            )
-            .unwrap();
-        }
-        if fog_timing.is_some() {
-            std::fs::write(
-                std::path::Path::new(directory).join("fog-gpu-timings.csv"),
-                fog_timing_csv,
             )
             .unwrap();
         }

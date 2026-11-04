@@ -226,11 +226,7 @@ fn a_mesh_scene_s_probes_trace_its_meshes_on_frames_with_a_tlas() {
     let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut scene = scene_db(&device, &queue);
     room(&mut scene.world);
-    let mut config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
-    config
-        .features
-        .edit::<helio_pass_foliage_place::FoliageSettings>()
-        .enabled = false;
+    let config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
             .with_pass_build_context(Box::new(helio_presets::deferred))
@@ -320,11 +316,7 @@ fn without_ray_queries_a_mesh_scene_has_no_gi() {
     assert!(GiMeshTracePass::new(&device).is_none());
     let mut scene = scene_db(&device, &queue);
     room(&mut scene.world);
-    let mut config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
-    config
-        .features
-        .edit::<helio_pass_foliage_place::FoliageSettings>()
-        .enabled = false;
+    let config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
             .with_pass_build_context(Box::new(helio_presets::deferred))

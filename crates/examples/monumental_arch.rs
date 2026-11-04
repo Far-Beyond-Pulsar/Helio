@@ -2,12 +2,13 @@
 //! Approximately 50 x 44.8 x 22.2 metres (City of Paris architectural overview):
 //! https://www.paris.fr/pages/a-la-place-de-l-arc-de-triomphe-devait-troner-un-elephant-18396
 //! This is an original procedural interpretation, not a surveyed replica.
+//! Its smoke post-process volume left Helio with its plugin (Pulsar
+//! `plugins/vendor/post`); this scene no longer has one.
 use crate::{architectural_mesh::Mesh, v3_demo_common::*};
 use glam::{Mat4, Vec2, Vec3};
 use helio::{Camera};
 use helio_mesh_api::{MeshUpload};
-use helio_components::{AtmosphereComponent, PostProcessVolumeComponent};
-use helio_pass_postprocess::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_components::AtmosphereComponent;
 use pulsar_scenedb::{Entity, World};
 
 // Extrude a counter-clockwise polygon along depth. Rotating the entire prism
@@ -112,16 +113,6 @@ pub fn camera(t: f32, aspect: f32) -> Camera {
 }
 
 pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    let mut settings = helio_pass_postprocess::PostProcessSettings::default();
-    // The smoke is a SceneDB volume, visible even with global camera fog off.
-    settings.fog_enabled = false;
-    settings.fog_density = 0.0;
-    settings.fog_mode = helio_pass_postprocess::FogMode::HeightBased;
-    settings.fog_height_falloff = 0.025;
-    settings.fog_max_distance = 350.0;
-    settings.fog_color = [0.7, 0.8, 1.0];
-    settings.fog_scattering_anisotropy = 0.3;
-    set_camera_postprocess(world, 0, &settings);
     let environment = world.spawn();
     // Earth's air; its sun is the scene's directional light.
     world.insert(
@@ -334,40 +325,6 @@ pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
         }
     }
 
-    // Hero fog volume for the HLFS cathedral/monument showcase. The bounds sit
-    // inside the grand vault so the camera can orbit through a clear exterior
-    // view and then reveal a denser, shaft-catching pocket beneath the arch.
-    let fog = world.spawn();
-    world.insert(
-        fog,
-        PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
-            PostProcessVolumeDescriptor {
-                bounds_min: [-8.5, 8.0, -14.0],
-                bounds_max: [8.5, 29.0, 14.0],
-                priority: 20.0,
-                blend_radius: 1.8,
-                blend_weight: if std::env::var_os("HLFS_NO_FOG").is_some() {
-                    0.0
-                } else {
-                    1.0
-                },
-                unbound: false,
-                settings: PostProcessSettings {
-                    fog_enabled: true,
-                    fog_mode: FogMode::Smoke,
-                    fog_density: 0.65,
-                    fog_height_falloff: 0.04,
-                    fog_height: 23.0,
-                    fog_max_distance: 140.0,
-                    fog_scattering_anisotropy: 0.28,
-                    fog_color: [0.09, 0.095, 0.11],
-                    ..PostProcessSettings::default()
-                },
-                ..Default::default()
-            }
-            .to_gpu(),
-        )),
-    );
     eprintln!(
         "Monumental arch: {triangles} triangles, 7 material batches, intersecting open vaults"
     );

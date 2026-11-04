@@ -237,7 +237,7 @@ impl ApplicationHandler for App {
         renderer.set_editor_mode(true);
         let xr_active = graphics.is_xr();
 
-        let animated = scene::build(&mut scene_db.world, &mut renderer);
+        let animated = scene::build(&mut scene_db.world);
 
         let state = AppState {
             window,

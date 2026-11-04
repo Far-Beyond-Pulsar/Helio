@@ -355,6 +355,7 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                     quality,
                 )
                 .with_color_input(color::current(build.env))
+                .with_color_alias(color::alias(build.env))
                 .with_intermediate_output()
                 .with_motion_vectors();
                 let stochastic = build.boolean("stochastic_mask")
@@ -403,6 +404,7 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
             "Bloom, exposure, tone mapping and colour grading into the output.",
             |build| {
                 let input = color::current(build.env);
+                let alias = color::alias(build.env);
                 let frame = build.env.frame;
                 let effects = build
                     .env
@@ -418,6 +420,7 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                         effects,
                     )
                     .with_color_input(input)
+                    .with_color_alias(alias)
                     .with_color_grading_lut(
                         build
                             .env

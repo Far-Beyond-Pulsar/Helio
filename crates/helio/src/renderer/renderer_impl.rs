@@ -110,7 +110,7 @@ pub struct Renderer {
     /// graph has the same passes and pass settings (Helio#254/#255).
     ///
     /// Opaque to the renderer: it never interprets pass-specific fields
-    /// (shadow atlas, SSR, foliage, TSR, reflections), it only
+    /// (shadow atlas, SSR, TSR, reflections), it only
     /// stores what the graph was built with. The size, scale, surface format,
     /// debug mode, render mode and XR flag have live fields of their own;
     /// [`Renderer::renderer_config`] overlays those onto this.
@@ -424,8 +424,8 @@ impl Renderer {
         self.frame_delta_override = seconds;
     }
 
-    /// Drive the frame clock animation reads (material graph `time`, foliage
-    /// wind, particles; `PrepareContext::time`) from the host's clock: each
+    /// Drive the frame clock animation reads (material graph `time`, a feature's
+    /// animation; `PrepareContext::time`) from the host's clock: each
     /// frame advances it by `seconds`, until changed. `Some(0.0)` freezes it
     /// (an editor viewport that is not realtime, a paused game); a game
     /// passes its clock's delta every frame, so animation follows pause and

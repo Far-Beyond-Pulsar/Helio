@@ -72,8 +72,6 @@ const WATER_OWN_WIND_WORD: u32 = 59u;
 const WATER_PHASE_WORD: u32 = 60u;
 // `environment_join.rs`'s `WATER_WIND_STRENGTH_PER_SPEED`.
 const WATER_WIND_PER_SPEED: f32 = 0.5;
-// `scene_lights` rows (`helio_pass_forward_lit::GpuLight`): 32 words.
-const LIGHT_ROW_WORDS: u32 = 32u;
 // A pooled row (the particles plugin's `GpuCoronaEmitter`): `particle_offset`,
 // `particle_count`
 // (the requested range in the source row) and `spawn_cursor`, which the
@@ -95,7 +93,8 @@ const WORKGROUP: u32 = 64u;
 @group(0) @binding(4) var<storage, read> transforms: array<ObjectTransform>;
 @group(0) @binding(5) var<storage, read> sources: array<u32>;
 @group(0) @binding(6) var<storage, read_write> rows_out: array<u32>;
-@group(0) @binding(7) var<storage, read> lights: array<u32>;
+// The lights' directional light: the direction toward it and 1.
+@group(0) @binding(7) var<storage, read> directional_light: array<vec4<f32>>;
 // Mesh instances' local bounding spheres, keyed like `owners`.
 @group(0) @binding(8) var<storage, read> mesh_bounds: array<vec4<f32>>;
 
@@ -252,26 +251,12 @@ fn write_emitter_range(row: u32, slot: u32, offset: u32) {
     rows_out[output + EMITTER_IDENTITY_WORD] = row + 1u;
 }
 
-/// A water row's sun: the direction toward the scene's first directional
-/// light with any intensity (`direction_outer` is the direction the light
-/// travels), as the sky's atmosphere picks its sun; `w` is 1. Straight up
-/// with `w` 0 when the scene has none.
+/// A water row's sun: the direction toward the lights' directional light,
+/// `w` 1; straight up with `w` 0 when the scene has none.
 fn write_sun(output: u32) {
     var sun = vec4<f32>(0.0, 1.0, 0.0, 0.0);
-    let rows = arrayLength(&lights) / LIGHT_ROW_WORDS;
-    for (var i = 0u; i < rows; i++) {
-        let base = i * LIGHT_ROW_WORDS;
-        let intensity = bitcast<f32>(lights[base + 11u]);
-        let light_type = lights[base + 13u];
-        let direction = vec3<f32>(
-            bitcast<f32>(lights[base + 4u]),
-            bitcast<f32>(lights[base + 5u]),
-            bitcast<f32>(lights[base + 6u]),
-        );
-        if light_type == 0u && intensity > 0.0 && dot(direction, direction) > 0.0 {
-            sun = vec4<f32>(-normalize(direction), 1.0);
-            break;
-        }
+    if arrayLength(&directional_light) > 0u && directional_light[0].w > 0.0 {
+        sun = directional_light[0];
     }
     for (var i = 0u; i < 4u; i++) {
         rows_out[output + WATER_SUN_WORD + i] = bitcast<u32>(sun[i]);

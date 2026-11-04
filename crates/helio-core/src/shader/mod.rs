@@ -41,7 +41,7 @@
 //! [`PRELUDE`] is the one snippet `helio-core` owns directly — every pass
 //! shares exactly one camera/depth convention, so it names no specific pass.
 //! Anything else a pass wants pre-pended by marker (Hi-Z traversal, a
-//! material PBR evaluation library, a foliage wind model, ...) is declared as
+//! material PBR evaluation library, an atmosphere model, ...) is declared as
 //! a [`ShaderSnippet`] by the pass crate that owns that content and passed
 //! explicitly to [`resolve_with`]/[`module_with`] — `helio-core` never
 //! hardcodes a specific snippet's name or source, only the generic
@@ -252,7 +252,7 @@ impl TextSource for Embedded {
 ///
 /// Declared as a `const` by whichever pass crate owns the snippet's content
 /// (e.g. `helio-pass-hiz`'s Hi-Z traversal, `helio-pass-gbuffer`'s PBR
-/// evaluation library, `helio-pass-foliage-place`'s wind model) and passed
+/// evaluation library, `helio-pass-sky`'s atmosphere) and passed
 /// explicitly to [`resolve_with`]/[`module_with`] by the pass that wants it.
 /// `helio-core` never declares one itself and never hardcodes a marker or
 /// source string belonging to a specific domain — only this generic shape.

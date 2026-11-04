@@ -11,8 +11,8 @@
 //! independently of everything else, so the space feels alive rather than
 //! uniformly lit.
 //!
-//! Rendered through the OpenXR path when a headset is connected (see `examples/vr` and
-//! `examples/foliage_demo`), and a plain desktop mirror with WASD + mouse look when
+//! Rendered through the OpenXR path when a headset is connected (see `examples/vr`),
+//! and a plain desktop mirror with WASD + mouse look when
 //! OpenXR initialisation fails. The camcorder bob/sway is desktop-only — a headset
 //! already supplies real head motion, and stacking a synthetic bob on top of it is a
 //! reliable way to make someone sick.
@@ -32,11 +32,11 @@ use helio::{
     HelioXrInput, Renderer, RendererBuilder, RendererConfig,
 };
 use helio_pass_postprocess::PostProcessPass;
-use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
+use helio_pass_postprocess::PostProcessSettings;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
-    spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_post_process_volume, update_light,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
 };
 
 // User shader snippet injected into the post-process pipeline.
@@ -1039,7 +1039,7 @@ impl ApplicationHandler for App {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
 
-        let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(helio_presets::deferred));
         let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
@@ -1047,23 +1047,14 @@ impl ApplicationHandler for App {
         if xr_active {
             renderer.set_jitter_enabled(false);
         }
-        // ── VHS camcorder post-process volume ─────────────────────────────────
-        spawn_post_process_volume(
-            &mut scene_db.world,
-            PostProcessVolumeDescriptor {
-                bounds_min: [-1000.0, -1000.0, -1000.0],
-                bounds_max: [1000.0, 1000.0, 1000.0],
-                blend_radius: 0.0,
-                unbound: true,
-                priority: 100.0,
-                blend_weight: 1.0,
-                settings: PostProcessSettings {
-                    // All effects are handled by the user_effects WGSL snippet.
-                    // Keep the volume at defaults so the built-in chain is a
-                    // no-op — the VHS shader owns the entire post-process look.
-                    ..PostProcessSettings::default()
-                },
-                ..Default::default()
+        // ── VHS camcorder post-process baseline ───────────────────────────────
+        v3_demo_common::set_post_baseline(
+            &mut renderer,
+            &PostProcessSettings {
+                // All effects are handled by the user_effects WGSL snippet.
+                // Keep the baseline at defaults so the built-in chain is a
+                // no-op — the VHS shader owns the entire post-process look.
+                ..PostProcessSettings::default()
             },
         );
 

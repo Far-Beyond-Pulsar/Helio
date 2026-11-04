@@ -13,7 +13,6 @@ bake = ["dep:helio-bake"]
 
 [dependencies]
 helio-mesh-api = { workspace = true }
-helio-pass-post-volumes = { workspace = true }
 helio = { path = "../helio" }
 helio-bake = { path = "../helio-bake", optional = true }
 helio-core = { workspace = true }
@@ -34,13 +33,10 @@ helio-scene-derivations = { path = "../helio-scene-derivations" }
 helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
 helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
-helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
-helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
-helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 
 [dev-dependencies]
 helio = { path = "../helio" }

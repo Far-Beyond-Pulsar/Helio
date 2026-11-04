@@ -5,10 +5,12 @@
 //! (`assets/vg_stress/shots.json`, or the built-in default), writing one JPEG
 //! (or a numbered JPEG sequence) plus a stats JSON per shot and an
 //! `index.json`. See VG_STRESS.md ("Capture mode").
+//! Fog and post-process volumes left Helio with their plugins (Pulsar
+//! `plugins/vendor/fog`, `plugins/vendor/post`): shots still record their
+//! medium, but no longer draw it, and the post stack is the host's baseline.
 
 use super::{AppState, TAU_RANGE};
 use helio::Camera;
-use helio_components::PostProcessVolumeComponent;
 use helio_vg_format::debug_view;
 use helio_vg_stream::VgRuntimeSettings;
 use serde::{Deserialize, Serialize};
@@ -151,6 +153,9 @@ impl CameraSpec {
     }
 }
 
+/// A shot's medium. The capture records it in its report; fog is the fog
+/// plugin's (Pulsar `plugins/vendor/fog`), which Helio's hosts do not draw.
+/// `shafts` still gives the sun its shadow map and volumetric flags.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FogSpec {
@@ -302,7 +307,7 @@ pub struct Shot {
     /// Depth of field (hero/cinematic shots only; debug views stay clean).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lens: Option<LensSpec>,
-    /// The post-process volumes (grading, bloom, vignette).
+    /// The post stack (grading, bloom, vignette) as the host's baseline.
     pub post: bool,
     /// `png` (default) or `jpg` (image sequences).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -450,7 +455,7 @@ pub fn default_shots() -> Vec<Shot> {
         color: [0.80, 0.84, 1.0],
         intensity: 0.30,
     });
-    // A beauty shot: sun, fog, post volumes, depth of field, 1440p.
+    // A beauty shot: sun, fog, post stack, depth of field, 1440p.
     let beauty = |name: &str,
                   camera: CameraSpec,
                   sun: SunSpec,
@@ -806,90 +811,47 @@ impl Options {
     }
 }
 
-// ── the post stack: grading volumes + lens ───────────────────────────────────
+// ── the post stack: grading + lens ───────────────────────────────────────────
 
-/// Post-process volumes of the museum: a cool, brighter outdoors volume
-/// (unbound) and a warmer, slightly darker one inside the temple, blended by
-/// position. Weight 0 switches the stack off without touching the world.
+/// The museum's post settings: cool, slightly bright grading with bloom and a
+/// vignette, published as the host's baseline (`set_post_baseline`) when on
+/// and the defaults when off. (Its warmer temple-interior volume left Helio
+/// with the post-volume plugin.)
 pub struct PostStack {
-    volumes: Vec<(
-        pulsar_scenedb::Entity,
-        helio_pass_postprocess::PostProcessVolumeDescriptor,
-    )>,
+    settings: helio_pass_postprocess::PostProcessSettings,
 }
 
 impl PostStack {
-    pub fn install(world: &mut pulsar_scenedb::World) -> Self {
-        use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
-        let outdoors = PostProcessVolumeDescriptor {
-            priority: 0.0,
-            unbound: true,
-            settings: PostProcessSettings {
-                bloom_enabled: true,
-                bloom_intensity: 0.22,
-                bloom_threshold: 1.1,
-                bloom_knee: 0.5,
-                bloom_tint: [1.0, 0.92, 0.8],
-                color_gain: [0.98, 1.0, 1.04],
-                color_saturation: [1.04, 1.04, 1.06],
-                color_contrast: [1.04, 1.04, 1.04],
-                vignette_enabled: true,
-                vignette_intensity: 0.28,
-                vignette_smoothness: 2.0,
-                vignette_roundness: 1.0,
-                vignette_color: [0.05, 0.04, 0.04],
-                ..PostProcessSettings::default()
-            },
-            ..Default::default()
+    pub fn install(renderer: &mut helio::Renderer) -> Self {
+        use helio_pass_postprocess::PostProcessSettings;
+        let settings = PostProcessSettings {
+            bloom_enabled: true,
+            bloom_intensity: 0.22,
+            bloom_threshold: 1.1,
+            bloom_knee: 0.5,
+            bloom_tint: [1.0, 0.92, 0.8],
+            color_gain: [0.98, 1.0, 1.04],
+            color_saturation: [1.04, 1.04, 1.06],
+            color_contrast: [1.04, 1.04, 1.04],
+            vignette_enabled: true,
+            vignette_intensity: 0.28,
+            vignette_smoothness: 2.0,
+            vignette_roundness: 1.0,
+            vignette_color: [0.05, 0.04, 0.04],
+            ..PostProcessSettings::default()
         };
-        let indoors = PostProcessVolumeDescriptor {
-            bounds_min: [-9.6, 0.0, -21.0],
-            bounds_max: [9.6, 12.0, 21.0],
-            priority: 10.0,
-            blend_radius: 3.0,
-            settings: PostProcessSettings {
-                bloom_enabled: true,
-                bloom_intensity: 0.35,
-                bloom_threshold: 0.9,
-                bloom_knee: 0.5,
-                bloom_tint: [1.0, 0.85, 0.65],
-                color_gain: [1.06, 0.99, 0.90],
-                color_saturation: [1.06, 1.02, 0.94],
-                color_contrast: [1.05, 1.05, 1.05],
-                vignette_enabled: true,
-                vignette_intensity: 0.38,
-                vignette_smoothness: 2.0,
-                vignette_roundness: 1.0,
-                vignette_color: [0.08, 0.05, 0.03],
-                ..PostProcessSettings::default()
-            },
-            ..Default::default()
-        };
-        let volumes = [outdoors, indoors]
-            .into_iter()
-            .map(|d| {
-                (
-                    super::v3_demo_common::spawn_post_process_volume(world, d.clone()),
-                    d,
-                )
-            })
-            .collect();
-        let stack = Self { volumes };
-        stack.set_on(world, false);
+        let stack = Self { settings };
+        stack.set_on(renderer, false);
         stack
     }
 
-    pub fn set_on(&self, world: &mut pulsar_scenedb::World, on: bool) {
-        for (entity, descriptor) in &self.volumes {
-            let mut d = descriptor.clone();
-            d.blend_weight = if on { 1.0 } else { 0.0 };
-            world.insert(
-                *entity,
-                PostProcessVolumeComponent::from(
-                    helio_pass_post_volumes::PostProcessVolumeRow::from(d.to_gpu()),
-                ),
-            );
-        }
+    pub fn set_on(&self, renderer: &mut helio::Renderer, on: bool) {
+        let settings = if on {
+            self.settings.clone()
+        } else {
+            helio_pass_postprocess::PostProcessSettings::default()
+        };
+        super::v3_demo_common::set_post_baseline(renderer, &settings);
     }
 }
 
@@ -1066,7 +1028,7 @@ impl Capture {
             Phase::Done => return true,
             Phase::Waiting { .. } => {
                 if self.post.is_none() {
-                    self.post = Some(PostStack::install(&mut s.scene_db.world));
+                    self.post = Some(PostStack::install(&mut s.renderer));
                 }
                 self.ensure_target(&s.device, size);
                 let first = self.shots.first().map(|x| x.camera.pose(0));
@@ -1244,23 +1206,8 @@ impl Capture {
             .clear_color
             .map_or(self.default_clear, |c| [c[0], c[1], c[2], 1.0]);
         s.renderer.set_clear_color(clear);
-        // Fog.
-        if let Some(entity) = s.fog_entity {
-            let fog = shot.fog.clone().filter(|f| f.enabled);
-            let component = super::v3_demo_common::GlobalFogComponent {
-                enabled: fog.is_some() as u32,
-                mode: (fog.as_ref().is_some_and(|f| f.height_falloff > 0.0)) as u32,
-                extinction: fog.as_ref().map_or(0.0, |f| f.density),
-                albedo: fog.as_ref().map_or([1.0; 3], |f| f.albedo),
-                anisotropy: fog.as_ref().map_or(0.0, |f| f.anisotropy),
-                height: fog.as_ref().map_or(0.0, |f| f.height),
-                height_falloff: fog.as_ref().map_or(0.0, |f| f.height_falloff),
-                ..Default::default()
-            };
-            s.scene_db.world.insert(entity, component);
-        }
         if let Some(post) = &self.post {
-            post.set_on(&mut s.scene_db.world, shot.post);
+            post.set_on(&mut s.renderer, shot.post);
         }
         if shot.ray_tracing {
             eprintln!(
@@ -1497,7 +1444,7 @@ impl Capture {
             "fog": shot.fog.clone().filter(|f| f.enabled),
             "sun": shot.sun,
             "lens": self.last_lens.map(|(f, n, d, on)| serde_json::json!({"enabled": on, "focal_length_mm": f, "f_number": n, "focus_distance_m": d})),
-            "post_volumes": shot.post,
+            "post": shot.post,
             "tier3_on": settings.tier3,
             "ray_tracing_requested": shot.ray_tracing,
             "ray_tracing_rendered": false,
@@ -2070,35 +2017,16 @@ mod placement_dump {
     }
 }
 
-/// The interactive post stack (`P`): 0 off, 1 standard (grading volumes, bloom,
-/// vignette), 2 cinematic (plus a light haze; depth of field is the lens
-/// plugin's). Installed lazily; the title shows the level.
+/// The interactive post stack (`P`): 0 off, 1 standard (grading, bloom,
+/// vignette), 2 cinematic (the same here: depth of field is the lens
+/// plugin's, haze the fog plugin's). Installed lazily; the title shows the
+/// level.
 pub fn set_interactive_post(s: &mut AppState, level: u8) {
     if s.post_stack.is_none() {
-        s.post_stack = Some(PostStack::install(&mut s.scene_db.world));
+        s.post_stack = Some(PostStack::install(&mut s.renderer));
     }
     if let Some(stack) = &s.post_stack {
-        stack.set_on(&mut s.scene_db.world, level >= 1);
-    }
-    if level >= 2 && s.fog_entity.is_none() {
-        super::v3_demo_common::set_volumetric_quality(&mut s.scene_db.world, 1, 200.0);
-        s.fog_entity = Some(super::v3_demo_common::spawn_global_fog(
-            &mut s.scene_db.world,
-            super::v3_demo_common::GlobalFogComponent {
-                enabled: 0,
-                ..Default::default()
-            },
-        ));
-    }
-    if let Some(entity) = s.fog_entity {
-        let component = super::v3_demo_common::GlobalFogComponent {
-            enabled: (level >= 2) as u32,
-            extinction: 0.003,
-            albedo: [0.9, 0.85, 0.75],
-            anisotropy: 0.5,
-            ..Default::default()
-        };
-        s.scene_db.world.insert(entity, component);
+        stack.set_on(&mut s.renderer, level >= 1);
     }
     s.post_level = level;
     println!(
@@ -2106,7 +2034,7 @@ pub fn set_interactive_post(s: &mut AppState, level: u8) {
         [
             "off",
             "standard (grading, bloom, vignette)",
-            "cinematic (+ depth of field, autofocus centre, haze)"
+            "cinematic (grading, bloom, vignette)"
         ][level as usize]
     );
 }
