@@ -10,7 +10,7 @@
 //! [`Meadow::range`]. Bands of tiles in the frame of the cube face under the eye carry it
 //! out to its range at the same cost on any planet.
 
-use helio_pass_foliage_place::components::{FoliageTypeComponent, FoliageWindComponent};
+use helio_pass_foliage_place::components::{FoliageTypeRow, FoliageWindRow};
 use helio_pass_foliage_place::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageType, FOLIAGE_FLAG_GROUND_COLOUR,
     FOLIAGE_FLAG_RECEIVES_INTERACTION,
@@ -24,9 +24,9 @@ pub const CUBE_M: f32 = 0.05;
 /// A meadow's foliage rows and the renderer settings it is drawn with.
 pub struct Meadow {
     /// The types, one SceneDB row each.
-    pub types: Vec<FoliageTypeComponent>,
+    pub types: Vec<FoliageTypeRow>,
     /// The wind, one SceneDB row.
-    pub wind: FoliageWindComponent,
+    pub wind: FoliageWindRow,
     /// Tufts a square metre at the densest (every type's together):
     /// `RendererConfig::foliage_tufts_per_m2`.
     pub tufts_per_m2: f32,
@@ -59,7 +59,7 @@ struct Kind {
     reach: f32,
 }
 
-fn row(ground: u32, k: Kind) -> FoliageTypeComponent {
+fn row(ground: u32, k: Kind) -> FoliageTypeRow {
     let mut t = GpuFoliageType {
         density: k.density,
         height_range: k.height,
@@ -70,7 +70,7 @@ fn row(ground: u32, k: Kind) -> FoliageTypeComponent {
         lod_distances: [6.0, 0.0, 0.0, k.reach],
         // Swaying whole, tips most (cubes move whole), a little flutter and jitter.
         wind_response: [0.7, 0.35, 0.1],
-        // Lies flat under a foot (`FoliageInteractorComponent`).
+        // Lies flat under a foot (`FoliageInteractorRow`).
         interaction_stiffness: 1.0,
         kind_and_flags: pack_kind_and_flags(
             FoliageKind::Block,
@@ -187,7 +187,7 @@ pub fn meadow() -> Meadow {
     ];
     Meadow {
         types,
-        wind: FoliageWindComponent {
+        wind: FoliageWindRow {
             direction_speed: [1.0, 0.0, 0.3, 1.5],
             gust: [0.5, 0.2, 0.0, 0.05],
             time_prev_time: [0.0, 0.0],

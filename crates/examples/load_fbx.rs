@@ -11,7 +11,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
+use helio_asset_compat::load_scene_file_with_config;
 use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
@@ -150,7 +150,8 @@ impl ApplicationHandler for App {
                     scene.meshes.len(),
                     scene.materials.len()
                 );
-                let material_ids = upload_scene_materials(&mut scene_db.world, &scene);
+                let material_ids =
+                    helio_components::upload_scene_materials(&mut scene_db.world, &scene);
                 for mesh in scene.meshes {
                     let radius = mesh
                         .vertices

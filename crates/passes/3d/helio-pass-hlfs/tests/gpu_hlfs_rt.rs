@@ -1,8 +1,8 @@
 //! The first executable RT control: opaque world visibility, not a performance claim.
 #![allow(dead_code)]
 mod support;
+use helio_components::ray_tracing::{RayTransmission, SceneDbRayTracing};
 use helio_core::{BlasGeometry, TlasInstanceInput};
-use helio_default_passes::ray_tracing::{RayTransmission, SceneDbRayTracing};
 use helio_pass_hlfs::{HlfsConfig, HlfsDebugMode, HlfsMode, HlfsPass};
 use support::{mean, ortho_depth, point, Fixture};
 use wgpu::util::DeviceExt;
@@ -1561,7 +1561,7 @@ fn tile_proposals_preserve_energy_across_empty_strata_and_packed_overflow() {
 #[ignore = "requires Vulkan hardware ray queries"]
 fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
     pollster::block_on(async {
-        use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
+        use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
         use std::sync::Arc;
         let mut f = Fixture::new_rt(65, 49).await;
         f.publish_ray_frame = false;
@@ -1625,7 +1625,9 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         let material = db.world.spawn();
         db.world.insert(
             material,
-            MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0),
+            MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+                [1.0; 4], 0.5, 0.0, [0.0; 3], 0.0,
+            )),
         );
         let mirror = db.world.gpu_mirror().unwrap();
         let vertices = MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index()).unwrap();
@@ -1633,7 +1635,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         let object = db.world.spawn();
         db.world.insert(
             object,
-            StaticObjectComponent::new(
+            StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
                 mesh.index(),
                 mesh.generation() + 1,
                 material.index(),
@@ -1646,7 +1648,7 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
                 0,
                 0,
                 helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW,
-            ),
+            )),
         );
         let shadow = render(&mut f, &mut acceleration, &db);
         assert!(
@@ -1663,7 +1665,9 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         let opaque_material = db.world.spawn();
         db.world.insert(
             opaque_material,
-            MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0),
+            MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+                [1.0; 4], 0.5, 0.0, [0.0; 3], 0.0,
+            )),
         );
         let mut opaque_row = *db.world.get::<StaticObjectComponent>(object).unwrap();
         opaque_row.material_slot = opaque_material.index();
@@ -1704,10 +1708,12 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
         );
         {
             let mut row = db.world.get_mut::<StaticObjectComponent>(object).unwrap();
-            *row = row.with_transform(
-                glam::Mat4::from_translation(glam::Vec3::new(-20.0, 0.0, 0.0)),
-                [0.0, 0.0, 0.0, 200.0],
-            );
+            *row = row
+                .with_transform(
+                    glam::Mat4::from_translation(glam::Vec3::new(-20.0, 0.0, 0.0)),
+                    [0.0, 0.0, 0.0, 200.0],
+                )
+                .into();
         }
         assert!(
             render(&mut f, &mut acceleration, &db) < clear * 0.2,
@@ -1735,8 +1741,8 @@ fn scenedb_projection_tracks_mesh_edits_transforms_removal_and_stale_frames() {
 #[ignore = "requires Vulkan hardware ray queries"]
 fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
     pollster::block_on(async {
+        use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
         use helio_core::Movability;
-        use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
         use std::sync::Arc;
         let mut f = Fixture::new_rt(65, 49).await;
         f.publish_ray_frame = false;
@@ -1797,7 +1803,9 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
         let material = db.world.spawn();
         db.world.insert(
             material,
-            MaterialComponent::new([1.0; 4], 0.5, 0.0, [0.0; 3], 0.0),
+            MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+                [1.0; 4], 0.5, 0.0, [0.0; 3], 0.0,
+            )),
         );
         let mirror = db.world.gpu_mirror().unwrap();
         let vertices = MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index()).unwrap();
@@ -1805,7 +1813,7 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
         let object = db.world.spawn();
         db.world.insert(
             object,
-            StaticObjectComponent::new(
+            StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
                 mesh.index(),
                 mesh.generation() + 1,
                 material.index(),
@@ -1818,7 +1826,7 @@ fn non_deforming_meshes_reuse_their_blas_until_marked_dynamic() {
                 0,
                 0,
                 helio_pass_object_batch::INSTANCE_FLAG_CASTS_SHADOW,
-            ),
+            )),
         );
         assert!(
             render(&mut f, &mut acceleration, &db) < clear * 0.2,

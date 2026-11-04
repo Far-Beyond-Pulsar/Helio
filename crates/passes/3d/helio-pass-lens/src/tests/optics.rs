@@ -15,13 +15,13 @@ use crate::ray_map::{required_overscan, spectral_samples, RayMap};
 
 /// A lens with the stack `elements` (rows `0..n`), 50 mm f/2.8 focused on the
 /// 3 m plane every scene here sits on, so nothing is out of focus.
-fn stacked(elements: &[LensElementComponent]) -> LensComponent {
+fn stacked(elements: &[LensElementRow]) -> LensRow {
     let mut lens = lens();
     lens.element_count = elements.len() as u32;
     lens
 }
 
-fn rows(elements: &[LensElementComponent]) -> Option<&[LensElementComponent]> {
+fn rows(elements: &[LensElementRow]) -> Option<&[LensElementRow]> {
     Some(elements)
 }
 
@@ -104,7 +104,7 @@ fn rectilinear_projection_is_an_exact_identity() {
         |_, _| 3.0,
     );
     let reference = plain(&mut rig, &scene);
-    let element = [LensElementComponent::projection(
+    let element = [LensElementRow::projection(
         ProjectionModel::Rectilinear,
         LensRegion::FullFrame,
     )];
@@ -132,11 +132,7 @@ fn brown_conrady_places_a_point_where_the_opencv_model_says() {
     let scene = blobs(&points, 1.4);
     let k = [-0.25, 0.06, -0.01, 0.0, 0.0, 0.0];
     let p = [0.012, -0.009];
-    let element = [LensElementComponent::brown_conrady(
-        k,
-        p,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::brown_conrady(k, p, LensRegion::FullFrame)];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     for &(px, py) in &points {
         // The ideal point in focal-length units, then the OpenCV model.
@@ -187,10 +183,7 @@ fn fisheye_projections_record_radius_by_angle() {
         (ProjectionModel::Stereographic, |t| 2.0 * (t * 0.5).tan()),
     ];
     for (model, radius) in cases {
-        let element = [LensElementComponent::projection(
-            model,
-            LensRegion::FullFrame,
-        )];
+        let element = [LensElementRow::projection(model, LensRegion::FullFrame)];
         let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
         let mut measured = Vec::new();
         for (&theta, &(sx, sy)) in thetas.iter().zip(&scene_points) {
@@ -263,11 +256,7 @@ fn a_neutral_spectral_lens_is_the_identity_at_every_quality() {
         |_, _| 3.0,
     );
     let reference = plain(&mut rig, &scene);
-    let element = [LensElementComponent::lateral_ca(
-        0.0,
-        0.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::lateral_ca(0.0, 0.0, LensRegion::FullFrame)];
     for (quality, samples) in [(0, 3), (1, 7), (2, 16)] {
         let mut lens = stacked(&element);
         lens.quality = quality;
@@ -307,11 +296,7 @@ fn lateral_chromatic_aberration_splits_a_white_line_off_axis() {
         |_, _| 3.0,
     );
     let d1 = 0.06;
-    let element = [LensElementComponent::lateral_ca(
-        d1,
-        0.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::lateral_ca(d1, 0.0, LensRegion::FullFrame)];
     let mut lens = stacked(&element);
     lens.quality = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
@@ -363,11 +348,7 @@ fn lateral_chromatic_aberration_splits_a_white_line_off_axis() {
         }
     }
     // Negative dispersion reverses it.
-    let element = [LensElementComponent::lateral_ca(
-        -d1,
-        0.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::lateral_ca(-d1, 0.0, LensRegion::FullFrame)];
     let mut lens = stacked(&element);
     lens.quality = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
@@ -382,10 +363,7 @@ fn lateral_chromatic_aberration_splits_a_white_line_off_axis() {
 fn natural_vignette_follows_cos4_of_the_ray_angle() {
     let mut rig = Rig::new();
     let scene = flat([1.0; 3]);
-    let element = [LensElementComponent::natural_vignette(
-        1.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::natural_vignette(1.0, LensRegion::FullFrame)];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     let resolved = rig.resolved();
     assert_eq!(
@@ -424,8 +402,8 @@ fn natural_vignette_follows_cos4_of_the_ray_angle() {
     // The ray's real angle: an equidistant fisheye records angle theta at
     // radius theta, so the falloff is cos^4 of the sensor radius.
     let element = [
-        LensElementComponent::projection(ProjectionModel::Equidistant, LensRegion::FullFrame),
-        LensElementComponent::natural_vignette(1.0, LensRegion::FullFrame),
+        LensElementRow::projection(ProjectionModel::Equidistant, LensRegion::FullFrame),
+        LensElementRow::natural_vignette(1.0, LensRegion::FullFrame),
     ];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     for &(x, y) in &[(96u32, 64u32), (120, 64), (110, 110)] {
@@ -438,10 +416,7 @@ fn natural_vignette_follows_cos4_of_the_ray_angle() {
         );
     }
     // Half the amount lands halfway.
-    let element = [LensElementComponent::natural_vignette(
-        0.5,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::natural_vignette(0.5, LensRegion::FullFrame)];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     let (qx, qy) = (q_of(3.0) * SCALE, q_of(3.0) * SCALE);
     let full = 1.0 / ((1.0 + qx * qx + qy * qy) * (1.0 + qx * qx + qy * qy));
@@ -454,7 +429,7 @@ fn graduated_nd_ramps_monotonically_hard_or_soft_and_tinted() {
     let scene = flat([1.0; 3]);
     // Dark toward +y (down), centred, two stops.
     let width = |rig: &mut Rig, softness: f32, tint: [f32; 3]| {
-        let element = [LensElementComponent::graduated_nd(
+        let element = [LensElementRow::graduated_nd(
             2.0,
             std::f32::consts::FRAC_PI_2,
             0.0,
@@ -505,10 +480,7 @@ fn t_stop_light_loss_scales_the_exposure() {
     // Not applied until an element asks: t_stop is carried, not enforced.
     let frame = rig.record(&scene, Some(&[lens]), None);
     assert_eq!(frame.pixel(40, 40), [1.0; 3]);
-    let element = [LensElementComponent::t_stop_loss(
-        1.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::t_stop_loss(1.0, LensRegion::FullFrame)];
     lens.element_count = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
     let expected = (2.8f32 / 4.0).powi(2);
@@ -535,7 +507,7 @@ fn prism_copies_are_weighted_and_preserve_energy() {
 
     // Five copies in a line, one eighth of the frame apart.
     let spacing = 0.12;
-    let element = [LensElementComponent::prism(
+    let element = [LensElementRow::prism(
         5,
         spacing,
         0.0,
@@ -564,10 +536,10 @@ fn prism_copies_are_weighted_and_preserve_energy() {
     // A ring of six, falling off, still sums to one; so does a kaleidoscope
     // that turns each copy.
     for element in [
-        LensElementComponent::prism(6, 0.2, 0.3, LensRegion::FullFrame)
+        LensElementRow::prism(6, 0.2, 0.3, LensRegion::FullFrame)
             .with_prism_ring()
             .with_prism_falloff(0.7),
-        LensElementComponent::prism(4, 0.1, 0.0, LensRegion::FullFrame).with_prism_spin(0.4),
+        LensElementRow::prism(4, 0.1, 0.0, LensRegion::FullFrame).with_prism_spin(0.4),
     ] {
         let frame = rig.record(&scene, Some(&[stacked(&[element])]), rows(&[element]));
         for c in 0..3 {
@@ -584,7 +556,7 @@ fn prism_copies_are_weighted_and_preserve_energy() {
     // the energy still adds up.
     let scene = blobs(&[(30.0, 40.0), (96.0, 88.0)], 1.6);
     let reference = plain(&mut rig, &scene);
-    let element = [LensElementComponent::prism(
+    let element = [LensElementRow::prism(
         3,
         0.1,
         0.0,
@@ -621,12 +593,12 @@ fn required_overscan_reports_how_far_the_map_reaches() {
     };
     struct Case {
         name: &'static str,
-        lens: LensComponent,
-        elements: Vec<LensElementComponent>,
+        lens: LensRow,
+        elements: Vec<LensElementRow>,
         expect: fn(f32) -> bool,
     }
     let bc = |k1: f32| {
-        LensElementComponent::brown_conrady(
+        LensElementRow::brown_conrady(
             [k1, 0.0, 0.0, 0.0, 0.0, 0.0],
             [0.0; 2],
             LensRegion::FullFrame,
@@ -642,7 +614,7 @@ fn required_overscan_reports_how_far_the_map_reaches() {
         Case {
             name: "identity",
             lens: lens(),
-            elements: vec![LensElementComponent::projection(
+            elements: vec![LensElementRow::projection(
                 ProjectionModel::Rectilinear,
                 LensRegion::FullFrame,
             )],
@@ -663,7 +635,7 @@ fn required_overscan_reports_how_far_the_map_reaches() {
         Case {
             name: "14 mm equidistant fisheye",
             lens: wide(14.0),
-            elements: vec![LensElementComponent::projection(
+            elements: vec![LensElementRow::projection(
                 ProjectionModel::Equidistant,
                 LensRegion::FullFrame,
             )],
@@ -672,7 +644,7 @@ fn required_overscan_reports_how_far_the_map_reaches() {
         Case {
             name: "2x squeeze",
             lens: lens(),
-            elements: vec![LensElementComponent::anamorphic_squeeze(
+            elements: vec![LensElementRow::anamorphic_squeeze(
                 2.0,
                 LensRegion::FullFrame,
             )],
@@ -681,28 +653,19 @@ fn required_overscan_reports_how_far_the_map_reaches() {
         Case {
             name: "shift",
             lens: lens(),
-            elements: vec![LensElementComponent::shift(0.1, 0.0, LensRegion::FullFrame)],
+            elements: vec![LensElementRow::shift(0.1, 0.0, LensRegion::FullFrame)],
             expect: |o| (o - 1.2).abs() < 1.0e-3,
         },
         Case {
             name: "lateral CA",
             lens: lens(),
-            elements: vec![LensElementComponent::lateral_ca(
-                0.05,
-                0.0,
-                LensRegion::FullFrame,
-            )],
+            elements: vec![LensElementRow::lateral_ca(0.05, 0.0, LensRegion::FullFrame)],
             expect: |o| (o - 1.0 / 0.95).abs() < 1.0e-3,
         },
         Case {
             name: "prism",
             lens: lens(),
-            elements: vec![LensElementComponent::prism(
-                3,
-                0.1,
-                0.0,
-                LensRegion::FullFrame,
-            )],
+            elements: vec![LensElementRow::prism(3, 0.1, 0.0, LensRegion::FullFrame)],
             expect: |o| (o - 1.2).abs() < 1.0e-3,
         },
     ];
@@ -772,8 +735,8 @@ fn sample_scene(scene: &Scene, uv: [f32; 2]) -> [f32; 3] {
 /// The GPU image against the twin's map applied to the smooth scene.
 fn assert_matches_the_twin(
     rig: &mut Rig,
-    lens: LensComponent,
-    elements: &[LensElementComponent],
+    lens: LensRow,
+    elements: &[LensElementRow],
     what: &str,
 ) -> Frame {
     let scene = smooth_scene();
@@ -802,31 +765,31 @@ fn assert_matches_the_twin(
 fn every_map_element_matches_its_cpu_twin() {
     let mut rig = Rig::new();
     let full = LensRegion::FullFrame;
-    let cases: Vec<(&str, LensComponent, Vec<LensElementComponent>)> = vec![
+    let cases: Vec<(&str, LensRow, Vec<LensElementRow>)> = vec![
         (
             "shift",
             lens(),
-            vec![LensElementComponent::shift(0.07, -0.04, full)],
+            vec![LensElementRow::shift(0.07, -0.04, full)],
         ),
         (
             "squeeze",
             lens(),
-            vec![LensElementComponent::anamorphic_squeeze(1.5, full)],
+            vec![LensElementRow::anamorphic_squeeze(1.5, full)],
         ),
         (
             "keystone",
             lens(),
-            vec![LensElementComponent::keystone(0.2, -0.3, full)],
+            vec![LensElementRow::keystone(0.2, -0.3, full)],
         ),
         (
             "division",
             lens(),
-            vec![LensElementComponent::division(-0.4, 0.1, full)],
+            vec![LensElementRow::division(-0.4, 0.1, full)],
         ),
         (
             "anamorphic distortion",
             lens(),
-            vec![LensElementComponent::anamorphic_distortion(
+            vec![LensElementRow::anamorphic_distortion(
                 [-0.3, 0.0],
                 [0.2, 0.0],
                 full,
@@ -835,7 +798,7 @@ fn every_map_element_matches_its_cpu_twin() {
         (
             "rational brown-conrady",
             lens(),
-            vec![LensElementComponent::brown_conrady(
+            vec![LensElementRow::brown_conrady(
                 [-0.2, 0.03, 0.0, 0.05, 0.0, 0.0],
                 [0.01, 0.0],
                 full,
@@ -845,22 +808,19 @@ fn every_map_element_matches_its_cpu_twin() {
             "kannala-brandt",
             lens(),
             vec![
-                LensElementComponent::projection(ProjectionModel::KannalaBrandt, full)
+                LensElementRow::projection(ProjectionModel::KannalaBrandt, full)
                     .with_kannala_brandt([-0.02, 0.003, 0.0, 0.0]),
             ],
         ),
         (
             "panini",
             lens(),
-            vec![
-                LensElementComponent::projection(ProjectionModel::Panini, full)
-                    .with_panini(1.0, 0.8),
-            ],
+            vec![LensElementRow::projection(ProjectionModel::Panini, full).with_panini(1.0, 0.8)],
         ),
         (
             "cylindrical",
             lens(),
-            vec![LensElementComponent::projection(
+            vec![LensElementRow::projection(
                 ProjectionModel::Cylindrical,
                 full,
             )],
@@ -868,13 +828,13 @@ fn every_map_element_matches_its_cpu_twin() {
         (
             "flat port",
             lens(),
-            vec![LensElementComponent::flat_port(1.333, 0.0, full)],
+            vec![LensElementRow::flat_port(1.333, 0.0, full)],
         ),
         (
             "dome port",
             lens(),
             vec![{
-                let mut e = LensElementComponent::dome_port(0.1, 0.04, full);
+                let mut e = LensElementRow::dome_port(0.1, 0.04, full);
                 e.params[dome_port::CURVATURE] = 0.0;
                 e
             }],
@@ -882,7 +842,7 @@ fn every_map_element_matches_its_cpu_twin() {
         (
             "region-limited distortion",
             lens(),
-            vec![LensElementComponent::brown_conrady(
+            vec![LensElementRow::brown_conrady(
                 [-0.3, 0.0, 0.0, 0.0, 0.0, 0.0],
                 [0.0; 2],
                 LensRegion::Ellipse {
@@ -897,13 +857,9 @@ fn every_map_element_matches_its_cpu_twin() {
             "stack",
             lens(),
             vec![
-                LensElementComponent::shift(0.06, 0.02, full),
-                LensElementComponent::brown_conrady(
-                    [-0.25, 0.0, 0.0, 0.0, 0.0, 0.0],
-                    [0.0; 2],
-                    full,
-                ),
-                LensElementComponent::anamorphic_squeeze(1.3, full),
+                LensElementRow::shift(0.06, 0.02, full),
+                LensElementRow::brown_conrady([-0.25, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0; 2], full),
+                LensElementRow::anamorphic_squeeze(1.3, full),
             ],
         ),
     ];
@@ -913,9 +869,8 @@ fn every_map_element_matches_its_cpu_twin() {
     }
 
     // The order of the stack matters.
-    let shift = LensElementComponent::shift(0.1, 0.0, full);
-    let barrel =
-        LensElementComponent::brown_conrady([-0.5, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0; 2], full);
+    let shift = LensElementRow::shift(0.1, 0.0, full);
+    let barrel = LensElementRow::brown_conrady([-0.5, 0.0, 0.0, 0.0, 0.0, 0.0], [0.0; 2], full);
     let a = [shift, barrel];
     let b = [barrel, shift];
     let (mut la, mut lb) = (lens(), lens());
@@ -939,7 +894,7 @@ fn outside_the_rendered_frame_the_image_clamps_to_its_edge() {
     let scene = Scene::new(|x, y| [x as f32 / 127.0, y as f32 / 127.0, 0.5], |_, _| 3.0);
     // The sensor looks 0.8 frames to the right: everything past the frame is
     // the last column.
-    let element = [LensElementComponent::shift(0.8, 0.0, LensRegion::FullFrame)];
+    let element = [LensElementRow::shift(0.8, 0.0, LensRegion::FullFrame)];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     for y in [10u32, 64, 120] {
         let edge = scene.color[(y * SIZE + SIZE - 1) as usize];
@@ -963,11 +918,7 @@ fn a_flat_port_magnifies_by_the_refractive_index_and_disperses() {
     // angle theta_w reaches the camera at sin(theta) = n sin(theta_w).
     let points = [(index_of(0.12), 64.0f32), (index_of(0.3), 64.0)];
     let scene = blobs(&points, 1.4);
-    let element = [LensElementComponent::flat_port(
-        n,
-        0.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::flat_port(n, 0.0, LensRegion::FullFrame)];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     for &(sx, sy) in &points {
         let x_scene = q_of(sx) * SCALE;
@@ -988,11 +939,7 @@ fn a_flat_port_magnifies_by_the_refractive_index_and_disperses() {
         );
     }
     // Dispersion: the higher index of blue magnifies it more.
-    let element = [LensElementComponent::flat_port(
-        n,
-        0.05,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::flat_port(n, 0.05, LensRegion::FullFrame)];
     let mut lens = stacked(&element);
     lens.quality = 1;
     let frame = rig.record(&scene, Some(&[lens]), rows(&element));
@@ -1017,7 +964,7 @@ fn a_dome_port_refracts_off_centre_and_curves_the_focus() {
     let n = 1.333f32;
     // Centred (no pupil offset), the dome does not deviate any ray.
     let scene = smooth_scene();
-    let mut centred = LensElementComponent::dome_port(0.2, 0.0, LensRegion::FullFrame);
+    let mut centred = LensElementRow::dome_port(0.2, 0.0, LensRegion::FullFrame);
     centred.params[dome_port::CURVATURE] = 0.0;
     let reference = plain(&mut rig, &scene);
     let element = [centred];
@@ -1035,7 +982,7 @@ fn a_dome_port_refracts_off_centre_and_curves_the_focus() {
     let (radius, offset) = (0.1f32, 0.05f32);
     let points = [(index_of(0.3), 64.0f32)];
     let blob = blobs(&points, 1.4);
-    let mut e = LensElementComponent::dome_port(radius, offset, LensRegion::FullFrame);
+    let mut e = LensElementRow::dome_port(radius, offset, LensRegion::FullFrame);
     e.params[dome_port::CURVATURE] = 0.0;
     let element = [e];
     let frame = rig.record(&blob, Some(&[stacked(&element)]), rows(&element));
@@ -1066,11 +1013,7 @@ fn a_dome_port_refracts_off_centre_and_curves_the_focus() {
     // The virtual image is a sphere: a flat wall in focus on the axis is
     // out of focus toward the corner. Camera: 0.8 rad vertical fov, square.
     let wall = Scene::new(Scene::checker, |_, _| 3.0);
-    let element = [LensElementComponent::dome_port(
-        0.1,
-        0.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::dome_port(0.1, 0.0, LensRegion::FullFrame)];
     let frame = rig.record(&wall, Some(&[stacked(&element)]), rows(&element));
     let tan_half = (0.8f32 * 0.5).tan();
     let (cx, cy) = (3u32, 3u32);
@@ -1096,10 +1039,7 @@ fn focus_breathing_follows_the_focus_and_scales_the_circles() {
     // Magnification 1 + k (D - D_ref): k = -0.2 per dioptre.
     let points = [(index_of(0.3), 64.0f32)];
     let scene = blobs(&points, 1.4);
-    let element = [LensElementComponent::focus_breathing(
-        -0.2,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::focus_breathing(-0.2, LensRegion::FullFrame)];
     for (focus, expected_scale) in [(2.0f32, 0.9f32), (0.5, 0.6)] {
         let mut lens = stacked(&element);
         lens.focus_distance_m = focus;
@@ -1126,10 +1066,7 @@ fn focus_breathing_follows_the_focus_and_scales_the_circles() {
     lens.max_coc_px = 64.0;
     let wall = Scene::new(Scene::checker, |_, _| 2.0);
     let before = rig.record(&wall, Some(&[lens]), None).coc(64, 64)[0];
-    let element = [LensElementComponent::focus_breathing(
-        1.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::focus_breathing(1.0, LensRegion::FullFrame)];
     lens.element_count = 1;
     let after = rig.record(&wall, Some(&[lens]), rows(&element)).coc(64, 64)[0];
     assert!(before > 3.0, "{before}");
@@ -1146,8 +1083,8 @@ fn transmission_elements_apply_in_their_regions() {
 
     // Neutral density and a colour filter.
     let element = [
-        LensElementComponent::nd_filter(2.0, LensRegion::FullFrame),
-        LensElementComponent::color_filter([1.0, 0.5, 0.25], 1.0, LensRegion::FullFrame),
+        LensElementRow::nd_filter(2.0, LensRegion::FullFrame),
+        LensElementRow::color_filter([1.0, 0.5, 0.25], 1.0, LensRegion::FullFrame),
     ];
     let frame = rig.record(&scene, Some(&[stacked(&element)]), rows(&element));
     let found = frame.pixel(40, 70);
@@ -1156,7 +1093,7 @@ fn transmission_elements_apply_in_their_regions() {
     }
 
     // A circular hood: open inside, black outside, half at the rim.
-    let element = [LensElementComponent::circular_hood(
+    let element = [LensElementRow::circular_hood(
         0.35,
         0.04,
         LensRegion::FullFrame,
@@ -1167,7 +1104,7 @@ fn transmission_elements_apply_in_their_regions() {
     let at_rim = frame.pixel(rim.floor() as u32, 64)[1];
     assert!((at_rim - 0.5).abs() < 0.2, "rim {at_rim}");
     // A matte box cuts the corners but not the middle of the edges.
-    let element = [LensElementComponent::matte_box(
+    let element = [LensElementRow::matte_box(
         [0.45, 0.45],
         0.0,
         0.02,
@@ -1182,7 +1119,7 @@ fn transmission_elements_apply_in_their_regions() {
 
     // Optical vignetting is the area of the iris the barrel leaves: the unit
     // circle against one displaced toward the axis by the field radius.
-    let element = [LensElementComponent::optical_vignette(
+    let element = [LensElementRow::optical_vignette(
         1.0,
         1.0,
         0.0,
@@ -1205,7 +1142,7 @@ fn transmission_elements_apply_in_their_regions() {
     // f/5.6 against a smaller iris, the corner is clear again.
     let mut lens = stacked(&element);
     lens.f_number = 5.6;
-    let element = [LensElementComponent::optical_vignette(
+    let element = [LensElementRow::optical_vignette(
         1.0,
         1.0,
         2.8,
@@ -1228,12 +1165,12 @@ fn the_twin_agrees_with_the_shader_on_transmission() {
     let scene = flat([1.0; 3]);
     let full = LensRegion::FullFrame;
     let element = [
-        LensElementComponent::projection(ProjectionModel::Equisolid, full),
-        LensElementComponent::natural_vignette(0.8, full),
-        LensElementComponent::optical_vignette(0.6, 0.9, 0.0, full),
-        LensElementComponent::circular_hood(0.5, 0.1, full),
-        LensElementComponent::graduated_nd(1.5, 0.4, 0.05, 0.3, [1.0, 0.8, 0.6], full),
-        LensElementComponent::nd_filter(
+        LensElementRow::projection(ProjectionModel::Equisolid, full),
+        LensElementRow::natural_vignette(0.8, full),
+        LensElementRow::optical_vignette(0.6, 0.9, 0.0, full),
+        LensElementRow::circular_hood(0.5, 0.1, full),
+        LensElementRow::graduated_nd(1.5, 0.4, 0.05, 0.3, [1.0, 0.8, 0.6], full),
+        LensElementRow::nd_filter(
             0.5,
             LensRegion::HalfPlane {
                 angle: 1.0,
@@ -1241,8 +1178,8 @@ fn the_twin_agrees_with_the_shader_on_transmission() {
             },
         )
         .with_feather(0.1),
-        LensElementComponent::color_filter([0.9, 1.0, 0.7], 0.5, full),
-        LensElementComponent::t_stop_loss(1.0, full),
+        LensElementRow::color_filter([0.9, 1.0, 0.7], 0.5, full),
+        LensElementRow::t_stop_loss(1.0, full),
     ];
     let mut lens = stacked(&element);
     lens.t_stop = 3.5;
@@ -1267,15 +1204,15 @@ fn the_twin_agrees_with_the_shader_on_transmission() {
 #[test]
 fn the_new_elements_are_built_with_the_documented_slots() {
     let full = LensRegion::FullFrame;
-    let e = LensElementComponent::projection(ProjectionModel::Panini, full).with_panini(0.5, 0.25);
+    let e = LensElementRow::projection(ProjectionModel::Panini, full).with_panini(0.5, 0.25);
     assert_eq!(
         (e.kind, e.params[..3].to_vec()),
         (element_kind::PROJECTION, vec![6.0, 0.5, 0.25])
     );
-    let e = LensElementComponent::projection(ProjectionModel::KannalaBrandt, full)
+    let e = LensElementRow::projection(ProjectionModel::KannalaBrandt, full)
         .with_kannala_brandt([1.0, 2.0, 3.0, 4.0]);
     assert_eq!(e.params[..5].to_vec(), vec![5.0, 1.0, 2.0, 3.0, 4.0]);
-    let e = LensElementComponent::brown_conrady([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [7.0, 8.0], full);
+    let e = LensElementRow::brown_conrady([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [7.0, 8.0], full);
     assert_eq!(
         (e.kind, e.params[..8].to_vec()),
         (
@@ -1283,22 +1220,22 @@ fn the_new_elements_are_built_with_the_documented_slots() {
             (1..=8).map(|n| n as f32).collect::<Vec<_>>()
         )
     );
-    let e = LensElementComponent::prism(4, 0.1, 0.5, full)
+    let e = LensElementRow::prism(4, 0.1, 0.5, full)
         .with_prism_ring()
         .with_prism_spin(0.3)
         .with_prism_falloff(0.8);
     assert_eq!(e.params[..6].to_vec(), vec![4.0, 0.1, 0.5, 1.0, 0.3, 0.8]);
-    let e = LensElementComponent::graduated_nd(2.0, 1.0, 0.1, 0.3, [0.5, 0.6, 0.7], full);
+    let e = LensElementRow::graduated_nd(2.0, 1.0, 0.1, 0.3, [0.5, 0.6, 0.7], full);
     assert_eq!(
         e.params[..7].to_vec(),
         vec![2.0, 1.0, 0.1, 0.3, 0.5, 0.6, 0.7]
     );
     assert_eq!(
-        LensElementComponent::lateral_ca(0.1, 0.02, full).params[..2].to_vec(),
+        LensElementRow::lateral_ca(0.1, 0.02, full).params[..2].to_vec(),
         vec![0.1, 0.02]
     );
     assert_eq!(
-        LensElementComponent::dome_port(0.1, 0.02, full).params[dome_port::CURVATURE],
+        LensElementRow::dome_port(0.1, 0.02, full).params[dome_port::CURVATURE],
         1.0
     );
     // Every kind is distinct and in the documented order.

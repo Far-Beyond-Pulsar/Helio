@@ -2,6 +2,7 @@
 //! their band of altitudes and nowhere else, their shadow darkens the
 //! ground under them along the sun, a still view holds still, and what they
 //! cost.
+use helio_components::LightComponent;
 use std::sync::{Arc, Mutex};
 
 use glam::Vec3;
@@ -9,8 +10,9 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
+use helio_components::AtmosphereComponent;
 use helio_default_passes::{build_default_graph_external_with_lighting_passes, VoxelPassFactory};
-use helio_pass_sky::{AtmosphereComponent, CloudLayer, PlanetWeather};
+use helio_pass_sky::{CloudLayer, PlanetWeather};
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
 use helio_pass_voxel_planet::{Planet, PlanetRecipe};
@@ -58,22 +60,14 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
         },
     );
     AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, &device);
-    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+    helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+    helio_components::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
+    helio_components::StaticObjectComponent::register_gpu_columns_growable(
         &mut gpu_store,
         16,
         &device,
     );
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        16,
-        &device,
-    );
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        16,
-        &device,
-    );
+    helio_components::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, &device);
     let mirror = GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(&queue));
     let mut scene = pulsar_scenedb::SceneDb::new();
     scene.world.attach_gpu_mirror(mirror.clone());
@@ -141,14 +135,14 @@ impl View {
     fn set_sky(&mut self, towards: Vec3, air: AtmosphereComponent) {
         self.scene.world.insert(
             self.sun,
-            helio_pass_forward_lit::LightComponent::from(helio::GpuLight {
+            LightComponent::from(helio_pass_forward_lit::LightRow::from(helio::GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [-towards.x, -towards.y, -towards.z, 0.0],
                 color_intensity: [1.0, 1.0, 1.0, 3.0],
                 shadow_index: u32::MAX,
                 light_type: helio::LightType::Directional as u32,
                 ..Default::default()
-            }),
+            })),
         );
         self.scene.world.insert(self.air, air);
         self.scene.world.flush_gpu_mirror(&self.queue);
@@ -302,9 +296,15 @@ fn clouds_appear_in_their_band_and_nowhere_else() {
     ];
     for (name, eye, forward, crosses) in cases {
         let camera = camera(eye, forward, 60.0, aspect);
-        view.set_sky(sun, AtmosphereComponent::earth());
+        view.set_sky(
+            sun,
+            AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth()),
+        );
         let clear = view.settle(&camera, 8);
-        view.set_sky(sun, AtmosphereComponent::earth().with_clouds(band()));
+        view.set_sky(
+            sun,
+            AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth().with_clouds(band())),
+        );
         let cloudy = view.settle(&camera, 16);
         view.capture(&format!("band_{name}_clear"), &clear);
         view.capture(&format!("band_{name}_cloudy"), &cloudy);
@@ -335,10 +335,12 @@ fn a_still_cloudy_sky_does_not_flicker() {
     let sun = Vec3::new(0.5, 0.45, 0.2).normalize();
     view.set_sky(
         sun,
-        AtmosphereComponent::earth().with_clouds(CloudLayer {
-            coverage: 0.5,
-            ..band()
-        }),
+        AtmosphereComponent::from(
+            helio_pass_sky::AtmosphereRow::earth().with_clouds(CloudLayer {
+                coverage: 0.5,
+                ..band()
+            }),
+        ),
     );
     let camera = camera(
         Vec3::new(0.0, 200.0, 0.0),
@@ -473,8 +475,8 @@ fn a_clouds_shadow_darkens_the_ground_under_it_along_the_sun() {
     let side_sun = Vec3::new(-0.5, 0.6, -0.3).normalize();
     let mut images = Vec::new();
     for air in [
-        AtmosphereComponent::earth(),
-        AtmosphereComponent::earth().with_clouds(clouds),
+        AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth()),
+        AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth().with_clouds(clouds)),
     ] {
         view.set_sky(sun, air);
         settle_ground(&mut view, ground_point + sun * to_eye, &down);
@@ -599,9 +601,11 @@ fn clouds_seen_from_orbit_lie_over_the_ground() {
     );
     let source = view.ground.clone().unwrap();
     *source.lock().unwrap() = Some(PlanetFrame::single(eye, planet, sun));
-    let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
+    let air = AtmosphereComponent::from(
+        helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], radius),
+    );
     let mut images = Vec::new();
-    for air in [air, air.with_clouds(clouds)] {
+    for air in [air, air.with_clouds(clouds).into()] {
         view.set_sky(sun, air);
         let started = std::time::Instant::now();
         loop {
@@ -649,7 +653,9 @@ fn from_far_away_the_cover_is_weather_not_a_tile() {
     let camera =
         Camera::perspective_look_to(eye, -towards.as_vec3(), Vec3::Y, fov, 1.0, 1000.0, 1.0e9);
     let sun = (towards.as_vec3() + Vec3::new(0.3, 0.2, 0.0)).normalize();
-    let air = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
+    let air = AtmosphereComponent::from(
+        helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], radius),
+    );
     let clouds = CloudLayer {
         wind: [0.0; 3],
         ..CloudLayer::cumulus()
@@ -657,11 +663,12 @@ fn from_far_away_the_cover_is_weather_not_a_tile() {
     let mut images = Vec::new();
     for air in [
         air,
-        air.with_clouds(clouds),
+        air.with_clouds(clouds).into(),
         air.with_clouds(CloudLayer {
             weather: PlanetWeather::calm(),
             ..clouds
-        }),
+        })
+        .into(),
     ] {
         view.set_sky(sun, air);
         images.push(view.settle(&camera, 24));
@@ -781,16 +788,26 @@ fn clouds_cost() {
         1.0e9,
     );
     let views = [
-        ("ground", camera, AtmosphereComponent::earth()),
+        (
+            "ground",
+            camera,
+            AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth()),
+        ),
         (
             "orbit",
             orbit,
-            AtmosphereComponent::earth().around_planet([0.0; 3], radius),
+            AtmosphereComponent::from(
+                helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], radius),
+            ),
         ),
     ];
     for (name, camera, air) in views {
         let clear = measure(&mut view, &camera, air);
-        let cloudy = measure(&mut view, &camera, air.with_clouds(CloudLayer::cumulus()));
+        let cloudy = measure(
+            &mut view,
+            &camera,
+            air.with_clouds(CloudLayer::cumulus()).into(),
+        );
         let trace = get(&cloudy, "CloudTrace");
         let atmosphere = get(&cloudy, "Atmosphere") - get(&clear, "Atmosphere");
         let composite = get(&cloudy, "AtmosphereComposite") - get(&clear, "AtmosphereComposite");

@@ -1,7 +1,7 @@
 //! Scene generators shared by the reference and GPU tests.
 #![allow(dead_code)]
 
-use helio_pass_gbuffer::StaticObjectComponent;
+use helio_pass_gbuffer::StaticObjectRow;
 use helio_vg_format::{GpuVgInstance, INST_ENABLED};
 
 pub struct Rng(pub u64);
@@ -19,7 +19,7 @@ impl Rng {
     }
 }
 
-pub fn object(center: [f32; 3], radius: f32) -> StaticObjectComponent {
+pub fn object(center: [f32; 3], radius: f32) -> StaticObjectRow {
     let mut t = [[0.0; 4]; 4];
     for i in 0..4 {
         t[i][i] = 1.0;
@@ -27,7 +27,7 @@ pub fn object(center: [f32; 3], radius: f32) -> StaticObjectComponent {
     t[3][0] = center[0];
     t[3][1] = center[1];
     t[3][2] = center[2];
-    StaticObjectComponent {
+    StaticObjectRow {
         mesh_slot: 0,
         mesh_generation: 1,
         material_slot: 0,
@@ -50,8 +50,8 @@ pub fn object(center: [f32; 3], radius: f32) -> StaticObjectComponent {
     }
 }
 
-pub fn dead_object() -> StaticObjectComponent {
-    StaticObjectComponent {
+pub fn dead_object() -> StaticObjectRow {
+    StaticObjectRow {
         mesh_generation: 0,
         ..object([0.0; 3], 0.0)
     }
@@ -76,7 +76,7 @@ pub fn random_scene(
     size: f32,
     r_lo: f32,
     r_hi: f32,
-) -> (Vec<GpuVgInstance>, Vec<StaticObjectComponent>) {
+) -> (Vec<GpuVgInstance>, Vec<StaticObjectRow>) {
     let mut rng = Rng(seed);
     let mut objects = Vec::with_capacity(n);
     for i in 0..n {
@@ -104,7 +104,7 @@ pub fn city_scene(
     seed: u64,
     blocks: usize,
     per_block: usize,
-) -> (Vec<GpuVgInstance>, Vec<StaticObjectComponent>) {
+) -> (Vec<GpuVgInstance>, Vec<StaticObjectRow>) {
     let mut rng = Rng(seed);
     let mut objects = Vec::new();
     for b in 0..blocks {

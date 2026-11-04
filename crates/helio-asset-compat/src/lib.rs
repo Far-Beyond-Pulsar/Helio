@@ -23,8 +23,7 @@ pub use ies::{IesError, IesProfile};
 pub use light_converter::convert_light;
 pub use lut::{CubeLut, LutError};
 pub use material_converter::{
-    convert_material, upload_scene_materials, ConvertedMaterial, ConvertedMaterialTextures,
-    ConvertedTextureRef,
+    convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef,
 };
 pub use mesh_converter::{convert_primitive, convert_vertex};
 pub use rig_converter::{

@@ -13,4 +13,5 @@ log = { workspace = true }
 pulsar_scenedb = { workspace = true }
 
 [dev-dependencies]
+helio-components = { path = "../../../helio-components" }
 pollster = "0.4"

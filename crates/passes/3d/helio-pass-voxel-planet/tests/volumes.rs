@@ -130,7 +130,11 @@ impl Scene {
             .map(|v| {
                 let clock = std::time::Instant::now();
                 let id = world.add_volume(v.id, &v.planet, v.transform);
-                eprintln!("volume {} added in {:.1} s", v.id, clock.elapsed().as_secs_f64());
+                eprintln!(
+                    "volume {} added in {:.1} s",
+                    v.id,
+                    clock.elapsed().as_secs_f64()
+                );
                 id
             })
             .collect();
@@ -177,15 +181,14 @@ impl Scene {
                 camera.eye,
             );
         }
-        let gi = self
-            .gi
-            .as_ref()
-            .map(|[frame, rays, hits, sun]| helio_pass_voxel_planet::chunks::GiRays {
+        let gi = self.gi.as_ref().map(|[frame, rays, hits, sun]| {
+            helio_pass_voxel_planet::chunks::GiRays {
                 frame,
                 rays,
                 hits,
                 sun,
-            });
+            }
+        });
         self.world.draw(
             &mut recorder,
             self.frame,
@@ -828,7 +831,13 @@ struct CrossShadows {
     shadowed_by_other: Vec<usize>,
 }
 
-fn cross_shadows(gpu: &Gpu, volumes: &Volumes, camera: &Camera, sun: DVec3, reach: f64) -> CrossShadows {
+fn cross_shadows(
+    gpu: &Gpu,
+    volumes: &Volumes,
+    camera: &Camera,
+    sun: DVec3,
+    reach: f64,
+) -> CrossShadows {
     let mut scene = Scene::with_capacity(
         gpu,
         volumes,
@@ -852,7 +861,8 @@ fn cross_shadows(gpu: &Gpu, volumes: &Volumes, camera: &Camera, sun: DVec3, reac
         for x in (0..camera.size[0]).step_by(2) {
             let i = (y * camera.size[0] + x) as usize;
             let dir = camera.pixel_dir(view_proj, x, y);
-            let (Some(drawn), Some(cpu)) = (hits[i], volumes.raycast(camera.eye, dir, near, Matter::All))
+            let (Some(drawn), Some(cpu)) =
+                (hits[i], volumes.raycast(camera.eye, dir, near, Matter::All))
             else {
                 continue;
             };
@@ -880,7 +890,11 @@ fn cross_shadows(gpu: &Gpu, volumes: &Volumes, camera: &Camera, sun: DVec3, reac
                     for v in &volumes.volumes {
                         let (o, d) = (v.transform.to_local(at), v.transform.dir_to_local(sun));
                         let t = (-o.dot(d)).max(0.0);
-                        eprintln!("  vs {}: local origin {o:.2} dir {d:.3} nearest {:.2}", v.id, o + d * t);
+                        eprintln!(
+                            "  vs {}: local origin {o:.2} dir {d:.3} nearest {:.2}",
+                            v.id,
+                            o + d * t
+                        );
                     }
                 }
                 if out.wrong_by[cpu.index][by] <= 3 {
@@ -925,7 +939,10 @@ fn volumes_shadow_each_other() {
     };
     let c = cross_shadows(gpu, &volumes, &camera, sun, 40.0);
     assert!(c.compared > 10_000, "{c:?}");
-    assert!(c.shadowed_by_other[0] > 300 && c.shadowed_by_other[1] > 50, "{c:?}");
+    assert!(
+        c.shadowed_by_other[0] > 300 && c.shadowed_by_other[1] > 50,
+        "{c:?}"
+    );
     assert!(c.wrong * 50 <= c.compared, "{c:?}");
     for (wrong, shadowed) in c.wrong_by.iter().zip(&c.shadowed_by_other) {
         assert!(wrong[2] * 50 <= *shadowed, "{c:?}");
@@ -1000,7 +1017,11 @@ fn gi_rays_cross_into_other_volumes() {
         let hit_at = origin + *d * cpu.hit.distance;
         let clip = view_proj * (hit_at - eye).as_vec3().extend(1.0);
         let ndc = clip.truncate() / clip.w;
-        if clip.w <= 0.0 || ndc.x.abs() > 0.95 || ndc.y.abs() > 0.95 || (hit_at - eye).length() > near {
+        if clip.w <= 0.0
+            || ndc.x.abs() > 0.95
+            || ndc.y.abs() > 0.95
+            || (hit_at - eye).length() > near
+        {
             continue;
         }
         compared += 1;
@@ -1028,7 +1049,10 @@ fn gi_rays_cross_into_other_volumes() {
             }
         }
     }
-    eprintln!("GI rays: compared {compared} (ground {}, block {}), wrong {wrong}", by_volume[0], by_volume[1]);
+    eprintln!(
+        "GI rays: compared {compared} (ground {}, block {}), wrong {wrong}",
+        by_volume[0], by_volume[1]
+    );
     assert!(by_volume[0] > 500 && by_volume[1] > 500, "{by_volume:?}");
     assert!(wrong * 100 <= compared, "{wrong} of {compared}");
 }

@@ -73,18 +73,18 @@ use crate::scene_join::{
     TRANSFORM_ROW_BYTES,
 };
 
-/// `GlobalFogSourceRow`: the `GlobalFogComponent` pass row (20 words).
+/// `GlobalFogSourceRow`: the `GlobalFogRow` pass row (20 words).
 pub const GLOBAL_FOG_SOURCE_ROW_BYTES: u64 = 20 * 4;
 /// `LocalFogSourceRow`: local size vec4, medium (20), edge fade vec4.
 pub const LOCAL_FOG_SOURCE_ROW_BYTES: u64 = 28 * 4;
 /// `PostProcessVolumeSourceRow`: local size vec4, then the pass row after
 /// its bounds (140 words).
 pub const POST_PROCESS_VOLUME_SOURCE_ROW_BYTES: u64 = 144 * 4;
-/// `CameraPostProcessSourceRow`: the `CameraPostProcessComponent` pass row.
+/// `CameraPostProcessSourceRow`: the `CameraPostProcessRow` pass row.
 pub const CAMERA_POST_PROCESS_SOURCE_ROW_BYTES: u64 = 136 * 4;
-/// `CameraLensSourceRow`: the `helio_pass_lens::LensComponent` pass row.
+/// `CameraLensSourceRow`: the `helio_pass_lens::LensRow` pass row.
 pub const CAMERA_LENS_SOURCE_ROW_BYTES: u64 =
-    std::mem::size_of::<helio_pass_lens::LensComponent>() as u64;
+    std::mem::size_of::<helio_pass_lens::LensRow>() as u64;
 /// `WaterVolumeSourceRow`: local size (`w`: surface height above the
 /// owner), then the water volume row after its bounds (56 words).
 pub const WATER_VOLUME_SOURCE_ROW_BYTES: u64 = 60 * 4;
@@ -95,14 +95,13 @@ pub const FOLIAGE_SOURCE_ROW_BYTES: u64 = 48 * 4;
 /// Words of a foliage type row (`helio_pass_foliage_place::GpuFoliageType`).
 const FOLIAGE_TYPE_WORDS: u32 =
     (std::mem::size_of::<helio_pass_foliage_place::GpuFoliageType>() / 4) as u32;
-/// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereComponent` pass
+/// `AtmosphereSourceRow`: the `helio_pass_sky::AtmosphereRow` pass
 /// row, its centre in the owner's space.
 pub const ATMOSPHERE_SOURCE_ROW_BYTES: u64 = ATMOSPHERE_WORDS as u64 * 4;
-/// Words of the atmosphere row (`helio_pass_sky::AtmosphereComponent`).
-const ATMOSPHERE_WORDS: u32 =
-    (std::mem::size_of::<helio_pass_sky::AtmosphereComponent>() / 4) as u32;
+/// Words of the atmosphere row (`helio_pass_sky::AtmosphereRow`).
+const ATMOSPHERE_WORDS: u32 = (std::mem::size_of::<helio_pass_sky::AtmosphereRow>() / 4) as u32;
 /// `DecalSourceRow`: local size vec4, then the `helio_pass_decal`
-/// `DecalComponent` row (32 words) with its transform left to the join.
+/// `DecalRow` row (32 words) with its transform left to the join.
 pub const DECAL_SOURCE_ROW_BYTES: u64 = 36 * 4;
 /// Rows the decal pass reads (`helio_pass_decal::MAX_DECALS`): placed decals
 /// beyond these are not drawn.
@@ -131,7 +130,7 @@ pub const MAX_WATER_HITBOXES: u32 = helio_pass_water_sim::MAX_WATER_HITBOXES;
 /// A water hitbox source row's interaction word.
 const WATER_HITBOX_GATE_WORD: u32 = 2;
 /// `SpriteSourceRow`: the sprite passes' row
-/// (`helio_pass_sprite_batch::SpriteComponent`, 20 words) at the 2D origin.
+/// (`helio_pass_sprite_batch::SpriteRow`, 20 words) at the 2D origin.
 pub const SPRITE_SOURCE_ROW_BYTES: u64 = 20 * 4;
 /// A sprite source row's width word: zero for a disabled sprite.
 const SPRITE_SIZE_WORD: u32 = 2;

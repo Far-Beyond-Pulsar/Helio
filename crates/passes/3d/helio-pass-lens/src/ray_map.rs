@@ -103,7 +103,7 @@ fn mix(a: V2, b: V2, t: f32) -> V2 {
     [a[0] * (1.0 - t) + b[0] * t, a[1] * (1.0 - t) + b[1] * t]
 }
 /// The bank layer a `PRESCRIPTION` element names (`rx_header`).
-fn prescription_layer(e: &LensElementComponent) -> usize {
+fn prescription_layer(e: &LensElementRow) -> usize {
     (bounded(e.params[0], 0.0, 4096.0, 0.0) + 0.5) as usize
 }
 /// Ray-map elements a covering prescription replaces (`rx_replaces_map`).
@@ -256,7 +256,7 @@ fn dome_port_map(p: &[f32; 16], x: V2, t: f32) -> V2 {
 /// The lens as the ray map sees it. Build with [`RayMap::new`].
 #[derive(Clone, Debug)]
 pub struct RayMap {
-    elements: Vec<LensElementComponent>,
+    elements: Vec<LensElementRow>,
     /// Focal-length units per image-height unit.
     scale: f32,
     focus_dpt: f32,
@@ -283,14 +283,14 @@ impl RayMap {
     /// Focus breathing follows `lens.focus_distance_m`: an autofocusing lens
     /// is resolved on the GPU only. `PRESCRIPTION` elements are inert, as on
     /// the GPU without a bank; [`Self::with_bank`] brings theirs.
-    pub fn new(lens: &LensComponent, elements: &[LensElementComponent], aspect: f32) -> Self {
+    pub fn new(lens: &LensRow, elements: &[LensElementRow], aspect: f32) -> Self {
         Self::build(lens, elements, aspect, &[])
     }
 
     /// [`Self::new`] with the baked lenses of `bank`, see [`Self::with_rays`].
     pub fn with_bank(
-        lens: &LensComponent,
-        elements: &[LensElementComponent],
+        lens: &LensRow,
+        elements: &[LensElementRow],
         aspect: f32,
         bank: &PrescriptionBank,
     ) -> Self {
@@ -304,8 +304,8 @@ impl RayMap {
     /// WGSL runs on the GPU only, so a user ray map's reach is not part of the
     /// result.
     pub fn with_rays(
-        lens: &LensComponent,
-        elements: &[LensElementComponent],
+        lens: &LensRow,
+        elements: &[LensElementRow],
         aspect: f32,
         rays: &[PrescriptionRays],
     ) -> Self {
@@ -313,8 +313,8 @@ impl RayMap {
     }
 
     fn build(
-        lens: &LensComponent,
-        elements: &[LensElementComponent],
+        lens: &LensRow,
+        elements: &[LensElementRow],
         aspect: f32,
         rays: &[PrescriptionRays],
     ) -> Self {
@@ -369,7 +369,7 @@ impl RayMap {
         self.scale
     }
 
-    fn region_distance(e: &LensElementComponent, q: V2) -> f32 {
+    fn region_distance(e: &LensElementRow, q: V2) -> f32 {
         let r = &e.region;
         match e.region_kind {
             region_kind::FULL_FRAME => -1.0e3,
@@ -412,13 +412,13 @@ impl RayMap {
     }
 
     /// Coverage of the element's region at `q`, 0..1.
-    pub fn region_weight(&self, e: &LensElementComponent, q: V2) -> f32 {
+    pub fn region_weight(&self, e: &LensElementRow, q: V2) -> f32 {
         let feather = if e.feather >= 0.0 { e.feather } else { 0.002 };
         let t = (0.5 - Self::region_distance(e, q) / feather.max(1.0e-5)).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
 
-    fn map_element(&self, e: &LensElementComponent, x: V2, t: f32) -> V2 {
+    fn map_element(&self, e: &LensElementRow, x: V2, t: f32) -> V2 {
         let p = &e.params;
         match e.kind {
             element_kind::PROJECTION => apply_projection(p, x),
@@ -457,11 +457,11 @@ impl RayMap {
         }
     }
 
-    fn prism_count(e: &LensElementComponent) -> u32 {
+    fn prism_count(e: &LensElementRow) -> u32 {
         (bounded(e.params[0], 2.0, 8.0, 2.0) + 0.5) as u32
     }
 
-    fn prism_copy(&self, e: &LensElementComponent, x: V2, copy: u32) -> V2 {
+    fn prism_copy(&self, e: &LensElementRow, x: V2, copy: u32) -> V2 {
         let p = &e.params;
         let n = Self::prism_count(e);
         let magnitude = bounded(p[1], -4.0, 4.0, 0.0) * self.scale;
@@ -482,7 +482,7 @@ impl RayMap {
     }
 
     /// Weight of copy `copy` of a prism element: `ratio^copy`, normalised.
-    pub fn prism_weight(e: &LensElementComponent, copy: u32) -> f32 {
+    pub fn prism_weight(e: &LensElementRow, copy: u32) -> f32 {
         let n = Self::prism_count(e);
         let ratio = if e.params[5] > 0.0 {
             bounded(e.params[5], 0.05, 20.0, 1.0)
@@ -516,7 +516,7 @@ impl RayMap {
     }
 
     /// The prism element of a selection.
-    pub fn prism_element(&self, selection: &PrismSelection) -> &LensElementComponent {
+    pub fn prism_element(&self, selection: &PrismSelection) -> &LensElementRow {
         &self.elements[selection.index]
     }
 
@@ -730,11 +730,7 @@ pub fn circle_overlap(d: f32, b: f32) -> f32 {
 /// rendered image. 1 for a map that stays inside the frame, e.g. the
 /// identity. `aspect` is the image's width over height; `elements` is the
 /// lens's stack (`lens.element_first ..`). See [`RayMap::required_overscan`].
-pub fn required_overscan(
-    lens: &LensComponent,
-    elements: &[LensElementComponent],
-    aspect: f32,
-) -> f32 {
+pub fn required_overscan(lens: &LensRow, elements: &[LensElementRow], aspect: f32) -> f32 {
     RayMap::new(lens, elements, aspect).required_overscan()
 }
 
@@ -745,8 +741,8 @@ pub fn required_overscan(
 /// knows (a user ray map's reach is not measured here; document its overscan
 /// need and let its host widen the camera).
 pub fn required_overscan_with_rays(
-    lens: &LensComponent,
-    elements: &[LensElementComponent],
+    lens: &LensRow,
+    elements: &[LensElementRow],
     aspect: f32,
     rays: &[PrescriptionRays],
 ) -> f32 {
@@ -755,8 +751,8 @@ pub fn required_overscan_with_rays(
 
 /// [`required_overscan_with_rays`] with the lenses of `bank`.
 pub fn required_overscan_with_bank(
-    lens: &LensComponent,
-    elements: &[LensElementComponent],
+    lens: &LensRow,
+    elements: &[LensElementRow],
     aspect: f32,
     bank: &PrescriptionBank,
 ) -> f32 {
@@ -765,14 +761,14 @@ pub fn required_overscan_with_bank(
 
 /// The overscan a camera applies for this lens: the factor the field of view's
 /// tangent extent is widened by about the frame centre, and the value to write
-/// to [`LensComponent::overscan`] so the lens crops it back. It is the
+/// to [`LensRow::overscan`] so the lens crops it back. It is the
 /// required overscan, 1 for a map that stays in the frame (or a lens that is
 /// off), at most [`APPLIED_OVERSCAN_CAP`]. The camera and the lens row must
 /// use the same value; compute it once from the authored lens. `rays` are the
 /// baked lenses `PRESCRIPTION` elements name (empty: they are inert).
 pub fn applied_overscan(
-    lens: &LensComponent,
-    elements: &[LensElementComponent],
+    lens: &LensRow,
+    elements: &[LensElementRow],
     aspect: f32,
     rays: &[PrescriptionRays],
 ) -> f32 {

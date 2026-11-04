@@ -5,7 +5,7 @@
 //! object's previous transform rolled forward for motion vectors.
 
 use bytemuck::{Pod, Zeroable};
-use helio_pass_gbuffer::StaticObjectComponent;
+use helio_components::StaticObjectComponent;
 use helio_pass_object_batch::ObjectBatchPass;
 
 #[repr(C)]

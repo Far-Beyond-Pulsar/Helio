@@ -1,8 +1,8 @@
 //! CPU-side resolution of indexed sublevels and peer-linked portals.
 //!
 //! This module is the authored-data boundary for the sublevel/portal system.
-//! It consumes `SubLevelActorComponent` and the authored peer-based
-//! `PortalComponent`, then produces resolved contexts and portal mappings for
+//! It consumes `SubLevelActorRow` and the authored peer-based
+//! `PortalRow`, then produces resolved contexts and portal mappings for
 //! the existing coordinate-space, portal-view, and portal-chain projection
 //! code. It intentionally does not write SceneDB rows or GPU buffers.
 
@@ -12,9 +12,9 @@ use std::fmt;
 use glam::{Mat4, Vec2, Vec4};
 use pulsar_scenedb::Entity;
 
-use helio_pass_gbuffer::{SubLevelActorComponent, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX};
+use helio_pass_gbuffer::{SubLevelActorRow, SubLevelIndex, DEFAULT_SUBLEVEL_INDEX};
 
-use crate::components::{PortalComponent, PortalViewComponent, NO_PORTAL_PEER};
+use crate::components::{PortalRow, PortalViewRow, NO_PORTAL_PEER};
 use crate::portal_math::portal_view_map;
 
 /// A component row together with its owning SceneDB entity.
@@ -23,7 +23,7 @@ pub struct SubLevelActorRecord {
     /// Entity carrying the actor component.
     pub entity: Entity,
     /// Authored actor placement.
-    pub component: SubLevelActorComponent,
+    pub component: SubLevelActorRow,
 }
 
 /// A component row together with its owning SceneDB entity.
@@ -32,7 +32,7 @@ pub struct PortalRecord {
     /// Entity carrying the portal component.
     pub entity: Entity,
     /// Authored portal relationship and local aperture.
-    pub component: PortalComponent,
+    pub component: PortalRow,
 }
 
 /// Authored contents associated with one indexed sublevel.
@@ -51,8 +51,8 @@ pub struct SubLevelContents {
 impl SubLevelContents {
     /// Build contents from the corresponding SceneDB rows.
     pub fn new(
-        actors: impl IntoIterator<Item = (Entity, SubLevelActorComponent)>,
-        portals: impl IntoIterator<Item = (Entity, PortalComponent)>,
+        actors: impl IntoIterator<Item = (Entity, SubLevelActorRow)>,
+        portals: impl IntoIterator<Item = (Entity, PortalRow)>,
     ) -> Self {
         Self {
             actors: actors
@@ -115,8 +115,8 @@ impl PortalProjection {
     ///
     /// The coordinate-space slot is assigned by the later projection bridge;
     /// this method deliberately does not allocate or mutate one.
-    pub fn to_portal_view(&self, coordinate_space: u32) -> PortalViewComponent {
-        PortalViewComponent {
+    pub fn to_portal_view(&self, coordinate_space: u32) -> PortalViewRow {
+        PortalViewRow {
             transform: self.source.transform.to_cols_array(),
             inverse_transform: self.source.transform.inverse().to_cols_array(),
             half_extent: self.source.half_extent,
@@ -796,7 +796,7 @@ mod tests {
         let entity = world.spawn();
         SubLevelActorRecord {
             entity,
-            component: SubLevelActorComponent::new(index, transform),
+            component: SubLevelActorRow::new(index, transform),
         }
     }
 
@@ -864,7 +864,7 @@ mod tests {
         let b_entity = world.spawn();
         let a = PortalRecord {
             entity: a_entity,
-            component: PortalComponent::new(
+            component: PortalRow::new(
                 Some(b_entity),
                 Mat4::from_translation(glam::vec3(0.0, 0.0, 0.0)),
                 [1.0, 2.0],
@@ -872,7 +872,7 @@ mod tests {
         };
         let b = PortalRecord {
             entity: b_entity,
-            component: PortalComponent::new(
+            component: PortalRow::new(
                 Some(a_entity),
                 Mat4::from_translation(glam::vec3(10.0, 0.0, 0.0)),
                 [1.0, 2.0],
@@ -917,7 +917,7 @@ mod tests {
                 [
                     (
                         a_entity,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(b_entity),
                             Mat4::from_translation(glam::vec3(0.0, 0.0, 6.0)),
                             [1.0, 1.0],
@@ -925,7 +925,7 @@ mod tests {
                     ),
                     (
                         b_entity,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(a_entity),
                             Mat4::from_translation(glam::vec3(0.0, 0.0, -6.0)),
                             [1.0, 1.0],
@@ -958,8 +958,8 @@ mod tests {
             SubLevelContents::new(
                 [],
                 [
-                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
-                    (b, PortalComponent::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
+                    (a, PortalRow::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (b, PortalRow::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
                 ],
             ),
         );
@@ -994,8 +994,8 @@ mod tests {
             SubLevelContents::new(
                 [],
                 [
-                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
-                    (b, PortalComponent::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
+                    (a, PortalRow::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (b, PortalRow::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
                 ],
             ),
         );
@@ -1020,7 +1020,7 @@ mod tests {
                 [
                     (
                         front,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(front_peer),
                             Mat4::from_translation(glam::vec3(0.0, 0.0, -4.0)),
                             [1.0, 1.0],
@@ -1028,7 +1028,7 @@ mod tests {
                     ),
                     (
                         front_peer,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(front),
                             Mat4::from_translation(glam::vec3(0.0, 0.0, -8.0)),
                             [1.0, 1.0],
@@ -1036,7 +1036,7 @@ mod tests {
                     ),
                     (
                         back,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(back_peer),
                             Mat4::from_translation(glam::vec3(0.0, 0.0, 4.0)),
                             [1.0, 1.0],
@@ -1044,7 +1044,7 @@ mod tests {
                     ),
                     (
                         back_peer,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(back),
                             Mat4::from_translation(glam::vec3(0.0, 0.0, 8.0)),
                             [1.0, 1.0],
@@ -1088,7 +1088,7 @@ mod tests {
             let pose = crate::portal_math::portal_pose_facing(normal * 6.0, -normal, up);
             portals.push((
                 entities[index],
-                PortalComponent::new(Some(entities[opposite[index]]), pose.transform, [1.6, 1.6]),
+                PortalRow::new(Some(entities[opposite[index]]), pose.transform, [1.6, 1.6]),
             ));
         }
         let mut resolver = SubLevelResolver::new();
@@ -1121,11 +1121,11 @@ mod tests {
         let target_entity = world.spawn();
         let source = PortalRecord {
             entity: source_entity,
-            component: PortalComponent::new(Some(target_entity), Mat4::IDENTITY, [1.0, 1.0]),
+            component: PortalRow::new(Some(target_entity), Mat4::IDENTITY, [1.0, 1.0]),
         };
         let target = PortalRecord {
             entity: target_entity,
-            component: PortalComponent::new(
+            component: PortalRow::new(
                 Some(source_entity),
                 Mat4::from_translation(glam::vec3(20.0, 0.0, 0.0)),
                 [1.0, 1.0],
@@ -1196,7 +1196,7 @@ mod tests {
                 actors: Vec::new(),
                 portals: vec![PortalRecord {
                     entity: missing_peer,
-                    component: PortalComponent::new(None, Mat4::IDENTITY, [1.0, 1.0]),
+                    component: PortalRow::new(None, Mat4::IDENTITY, [1.0, 1.0]),
                 }],
             },
         );

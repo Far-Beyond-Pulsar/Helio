@@ -14,7 +14,9 @@ pub mod ocean_fft;
 mod reflection_capture;
 pub mod shoreline;
 pub mod surface_query;
-pub use components::{WaterHitboxComponent, WaterVolumeComponent};
+pub use components::WATER_HITBOXES;
+pub use components::WATER_VOLUMES;
+pub use components::{WaterHitboxRow, WaterVolumeRow};
 pub use gpu_types::*;
 pub use ocean_fft::{OceanSpectrum, CASCADE_LENGTHS as OCEAN_CASCADE_LENGTHS};
 pub use shoreline::{WaterShoreMap, WaterTerrainProvider, SHORE_MAP_SIZE};
@@ -564,7 +566,7 @@ impl WaterSimPass {
     }
 
     /// Set the absolute-world ocean rest height used by mirrored captures.
-    /// Keep this equal to `bounds_max.w` on the live `WaterVolumeComponent`
+    /// Keep this equal to `bounds_max.w` on the live `WaterVolumeRow`
     /// rows; Ultra-Water's global ocean has one rest plane.
     pub fn set_ocean_rest_height(&mut self, rest_y: f64) -> Result<(), &'static str> {
         if !rest_y.is_finite() {
@@ -2479,9 +2481,7 @@ impl RenderPass for WaterSimPass {
                                     },
                                     wgpu::BindGroupEntry {
                                         binding: 21,
-                                        resource: wgpu::BindingResource::TextureView(
-                                            tint_sky_view,
-                                        ),
+                                        resource: wgpu::BindingResource::TextureView(tint_sky_view),
                                     },
                                 ],
                             },

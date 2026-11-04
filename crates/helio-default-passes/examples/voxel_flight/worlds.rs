@@ -76,8 +76,8 @@ impl Preset {
     /// `HELIO_VOXEL_FLIGHT_CLOUDS=voxel[:cell_m[,fill]]` voxels (32 m cells
     /// filled from density 0.3). `HELIO_VOXEL_FLIGHT_CLOUD_SEED` picks
     /// another weather.
-    pub fn sky(self, radius: f64) -> Option<helio_pass_sky::AtmosphereComponent> {
-        use helio_pass_sky::{AtmosphereComponent, CloudLayer, CloudRepresentation, PlanetWeather};
+    pub fn sky(self, radius: f64) -> Option<helio_pass_sky::AtmosphereRow> {
+        use helio_pass_sky::{AtmosphereRow, CloudLayer, CloudRepresentation, PlanetWeather};
         let clouds = std::env::var_os("HELIO_VOXEL_FLIGHT_NO_CLOUDS").is_none();
         let representation = match std::env::var("HELIO_VOXEL_FLIGHT_CLOUDS").ok().as_deref() {
             Some(v) if v.starts_with("voxel") => {
@@ -107,7 +107,7 @@ impl Preset {
             // Earth's air with cumulus, under weather (seed 2) that leaves
             // the spawn broken cumulus rather than inside a deck.
             Preset::Earth => {
-                let sky = AtmosphereComponent::earth().around_planet([0.0; 3], radius);
+                let sky = AtmosphereRow::earth().around_planet([0.0; 3], radius);
                 let cumulus = CloudLayer::cumulus();
                 let cumulus = CloudLayer {
                     weather: PlanetWeather {
@@ -125,8 +125,8 @@ impl Preset {
             // Dusty air: more and redder aerosols, a sandy ground bouncing
             // light into it, a few high clouds.
             Preset::Desert => {
-                let earth = AtmosphereComponent::earth();
-                let sky = AtmosphereComponent {
+                let earth = AtmosphereRow::earth();
+                let sky = AtmosphereRow {
                     mie_scattering: [9.0e-3, 8.0e-3, 6.5e-3],
                     mie_absorption: [6.0e-3, 7.0e-3, 9.0e-3],
                     mie_scale_height: 1.6,
@@ -152,14 +152,14 @@ impl Preset {
 
     /// A ground haze thinning with altitude over the planet (none on the
     /// Moon), unless `HELIO_VOXEL_FLIGHT_NO_HAZE`.
-    pub fn haze(self, radius: f64) -> Option<helio_pass_volumetric_fog::GlobalFogComponent> {
-        use helio_pass_volumetric_fog::GlobalFogComponent;
+    pub fn haze(self, radius: f64) -> Option<helio_pass_volumetric_fog::GlobalFogRow> {
+        use helio_pass_volumetric_fog::GlobalFogRow;
         if std::env::var_os("HELIO_VOXEL_FLIGHT_NO_HAZE").is_some() {
             return None;
         }
         let haze = match self {
             Preset::Moon => return None,
-            Preset::Earth => GlobalFogComponent {
+            Preset::Earth => GlobalFogRow {
                 mode: 1,
                 extinction: 0.0006,
                 height_falloff: 0.004,
@@ -167,7 +167,7 @@ impl Preset {
                 ..Default::default()
             },
             // Dust: thicker, warm, hugging the ground.
-            Preset::Desert => GlobalFogComponent {
+            Preset::Desert => GlobalFogRow {
                 mode: 1,
                 extinction: 0.0012,
                 height_falloff: 0.003,

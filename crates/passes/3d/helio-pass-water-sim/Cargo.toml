@@ -21,7 +21,6 @@ helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }
-pulsar_scenedb_derive = { workspace = true }
 glam = { workspace = true }
 helio-pass-voxel-planet = { path = "../helio-pass-voxel-planet", default-features = false }
 rayon = "1.12"

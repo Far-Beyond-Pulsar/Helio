@@ -3,6 +3,10 @@ use helio::{
     GpuLight, LightType, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig,
     SceneDbHandle,
 };
+use helio_components::{
+    AtmosphereComponent, CoronaEmitterComponent, DecalComponent, MaterialComponent,
+    PostProcessVolumeComponent, ReflectionCaptureComponent,
+};
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
 
@@ -44,70 +48,61 @@ pub fn new_scene_db_with_gpu_mirror_and(
         max_cells_metadata: 0,
     };
     let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg);
-    helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
-    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+    helio_components::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
+    helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_components::MaterialComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
     );
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
+    helio_components::StaticObjectComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
     );
-    helio_pass_gbuffer::SubLevelActorComponent::register_gpu_columns_growable(
+    helio_components::PortalComponent::register_gpu_columns_growable(&mut gpu_store, 1024, device);
+    helio_components::PortalViewComponent::register_gpu_columns_growable(
         &mut gpu_store,
         1024,
         device,
     );
-    helio_pass_portal_cull::components::PortalComponent::register_gpu_columns_growable(
+    helio_components::PortalChainComponent::register_gpu_columns_growable(
         &mut gpu_store,
         1024,
         device,
     );
-    helio_pass_portal_cull::components::PortalViewComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1024,
-        device,
-    );
-    helio_pass_portal_cull::components::PortalChainComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        1024,
-        device,
-    );
-    helio_pass_portal_cull::components::PortalProjectionCountsComponent::register_gpu_columns_growable(
+    helio_components::PortalProjectionCountsComponent::register_gpu_columns_growable(
         &mut gpu_store,
         1,
         device,
     );
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+    helio_components::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
         helio_pass_forward_lit::MAX_LIGHTS,
         device,
     );
-    helio_pass_postprocess::CameraPostProcessComponent::register_gpu_columns_growable(
+    helio_components::CameraPostProcessComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
     );
-    helio_pass_lens::LensComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_pass_lens::LensElementComponent::register_gpu_columns_growable(
+    helio_components::LensComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
+    helio_components::LensElementComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
     );
-    helio_pass_volumetric_fog::GlobalFogComponent::register_gpu_columns_growable(
+    helio_components::GlobalFogComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
     );
-    helio_pass_volumetric_fog::LocalFogVolumeComponent::register_gpu_columns_growable(
+    helio_components::LocalFogVolumeComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
     );
-    helio_pass_volumetric_fog::VolumetricFogSettingsComponent::register_gpu_columns_growable(
+    helio_components::VolumetricFogSettingsComponent::register_gpu_columns_growable(
         &mut gpu_store,
         4096,
         device,
@@ -147,7 +142,7 @@ pub fn flush_scene_db(
 /// masked or blended materials, ...) is left out, so the probes see past it.
 /// `HELIO_SCENE_RAYS=off` publishes none (for A/B: no mesh GI).
 pub struct SceneRays {
-    projection: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
+    projection: Option<helio_components::ray_tracing::SceneDbRayTracing>,
     failed: bool,
 }
 
@@ -159,7 +154,7 @@ impl SceneRays {
             .then_some(())
             .filter(|_| std::env::var("HELIO_SCENE_RAYS").as_deref() != Ok("off"))
             .map(|_| {
-                helio_default_passes::ray_tracing::SceneDbRayTracing::partial(
+                helio_components::ray_tracing::SceneDbRayTracing::partial(
                     device.clone(),
                     queue.clone(),
                 )
@@ -181,7 +176,7 @@ impl SceneRays {
     }
 
     /// The virtual-geometry proxies' counters.
-    pub fn vg_stats(&self) -> helio_default_passes::ray_proxies::VgRayStats {
+    pub fn vg_stats(&self) -> helio_components::ray_proxies::VgRayStats {
         self.projection
             .as_ref()
             .map(|p| p.vg_stats())
@@ -383,22 +378,19 @@ pub fn make_material(
     metallic: f32,
     emissive: [f32; 3],
     emissive_strength: f32,
-) -> helio_pass_gbuffer::MaterialComponent {
-    helio_pass_gbuffer::MaterialComponent::new(
+) -> helio_components::MaterialComponent {
+    MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
         base_color,
         roughness,
         metallic,
         emissive,
         emissive_strength,
-    )
+    ))
 }
 
 /// Insert a material as a normal SceneDB component row and return its entity
 /// index. The index is the value object rows store in `material_slot`.
-pub fn spawn_material(
-    world: &mut World,
-    material: helio_pass_gbuffer::MaterialComponent,
-) -> Entity {
+pub fn spawn_material(world: &mut World, material: helio_components::MaterialComponent) -> Entity {
     let entity = world.spawn();
     world.insert(entity, material);
     entity
@@ -413,7 +405,7 @@ pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -
         // check). NOT 0: SceneDB-authored lights never get a real
         // shadow-atlas slot assigned -- the CPU-side importance-scoring
         // loop that would allocate one predates SceneDB and doesn't run
-        // for these (see helio_pass_forward_lit::components::LightComponent's
+        // for these (see helio_components::LightComponent's
         // doc comment). shadow_index: 0 silently samples atlas layer 0's
         // stale/unrelated contents as if it belonged to this light, which
         // reads as "fully shadowed" -- an entirely black scene, not merely
@@ -435,7 +427,7 @@ pub fn point_light(position: [f32; 3], color: [f32; 3], intensity: f32, range: f
         // check). NOT 0: SceneDB-authored lights never get a real
         // shadow-atlas slot assigned -- the CPU-side importance-scoring
         // loop that would allocate one predates SceneDB and doesn't run
-        // for these (see helio_pass_forward_lit::components::LightComponent's
+        // for these (see helio_components::LightComponent's
         // doc comment). shadow_index: 0 silently samples atlas layer 0's
         // stale/unrelated contents as if it belonged to this light, which
         // reads as "fully shadowed" -- an entirely black scene, not merely
@@ -465,7 +457,7 @@ pub fn spot_light(
         // check). NOT 0: SceneDB-authored lights never get a real
         // shadow-atlas slot assigned -- the CPU-side importance-scoring
         // loop that would allocate one predates SceneDB and doesn't run
-        // for these (see helio_pass_forward_lit::components::LightComponent's
+        // for these (see helio_components::LightComponent's
         // doc comment). shadow_index: 0 silently samples atlas layer 0's
         // stale/unrelated contents as if it belonged to this light, which
         // reads as "fully shadowed" -- an entirely black scene, not merely
@@ -481,11 +473,11 @@ pub fn spot_light(
 // ── SceneDB-owned scene content ─────────────────────────────────────────────
 //
 // A demo's placed objects and lights are authored as *pass-owned* SceneDB
-// components — `helio_pass_gbuffer::StaticObjectComponent` and
-// `helio_pass_forward_lit::LightComponent` — not as example-local structs or
+// components — `helio_components::StaticObjectComponent` and
+// `helio_components::LightComponent` — not as example-local structs or
 // entries in a Helio-owned `Vec`/arena. Each is `#[derive(SceneStore)]` +
 // `#[gpu(layout = packed, ...)]`, exactly like the already-shipped
-// `helio_pass_corona::CoronaEmitterComponent`: the pass that consumes a kind
+// `helio_components::CoronaEmitterComponent`: the pass that consumes a kind
 // of scene content owns its schema and its generated GPU buffer, and a World
 // row is the only authoritative record of "this exists."
 //
@@ -493,8 +485,8 @@ pub fn spot_light(
 // resolved when the component is authored, while existence and transforms stay
 // exclusively in the World row.
 
-pub use helio_pass_forward_lit::LightComponent;
-pub use helio_pass_gbuffer::{MeshComponent, StaticObjectComponent};
+pub use helio_components::LightComponent;
+pub use helio_components::{MeshComponent, StaticObjectComponent};
 
 /// Insert the scene's atmosphere: Earth's air, its Rayleigh scattering
 /// tinted towards `tint` (each channel scaled by `tint` over its largest
@@ -502,7 +494,7 @@ pub use helio_pass_gbuffer::{MeshComponent, StaticObjectComponent};
 /// keyed SceneDB buffer, and the scene's first directional light is its sun;
 /// without one the sky is black.
 pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
-    let mut sky = helio_pass_sky::AtmosphereComponent::earth();
+    let mut sky = AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth());
     let peak = tint[0].max(tint[1]).max(tint[2]).max(f32::EPSILON);
     for (scattering, channel) in sky.rayleigh_scattering.iter_mut().zip(tint) {
         *scattering *= channel / peak;
@@ -513,7 +505,7 @@ pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
 }
 
 /// CPU-friendly description of a water volume's static appearance, packed
-/// into the raw `[f32; 4]` slots `helio_pass_water_sim::WaterVolumeComponent`
+/// into the raw `[f32; 4]` slots `helio_components::WaterVolumeComponent`
 /// stores GPU-side. Field-to-slot mapping mirrors the `WaterVolume` struct
 /// documented in that pass's WGSL shaders (`surface.wgsl`, `caustics.wgsl`,
 /// `underwater_fog.wgsl`, `hitbox.frag.wgsl`) -- this is the removed
@@ -615,8 +607,8 @@ impl Default for WaterVolumeDescriptor {
 }
 
 impl WaterVolumeDescriptor {
-    pub fn to_component(&self) -> helio_pass_water_sim::WaterVolumeComponent {
-        helio_pass_water_sim::WaterVolumeComponent {
+    pub fn to_component(&self) -> helio_components::WaterVolumeComponent {
+        helio_components::WaterVolumeComponent {
             bounds_min: [
                 self.bounds_min[0],
                 self.bounds_min[1],
@@ -695,7 +687,7 @@ pub fn spawn_water_volume(world: &mut World, descriptor: WaterVolumeDescriptor) 
 }
 
 /// CPU-friendly description of one AABB water-displacement hitbox; packs into
-/// `helio_pass_water_sim::WaterHitboxComponent` per `hitbox.frag.wgsl`'s
+/// `helio_components::WaterHitboxComponent` per `hitbox.frag.wgsl`'s
 /// `GpuWaterHitbox` layout. Coordinates are world space; the simulation
 /// maps the box into each water volume it overlaps.
 #[derive(Clone, Copy, Debug)]
@@ -709,8 +701,8 @@ pub struct WaterHitboxDescriptor {
 }
 
 impl WaterHitboxDescriptor {
-    pub fn to_component(&self) -> helio_pass_water_sim::WaterHitboxComponent {
-        helio_pass_water_sim::WaterHitboxComponent {
+    pub fn to_component(&self) -> helio_components::WaterHitboxComponent {
+        helio_components::WaterHitboxComponent {
             old_min: [self.old_min[0], self.old_min[1], self.old_min[2], 0.0],
             old_max: [self.old_max[0], self.old_max[1], self.old_max[2], 0.0],
             new_min: [self.new_min[0], self.new_min[1], self.new_min[2], 0.0],
@@ -730,15 +722,14 @@ pub fn spawn_water_hitbox(world: &mut World, descriptor: WaterHitboxDescriptor) 
 /// Replace a previously spawned water hitbox's bounds (e.g. each frame, as
 /// the object displacing the water moves).
 pub fn update_water_hitbox(world: &mut World, entity: Entity, descriptor: WaterHitboxDescriptor) {
-    if let Some(mut existing) = world.get_mut::<helio_pass_water_sim::WaterHitboxComponent>(entity)
-    {
+    if let Some(mut existing) = world.get_mut::<helio_components::WaterHitboxComponent>(entity) {
         *existing = descriptor.to_component();
     }
 }
 
 /// Spawn a post-process volume record from the CPU-side descriptor
 /// (`PostProcessVolumeDescriptor::to_gpu()` feeds the same
-/// `helio_pass_postprocess::PostProcessVolumeComponent` the pass reads).
+/// `helio_components::PostProcessVolumeComponent` the pass reads).
 pub fn spawn_post_process_volume(
     world: &mut World,
     descriptor: helio_pass_postprocess::PostProcessVolumeDescriptor,
@@ -746,12 +737,14 @@ pub fn spawn_post_process_volume(
     let entity = world.spawn();
     world.insert(
         entity,
-        helio_pass_postprocess::PostProcessVolumeComponent::from(descriptor.to_gpu()),
+        PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+            descriptor.to_gpu(),
+        )),
     );
     entity
 }
 
-/// Spawn a decal record. `helio_pass_decal::DecalComponent` mirrors
+/// Spawn a decal record. `helio_components::DecalComponent` mirrors
 /// `helio_pass_decal::GpuDecal` byte-for-byte, so any already-built `GpuDecal` value
 /// (as constructed for the removed `Scene::insert_texture` bindless-table
 /// path) can be spawned directly -- only per-decal *textures* (an
@@ -759,7 +752,10 @@ pub fn spawn_post_process_volume(
 /// replacement yet, since no component owns a bindless texture table.
 pub fn spawn_decal(world: &mut World, decal: helio_pass_decal::GpuDecal) -> Entity {
     let entity = world.spawn();
-    world.insert(entity, helio_pass_decal::DecalComponent::from(decal));
+    world.insert(
+        entity,
+        DecalComponent::from(helio_pass_decal::DecalRow::from(decal)),
+    );
     entity
 }
 
@@ -790,7 +786,9 @@ pub fn spawn_reflection_capture_box(
     let entity = world.spawn();
     world.insert(
         entity,
-        helio_pass_deferred_light::ReflectionCaptureComponent::from(gpu),
+        ReflectionCaptureComponent::from(helio_pass_deferred_light::ReflectionCaptureRow::from(
+            gpu,
+        )),
     );
     entity
 }
@@ -836,7 +834,7 @@ pub fn spawn_object(
         .filter(|handle| handle.count != 0)
         .ok_or("mesh has no GPU index range")?;
     let material_component = world
-        .get::<helio_pass_gbuffer::MaterialComponent>(material)
+        .get::<helio_components::MaterialComponent>(material)
         .ok_or("material entity has no MaterialComponent")?;
     let bounds = [
         transform.w_axis.x,
@@ -856,7 +854,7 @@ pub fn spawn_object(
     // `+1` keeps 0 as a true "never written" sentinel while staying
     // trivially recoverable (`stored - 1 == real generation`) if anything
     // ever needs the raw value back.
-    let component = StaticObjectComponent::new(
+    let component = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
         mesh.index(),
         mesh.generation().wrapping_add(1),
         material.index(),
@@ -869,7 +867,7 @@ pub fn spawn_object(
         material_component.material_class,
         0,
         0,
-    );
+    ));
     let entity = world.spawn();
     world.insert(entity, component);
     Ok(entity)
@@ -927,7 +925,7 @@ pub fn update_object_transform(
         transform.w_axis.z,
         object.bounds[3],
     ];
-    *object = object.with_transform(transform, bounds);
+    *object = object.with_transform(transform, bounds).into();
     Ok(())
 }
 
@@ -947,7 +945,10 @@ pub fn despawn_object(
 /// no per-frame step to call from here at all.
 pub fn spawn_light(world: &mut World, light: GpuLight) -> Entity {
     let entity = world.spawn();
-    world.insert(entity, LightComponent::from(light));
+    world.insert(
+        entity,
+        LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+    );
     entity
 }
 
@@ -956,7 +957,7 @@ pub fn spawn_light(world: &mut World, light: GpuLight) -> Entity {
 /// resubmission step exists to call anymore.
 pub fn update_light(world: &mut World, entity: Entity, light: GpuLight) {
     if let Some(mut existing) = world.get_mut::<LightComponent>(entity) {
-        *existing = LightComponent::from(light);
+        *existing = LightComponent::from(helio_pass_forward_lit::LightRow::from(light));
     }
 }
 
@@ -990,7 +991,7 @@ pub fn update_corona_emitter(
     slot: u32,
     emitter: helio_pass_corona::GpuCoronaEmitter,
 ) {
-    if let Some(mut existing) = world.get_mut::<helio_pass_corona::CoronaEmitterComponent>(entity) {
+    if let Some(mut existing) = world.get_mut::<helio_components::CoronaEmitterComponent>(entity) {
         *existing = corona_component_for_slot(slot, emitter);
     }
 }
@@ -998,12 +999,12 @@ pub fn update_corona_emitter(
 fn corona_component_for_slot(
     slot: u32,
     mut emitter: helio_pass_corona::GpuCoronaEmitter,
-) -> helio_pass_corona::CoronaEmitterComponent {
+) -> helio_components::CoronaEmitterComponent {
     emitter.particle_count = emitter
         .particle_count
         .min(helio_pass_corona::CORONA_MAX_PARTICLES_PER_EMITTER);
     emitter.particle_offset = slot * helio_pass_corona::CORONA_MAX_PARTICLES_PER_EMITTER;
-    helio_pass_corona::CoronaEmitterComponent::from(emitter)
+    CoronaEmitterComponent::from(helio_pass_corona::CoronaEmitterRow::from(emitter))
 }
 
 /// Builds a cube mesh centred at `center` (mesh-local origin offset) with the
@@ -1153,18 +1154,23 @@ pub fn set_camera_postprocess(
     view_id: u32,
     settings: &helio_pass_postprocess::PostProcessSettings,
 ) {
-    use helio_pass_postprocess::CameraPostProcessComponent;
+    use helio_components::CameraPostProcessComponent;
     let existing = world
         .query::<&CameraPostProcessComponent>()
         .find(|(_, row)| row.view_id == view_id)
         .map(|(entity, _)| entity);
     let entity = existing.unwrap_or_else(|| world.spawn());
-    world.insert(entity, CameraPostProcessComponent::new(view_id, settings));
+    world.insert(
+        entity,
+        CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+            view_id, settings,
+        )),
+    );
 }
 
 /// Author one persistent lens row per view (the camera's optics and focus).
-pub fn set_camera_lens(world: &mut World, lens: helio_pass_lens::LensComponent) {
-    use helio_pass_lens::LensComponent;
+pub fn set_camera_lens(world: &mut World, lens: helio_components::LensComponent) {
+    use helio_components::LensComponent;
     let existing = world
         .query::<&LensComponent>()
         .find(|(_, row)| row.view_id == lens.view_id)
@@ -1181,7 +1187,7 @@ pub fn set_camera_lens(world: &mut World, lens: helio_pass_lens::LensComponent) 
 // part of lit medium, so a light only forms them when it (a) participates in
 // the medium and (b) has a shadow map to be occluded by.
 
-pub use helio_pass_volumetric_fog::{
+pub use helio_components::{
     GlobalFogComponent, LocalFogVolumeComponent, VolumetricFogSettingsComponent,
 };
 
@@ -1223,7 +1229,9 @@ pub fn spawn_local_fog(
     medium: GlobalFogComponent,
     edge_fade: f32,
 ) -> Entity {
-    let mut volume = LocalFogVolumeComponent::new(bounds_min, bounds_max, medium);
+    let mut volume = LocalFogVolumeComponent::from(
+        helio_pass_volumetric_fog::LocalFogVolumeRow::new(bounds_min, bounds_max, medium.row()),
+    );
     volume.edge_fade = edge_fade;
     let entity = world.spawn();
     world.insert(entity, volume);

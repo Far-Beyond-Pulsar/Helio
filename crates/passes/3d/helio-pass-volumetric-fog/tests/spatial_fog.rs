@@ -1,8 +1,8 @@
 //! Run the real shaders against the SceneDB GPU mirror. The camera is outside
 //! the medium and its global fog is disabled: the regression that hid the demo.
+use helio_components::PostProcessVolumeComponent;
 use helio_pass_postprocess::{
-    FogMode, GpuPostProcessUniforms, PostProcessSettings, PostProcessVolumeComponent,
-    PostProcessVolumeDescriptor,
+    FogMode, GpuPostProcessUniforms, PostProcessSettings, PostProcessVolumeDescriptor,
 };
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -84,7 +84,9 @@ fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
         };
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(descriptor.to_gpu()),
+            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+                descriptor.to_gpu(),
+            )),
         );
         world.flush_gpu_mirror(&queue);
         let camera_data = helio_core::GpuCameraUniforms::new(
@@ -134,12 +136,12 @@ fn scenedb_local_fog_is_visible_from_outside_and_tracks_edits_and_removal() {
         let indirect = buffer(&device, &[0; 40], wgpu::BufferUsages::STORAGE);
         let global_media = buffer(
             &device,
-            &[0; std::mem::size_of::<helio_pass_volumetric_fog::GlobalFogComponent>()],
+            &[0; std::mem::size_of::<helio_components::GlobalFogComponent>()],
             wgpu::BufferUsages::STORAGE,
         );
         let local_media = buffer(
             &device,
-            &[0; std::mem::size_of::<helio_pass_volumetric_fog::LocalFogVolumeComponent>()],
+            &[0; std::mem::size_of::<helio_components::LocalFogVolumeComponent>()],
             wgpu::BufferUsages::STORAGE,
         );
         let output = buffer(
@@ -299,7 +301,9 @@ fn cs_probe() {
         descriptor.settings.fog_density = 0.3;
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(descriptor.to_gpu()),
+            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+                descriptor.to_gpu(),
+            )),
         );
         assert!(
             (sample(&world).0[3] - 0.3).abs() < 1e-5,
@@ -308,7 +312,9 @@ fn cs_probe() {
         descriptor.settings.fog_mode = FogMode::Smoke;
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(descriptor.to_gpu()),
+            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+                descriptor.to_gpu(),
+            )),
         );
         let first = sample(&world).0;
         queue.write_buffer(&globals, 32, bytemuck::bytes_of(&8.0f32));
@@ -323,7 +329,9 @@ fn cs_probe() {
         assert_eq!(removed[3], 0.0, "removed rows must stop injecting fog");
         world.insert(
             entity,
-            PostProcessVolumeComponent::from(descriptor.to_gpu()),
+            PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+                descriptor.to_gpu(),
+            )),
         );
         assert!(
             sample(&world).0[3] > 0.0,

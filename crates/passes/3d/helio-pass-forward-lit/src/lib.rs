@@ -8,7 +8,8 @@ use helio_mats::radiant::{RadiantShaderCache, RadiantShaderKey};
 
 mod components;
 pub mod gpu_types;
-pub use components::{LightComponent, MAX_LIGHTS};
+pub use components::SCENE_LIGHTS;
+pub use components::{LightRow, MAX_LIGHTS};
 pub use gpu_types::*;
 use pulsar_scenedb::gpu::BufferKey;
 
@@ -491,7 +492,7 @@ impl RenderPass for ForwardLitPass {
         let num_tiles_y = ctx.height.div_ceil(TILE_SIZE);
 
         // Prefer the SceneDB-direct `"scene_lights"` buffer (fixed capacity
-        // `MAX_LIGHTS`, no per-frame CPU query -- see `LightComponent`'s
+        // `MAX_LIGHTS`, no per-frame CPU query -- see `LightRow`'s
         // module doc) when something has actually inserted one. Nothing in
         // `engine_backend`/`helio_component` does today -- production's real
         // light source is `helio_pass_forward_lit::LightsFrameData (see this pass's own frame-data note)` (the `Renderer`-seeded

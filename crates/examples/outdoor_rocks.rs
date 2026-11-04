@@ -27,9 +27,7 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_asset_compat::{
-    load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
-};
+use helio_asset_compat::{load_scene_bytes_with_config, load_scene_file_with_config, LoadConfig};
 use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
@@ -277,7 +275,8 @@ impl ApplicationHandler for App {
                             return None;
                         }
                     };
-                    let mat_ids = upload_scene_materials(&mut scene_db.world, &scene);
+                    let mat_ids =
+                        helio_components::upload_scene_materials(&mut scene_db.world, &scene);
                     let entries: Vec<(pulsar_scenedb::Entity, pulsar_scenedb::Entity)> = scene
                         .meshes
                         .iter()
@@ -374,7 +373,7 @@ impl ApplicationHandler for App {
             let entity = scene_db.world.spawn();
             scene_db.world.insert(
                 entity,
-                helio_pass_billboard::BillboardComponent {
+                helio_components::BillboardComponent {
                     world_pos: billboard.world_pos,
                     scale_flags: billboard.scale_flags,
                     color: billboard.color,
@@ -394,7 +393,8 @@ impl ApplicationHandler for App {
             Ok(scene) => {
                 // Upload meshes + materials in a single traversal.
                 {
-                    let mat_ids = upload_scene_materials(&mut scene_db.world, &scene);
+                    let mat_ids =
+                        helio_components::upload_scene_materials(&mut scene_db.world, &scene);
                     let ship_transform =
                         Mat4::from_rotation_translation(Quat::from_rotation_y(0.4), ship_pos);
                     for mesh in &scene.meshes {

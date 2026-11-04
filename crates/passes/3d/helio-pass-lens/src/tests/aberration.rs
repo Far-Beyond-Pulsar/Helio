@@ -11,7 +11,7 @@
 
 use super::*;
 
-fn stacked(elements: &[LensElementComponent]) -> LensComponent {
+fn stacked(elements: &[LensElementRow]) -> LensRow {
     let mut lens = lens();
     lens.element_count = elements.len() as u32;
     lens
@@ -64,7 +64,7 @@ fn mean_of_scene(scene: &Scene, channel: usize) -> f32 {
     scene.color.iter().map(|c| c[channel]).sum::<f32>() / scene.color.len() as f32
 }
 
-fn record(rig: &mut Rig, scene: &Scene, elements: &[LensElementComponent]) -> Frame {
+fn record(rig: &mut Rig, scene: &Scene, elements: &[LensElementRow]) -> Frame {
     rig.record(
         scene,
         Some(&[stacked(elements)]),
@@ -143,10 +143,7 @@ fn without_aberration_elements_the_stage_is_idle_and_the_image_untouched() {
     );
 
     // Other element kinds do not wake it either.
-    let element = [LensElementComponent::natural_vignette(
-        0.0,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::natural_vignette(0.0, LensRegion::FullFrame)];
     let frame = record(&mut rig, &scene, &element);
     assert_eq!(frame.output, input);
     assert_eq!(rig.resolved().aberration_flags, 0);
@@ -154,11 +151,7 @@ fn without_aberration_elements_the_stage_is_idle_and_the_image_untouched() {
 
     // An aberration element wakes it; with nothing to scatter it still
     // reproduces the image exactly.
-    let element = [LensElementComponent::diffusion(
-        0.0,
-        0.01,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::diffusion(0.0, 0.01, LensRegion::FullFrame)];
     let frame = record(&mut rig, &scene, &element);
     assert_eq!(rig.resolved().aberration_flags, AB_ACTIVE);
     let args = rig.args();
@@ -191,41 +184,32 @@ fn scattering_elements_preserve_mean_radiance() {
     let mut rig = Rig::new();
     let scene = energy_scene();
     let full = LensRegion::FullFrame;
-    let cases: Vec<(&str, LensElementComponent)> = vec![
-        (
-            "diffusion",
-            LensElementComponent::diffusion(0.4, 0.02, full),
-        ),
-        ("pro-mist", LensElementComponent::pro_mist(0.4, full)),
-        (
-            "black pro-mist",
-            LensElementComponent::black_pro_mist(0.4, full),
-        ),
-        (
-            "glimmerglass",
-            LensElementComponent::glimmerglass(0.4, full),
-        ),
-        ("fog", LensElementComponent::fog(0.4, full)),
+    let cases: Vec<(&str, LensElementRow)> = vec![
+        ("diffusion", LensElementRow::diffusion(0.4, 0.02, full)),
+        ("pro-mist", LensElementRow::pro_mist(0.4, full)),
+        ("black pro-mist", LensElementRow::black_pro_mist(0.4, full)),
+        ("glimmerglass", LensElementRow::glimmerglass(0.4, full)),
+        ("fog", LensElementRow::fog(0.4, full)),
         (
             "spherical glow",
-            LensElementComponent::spherical_glow(0.4, 2.8, 2.0, 0.02, full),
+            LensElementRow::spherical_glow(0.4, 2.8, 2.0, 0.02, full),
         ),
         (
             "star 4",
-            LensElementComponent::star_filter(4, 0.2, 0.3, 0.4, full),
+            LensElementRow::star_filter(4, 0.2, 0.3, 0.4, full),
         ),
         (
             "star 6",
-            LensElementComponent::star_filter(6, 0.0, 0.3, 0.4, full),
+            LensElementRow::star_filter(6, 0.0, 0.3, 0.4, full),
         ),
         (
             "star 8",
-            LensElementComponent::star_filter(8, 0.1, 0.3, 0.4, full),
+            LensElementRow::star_filter(8, 0.1, 0.3, 0.4, full),
         ),
-        ("halation", LensElementComponent::halation(0.5, 0.03, full)),
-        ("smear", LensElementComponent::smear(0.5, 0.05, 0.4, full)),
-        ("dirt", LensElementComponent::dirt(0.4, 0.02, 0.0, full)),
-        ("coma", LensElementComponent::coma(0.3, 0.2, full)),
+        ("halation", LensElementRow::halation(0.5, 0.03, full)),
+        ("smear", LensElementRow::smear(0.5, 0.05, 0.4, full)),
+        ("dirt", LensElementRow::dirt(0.4, 0.02, 0.0, full)),
+        ("coma", LensElementRow::coma(0.3, 0.2, full)),
     ];
     for (name, element) in cases {
         let frame = record(&mut rig, &scene, &[element]);
@@ -253,10 +237,10 @@ fn a_stack_of_scatterers_conserves_energy_too() {
     let scene = energy_scene();
     let full = LensRegion::FullFrame;
     let elements = [
-        LensElementComponent::pro_mist(0.3, full),
-        LensElementComponent::star_filter(4, 0.0, 0.3, 0.3, full),
-        LensElementComponent::halation(0.4, 0.03, full),
-        LensElementComponent::smear(0.3, 0.04, 1.0, full),
+        LensElementRow::pro_mist(0.3, full),
+        LensElementRow::star_filter(4, 0.0, 0.3, 0.3, full),
+        LensElementRow::halation(0.4, 0.03, full),
+        LensElementRow::smear(0.3, 0.04, 1.0, full),
     ];
     let frame = record(&mut rig, &scene, &elements);
     for channel in 0..3 {
@@ -307,7 +291,7 @@ fn a_star_filter_with_n_points_makes_n_spikes() {
     let scene = blobs(&[(64.0, 64.0, 60.0)], 1.0);
     for points in [2u32, 4, 6, 8] {
         for rotation in [0.0f32, 0.3] {
-            let element = [LensElementComponent::star_filter(
+            let element = [LensElementRow::star_filter(
                 points,
                 rotation,
                 0.45,
@@ -352,7 +336,7 @@ fn coma_drags_a_tail_away_from_the_axis() {
     // control on it.
     let points = [(106.0, 64.0), (64.0, 22.0), (100.0, 100.0), (64.0, 64.0)];
     let scene = blobs(&points.map(|(x, y)| (x, y, 20.0)), 1.0);
-    let element = [LensElementComponent::coma(0.8, 0.5, LensRegion::FullFrame)];
+    let element = [LensElementRow::coma(0.8, 0.5, LensRegion::FullFrame)];
     let frame = record(&mut rig, &scene, &element);
     let plain = record(&mut rig, &scene, &[]);
     for &(x, y) in &points[..3] {
@@ -406,7 +390,7 @@ fn astigmatism_turns_the_ellipse_with_its_sign() {
         (plain_along - plain_across).abs() < 0.2,
         "the source is round"
     );
-    let positive = [LensElementComponent::astigmatism(
+    let positive = [LensElementRow::astigmatism(
         0.15,
         0.2,
         LensRegion::FullFrame,
@@ -416,7 +400,7 @@ fn astigmatism_turns_the_ellipse_with_its_sign() {
         along > 2.0 * across && along > 2.0 * plain_along,
         "positive: along {along} across {across}"
     );
-    let negative = [LensElementComponent::astigmatism(
+    let negative = [LensElementRow::astigmatism(
         -0.15,
         0.2,
         LensRegion::FullFrame,
@@ -433,7 +417,7 @@ fn corner_softness_leaves_the_centre_sharp() {
     let mut rig = Rig::new();
     let scene = blobs(&[(64.0, 64.0, 20.0), (116.0, 116.0, 20.0)], 1.2);
     let plain = record(&mut rig, &scene, &[]);
-    let element = [LensElementComponent::corner_softness(
+    let element = [LensElementRow::corner_softness(
         0.04,
         0.3,
         LensRegion::FullFrame,
@@ -462,7 +446,7 @@ fn corner_softness_leaves_the_centre_sharp() {
 fn spherical_glow_fades_as_the_lens_stops_down() {
     let mut rig = Rig::new();
     let scene = patches([0.0; 3], &[(60, 60, 8, 8, [10.0; 3])]);
-    let element = [LensElementComponent::spherical_glow(
+    let element = [LensElementRow::spherical_glow(
         0.5,
         2.8,
         2.0,
@@ -500,7 +484,7 @@ fn smear_spreads_along_its_direction() {
     let mut rig = Rig::new();
     let scene = blobs(&[(64.0, 64.0, 40.0)], 1.0);
     for angle in [0.0f32, std::f32::consts::FRAC_PI_2] {
-        let element = [LensElementComponent::smear(
+        let element = [LensElementRow::smear(
             0.8,
             0.06,
             angle,
@@ -536,12 +520,12 @@ fn black_pro_mist_lifts_the_shadows_less_than_pro_mist() {
     let pro = record(
         &mut rig,
         &scene,
-        &[LensElementComponent::pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)],
+        &[LensElementRow::pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)],
     );
     let black = record(
         &mut rig,
         &scene,
-        &[LensElementComponent::black_pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)],
+        &[LensElementRow::black_pro_mist(0.4, LensRegion::FullFrame).with_feather(0.0)],
     );
     let (pro_far, black_far) = (lift(&pro, false), lift(&black, false));
     assert!(
@@ -565,11 +549,7 @@ fn black_pro_mist_lifts_the_shadows_less_than_pro_mist() {
 fn halation_is_red_dominant() {
     let mut rig = Rig::new();
     let scene = patches([0.0; 3], &[(58, 58, 12, 12, [6.0; 3])]);
-    let element = [LensElementComponent::halation(
-        0.6,
-        0.03,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::halation(0.6, 0.03, LensRegion::FullFrame)];
     let frame = record(&mut rig, &scene, &element);
     let mut halo = [0.0f32; 3];
     for (x, y) in pixels() {
@@ -594,10 +574,8 @@ fn halation_is_red_dominant() {
         );
     }
     // A custom tint works: a blue halation puts the halo in blue.
-    let element = [
-        LensElementComponent::halation(0.6, 0.03, LensRegion::FullFrame)
-            .with_halation_tint([0.0, 0.0, 1.0]),
-    ];
+    let element = [LensElementRow::halation(0.6, 0.03, LensRegion::FullFrame)
+        .with_halation_tint([0.0, 0.0, 1.0])];
     let frame = record(&mut rig, &scene, &element);
     let blue: f32 = pixels().map(|(x, y)| frame.pixel(x, y)[2]).sum();
     let red: f32 = pixels().map(|(x, y)| frame.pixel(x, y)[0]).sum();
@@ -615,12 +593,7 @@ fn halation_is_red_dominant() {
 fn dirt_loses_a_little_light_where_it_covers() {
     let mut rig = Rig::new();
     let scene = energy_scene();
-    let element = [LensElementComponent::dirt(
-        0.3,
-        0.02,
-        0.1,
-        LensRegion::FullFrame,
-    )];
+    let element = [LensElementRow::dirt(0.3, 0.02, 0.1, LensRegion::FullFrame)];
     let frame = record(&mut rig, &scene, &element);
     for channel in 0..3 {
         let ratio = mean(&frame, channel) / mean_of_scene(&scene, channel);
@@ -654,7 +627,7 @@ fn a_mask_region_restricts_an_element_to_the_white_half() {
         channel: 0,
         invert: false,
     };
-    let element = [LensElementComponent::diffusion(0.8, 0.04, region)];
+    let element = [LensElementRow::diffusion(0.8, 0.04, region)];
     let frame = record(&mut rig, &scene, &element);
     // The black half is exactly the input; the white half changed.
     for (x, y) in pixels().filter(|&(x, _)| x < 56) {
@@ -679,7 +652,7 @@ fn a_mask_region_restricts_an_element_to_the_white_half() {
         channel: 0,
         invert: true,
     };
-    let element = [LensElementComponent::diffusion(0.8, 0.04, region)];
+    let element = [LensElementRow::diffusion(0.8, 0.04, region)];
     let frame = record(&mut rig, &scene, &element);
     for (x, y) in pixels().filter(|&(x, _)| x >= 72) {
         let i = ((y * SIZE + x) * 4) as usize;
@@ -697,7 +670,7 @@ fn a_mask_region_restricts_an_element_to_the_white_half() {
         channel: 0,
         invert: false,
     };
-    let element = [LensElementComponent::diffusion(0.8, 0.04, region)];
+    let element = [LensElementRow::diffusion(0.8, 0.04, region)];
     let frame = record(&mut rig, &scene, &element);
     assert_eq!(frame.output, input);
 }
@@ -759,7 +732,7 @@ fn a_water_drop_displaces_content_inside_its_footprint_only() {
     rig.masks = Some(mask_array(&rig.device, &rig.queue, MASK as u32, &[&mask]));
     // Brightness grows to the right: shifting the lookup shows as a change.
     let scene = Scene::new(|x, _| [0.1 + x as f32 * 0.05; 3], |_, _| 3.0);
-    let element = [LensElementComponent::water_drops(
+    let element = [LensElementRow::water_drops(
         0.05,
         0,
         0.0,

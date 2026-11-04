@@ -21,7 +21,7 @@ pub fn hw_bin_for_tris(tris: u32) -> usize {
 pub const VIS_EMPTY: u32 = 0xffff_ffff;
 
 /// Stride of one row of the scene join's `static_objects` buffer
-/// (`StaticObjectComponent`, 63 words). Only `transform` (words 4..20) is read.
+/// (`StaticObjectRow`, 63 words). Only `transform` (words 4..20) is read.
 pub const OBJECT_STRIDE: u64 = 252;
 
 /// One `draw_indirect` argument block (wgpu `DrawIndirectArgs` layout). 16 bytes.

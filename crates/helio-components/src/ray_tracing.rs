@@ -1,8 +1,9 @@
 //! Frontend-owned acceleration projection of SceneDB's static shadow casters.
 //! No renderer-owned scene table or GPU readback is involved.
 //!
-//! A host adapter: it reads a CPU `World` through change cursors, so it lives
-//! with the frontend graphs. Passes consume only what the renderer publishes
+//! A host adapter: it reads a CPU `World`'s host components through change
+//! cursors, so it lives with them (moved from helio-default-passes in the
+//! layered rewrite's phase 1). Passes consume only what the renderer publishes
 //! of it ([`SceneDbRayTracing::frame`]): the TLAS, transmission rows
 //! (`helio_pass_hlfs`, Pulsar-Native#1066) and each instance's surface
 //! (`RayInstance`: the GI probes' mesh tracer shades its hits from them).
@@ -18,12 +19,10 @@
 //! ([`SceneDbRayTracing::new`], for consumers that take every candidate as
 //! glass or as opaque) still refuses them.
 use crate::ray_proxies::{Lookup, VgRayProxies, VgRayStats};
+use crate::{MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent};
 use helio_core::{
     BlasGeometry, BlasManager, Movability, RayInstance, TlasInstanceInput, TlasManager,
     RAY_INSTANCE_MASKED, RAY_INSTANCE_PROXY, RAY_INSTANCE_TWO_SIDED,
-};
-use helio_pass_gbuffer::{
-    MaterialComponent, MeshComponent, RenderGroupComponent, StaticObjectComponent,
 };
 use pulsar_scenedb::{
     ChangeCursor, ChangeRead, ComponentChange, ComponentChangeKind, Entity, World,
@@ -80,7 +79,7 @@ impl CasterKey {
             mesh: (object.mesh_slot, object.mesh_generation),
             material: (object.material_slot, object.material_generation),
             draw: (object.index_count, object.first_index, object.vertex_offset),
-            graph_hash: object.graph_hash(),
+            graph_hash: object.row().graph_hash(),
             flags: object.flags,
         }
     }
@@ -107,7 +106,7 @@ fn casts_shadow(object: &StaticObjectComponent) -> bool {
 
 /// Row-major 3x4 TLAS transform of an object's column-major world matrix.
 fn tlas_transform(object: &StaticObjectComponent) -> [f32; 12] {
-    let m = object.transform().to_cols_array();
+    let m = object.row().transform().to_cols_array();
     [
         m[0], m[4], m[8], m[12], m[1], m[5], m[9], m[13], m[2], m[6], m[10], m[14],
     ]
@@ -148,7 +147,7 @@ pub struct SceneDbRayTracing {
     changes: Vec<ComponentChange>,
     /// Base colour textures' means: a hit's colour is its material's factor
     /// times its texture's mean.
-    texture_means: crate::texture_means::TextureMeans,
+    texture_means: helio_default_passes::texture_means::TextureMeans,
 }
 impl SceneDbRayTracing {
     /// The scene's shadow casters, all of them: an object the projection
@@ -173,7 +172,7 @@ impl SceneDbRayTracing {
 
     fn with_partial(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, partial: bool) -> Self {
         Self {
-            texture_means: crate::texture_means::TextureMeans::new(&device),
+            texture_means: helio_default_passes::texture_means::TextureMeans::new(&device),
             blas: BlasManager::new(device.clone()),
             tlas: TlasManager::new(device.clone(), 1),
             device,
@@ -484,7 +483,7 @@ impl SceneDbRayTracing {
                     row
                 }
             };
-            if !row.supported || object.graph_hash() != 0 {
+            if !row.supported || object.row().graph_hash() != 0 {
                 unsupported!("custom-shader casters, transparent casters without explicit RayTransmission, and masked casters (in a full projection, or transmitting) are unsupported");
             }
             if row.generation != object.material_generation {

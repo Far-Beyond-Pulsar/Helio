@@ -116,7 +116,7 @@ fn content(world: &mut pulsar_scenedb::World) {
     let decal = world.spawn();
     world.insert(
         decal,
-        helio_pass_decal::DecalComponent {
+        helio_components::DecalComponent {
             transform: Mat4::from_scale_rotation_translation(
                 Vec3::new(1.0, 1.0, 0.02),
                 glam::Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),

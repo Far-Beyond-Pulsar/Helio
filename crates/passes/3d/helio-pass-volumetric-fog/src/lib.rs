@@ -39,8 +39,8 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 pub mod components;
 pub use components::{
-    FogComponent, FogSceneBinding, GlobalFogComponent, LocalFogVolumeComponent,
-    VolumetricFogSettingsComponent,
+    GlobalFogRow, LocalFogVolumeRow, VolumetricFogSettingsRow, GLOBAL_FOG_MEDIA, LOCAL_FOG_MEDIA,
+    VOLUMETRIC_FOG_SETTINGS,
 };
 
 /// Froxel grid dimensions.
@@ -591,11 +591,11 @@ impl VolumetricFogPass {
         };
         let fallback_global = empty_storage(
             "Fog Empty Global Media",
-            std::mem::size_of::<GlobalFogComponent>() as u64,
+            std::mem::size_of::<GlobalFogRow>() as u64,
         );
         let fallback_local = empty_storage(
             "Fog Empty Local Media",
-            std::mem::size_of::<LocalFogVolumeComponent>() as u64,
+            std::mem::size_of::<LocalFogVolumeRow>() as u64,
         );
         let fallback_settings = empty_storage("Fog Empty View Settings", 48);
         let clusters_buf = empty_storage("Fog Cluster Light Lists", (24 * 14 * 32 * 65 * 4) as u64);

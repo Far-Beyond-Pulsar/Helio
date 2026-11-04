@@ -130,12 +130,13 @@ helio-wasm = { layer = "host" }
 helio-web-demos = { layer = "host" }
 helio-android-demos = { layer = "host" }
 helio-snapshot = { layer = "host" }
+helio-components = { layer = "host" }       # SceneDB components for Helio's own hosts
 
 [budgets]
-# `#[derive(SceneStore)]` structs in Helio sources. Components belong to the
-# plugins that register them, not to Helio (layered-rewrite.md §3); this
-# number may only go down, and reaches 0 at the end of phase 1.
-scene_store_derives = 31
+# `#[derive(SceneStore)]` structs below the host layer. Components belong to
+# whoever produces the data (an engine's plugins; for Helio's own hosts,
+# helio-components), never to the renderer (layered-rewrite.md §3, phase 1).
+scene_store_derives = 0
 
 [renamed]
 # Old crate names in git history -> today's crate, for the co-change report.

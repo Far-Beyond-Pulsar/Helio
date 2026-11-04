@@ -48,6 +48,7 @@ ies_demo            = []
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
+helio-components = { path = "../helio-components" }
 helio-wasm          = { path = "../helio-wasm" }
 helio               = { workspace = true }
 helio-core          = { workspace = true }

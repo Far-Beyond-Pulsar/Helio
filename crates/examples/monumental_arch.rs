@@ -5,6 +5,7 @@
 use crate::{architectural_mesh::Mesh, v3_demo_common::*};
 use glam::{Mat4, Vec2, Vec3};
 use helio::{Camera, MeshUpload};
+use helio_components::{AtmosphereComponent, PostProcessVolumeComponent};
 use helio_pass_postprocess::{FogMode, PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, World};
 
@@ -122,7 +123,10 @@ pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
     set_camera_postprocess(world, 0, &settings);
     let environment = world.spawn();
     // Earth's air; its sun is the scene's directional light.
-    world.insert(environment, helio_pass_sky::AtmosphereComponent::earth());
+    world.insert(
+        environment,
+        AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth()),
+    );
     let mut meshes: Vec<Mesh> = (0..7).map(|_| Mesh::default()).collect();
     // Four piers preserve both intersecting passages down to the plaza.
     for side in [-1.0, 1.0] {
@@ -335,7 +339,7 @@ pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
     let fog = world.spawn();
     world.insert(
         fog,
-        helio_pass_postprocess::PostProcessVolumeComponent::from(
+        PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
             PostProcessVolumeDescriptor {
                 bounds_min: [-8.5, 8.0, -14.0],
                 bounds_max: [8.5, 29.0, 14.0],
@@ -361,7 +365,7 @@ pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
                 ..Default::default()
             }
             .to_gpu(),
-        ),
+        )),
     );
     eprintln!(
         "Monumental arch: {triangles} triangles, 7 material batches, intersecting open vaults"

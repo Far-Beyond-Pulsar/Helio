@@ -3,11 +3,9 @@ use std::sync::Arc;
 
 use glam::{Vec2, Vec3};
 use helio::{Camera, GpuLight, GpuMaterial, LightType, Renderer, RendererBuilder, RendererConfig};
-use helio_asset_compat::{
-    load_scene_file_with_config, upload_scene_materials, ConvertedTextureRef, LoadConfig,
-};
-use helio_pass_forward_lit::LightComponent;
-use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
+use helio_asset_compat::{load_scene_file_with_config, ConvertedTextureRef, LoadConfig};
+use helio_components::LightComponent;
+use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 use pulsar_scenedb::{Entity, SceneDb, World};
 use thiserror::Error;
@@ -670,7 +668,7 @@ fn upload_scene_rows(
     world: &mut World,
     scene: &helio_asset_compat::ConvertedScene,
 ) -> (Vec<Entity>, Vec<Entity>) {
-    let material_ids = upload_scene_materials(world, scene);
+    let material_ids = helio_components::upload_scene_materials(world, scene);
     let mesh_ids = scene
         .meshes
         .iter()
@@ -690,7 +688,7 @@ fn upload_scene_rows(
 }
 
 fn fallback_material() -> MaterialComponent {
-    MaterialComponent::from(GpuMaterial {
+    MaterialComponent::from(helio_pass_gbuffer::MaterialRow::from(GpuMaterial {
         base_color: [0.7, 0.65, 0.55, 1.0],
         emissive: [0.0; 4],
         roughness_metallic: [0.6, 0.0, 1.5, 0.0],
@@ -703,7 +701,7 @@ fn fallback_material() -> MaterialComponent {
         flags: 0,
         material_class: 0,
         class_params: [0.0; 4],
-    })
+    }))
 }
 
 fn insert_object(
@@ -727,7 +725,7 @@ fn insert_object(
     let material_component = world
         .get::<MaterialComponent>(material)
         .ok_or_else(|| SnapshotError::Render("material entity is missing".into()))?;
-    let object = StaticObjectComponent::new(
+    let object = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
         mesh.index(),
         mesh.generation().wrapping_add(1),
         material.index(),
@@ -740,7 +738,7 @@ fn insert_object(
         material_component.material_class,
         0,
         3,
-    );
+    ));
     let entity = world.spawn();
     world.insert(entity, object);
     Ok(entity)
@@ -748,7 +746,10 @@ fn insert_object(
 
 fn insert_light(world: &mut World, light: GpuLight) -> Entity {
     let entity = world.spawn();
-    world.insert(entity, LightComponent::from(light));
+    world.insert(
+        entity,
+        LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+    );
     entity
 }
 
@@ -1071,7 +1072,7 @@ impl SnapshotBatch {
             let light = self.scene_db.world.spawn();
             self.scene_db.world.insert(
                 light,
-                LightComponent::from(GpuLight {
+                LightComponent::from(helio_pass_forward_lit::LightRow::from(GpuLight {
                     position_range: [0.0, 0.0, 0.0, f32::MAX],
                     direction_outer: [dir.x, dir.y, dir.z, 0.0],
                     color_intensity: [color[0], color[1], color[2], intensity],
@@ -1095,7 +1096,7 @@ impl SnapshotBatch {
                     light_function_index: -1,
                     ies_angle_scale: 0.0,
                     ies_angle_offset: 0.0,
-                }),
+                })),
             );
             self.live_entities.push(light);
         }

@@ -1,7 +1,7 @@
 //! Volumetric clouds, part of the atmosphere: a layer of clouds in a band of
 //! altitudes over the planet's surface (or flat ground) and a sheet of
 //! cirrus above it, described by the
-//! [`AtmosphereComponent`](crate::AtmosphereComponent) row's cloud fields
+//! [`AtmosphereRow`](crate::AtmosphereRow) row's cloud fields
 //! ([`CloudLayer`](crate::atmosphere::CloudLayer), its weather
 //! [`PlanetWeather`](crate::atmosphere::PlanetWeather)). Their density is
 //! noise (`shaders/clouds_common.wgsl`, after Schneider's Nubis): the

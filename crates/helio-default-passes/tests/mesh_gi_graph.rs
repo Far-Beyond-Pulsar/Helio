@@ -4,6 +4,7 @@
 //! published); without ray queries there is no GI, the sky's ambient as
 //! before.
 
+use helio_components::LightComponent;
 use std::sync::Arc;
 
 use glam::{Mat4, Vec3};
@@ -11,9 +12,9 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
+use helio_components::ray_tracing::SceneDbRayTracing;
+use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
 use helio_default_passes::build_default_graph_external_with_context;
-use helio_default_passes::ray_tracing::SceneDbRayTracing;
-use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
 use helio_pass_gi::{GiMeshTracePass, GiPass, PROBES, PROBE_WORDS};
 
 fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scenedb::SceneDb {
@@ -30,7 +31,7 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
     MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
     MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
     StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+    helio_components::LightComponent::register_gpu_columns_growable(
         &mut store,
         helio_pass_forward_lit::MAX_LIGHTS,
         device,
@@ -73,19 +74,19 @@ fn spawn_box(world: &mut pulsar_scenedb::World, centre: Vec3, half: Vec3, colour
     let mesh = world.spawn();
     world.insert(mesh, MeshComponent { vertices, indices });
     let material = world.spawn();
-    let row = MaterialComponent::new(
+    let row = MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
         [colour[0], colour[1], colour[2], 1.0],
         0.8,
         0.0,
         [0.0; 3],
         0.0,
-    );
+    ));
     world.insert(material, row);
     let store = world.gpu_mirror().cloned().unwrap();
     let vertex_range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
     let index_range = MeshComponent::indices_gpu_handle(store.store(), mesh.index()).unwrap();
     let transform = Mat4::from_translation(centre);
-    let object = StaticObjectComponent::new(
+    let object = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
         mesh.index(),
         mesh.generation().wrapping_add(1),
         material.index(),
@@ -98,7 +99,7 @@ fn spawn_box(world: &mut pulsar_scenedb::World, centre: Vec3, half: Vec3, colour
         row.material_class,
         0,
         0,
-    );
+    ));
     let entity = world.spawn();
     world.insert(entity, object);
 }
@@ -108,13 +109,15 @@ fn room(world: &mut pulsar_scenedb::World) {
     let light = world.spawn();
     world.insert(
         light,
-        helio_pass_forward_lit::LightComponent::from(helio_pass_forward_lit::GpuLight {
-            position_range: [0.0, 2.5, 0.0, 12.0],
-            color_intensity: [1.0, 0.9, 0.8, 20.0],
-            shadow_index: u32::MAX,
-            light_type: 1,
-            ..Default::default()
-        }),
+        LightComponent::from(helio_pass_forward_lit::LightRow::from(
+            helio_pass_forward_lit::GpuLight {
+                position_range: [0.0, 2.5, 0.0, 12.0],
+                color_intensity: [1.0, 0.9, 0.8, 20.0],
+                shadow_index: u32::MAX,
+                light_type: 1,
+                ..Default::default()
+            },
+        )),
     );
     let white = [0.7; 3];
     spawn_box(

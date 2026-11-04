@@ -530,9 +530,12 @@ fn build_scene(
     // roof carve it into shafts. (A global uniform medium would also attenuate
     // the sunlight along its whole path: 120 m at 0.08/m leaves e^-9.6.)
     let haze = scene_db.world.spawn();
-    scene_db
-        .world
-        .insert(haze, hall_haze(GlobalFogComponent::default()));
+    scene_db.world.insert(
+        haze,
+        hall_haze(GlobalFogComponent::from(
+            helio_pass_volumetric_fog::GlobalFogRow::default(),
+        )),
+    );
 
     // A denser pocket mid-hall. It is a local medium, so it is visible
     // from anywhere, not only while the camera is inside it, and overlaps
@@ -686,10 +689,12 @@ fn probe() {
 /// The colonnade's haze: a local medium just larger than the hall, with a
 /// soft edge, so light outside travels through clear air.
 fn hall_haze(medium: GlobalFogComponent) -> v3_demo_common::LocalFogVolumeComponent {
-    let mut volume = v3_demo_common::LocalFogVolumeComponent::new(
-        [-HALL_HALF_X - 2.0, 0.0, -HALL_HALF_Z - 2.0],
-        [HALL_HALF_X + 2.0, ROOF_Y + 1.0, HALL_HALF_Z + 2.0],
-        medium,
+    let mut volume = v3_demo_common::LocalFogVolumeComponent::from(
+        helio_pass_volumetric_fog::LocalFogVolumeRow::new(
+            [-HALL_HALF_X - 2.0, 0.0, -HALL_HALF_Z - 2.0],
+            [HALL_HALF_X + 2.0, ROOF_Y + 1.0, HALL_HALF_Z + 2.0],
+            medium.row(),
+        ),
     );
     volume.edge_fade = 1.5;
     volume

@@ -1,5 +1,5 @@
-//! SceneDB-owned lens records: one [`LensComponent`] per view, and the
-//! [`LensElementComponent`] rows it stacks in front of the sensor.
+//! SceneDB-owned lens records: one [`LensRow`] per view, and the
+//! [`LensElementRow`] rows it stacks in front of the sensor.
 //!
 //! A view's lens is an ordered stack of optical elements reduced per pixel
 //! to four quantities: a ray map (sensor uv -> scene uv, per wavelength), a
@@ -13,11 +13,10 @@
 //! owned by the camera: post-process volumes never blend lens settings.
 //!
 //! Both rows are packed GPU components read by [`crate::LensPass`], matched
-//! to a view like `CameraPostProcessComponent`: the first enabled
-//! [`LensComponent`] whose `view_id` equals the camera's (u32 bits of
+//! to a view like `CameraPostProcessRow`: the first enabled
+//! [`LensRow`] whose `view_id` equals the camera's (u32 bits of
 //! `jitter_frame.w`) wins; with none the lens is off and the image passes
 //! through untouched.
-use pulsar_scenedb_derive::SceneStore;
 
 /// Most elements one lens stacks; rows past this are ignored.
 pub const MAX_LENS_ELEMENTS: u32 = 32;
@@ -28,7 +27,7 @@ pub const FOCUS_MANUAL: u32 = 0;
 /// at `af_speed` per second.
 pub const FOCUS_AUTO_POINT: u32 = 1;
 
-/// Element kinds (`LensElementComponent::kind`).
+/// Element kinds (`LensElementRow::kind`).
 pub mod element_kind {
     /// Inert row.
     pub const NONE: u32 = 0;
@@ -612,7 +611,7 @@ pub mod dirt {
     pub const TAIL: usize = 3;
 }
 
-/// Region kinds (`LensElementComponent::region_kind`). Regions live in
+/// Region kinds (`LensElementRow::region_kind`). Regions live in
 /// image-height units centred on the frame: `q = (uv - 0.5) * (aspect, 1)`,
 /// y down.
 pub mod region_kind {
@@ -652,70 +651,47 @@ pub mod mask {
 }
 
 /// A camera's lens. One row per view; see the module doc.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "camera_lenses")]
-pub struct LensComponent {
-    #[gpu]
+pub struct LensRow {
     pub view_id: u32,
-    #[gpu]
     pub enabled: u32,
     /// [`FOCUS_MANUAL`] or [`FOCUS_AUTO_POINT`].
-    #[gpu]
     pub focus_mode: u32,
     /// 0 economical, 1 high (more gather taps), 2 ultra. Also the number of
     /// wavelength samples of lateral chromatic aberration: 3, 7, 16.
-    #[gpu]
     pub quality: u32,
-    #[gpu]
     pub focal_length_mm: f32,
-    #[gpu]
     pub f_number: f32,
     /// Transmission stop; the light lost against the f-number is applied by
     /// a [`element_kind::T_STOP_LOSS`] element.
-    #[gpu]
     pub t_stop: f32,
-    #[gpu]
     pub sensor_width_mm: f32,
     /// Zero derives it from the width at 3:2.
-    #[gpu]
     pub sensor_height_mm: f32,
-    #[gpu]
     pub focus_distance_m: f32,
     /// Autofocus point in uv (y down).
-    #[gpu]
     pub af_u: f32,
-    #[gpu]
     pub af_v: f32,
     /// Autofocus ease rate in 1/s (<= 0: instant).
-    #[gpu]
     pub af_speed: f32,
     /// Largest circle of confusion diameter in pixels (<= 0: 32).
-    #[gpu]
     pub max_coc_px: f32,
     /// First row of this lens's elements in the `lens_elements` buffer.
-    #[gpu]
     pub element_first: u32,
-    #[gpu]
     pub element_count: u32,
     /// Scheimpflug: focal plane tilt in radians about an axis in the image
     /// plane at `tilt_axis` radians from +x.
-    #[gpu]
     pub tilt_angle: f32,
-    #[gpu]
     pub tilt_axis: f32,
     /// Petzval field curvature in dioptres at the frame corner; the focus
     /// shifts by `field_curvature * r^2`.
-    #[gpu]
     pub field_curvature: f32,
     /// Iris blade count (0 = circular); shapes the flare pupil.
-    #[gpu]
     pub aperture_blades: u32,
     /// Iris rotation in radians.
-    #[gpu]
     pub aperture_rotation: f32,
     /// Autofocus sampling radius in uv (<= 0: 0.02).
-    #[gpu]
     pub af_radius: f32,
     /// The overscan factor (>= 1; 0 reads as 1) the camera rendering this view
     /// widened its field of view by: the image the pass is given shows
@@ -723,19 +699,26 @@ pub struct LensComponent {
     /// the pass maps it back to the frame. Author it with
     /// [`crate::ray_map::applied_overscan`] from the lens and elements the
     /// camera widened by; see the README.
-    #[gpu]
     pub overscan: f32,
-    #[gpu]
     pub _pad1: f32,
 }
-const _: () = assert!(std::mem::size_of::<LensComponent>() == 96);
-const _: () = assert!(std::mem::offset_of!(LensComponent, overscan) == 88);
-const _: () = assert!(std::mem::offset_of!(LensComponent, focal_length_mm) == 16);
-const _: () = assert!(std::mem::offset_of!(LensComponent, element_first) == 56);
-const _: () = assert!(std::mem::offset_of!(LensComponent, tilt_angle) == 64);
-const _: () = assert!(std::mem::offset_of!(LensComponent, aperture_rotation) == 80);
 
-impl LensComponent {
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for LensRow {}
+
+/// The buffer the renderer reads [`LensRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const CAMERA_LENSES: helio_core::BufferContract<LensRow> =
+    helio_core::BufferContract::new("camera_lenses");
+const _: () = assert!(std::mem::size_of::<LensRow>() == 96);
+const _: () = assert!(std::mem::offset_of!(LensRow, overscan) == 88);
+const _: () = assert!(std::mem::offset_of!(LensRow, focal_length_mm) == 16);
+const _: () = assert!(std::mem::offset_of!(LensRow, element_first) == 56);
+const _: () = assert!(std::mem::offset_of!(LensRow, tilt_angle) == 64);
+const _: () = assert!(std::mem::offset_of!(LensRow, aperture_rotation) == 80);
+
+impl LensRow {
     /// A 50 mm f/2.8 lens on a 36 x 24 mm sensor focused at 3 m.
     pub fn new(view_id: u32) -> Self {
         Self {
@@ -768,45 +751,43 @@ impl LensComponent {
 }
 
 /// One optical element in front of the sensor. Rows are indexed from
-/// [`LensComponent::element_first`]; kind [`element_kind::NONE`] rows are
+/// [`LensRow::element_first`]; kind [`element_kind::NONE`] rows are
 /// skipped, so a gap in the buffer is inert.
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "lens_elements")]
-pub struct LensElementComponent {
+pub struct LensElementRow {
     /// [`element_kind`].
-    #[gpu]
     pub kind: u32,
     /// [`region_kind`].
-    #[gpu]
     pub region_kind: u32,
     /// Polygon vertex count.
-    #[gpu]
     pub region_count: u32,
-    #[gpu]
     pub flags: u32,
     /// Width of the region's soft edge in image-height units. Negative:
     /// derived from the aperture (see [`element_kind::DIOPTER`]).
-    #[gpu]
     pub feather: f32,
-    #[gpu]
     pub _pad0: f32,
-    #[gpu]
     pub _pad1: f32,
-    #[gpu]
     pub _pad2: f32,
     /// Kind-specific parameters.
-    #[gpu]
     pub params: [f32; 16],
     /// Region-kind-specific geometry.
-    #[gpu]
     pub region: [f32; 16],
 }
-const _: () = assert!(std::mem::size_of::<LensElementComponent>() == 160);
-const _: () = assert!(std::mem::offset_of!(LensElementComponent, params) == 32);
-const _: () = assert!(std::mem::offset_of!(LensElementComponent, region) == 96);
 
-/// Where an element acts, for building [`LensElementComponent`] rows.
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for LensElementRow {}
+
+/// The buffer the renderer reads [`LensElementRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const LENS_ELEMENTS: helio_core::BufferContract<LensElementRow> =
+    helio_core::BufferContract::new("lens_elements");
+const _: () = assert!(std::mem::size_of::<LensElementRow>() == 160);
+const _: () = assert!(std::mem::offset_of!(LensElementRow, params) == 32);
+const _: () = assert!(std::mem::offset_of!(LensElementRow, region) == 96);
+
+/// Where an element acts, for building [`LensElementRow`] rows.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LensRegion<'a> {
     FullFrame,
@@ -831,7 +812,7 @@ pub enum LensRegion<'a> {
     Mask,
     /// One channel (0 red .. 3 alpha) of a layer of the mask array, covering
     /// where it is bright (`invert`: dark). Refine the mapping with
-    /// [`LensElementComponent::with_mask_transform`].
+    /// [`LensElementRow::with_mask_transform`].
     MaskChannel {
         layer: u32,
         channel: u32,
@@ -839,7 +820,7 @@ pub enum LensRegion<'a> {
     },
 }
 
-impl LensElementComponent {
+impl LensElementRow {
     fn with_region(kind: u32, params: [f32; 16], region: LensRegion<'_>) -> Self {
         let mut row: Self = bytemuck::Zeroable::zeroed();
         row.kind = kind;
@@ -1428,38 +1409,4 @@ impl LensElementComponent {
         self.params[2] = metres;
         self
     }
-}
-
-// The pinned SceneDB dispatches removals/despawns through this release
-// registry, but only generates registrations for variable-length components.
-// Packed rows need an explicit tombstone: the shader scans capacity, and a
-// stale row would keep a deleted lens or element alive.
-pulsar_reflection::inventory::submit! {
-    pulsar_scenedb::gpu::world_mirror::VarLenReleaseRegistration {
-        component_id: pulsar_scenedb::component::component_id::<LensComponent>,
-        release: clear_lens_row,
-    }
-}
-fn clear_lens_row(mirror: &pulsar_scenedb::gpu::GpuMirrorHandle, row: u32) {
-    let zero: LensComponent = bytemuck::Zeroable::zeroed();
-    mirror.store().mark_gpu_row_dirty(
-        pulsar_scenedb::component::component_id::<__ScenedbGpuPacked_LensComponent>(),
-        row,
-        bytemuck::bytes_of(&zero),
-    );
-}
-
-pulsar_reflection::inventory::submit! {
-    pulsar_scenedb::gpu::world_mirror::VarLenReleaseRegistration {
-        component_id: pulsar_scenedb::component::component_id::<LensElementComponent>,
-        release: clear_element_row,
-    }
-}
-fn clear_element_row(mirror: &pulsar_scenedb::gpu::GpuMirrorHandle, row: u32) {
-    let zero: LensElementComponent = bytemuck::Zeroable::zeroed();
-    mirror.store().mark_gpu_row_dirty(
-        pulsar_scenedb::component::component_id::<__ScenedbGpuPacked_LensElementComponent>(),
-        row,
-        bytemuck::bytes_of(&zero),
-    );
 }

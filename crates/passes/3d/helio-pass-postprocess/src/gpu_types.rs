@@ -182,7 +182,7 @@ pub struct GpuPostProcessUniforms {
 
     // Lens flare: appended 96-byte block (24 words); shared with the optics
     // pass. Camera optics (f-number, focal length, sensor, iris) are not here:
-    // they belong to the camera's `LensComponent` (helio-pass-lens).
+    // they belong to the camera's `LensRow` (helio-pass-lens).
     pub lens_enabled: u32,          // 432
     pub lens_quality: u32,          // 436
     pub lens_profile: u32,          // 440

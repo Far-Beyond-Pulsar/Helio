@@ -31,7 +31,11 @@ fn forest(planet: &Planet) -> DVec3 {
             let a = t as f64 * 0.37;
             let dir = DVec3::new(a.cos(), 0.8 + 0.1 * (a * 1.3).sin(), a.sin()).normalize();
             let eye = planet.surface_point_of(dir * planet.outer_radius(), 1.7, Matter::Ground);
-            (planet.ground_height_of(eye, Matter::Ground) - planet.ground_height_of(eye, Matter::All), eye)
+            (
+                planet.ground_height_of(eye, Matter::Ground)
+                    - planet.ground_height_of(eye, Matter::All),
+                eye,
+            )
         })
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .unwrap()
@@ -40,14 +44,28 @@ fn forest(planet: &Planet) -> DVec3 {
 
 fn stat(v: &mut [f64]) -> String {
     v.sort_by(f64::total_cmp);
-    let at = |q: f64| v.get(((v.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
-    format!("p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms ({})", at(0.5), at(0.95), at(0.99), at(1.0), v.len())
+    let at = |q: f64| {
+        v.get(((v.len() as f64 - 1.0) * q).round() as usize)
+            .copied()
+            .unwrap_or(0.0)
+    };
+    format!(
+        "p50 {:.2} p95 {:.2} p99 {:.2} max {:.2} ms ({})",
+        at(0.5),
+        at(0.95),
+        at(0.99),
+        at(1.0),
+        v.len()
+    )
 }
 
 fn wait_loaded(queries: &WorldQueries) {
     let started = Instant::now();
     while queries.loading() > 0 {
-        assert!(started.elapsed() < Duration::from_secs(300), "bricks still loading");
+        assert!(
+            started.elapsed() < Duration::from_secs(300),
+            "bricks still loading"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -66,7 +84,11 @@ fn sculpt_strokes_against_queries() {
     queries.focus(1, ground, 16.0);
     let started = Instant::now();
     wait_loaded(&queries);
-    eprintln!("QUERY_EDITS {} bricks resident in {:.1} s", queries.resident(), started.elapsed().as_secs_f64());
+    eprintln!(
+        "QUERY_EDITS {} bricks resident in {:.1} s",
+        queries.resident(),
+        started.elapsed().as_secs_f64()
+    );
     for (name, op, shape, radius) in [
         ("build", BrushOp::Add, BrushShape::Cube, 6.0),
         ("dig", BrushOp::Remove, BrushShape::Sphere, 4.0),
@@ -85,7 +107,8 @@ fn sculpt_strokes_against_queries() {
                 let mut out = Vec::new();
                 while !stop.load(Ordering::Relaxed) {
                     let a = f64::from(n) * 0.37;
-                    let dir = (ahead * 8.0 + side * (a.sin() * 6.0) - up * (1.0 + a.cos())).normalize();
+                    let dir =
+                        (ahead * 8.0 + side * (a.sin() * 6.0) - up * (1.0 + a.cos())).normalize();
                     let t = Instant::now();
                     std::hint::black_box(queries.raycast(eye, dir, 14.0, Matter::All));
                     let cell = grid.locate(ground + side * a.cos() * 4.0).0;
@@ -101,9 +124,22 @@ fn sculpt_strokes_against_queries() {
         let stroke = Instant::now();
         for n in 0..20 {
             let frame = Instant::now();
-            let at = ground + side * (radius * (f64::from(n) * 0.35).sin()) + ahead * (radius * 0.1 * f64::from(n));
-            let center = if op == BrushOp::Add { at + up * (radius * 0.5) } else { at };
-            let brush = Brush { center: center.to_array(), radius, shape, op, material: 9, height: 0.0 };
+            let at = ground
+                + side * (radius * (f64::from(n) * 0.35).sin())
+                + ahead * (radius * 0.1 * f64::from(n));
+            let center = if op == BrushOp::Add {
+                at + up * (radius * 0.5)
+            } else {
+                at
+            };
+            let brush = Brush {
+                center: center.to_array(),
+                radius,
+                shape,
+                op,
+                material: 9,
+                height: 0.0,
+            };
             let t = Instant::now();
             queries.edit(&[brush]);
             calls.push(t.elapsed().as_secs_f64() * 1e3);

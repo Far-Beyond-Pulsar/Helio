@@ -77,9 +77,9 @@ const WORKGROUP_SIZE: u32 = 64;
 const PLACE_PART: u32 = 1024;
 /// Parts in a frame at most: every queued tile at the largest candidate grid.
 const MAX_PARTS: u32 = 2 * MAX_QUEUED_TILES * crate::MAX_CANDIDATES_PER_TILE.div_ceil(PLACE_PART);
-/// Bytes of a `FoliageInteractorComponent` row, and of a gathered one.
+/// Bytes of a `FoliageInteractorRow` row, and of a gathered one.
 const SOURCE_INTERACTOR_BYTES: u64 =
-    std::mem::size_of::<crate::components::FoliageInteractorComponent>() as u64;
+    std::mem::size_of::<crate::components::FoliageInteractorRow>() as u64;
 /// Bytes of a gathered interactor (`Interactor` in foliage_interactors.wgsl).
 pub const INTERACTOR_BYTES: u64 = 48;
 
@@ -120,7 +120,7 @@ pub struct FoliagePlacePass {
     /// the cull and the draw.
     pub bands_buffer: Arc<wgpu::Buffer>,
 
-    /// This frame's interactors (`FoliageInteractorComponent` rows with a radius) in
+    /// This frame's interactors (`FoliageInteractorRow` rows with a radius) in
     /// render space, for the draw: a count, then at most [`FOLIAGE_MAX_INTERACTORS`]
     /// rows of [`INTERACTOR_BYTES`] (`Interactors` in foliage_interactors.wgsl).
     pub interactors: Arc<wgpu::Buffer>,

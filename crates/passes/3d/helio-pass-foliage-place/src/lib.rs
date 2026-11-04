@@ -74,6 +74,14 @@ mod residency;
 mod uniforms;
 pub mod wind;
 
+pub use components::FoliageInteractorRow;
+pub use components::FoliageLayerRow;
+pub use components::FoliageTypeRow;
+pub use components::FoliageWindRow;
+pub use components::FOLIAGE_INTERACTORS;
+pub use components::FOLIAGE_LAYERS;
+pub use components::FOLIAGE_TYPES;
+pub use components::FOLIAGE_WIND;
 pub use frame_data::FoliageTerrainViews;
 pub use pass::{FoliagePlacePass, INTERACTOR_BYTES, MAX_FOLIAGE_LAYERS, MAX_FOLIAGE_TYPES};
 pub use reference::{

@@ -8,7 +8,7 @@
 //! ([`helio::RendererBuilder::with_scene_derivation`]). Each frame its input
 //! rows changed, the join recomputes, for every instance:
 //!
-//! - **meshes**: one `StaticObjectComponent`-shaped row and one material row
+//! - **meshes**: one `StaticObjectRow`-shaped row and one material row
 //!   per section of every placed mesh instance, published as
 //!   `"static_objects"`/`"materials"` for the object-batch, G-buffer, shadow
 //!   and virtual-geometry passes;

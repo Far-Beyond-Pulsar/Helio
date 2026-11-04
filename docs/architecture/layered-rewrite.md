@@ -374,17 +374,70 @@ Rules:
   voxel presets become a voxel-api export (phase 4).
 
 ### Phase 1: buffer contracts; components leave Helio
-- `helio-scene-input`: `BufferContract<R>`, the `SceneBuffers` projection
-  (Helio-owned type, filled by the host), `SceneDerivation` trait, ray
-  proxies, materials ABI (`helio-mats`' GPU side).
-- For each of the 31 `SceneStore` structs in Helio pass crates: the row ABI
-  becomes a contract in the owning feature's (or spine's) API crate; the
-  component itself moves to Pulsar next to helio-component's matching source
-  row, and the two collapse into one component where they duplicate.
-- Helio examples/tests switch to the test host's row writer.
-- Done when no Helio crate uses `#[derive(SceneStore)]` or
-  `pulsar_scenedb_derive`, and no crate imports `helio_pass_gbuffer` for a
-  type. Stretch: no Helio crate depends on `pulsar_scenedb`.
+What Helio's 31 `SceneStore` structs are today (measured 2026-11-01):
+- Helio's runtime code (passes, joins) uses them only as **row layouts**:
+  struct values and buffer keys. Component behaviour (World inserts,
+  `register_gpu_columns*`, var-len handles) sits in examples, tests, the wasm
+  runner, `helio::bake_scene_from_world` (only Helio examples call it) and
+  one runtime site, HLFS's `ray_tracing.rs`, which re-reads mesh pools from
+  the World.
+- Pulsar uses them as row values too: authoring components build them
+  (`to_row()`), pack them into its own `*SourceRow` components, and Helio's
+  joins write the pass buffers. Pulsar inserts a few directly
+  (`SubLevelActorComponent`, portal rows).
+
+So:
+1. **Rows and contracts in Helio.** Each struct becomes a plain
+   `#[repr(C)] Pod` row named `*Row` (`AtmosphereComponent` →
+   `AtmosphereRow`), with no `SceneStore`/`#[gpu]`, plus
+   `pub const ATMOSPHERES: BufferContract<AtmosphereRow>` in its crate.
+   `BufferContract<R>` (helio-core `scene_input`, moving with it in phase 2)
+   is the key and the row size; `resolve()` checks a buffer's `row_bytes`
+   against the row and names the contract on mismatch. Var-len data (mesh
+   vertices/indices, portal chains) gets `PoolContract<T>`. Rows keep a
+   one-line `unsafe impl pulsar_scenedb::Pod` so a component can embed them.
+2. **Components where the data is produced.**
+   - Pulsar: newtype components over the rows it inserts directly, in
+     `helio_component` (`#[repr(transparent)]`, `Deref` to the row, layout
+     equal by construction).
+   - Helio's standalone hosts (examples, demos, wasm, snapshot, tests): a
+     host-layer crate `helio-components` with the same newtypes, plus the
+     mesh/portal-chain components and `bake_scene_from_world`. Nothing below
+     the host layer may depend on it (the layer gate enforces this).
+3. **Runtime code reads contracts only.** HLFS ray tracing builds from the
+   static-object rows' own index/vertex ranges instead of re-reading mesh
+   components from the World.
+4. Unused rows are deleted (`FogComponent`, and any other with no reader).
+
+Done when `scene_store_derives` is 0, no Helio crate below the host layer
+depends on `pulsar_scenedb_derive`, and voxel_craft/voxel_flight frames
+match. Stretch (may slip to phase 2): Helio owns the projection type and
+drops `pulsar_scenedb` below the host layer.
+
+As built (2026-11-02):
+- 27 rows + contracts (`ATMOSPHERES`, `SCENE_LIGHTS`, `MATERIALS`, …), mesh
+  pools `MESH_VERTICES`/`MESH_INDICES`, `PortalChain` + its pool keys.
+  `SectionedObjectComponent` and `FogComponent` deleted (no reader).
+  `SubLevelActorRow` is not a contract (no pass reads it): it is the portal
+  resolver's CPU input, and hosts store it as a plain component.
+- `helio-components` (host layer): one component per contract, the contract
+  row's exact fields; `same_layout!` asserts size, alignment, every field
+  offset and the key at compile time, and adds `From` both ways, `Deref` to
+  the row, the row's `From` conversions and its builders returning the
+  component. Also `bake_scene_from_world`, `publish_portal_projection`,
+  `upload_scene_materials`, and the HLFS/GI ray-tracing adapter
+  (`ray_tracing`, `ray_proxies`), which read host components.
+- Pitfall: SceneDB accepts any `Send + Sync` value as a component, so
+  inserting a bare row compiles and is never mirrored. Use
+  `WorldRows::insert_row`; builders on components return components for the
+  same reason. Three examples inserted meadow rows bare, caught by audit.
+- Deleted: the hand-written removal tombstones (fog, lens, post-process).
+  `#[derive(SceneStore)]` already zeroes a component's row on removal; the
+  duplicates cost frame time.
+- Verified: every Helio target builds, layer gate clean (0 derives),
+  touched crates' tests pass except failures identical on the phase-0
+  baseline (8 fog device-limit, clouds cost, foliage on voxels, voxel graph
+  settle), voxel_craft A/B frames and run time match the baseline.
 
 ### Phase 2: split helio-core into `helio-gpu` + `helio-graph` (#1538 reshaped)
 - `helio-graph` is the statics-free crate #1538 calls `helio-pass-api`.

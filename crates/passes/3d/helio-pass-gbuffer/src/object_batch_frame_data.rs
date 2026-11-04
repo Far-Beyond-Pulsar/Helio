@@ -1,6 +1,6 @@
 //! GPU-driven static-object batch: the sorted instance/draw-call/range/
 //! shadow-partition data every geometry-drawing pass needs, all derived
-//! fresh each frame from SceneDB's [`crate::StaticObjectComponent`] rows with
+//! fresh each frame from SceneDB's [`crate::StaticObjectRow`] rows with
 //! zero per-frame CPU iteration.
 //!
 //! Produced by `helio-pass-object-batch`'s `ObjectBatchPass`, consumed by
@@ -13,7 +13,7 @@
 //!
 //! Defined here rather than in `helio-pass-object-batch` itself because that
 //! crate already depends on `helio-pass-gbuffer` for [`crate::
-//! StaticObjectComponent`]'s schema; putting the frame-data type in the
+//! StaticObjectRow`]'s schema; putting the frame-data type in the
 //! opposite direction would be a dependency cycle. `helio-pass-gbuffer`
 //! already plays this "shared contract" role for other cross-pass shapes
 //! (`helio-pass-transparent`, `helio-pass-object-batch`, and `helio-pass-
