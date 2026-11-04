@@ -208,8 +208,8 @@ impl ApplicationHandler for App {
         let format = graphics.surface_config.format;
         let mut config = RendererConfig::new(size.width, size.height, format)
             .with_render_mode(RenderMode::Deferred);
-        config.enable_foliage = foliage_enabled;
-        config.foliage_tufts_per_m2 = Some(blades_per_m2 / 8.0);
+        config.features.edit::<helio_pass_foliage_place::FoliageSettings>().enabled = foliage_enabled;
+        config.features.edit::<helio_pass_foliage_place::FoliageSettings>().tufts_per_m2 = Some(blades_per_m2 / 8.0);
 
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
@@ -219,7 +219,7 @@ impl ApplicationHandler for App {
         // scene content -- the pass owns these schemas and its GPU mirror
         // publishes insert/mutate/remove through the World.
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let builder = RendererBuilder::new(config, scene_db_handle(&scene_db))
+        let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(build_default_graph_external_with_context));
         let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
         let xr_active = graphics.is_xr();

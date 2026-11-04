@@ -256,7 +256,7 @@ impl ApplicationHandler for App {
             // keeps the half-space in front of this inward-facing normal.
             // Each peer retains its own physical orientation; recursion does
             // not rely on a hidden continuation marker.
-            let pose = helio::portal_pose_facing(normal * HALF_SIZE, -normal, up);
+            let pose = helio_pass_portal_cull::portal_pose_facing(normal * HALF_SIZE, -normal, up);
             let entity = authored_portal_entities[i];
             let component = PortalComponent::from(helio_pass_portal_cull::PortalRow::new(
                 Some(authored_portal_entities[opposite_face[i]]),
@@ -324,7 +324,7 @@ impl ApplicationHandler for App {
             projection_entities[0],
         )
         .expect("portal_cube dense projection rows");
-        renderer.set_portal_projection_frame(&projection_frame);
+        helio_default_passes::portals::set_projection_frame(&mut renderer, &projection_frame);
 
         // ── A light near the center so every wall reads, plus one per
         // doorway direction so the receding reflections don't go flat black.
@@ -587,7 +587,7 @@ impl AppState {
                         self.portal_projection_entities[0],
                     )
                     .expect("portal_cube visible projection rows");
-                    self.renderer.set_portal_projection_frame(&projection_frame);
+                    helio_default_passes::portals::set_projection_frame(&mut self.renderer, &projection_frame);
                 } else {
                     log::warn!(
                         "[portal_cube] visible projection rows exceed dense row arena: views={} chains={} capacity={}",

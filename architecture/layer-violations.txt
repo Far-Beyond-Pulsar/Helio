@@ -1,15 +1,5 @@
 # Layer violations that exist today (scripts/architecture/check_layers.py).
 # This list may only shrink. Do not add to it: fix the dependency.
-helio -> helio-bake  (renderer -> feature)
-helio -> helio-pass-billboard  (renderer -> feature)
-helio -> helio-pass-corona  (renderer -> feature)
-helio -> helio-pass-foliage-place  (renderer -> feature)
-helio -> helio-pass-portal-cull  (renderer -> feature)
-helio -> helio-pass-portal-instances  (renderer -> feature)
-helio -> helio-pass-sky  (renderer -> feature)
-helio -> helio-pass-volumetric-fog  (renderer -> feature)
-helio -> helio-vg-format  (renderer -> feature)
-helio -> helio-vg-stream  (renderer -> feature)
 helio-pass-deferred-light -> helio-pass-gi  (spine -> feature)
 helio-pass-deferred-light -> helio-pass-sky  (spine -> feature)
 helio-pass-gi -> helio-pass-sky  (feature -> feature)

@@ -9,6 +9,7 @@ default = ["gpu"]
 gpu = []
 
 [dependencies]
+helio-settings = { workspace = true }
 pulsar_reflection = { workspace = true }
 glam = { workspace = true }
 helio-core = { workspace = true }

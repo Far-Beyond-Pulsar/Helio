@@ -302,11 +302,23 @@ impl Showcase {
             Box::new(pass)
         });
         let mut renderer_config = RendererConfig::new(size[0], size[1], format);
-        renderer_config.enable_foliage = true;
-        renderer_config.foliage_tufts_per_m2 = Some(meadow.tufts_per_m2 * 1.4);
-        renderer_config.foliage_blades_per_tuft = Some(meadow.blades_per_tuft);
-        renderer_config.foliage_range = Some(meadow.range * 1.5);
-        let mut renderer = RendererBuilder::new(renderer_config, mirror)
+        renderer_config
+            .features
+            .edit::<helio_pass_foliage_place::FoliageSettings>()
+            .enabled = true;
+        renderer_config
+            .features
+            .edit::<helio_pass_foliage_place::FoliageSettings>()
+            .tufts_per_m2 = Some(meadow.tufts_per_m2 * 1.4);
+        renderer_config
+            .features
+            .edit::<helio_pass_foliage_place::FoliageSettings>()
+            .blades_per_tuft = Some(meadow.blades_per_tuft);
+        renderer_config
+            .features
+            .edit::<helio_pass_foliage_place::FoliageSettings>()
+            .range = Some(meadow.range * 1.5);
+        let mut renderer = RendererBuilder::new(renderer_config.clone(), mirror)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
                 build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])

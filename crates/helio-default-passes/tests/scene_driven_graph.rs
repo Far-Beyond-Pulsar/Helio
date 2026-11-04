@@ -129,17 +129,21 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
     let mut scene = scene_db(&device, &queue);
     floor(&mut scene.world);
     let mut config = RendererConfig::new(64, 48, wgpu::TextureFormat::Rgba8UnormSrgb);
-    config.enable_foliage = false;
-    let mut renderer = RendererBuilder::new(config, scene.world.gpu_mirror().cloned().unwrap())
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-        .with_external_device()
-        .build(
-            device.clone(),
-            queue.clone(),
-            config.width,
-            config.height,
-            config.surface_format,
-        );
+    config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = false;
+    let mut renderer =
+        RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_external_device()
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
     let camera = Camera::perspective_look_at(
         Vec3::new(0.0, 3.0, 6.0),
         Vec3::ZERO,

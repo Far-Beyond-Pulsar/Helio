@@ -81,8 +81,11 @@ fn view(width: u32, height: u32, ground: bool) -> Option<View> {
         Vec::new()
     };
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
-    config.enable_foliage = false;
-    let mut renderer = RendererBuilder::new(config, mirror)
+    config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = false;
+    let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.0; 3], 0.0)
         .with_external_device()
         .with_pass_build_context(Box::new(move |ctx| {

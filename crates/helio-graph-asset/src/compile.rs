@@ -166,6 +166,7 @@ pub fn build_env<'e>(ctx: &PassBuildContext<'e>) -> BuildEnv<'e> {
         ctx.cull_stats_buffer,
         ctx.owns_device,
     )
+    .with_feature_settings(&ctx.config.features)
     .with_setting(ctx.config.clone())
     .with_setting(ctx.debug_state.clone())
     .with_setting(ctx.scene_db.clone())

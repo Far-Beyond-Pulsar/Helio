@@ -9,10 +9,11 @@ license = "MIT OR Apache-2.0"
 default = ["gpu"]
 # `#[derive(SceneStore)]` checks the deriving crate's own `gpu` feature.
 gpu = []
-bake = ["helio/bake"]
+bake = ["dep:helio-bake"]
 
 [dependencies]
 helio = { path = "../helio" }
+helio-bake = { path = "../helio-bake", optional = true }
 helio-core = { workspace = true }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
@@ -45,4 +46,5 @@ helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 
 [dev-dependencies]
-helio = { path = "../helio", features = ["bake"] }
+helio = { path = "../helio" }
+helio-bake = { path = "../helio-bake" }

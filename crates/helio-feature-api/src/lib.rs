@@ -9,6 +9,7 @@
 mod feature;
 mod pins;
 mod registry;
+mod settings;
 
 pub use feature::{ContractUse, Feature, FeatureRegistrar, FeatureSet};
 pub use pins::{PinDesc, PinKind, PinShape, PinType};
@@ -16,3 +17,4 @@ pub use registry::{
     BuildEnv, BuildFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry,
     ParamDesc, ParamType, Params, PinTable, PinsFn,
 };
+pub use settings::FeatureSettings;

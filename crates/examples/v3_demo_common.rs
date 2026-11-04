@@ -342,7 +342,7 @@ pub fn build_default_renderer(
     config: RendererConfig,
 ) -> Renderer {
     let graph_scene_db = scene_db_handle(scene_db);
-    RendererBuilder::new(config, graph_scene_db.clone())
+    RendererBuilder::new(config.clone(), graph_scene_db.clone())
         .with_external_device()
         .with_pass_build_context(Box::new(
             helio_default_passes::build_default_graph_external_with_context,
@@ -363,7 +363,7 @@ pub fn build_default_renderer_with_context(
     graphics: &mut helio::HelioGraphicsContext<'_>,
     config: RendererConfig,
 ) -> Renderer {
-    let builder = RendererBuilder::new(config, scene_db_handle(scene_db)).with_pass_build_context(
+    let builder = RendererBuilder::new(config.clone(), scene_db_handle(scene_db)).with_pass_build_context(
         Box::new(helio_default_passes::build_default_graph_external_with_context),
     );
     graphics

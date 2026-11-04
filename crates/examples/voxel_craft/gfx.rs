@@ -446,12 +446,12 @@ impl Gfx {
         };
         // The meadow, grown on the terrain the planet pass draws
         // (`VOXEL_CRAFT_NO_FOLIAGE`: bare turf, for A/B measurements).
-        renderer_config.enable_foliage = std::env::var_os("VOXEL_CRAFT_NO_FOLIAGE").is_none();
-        renderer_config.foliage_tufts_per_m2 = Some(meadow.tufts_per_m2);
-        renderer_config.foliage_blades_per_tuft = Some(meadow.blades_per_tuft);
-        renderer_config.foliage_range = Some(meadow.range);
+        renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().enabled = std::env::var_os("VOXEL_CRAFT_NO_FOLIAGE").is_none();
+        renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().tufts_per_m2 = Some(meadow.tufts_per_m2);
+        renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().blades_per_tuft = Some(meadow.blades_per_tuft);
+        renderer_config.features.edit::<helio_pass_foliage_place::FoliageSettings>().range = Some(meadow.range);
         let handle = scene_db_handle(&scene);
-        let builder = RendererBuilder::new(renderer_config, handle).with_pass_build_context(
+        let builder = RendererBuilder::new(renderer_config.clone(), handle).with_pass_build_context(
             Box::new(move |ctx| {
                 build_default_graph_external_with_voxel_passes(ctx, vec![factory.clone()])
             }),

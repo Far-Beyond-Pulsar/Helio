@@ -220,25 +220,24 @@ pub fn publish_portal_projection(
     Ok(())
 }
 
-/// Project a SceneDB world into the [`helio::SceneGeometry`] a bake reads
+/// Project a SceneDB world into the [`helio_bake::SceneGeometry`] a bake reads
 /// (Helio#256): every drawn object (`StaticObjectRow` and the
 /// `MeshComponent` it references, in world space) and every live light
 /// (`LightRow`). This is the explicit CPU projection
-/// [`helio::Renderer::set_bake_scene`] takes; the renderer itself never traverses
-/// scene entities.
+/// [`bake`] takes; the renderer itself never traverses scene entities.
 ///
-/// Call it after the scene is populated and before
-/// [`helio::Renderer::auto_bake`]. Objects whose mesh row is gone (a stale
+/// Call it after the scene is populated, and hand the result to [`bake`]. Objects whose mesh row is gone (a stale
 /// generation) are skipped.
 #[cfg(feature = "bake")]
-pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> helio::SceneGeometry {
-    use helio::{GpuLight, LightSource, LightSourceKind, LightType, MeshUpload};
+pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> helio_bake::SceneGeometry {
+    use helio::{GpuLight, LightType, MeshUpload};
+    use helio_bake::{LightSource, LightSourceKind};
 
     let meshes: std::collections::HashMap<u32, (u32, &MeshComponent)> = world
         .query::<&MeshComponent>()
         .map(|(entity, mesh)| (entity.index(), (entity.generation(), mesh)))
         .collect();
-    let mut scene = helio::SceneGeometry::new();
+    let mut scene = helio_bake::SceneGeometry::new();
     for (_, object) in world.query::<&StaticObjectComponent>() {
         let Some(&(generation, mesh)) = meshes.get(&object.mesh_slot) else {
             continue;
@@ -252,7 +251,7 @@ pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> helio::SceneGeome
             indices: mesh.indices.clone(),
         };
         let transform = glam::Mat4::from_cols_array_2d(&object.transform);
-        scene.add_mesh(helio::mesh_upload_to_bake(
+        scene.add_mesh(helio_bake::mesh_upload_to_bake(
             &upload,
             transform,
             Some(object.mesh_slot),
@@ -302,7 +301,8 @@ pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> helio::SceneGeome
 #[cfg(all(test, feature = "bake"))]
 mod bake_scene_tests {
     use super::*;
-    use helio::{GpuLight, LightSourceKind, LightType, PackedVertex};
+    use helio::{GpuLight, LightType, PackedVertex};
+    use helio_bake::LightSourceKind;
     use helio_pass_forward_lit::LightRow;
     use helio_pass_gbuffer::StaticObjectRow;
 
@@ -385,4 +385,33 @@ mod bake_scene_tests {
             "GpuLight::default() requests no shadow"
         );
     }
+}
+
+/// Bake `scene` now (blocking) and keep the result rendered: the bake's
+/// inject pass is a persistent pass, so it survives graph rebuilds.
+#[cfg(feature = "bake")]
+pub fn bake(
+    renderer: &mut helio::Renderer,
+    scene: helio_bake::SceneGeometry,
+    config: helio_bake::BakeConfig,
+) -> Result<(), helio_bake::BakeError> {
+    let started = std::time::Instant::now();
+    let (objects, lights) = (scene.meshes.len(), scene.lights.len());
+    let baked = std::sync::Arc::new(helio_bake::run_bake_blocking(
+        renderer.device(),
+        renderer.queue(),
+        &scene,
+        &config,
+    )?);
+    log::info!(
+        "[helio-bake] bake of '{}' done in {:.2}s: {objects} objects, {lights} lights",
+        config.scene_name,
+        started.elapsed().as_secs_f32(),
+    );
+    renderer.install_persistent_pass(std::sync::Arc::new(move || {
+        Box::new(helio_bake::BakeInjectPass::new(std::sync::Arc::clone(
+            &baked,
+        )))
+    }));
+    Ok(())
 }

@@ -1035,7 +1035,7 @@ impl ApplicationHandler for App {
         }));
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let builder = RendererBuilder::new(config, scene_db_handle(&scene_db))
+        let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(|ctx| {
                 build_default_graph_with_user_effects_with_context(ctx, VHS_SHADER_SNIPPET)
             }));

@@ -263,7 +263,8 @@ path = "vr/main.rs"
 [dependencies]
 helio-components = { path = "../helio-components", features = ["bake"] }
 profiling = { workspace = true }
-helio = { workspace = true, features = ["bake"] }
+helio = { workspace = true }
+helio-bake = { path = "../helio-bake" }
 helio-core = { workspace = true }
 helio-vg-build = { path = "../helio-vg-build" }
 helio-vg-format = { workspace = true }
