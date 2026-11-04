@@ -15,7 +15,8 @@
 //! Sources go through `helio_core::shader::resolve_with` first — the same call
 //! (modulo which snippets a given pass registers) the runtime makes — so a
 //! prelude/snippet-using shader is validated as the GPU will see it, not as
-//! the bare file on disk. The snippet list here (HIZ, PBR, the frame's sky) is this
+//! the bare file on disk. The snippet list here (HIZ, PBR, the frame's sky and
+//! view remaps) is this
 //! test's own aggregation of every pass-owned snippet in the workspace, not
 //! something `helio-core` itself knows about — `resolve_with` never fails
 //! for a marker with no matching snippet, so listing all of them here is
@@ -30,6 +31,7 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_frame_api::lighting::sky::ATMOSPHERE_SNIPPET,
     helio_frame_api::lighting::sky::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
+    helio_frame_api::lighting::VIEW_REMAP_SNIPPET,
     helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
 ];
 
@@ -115,18 +117,26 @@ fn is_composed(path: &Path) -> bool {
 /// same way the pass does, so they are validated as the GPU sees them.
 fn compose(root: &Path, path: &Path, source: String) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
-    // `SceneJoin` and `EnvironmentJoin` prefix the shared join declarations.
+    // The scene derivations prefix the shared join declarations
+    // (`helio_scene_join::join_source`), wherever their crate keeps them:
+    // the hierarchy resolve, the row join, and each kind's own join.
     const JOINS: &[&str] = &[
-        "helio-scene-derivations/shaders/scene_join_meshes.wgsl",
-        "helio-scene-derivations/shaders/scene_join_lights.wgsl",
-        "helio-scene-derivations/shaders/environment_join.wgsl",
-        "helio-scene-derivations/shaders/hierarchy_resolve.wgsl",
-        "helio-scene-derivations/shaders/scene_join_moved.wgsl",
+        "hierarchy_resolve.wgsl",
+        "row_join.wgsl",
+        "scene_join_lights.wgsl",
+        "scene_join_meshes.wgsl",
+        "scene_join_moved.wgsl",
     ];
-    if JOINS.iter().any(|suffix| normalized.ends_with(suffix)) {
-        let common = root.join("crates/helio-scene-derivations/shaders/scene_join_common.wgsl");
-        let common = std::fs::read_to_string(common).expect("scene_join_common.wgsl");
-        return format!("{common}\n{source}");
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| JOINS.contains(&name))
+    {
+        return helio_scene_join::join_source(&source);
+    }
+    // The tone map prefixes the post settings' declarations.
+    if normalized.ends_with("helio-pass-postprocess/shaders/postprocess.wgsl") {
+        return helio_pass_postprocess::with_post_settings(&source);
     }
     // The depth passes prefix the alpha-tested depth material's declarations
     // (`helio_pass_gbuffer::depth_material::DepthMaterialBindings::shader_source`).

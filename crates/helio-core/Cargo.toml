@@ -31,6 +31,8 @@ helio-pass-hiz = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
 helio-frame-api = { path = "../helio-frame-api" }
 helio-scene-derivations = { workspace = true }
+helio-scene-join = { workspace = true }
+helio-pass-postprocess = { workspace = true }
 
 [features]
 default = ["profiling", "shader-hot-reload"]
