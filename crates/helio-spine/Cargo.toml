@@ -10,11 +10,7 @@ license = "MIT OR Apache-2.0"
 helio-frame-api = { path = "../helio-frame-api" }
 helio-core = { workspace = true }
 helio-feature-api = { path = "../helio-feature-api" }
-pulsar_scenedb = { workspace = true }
 wgpu = { workspace = true }
-helio-pass-shadow-matrix = { path = "../passes/3d/helio-pass-shadow-matrix" }
 helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
-helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
-helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-tsr = { workspace = true }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }

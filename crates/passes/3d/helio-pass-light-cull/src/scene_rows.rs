@@ -1,7 +1,7 @@
 //! The lights' scene rows: one `GpuLight` row per placed light instance,
 //! positioned and oriented by its owner, published as the frame's light list
-//! (`helio_frame_api::lighting::LIGHT_LIST`), with its directional light
-//! (`helio_frame_api::lighting::DIRECTIONAL_LIGHT`); and, in editor mode, a
+//! ([`crate::LIGHT_LIST`]), with its directional light
+//! ([`crate::DIRECTIONAL_LIGHT`]); and, in editor mode, a
 //! billboard per light as `"billboard_instances"`. A light is placed when it
 //! is attached, enabled, and its owner current and visible.
 
@@ -17,9 +17,9 @@ const LIGHT_ROW_BYTES: u64 = 128;
 const BILLBOARD_ROW_BYTES: u64 = 48;
 const WORKGROUP: u32 = 64;
 
-pub const LIGHTS_KEY: BufferKey = BufferKey::of(helio_frame_api::lighting::LIGHT_LIST);
+pub const LIGHTS_KEY: BufferKey = BufferKey::of(crate::LIGHT_LIST);
 pub const DIRECTIONAL_LIGHT_KEY: BufferKey =
-    BufferKey::of(helio_frame_api::lighting::DIRECTIONAL_LIGHT);
+    BufferKey::of(crate::DIRECTIONAL_LIGHT);
 pub const BILLBOARDS_KEY: BufferKey = BufferKey::of("billboard_instances");
 
 /// The light join's shader as compiled (shader validation without a device).

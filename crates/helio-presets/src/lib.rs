@@ -62,6 +62,7 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
     use helio_core::graph::type_name_of as name;
     helio_core::SwapPolicy::new()
         .independent::<BackgroundPass>()
+        .independent::<helio_spine::UnlitPass>()
         .independent::<LightCullPass>()
         .independent::<SsrPass>()
         .independent::<helio_pass_ssr::SsrCompositePass>()

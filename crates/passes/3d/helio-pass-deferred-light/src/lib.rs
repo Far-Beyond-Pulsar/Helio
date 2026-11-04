@@ -10,13 +10,16 @@ use helio_frame_api::lighting::sky::{
 };
 use helio_frame_api::lighting::{
     DIRECTIONAL_VISIBILITY, ENVIRONMENT_CUBES, ENVIRONMENT_CUBES_SAMPLER, ENVIRONMENT_PROBES,
-    INDIRECT_DIFFUSE, INDIRECT_SPECULAR_LAYERS, LIGHT_LIST, SUN_VISIBILITY, TRANSMISSION,
+    INDIRECT_DIFFUSE, INDIRECT_SPECULAR_LAYERS, SUN_VISIBILITY, TRANSMISSION,
     VIEW_REMAPS, VIEW_REMAPS_BYTES, VIEW_REMAP_SNIPPET,
 };
+use helio_pass_light_cull::LIGHT_LIST;
 use pulsar_scenedb::gpu::BufferKey;
 
 mod components;
+pub mod feature;
 pub mod gpu_types;
+pub use feature::DeferredLightingFeature;
 pub use components::REFLECTION_CAPTURES;
 pub use components::{ReflectionCaptureRow, MAX_REFLECTION_CAPTURES};
 pub use gpu_types::*;

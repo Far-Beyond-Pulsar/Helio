@@ -5,6 +5,11 @@ edition = "2021"
 
 [dependencies]
 helio-core = { workspace = true }
+helio-feature-api = { path = "../../../helio-feature-api" }
+helio-frame-api = { path = "../../../helio-frame-api" }
+helio-pass-light-cull = { workspace = true }
+helio-settings = { workspace = true }
+pulsar_scenedb = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 

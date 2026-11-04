@@ -4,6 +4,10 @@ use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Resul
 pub mod gpu_types;
 pub use gpu_types::*;
 pub mod budget;
+pub mod feature;
+pub mod settings;
+pub use feature::ShadowViewsFeature;
+pub use settings::SHADOWS;
 pub mod sun_occlusion;
 pub use budget::*;
 pub use sun_occlusion::*;

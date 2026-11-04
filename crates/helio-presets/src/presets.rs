@@ -26,7 +26,7 @@ use helio::{IntoGraph, PassBuildContext, RendererConfig};
 use helio_core::RenderGraph;
 use helio_feature_api::ExtensionPoint;
 use helio_frame_api::color::ReactiveMask;
-use helio_frame_api::lighting::{InputsOrder, SpecularLayers};
+use helio_frame_api::lighting::{InputsOrder, LightingModel, SpecularLayers};
 use helio_frame_api::{Phase, PhaseList, Slot, HOST_INPUTS};
 use helio_graph_asset::{
     core_nodes, Connection, GraphAsset, GraphAssetPipeline, NodeInstance, NodeRegistry, Params,
@@ -34,7 +34,7 @@ use helio_graph_asset::{
 };
 use serde_json::Value;
 
-use crate::features::{kind, SceneColorFormat};
+use crate::features::kind;
 
 /// One of Helio's shipped pipelines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -127,6 +127,15 @@ impl Preset {
         }
     }
 
+    /// The lighting model the preset resolves its G-buffer with.
+    fn lighting_model(self) -> LightingModel {
+        match self {
+            Preset::Forward | Preset::Simple => LightingModel::Forward,
+            _ if self.hlfs() => LightingModel::LightField,
+            _ => LightingModel::Deferred,
+        }
+    }
+
     /// Where the preset's lighting inputs run: after the forward phase,
     /// which lit the scene, or before the lighting.
     fn inputs_order(self) -> InputsOrder {
@@ -151,18 +160,16 @@ impl Preset {
         let aa = self.aa(config);
 
         // Scene prep: per-frame tables (an object kind's batches first), the
-        // lights' shadow views and what casts into them, the background,
-        // visibility against the depth pyramid.
+        // shadow views and what casts into them (the phase's compute and
+        // drawers), the background, visibility against the depth pyramid
+        // (a kind's culling, the lights' binning).
         nodes.slot(Slot::Prepare);
-        nodes.pass("shadow_matrix");
         nodes.phase(Phase::ShadowCasters);
         nodes.pass("background");
         nodes.slot(Slot::Visibility);
-        if !self.hlfs() {
-            nodes.pass("light_cull");
-        }
 
-        // Geometry and lighting.
+        // Geometry and lighting: the forward phase draws lit; otherwise the
+        // G-buffer is resolved by the installed lighting model, or unlit.
         if self == Preset::Forward {
             nodes.phase(Phase::Forward);
             nodes.slot(Slot::LightingInputs);
@@ -170,7 +177,7 @@ impl Preset {
             nodes.phase(Phase::GBuffer);
             nodes.slot(Slot::Geometry);
             nodes.slot(Slot::LightingInputs);
-            nodes.pass(if self.hlfs() { "hlfs" } else { "deferred_light" });
+            nodes.lighting_model(self.lighting_model());
         }
         nodes.slot(Slot::Lighting);
 
@@ -240,10 +247,7 @@ impl Preset {
                     .require::<RendererConfig>()
                     .expect("a renderer build supplies its config")
                     .clone();
-                if self.hlfs() {
-                    let format = helio_pass_hlfs::HlfsPass::preferred_output_format(env.device);
-                    env.insert_setting(SceneColorFormat(format));
-                }
+                env.insert_setting(self.lighting_model());
                 env.insert_setting(PhaseList(self.phases()));
                 env.insert_setting(self.specular_layers());
                 env.insert_setting(self.inputs_order());
@@ -402,6 +406,19 @@ impl Nodes<'_> {
 
     fn slot(&mut self, slot: Slot) {
         self.at(slot.point());
+    }
+
+    /// The lighting model's nodes, or the spine's unlit stand-in when none
+    /// is installed (the preset still shows its surfaces, unlit).
+    fn lighting_model(&mut self, model: LightingModel) {
+        let Some(point) = model.point() else {
+            return;
+        };
+        if self.registry.placed(point).is_empty() {
+            self.pass("unlit");
+        } else {
+            self.at(point);
+        }
     }
 
     /// A draw phase: the compute it needs first, the drawer that opens it,

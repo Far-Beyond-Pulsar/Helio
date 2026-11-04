@@ -272,7 +272,7 @@ unsafe impl pulsar_scenedb::Pod for LightRow {}
 /// The buffer the renderer reads [`LightRow`]s from. Engines produce it
 /// (a SceneDB component stored under this key, or a scene derivation).
 pub const SCENE_LIGHTS: helio_core::BufferContract<LightRow> =
-    helio_core::BufferContract::new("scene_lights");
+    helio_core::BufferContract::new(crate::LIGHT_LIST);
 
 impl From<GpuLight> for LightRow {
     fn from(value: GpuLight) -> Self {

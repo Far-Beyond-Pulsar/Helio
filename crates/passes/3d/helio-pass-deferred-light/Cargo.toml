@@ -11,6 +11,8 @@ pulsar_reflection = { workspace = true }
 helio-core  = { workspace = true }
 helio-mats  = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
+helio-pass-light-cull = { workspace = true }
+helio-feature-api = { path = "../../../helio-feature-api" }
 helio-frame-api = { path = "../../../helio-frame-api" }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }

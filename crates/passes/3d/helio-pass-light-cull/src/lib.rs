@@ -10,7 +10,9 @@
 //! These buffers are published into `ResourceRegistry` so `DeferredLightPass` can
 //! skip every light that doesn't touch the current pixel's tile.
 
+pub mod feature;
 pub mod scene_rows;
+pub use feature::LightCullFeature;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::ResourceBuilder;
@@ -21,6 +23,17 @@ pub use gpu_types::*;
 pub mod light;
 pub use light::{GpuLight, LightRow, LightType, SCENE_LIGHTS};
 use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKey};
+
+/// The scene's lights, the lights' contract: SceneDB rows ([`GpuLight`]),
+/// whatever kinds of light are published. What shades against lights reads
+/// them here, never by a name of its own.
+pub const LIGHT_LIST: &str = "scene_lights";
+
+/// The lights' directional light (the sun of what reads one: water, media):
+/// one SceneDB row, a `vec4<f32>`, the unit direction toward the light and
+/// 1, published with the light list ([`scene_rows`]). Zero, or absent: no
+/// directional light.
+pub const DIRECTIONAL_LIGHT: &str = "directional_light";
 
 pub const TILE_SIZE: u32 = 16;
 pub const MAX_LIGHTS_PER_TILE: u32 = 64;
