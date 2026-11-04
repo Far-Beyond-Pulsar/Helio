@@ -338,10 +338,9 @@ mod tests {
             .map(|i| flat.nodes[*i].id.as_str())
             .collect();
         let at = |id: &str| ids.iter().position(|k| *k == id).unwrap();
-        assert!(at("start") < at("object_batch"));
-        assert!(at("shadow_matrix") < at("shadow_dirty") && at("shadow_dirty") < at("shadow"));
-        assert!(at("hiz") < at("occlusion_cull"));
-        assert!(at("gbuffer") < at("deferred_light"));
+        assert!(at("start") < at("shadow_matrix"));
+        assert!(at("shadow_matrix") < at("background") && at("background") < at("hiz"));
+        assert!(at("hiz") < at("deferred_light"));
         assert!(at("deferred_light") < at("post_process"));
         // The execution chain — the nodes with flow pins — ends at the Output; the
         // host declarations are data-only nodes and build after the chain.
@@ -390,24 +389,21 @@ mod tests {
         probe.nodes.insert(
             kind("hiz"),
             pins(
-                // Hi-Z reads last frame's depth, which the GBuffer writes later.
+                // Hi-Z reads last frame's depth, which the lighting reads later.
                 vec![PinDesc::resource(PinType::DEPTH, "depth").history()],
                 vec![output_pin(PinType::TEXTURE, "hiz")],
             ),
         );
         probe.nodes.insert(
-            kind("gbuffer"),
+            kind("deferred_light"),
             pins(
                 vec![
                     PinDesc::resource(PinType::BUFFER, format!("{SCENEDB_PREFIX}materials")),
                     PinDesc::resource(PinType::SCENE, "material_textures"),
+                    PinDesc::resource(PinType::TEXTURE, "hiz"),
                 ],
                 vec![output_pin(PinType::DEPTH, "depth")],
             ),
-        );
-        probe.nodes.insert(
-            kind("occlusion_cull"),
-            pins(vec![PinDesc::resource(PinType::TEXTURE, "hiz")], vec![]),
         );
         probe.scene_buffers = vec!["materials".into()];
         apply_probe(&mut registry, &probe);
@@ -428,27 +424,27 @@ mod tests {
         // A pass reads through its own Get and writes through its own Set; nothing is
         // wired from one pass to another.
         assert!(has(
-            ("get:hiz@occlusion_cull", "hiz"),
-            ("occlusion_cull", "hiz")
+            ("get:hiz@deferred_light", "hiz"),
+            ("deferred_light", "hiz")
         ));
         assert!(has(("hiz", "out_hiz"), ("set:hiz@hiz", "hiz")));
         assert!(has(("get:depth@hiz", "depth"), ("hiz", "depth")));
         assert!(has(
-            ("gbuffer", "out_depth"),
-            ("set:depth@gbuffer", "depth")
+            ("deferred_light", "out_depth"),
+            ("set:depth@deferred_light", "depth")
         ));
         assert!(has(
-            ("get:scenedb.materials@gbuffer", "scenedb.materials"),
-            ("gbuffer", "scenedb.materials")
+            ("get:scenedb.materials@deferred_light", "scenedb.materials"),
+            ("deferred_light", "scenedb.materials")
         ));
         // Nothing is wired from one pass to another but the chain's flow wire.
         assert!(all
             .iter()
-            .filter(|c| c.from.node == "hiz" && c.to.node == "occlusion_cull")
+            .filter(|c| c.from.node == "hiz" && c.to.node == "deferred_light")
             .all(|c| c.from.pin == "out" && c.to.pin == "in"));
 
-        // The buffers resolve: occlusion cull reads what Hi-Z set, and Hi-Z reads the
-        // depth the GBuffer sets later in the frame (history).
+        // The buffers resolve: the lighting reads what Hi-Z set, and Hi-Z reads
+        // the depth the lighting sets later in the frame (history).
         let validation = validate(&asset, &registry);
         assert!(
             validation
@@ -465,10 +461,10 @@ mod tests {
                 to: PinRef::new(to.0, to.1),
             })
         };
-        assert!(flat_has(("hiz", "out_hiz"), ("occlusion_cull", "hiz")));
-        assert!(flat_has(("gbuffer", "out_depth"), ("hiz", "depth")));
+        assert!(flat_has(("hiz", "out_hiz"), ("deferred_light", "hiz")));
+        assert!(flat_has(("deferred_light", "out_depth"), ("hiz", "depth")));
         // The execution chain runs from On Frame Start through the sections.
-        assert!(flat_has(("start", "out"), ("object_batch", "in")));
+        assert!(flat_has(("start", "out"), ("shadow_matrix", "in")));
 
         // A Get sits left of the pass that reads it, a Set right of the pass that writes.
         let x = |id: &str| {
@@ -480,7 +476,7 @@ mod tests {
                 .unwrap()
                 .position[0]
         };
-        assert!(x("get:scenedb.materials@gbuffer") < x("gbuffer"));
-        assert!(x("set:depth@gbuffer") > x("gbuffer"));
+        assert!(x("get:scenedb.materials@deferred_light") < x("deferred_light"));
+        assert!(x("set:depth@deferred_light") > x("deferred_light"));
     }
 }

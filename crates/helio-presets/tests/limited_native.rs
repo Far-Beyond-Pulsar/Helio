@@ -197,21 +197,13 @@ async fn run_default_graph(
         .expect("the complete selected-tier default graph must render");
 
     if label == "Budgeted shadows" {
+        // Frames for the shadow views to page their requests in (what casts
+        // into them, and its update budget, is the meshes plugin's test).
         for _ in 0..16 {
             device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
             renderer
                 .render(&camera, &target_view)
                 .expect("budgeted shadow frame");
-            let (updates, texels) = renderer
-                .find_pass::<helio_pass_shadow::ShadowPass>()
-                .unwrap()
-                .last_update_work();
-            let budget = config
-                .features
-                .get_or_default::<helio_pass_shadow_matrix::ShadowSettings>()
-                .budget;
-            assert!(updates <= budget.updates_per_frame);
-            assert!(texels <= budget.update_texels_per_frame);
         }
     }
 
@@ -271,9 +263,7 @@ fn scene_db_with_gpu_mirror(
             max_cells_metadata: 0,
         },
     );
-    helio_components::MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
     helio_components::MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
-    helio_components::StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
     helio_components::LightComponent::register_gpu_columns_growable(
         &mut store,
         helio_pass_light_cull::MAX_LIGHTS,

@@ -1,4 +1,4 @@
-//! The default graph follows the scene: in a mesh room with no
+//! The default graph follows the scene: in an empty scene with no
 //! billboards and no debug mode, those passes are dormant (no prepare, no
 //! execute, no content resources). Each joins when its content appears: a
 //! debug line, a debug view, a billboard row in a column the host registered
@@ -6,12 +6,11 @@
 
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig,
 };
 use helio_components::BillboardComponent;
-use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
 
 /// Passes that need scene content or a debug mode the room does not have.
 const CONTENT_PASSES: &[&str] = &[
@@ -34,9 +33,6 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
             max_cells_metadata: 0,
         },
     );
-    MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
-    MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
-    StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
     // Registered before any billboard exists, as editors do: the column's
     // presence alone must not wake the billboard pass.
     BillboardComponent::register_gpu_columns_growable(&mut store, 64, device);
@@ -47,53 +43,6 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
             queue.clone(),
         ));
     scene_db
-}
-
-/// A floor slab.
-fn floor(world: &mut pulsar_scenedb::World) {
-    let half = Vec3::new(5.0, 0.25, 5.0);
-    let mut vertices = Vec::new();
-    let mut indices = Vec::new();
-    for (a, b) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-        vertices.push(helio_mesh_api::PackedVertex::from_components(
-            [a * half.x, half.y, b * half.z],
-            [0.0, 1.0, 0.0],
-            [0.0; 2],
-            [1.0, 0.0, 0.0],
-            1.0,
-        ));
-    }
-    indices.extend_from_slice(&[0, 2, 1, 0, 3, 2]);
-    let mesh = world.spawn();
-    world.insert(mesh, MeshComponent { vertices, indices });
-    let material = world.spawn();
-    let row = MaterialComponent::from(helio_mats::MaterialRow::new(
-        [0.7, 0.7, 0.7, 1.0],
-        0.8,
-        0.0,
-        [0.0; 3],
-        0.0,
-    ));
-    world.insert(material, row);
-    let store = world.gpu_mirror().cloned().unwrap();
-    let vertex_range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
-    let index_range = MeshComponent::indices_gpu_handle(store.store(), mesh.index()).unwrap();
-    let object = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
-        mesh.index(),
-        mesh.generation().wrapping_add(1),
-        material.index(),
-        material.generation().wrapping_add(1),
-        Mat4::IDENTITY,
-        [0.0, 0.0, 0.0, half.length()],
-        index_range.count,
-        index_range.offset,
-        vertex_range.offset as i32,
-        row.material_class,
-        0,
-        0,
-    ));
-    let entity = world.spawn();
-    world.insert(entity, object);
 }
 
 #[test]
@@ -117,7 +66,6 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
     let (device, queue) = (Arc::new(device), Arc::new(queue));
     let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut scene = scene_db(&device, &queue);
-    floor(&mut scene.world);
     let config = RendererConfig::new(64, 48, wgpu::TextureFormat::Rgba8UnormSrgb);
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
@@ -179,7 +127,7 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
             renderer.graph_members()
         );
     }
-    assert!(has(&renderer, "GBuffer") && has(&renderer, "PostProcess"));
+    assert!(has(&renderer, "PostProcess"));
 
     // A debug line wakes the user debug draw.
     renderer.debug_line(Vec3::ZERO, Vec3::Y, [1.0, 0.0, 0.0, 1.0]);

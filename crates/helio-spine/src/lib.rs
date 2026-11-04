@@ -25,7 +25,9 @@ use helio_pass_shadow_matrix::{LightDirtyFlags, ShadowMatrixPass, ShadowSettings
 use helio_pass_tsr::{TsrPass, TsrQuality};
 
 mod background;
+mod gbuffer_clear;
 pub use background::BackgroundPass;
+pub use gbuffer_clear::GBufferClearPass;
 
 /// What the spine's nodes read that is not the frame: a graph's builder sets
 /// it (Helio's presets from their renderer config).
@@ -169,6 +171,17 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
                 .with_budget(budget, ih),
             ));
             build.env.shared(|| dirty);
+            Ok(())
+        },
+    ));
+
+    registry.node(pass_node(
+        "gbuffer_clear",
+        "Scene: Clear G-Buffer",
+        CATEGORY,
+        "Clears the frame's G-buffer and depth when no object kind installed opens the G-buffer phase.",
+        |build| {
+            build.graph.add_pass(Box::new(GBufferClearPass));
             Ok(())
         },
     ));

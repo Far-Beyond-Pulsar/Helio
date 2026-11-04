@@ -84,30 +84,6 @@ fn is_composed(path: &Path) -> bool {
         "helio-pass-hlfs/shaders/sample.wgsl",
         "helio-pass-hlfs/shaders/spatial.wgsl",
         "helio-pass-hlfs/shaders/temporal.wgsl",
-        "helio-pass-transparent/shaders/transparent_base.wgsl",
-        // The virtual geometry's kernels, assembled by their crates from
-        // shared declaration pieces (`include_str!` constants joined in
-        // Rust); validated when their passes build their pipelines (the
-        // crates' GPU tests).
-        "helio-pass-vg-bvh/shaders/vg_bvh_build.wgsl",
-        "helio-pass-vg-cull/shaders/vg_cull.wgsl",
-        "helio-pass-vg-dense/shaders/args.wgsl",
-        "helio-pass-vg-dense/shaders/bin.wgsl",
-        "helio-pass-vg-dense/shaders/collect.wgsl",
-        "helio-pass-vg-dense/shaders/footprint.wgsl",
-        "helio-pass-vg-dense/shaders/peel.wgsl",
-        "helio-pass-vg-dense/shaders/rt.wgsl",
-        "helio-pass-vg-dense/shaders/tiles.wgsl",
-        "helio-pass-vg-raster/shaders/vg_dense_count.wgsl",
-        "helio-pass-vg-raster/shaders/vg_hw_raster.wgsl",
-        "helio-pass-vg-raster/shaders/vg_hw_raster_masked.wgsl",
-        "helio-pass-vg-raster/shaders/vg_sw_bin.wgsl",
-        "helio-pass-vg-raster/shaders/vg_sw_raster.wgsl",
-        "helio-pass-vg-raster/shaders/vg_sw_raster_masked.wgsl",
-        "helio-pass-vg-raster/shaders/vg_tile_raster.wgsl",
-        "helio-pass-vg-shade/shaders/vg_debug.wgsl",
-        "helio-pass-vg-shade/shaders/vg_resolve.wgsl",
-        "helio-pass-vg-shade/shaders/vg_shade.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
@@ -115,7 +91,7 @@ fn is_composed(path: &Path) -> bool {
 
 /// Assembles the shaders their passes build from more than one piece, the
 /// same way the pass does, so they are validated as the GPU sees them.
-fn compose(root: &Path, path: &Path, source: String) -> String {
+fn compose(path: &Path, source: String) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
     // The scene derivations prefix the shared join declarations
     // (`helio_scene_join::join_source`), wherever their crate keeps them:
@@ -124,8 +100,6 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
         "hierarchy_resolve.wgsl",
         "row_join.wgsl",
         "scene_join_lights.wgsl",
-        "scene_join_meshes.wgsl",
-        "scene_join_moved.wgsl",
     ];
     if path
         .file_name()
@@ -137,20 +111,6 @@ fn compose(root: &Path, path: &Path, source: String) -> String {
     // The tone map prefixes the post settings' declarations.
     if normalized.ends_with("helio-pass-postprocess/shaders/postprocess.wgsl") {
         return helio_pass_postprocess::with_post_settings(&source);
-    }
-    // The depth passes prefix the alpha-tested depth material's declarations
-    // (`helio_pass_gbuffer::depth_material::DepthMaterialBindings::shader_source`).
-    const DEPTH_MATERIAL: &[&str] = &["helio-pass-shadow/shaders/shadow.wgsl"];
-    if DEPTH_MATERIAL
-        .iter()
-        .any(|suffix| normalized.ends_with(suffix))
-    {
-        let material = root.join("crates/passes/3d/helio-pass-gbuffer/shaders/depth_material.wgsl");
-        let material = std::fs::read_to_string(material).expect("depth_material.wgsl");
-        return format!(
-            "{material}
-{source}"
-        );
     }
     source
 }
@@ -191,7 +151,7 @@ fn every_wgsl_shader_parses_and_validates() {
     for path in &shaders {
         let rel = path.strip_prefix(&root).unwrap_or(path);
         let source = std::fs::read_to_string(path).expect("shader should be readable");
-        let source = compose(&root, path, source);
+        let source = compose(path, source);
 
         if is_composed(path) {
             continue;

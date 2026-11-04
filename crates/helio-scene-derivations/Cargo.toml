@@ -18,10 +18,3 @@ bytemuck = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 pollster = { workspace = true }
-
-[dev-dependencies]
-helio-pass-object-batch = { workspace = true }
-helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
-helio-components = { path = "../helio-components" }
-helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
-pulsar_scenedb = { workspace = true }

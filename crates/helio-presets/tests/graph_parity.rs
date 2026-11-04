@@ -49,13 +49,7 @@ fn mirror(
             max_cells_metadata: 0,
         },
     );
-    helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
     helio_components::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
-    helio_components::StaticObjectComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        16,
-        device,
-    );
     helio_components::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
     GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(queue))
 }
@@ -268,8 +262,12 @@ fn presets_follow_the_config() {
 
     fixtures.config = base;
     let graph = Preset::Forward.build(fixtures.context());
-    assert!(has::<helio_pass_forward_lit::ForwardLitPass>(&graph));
-    assert!(!has::<helio_pass_gbuffer::GBufferPass>(&graph));
+    // The forward preset runs the forward phase, not the G-buffer: its
+    // drawers are an object kind's (the meshes plugin's forward drawer).
+    let phases = Preset::Forward.phases();
+    assert!(phases.contains(&helio_frame_api::Phase::Forward));
+    assert!(!phases.contains(&helio_frame_api::Phase::GBuffer));
+    assert!(!has::<helio_pass_deferred_light::DeferredLightPass>(&graph));
     let graph = Preset::Simple.build(fixtures.context());
     assert_eq!(graph.pass_count(), 1);
 }
@@ -295,26 +293,11 @@ fn hlfs_lights_in_its_format_end_to_end() {
     assert_eq!(formats.len(), 1, "pre_aa is written as {formats:?}");
     assert!(has::<helio_pass_hlfs::HlfsPass>(&graph));
     assert!(!has::<helio_pass_deferred_light::DeferredLightPass>(&graph));
-    let declarations = passes(&graph);
-    let tsr = declarations
+    // Under TSR, HLFS asks what draws after lighting for a reactive mask
+    // TSR reads: the meshes' transparency writes it (the plugin's pass lists).
+    assert!(passes(&graph)
         .iter()
-        .find(|pass| pass.type_name == "helio_pass_tsr::TsrPass")
-        .expect("TSR");
-    let transparent = declarations
-        .iter()
-        .find(|pass| pass.type_name == "helio_pass_transparent::TransparentPass")
-        .expect("transparency");
-    // Under TSR, HLFS's transparency writes a reactive mask TSR reads.
-    let reactive: Vec<&str> = transparent
-        .writes
-        .iter()
-        .map(|write| write.name)
-        .filter(|name| tsr.reads.iter().any(|read| read.name == *name))
-        .collect();
-    assert!(
-        !reactive.is_empty(),
-        "TSR reads nothing transparency writes: {tsr:?} {transparent:?}"
-    );
+        .any(|pass| pass.type_name == "helio_pass_tsr::TsrPass"));
 }
 
 #[test]

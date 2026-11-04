@@ -16,6 +16,7 @@
 pub mod material;
 pub mod radiant;
 pub mod row;
+pub mod templates;
 pub mod shader;
 pub mod texture_mips;
 pub mod vg_alpha;

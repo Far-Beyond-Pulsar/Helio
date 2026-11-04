@@ -7,14 +7,12 @@ description = "Helio's shipped pipelines as node-graph presets, the feature list
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio-mesh-api = { workspace = true }
 helio-frame-api = { path = "../helio-frame-api" }
 # The scene join's world origin (`SceneDerivationContext::world_origin`).
 glam = { workspace = true }
 helio = { path = "../helio" }
 helio-feature-api = { path = "../helio-feature-api" }
 helio-spine = { path = "../helio-spine" }
-helio-pass-vg = { path = "../passes/3d/helio-pass-vg" }
 helio-graph-asset = { path = "../helio-graph-asset" }
 helio-core = { workspace = true }
 image = { workspace = true, features = ["png"] }
@@ -27,40 +25,23 @@ helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "../passes/3d/helio-pass-buffer-view" }
 helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
 helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
-helio-pass-indirect-dispatch = { path = "../passes/3d/helio-pass-indirect-dispatch" }
 helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
-helio-pass-object-batch = { path = "../passes/3d/helio-pass-object-batch" }
-helio-pass-occlusion-cull = { path = "../passes/3d/helio-pass-occlusion-cull" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
-helio-pass-shadow = { path = "../passes/3d/helio-pass-shadow" }
-helio-pass-shadow-dirty = { path = "../passes/3d/helio-pass-shadow-dirty" }
 helio-pass-shadow-matrix = { path = "../passes/3d/helio-pass-shadow-matrix" }
 helio-pass-simple-cube = { path = "../passes/3d/helio-pass-simple-cube" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
 helio-pass-tsr = { workspace = true }
-helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
-helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
-helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
-helio-vg-format = { path = "../helio-vg-format" }
-helio-vg-stream = { path = "../helio-vg-stream" }
 
 [dev-dependencies]
 bytemuck = { workspace = true }
 helio-mats = { workspace = true }
-helio-scene-derivations = { path = "../helio-scene-derivations" }
-helio-pass-vg-cull = { path = "../passes/3d/helio-pass-vg-cull" }
-helio-pass-vg-shade = { path = "../passes/3d/helio-pass-vg-shade" }
 pulsar_scenedb = { workspace = true }
-helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-components = { path = "../helio-components" }
 env_logger = { workspace = true }
 profiling = { workspace = true }
 pollster = { workspace = true }
 winit = { workspace = true }
-helio-vg-stream = { path = "../helio-vg-stream" }
-helio-vg-build = { path = "../helio-vg-build" }
-helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 glam = { workspace = true }
 serde_json = { workspace = true }
