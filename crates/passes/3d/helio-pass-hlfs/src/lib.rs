@@ -710,7 +710,7 @@ impl RenderPass for HlfsPass {
             "ray_transmission",
             "static_shadow_atlas",
             "shadow_transmittance",
-            helio_pass_gi::GI_IRRADIANCE,
+            helio_gi_api::GI_IRRADIANCE,
         ]
     }
     fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
@@ -944,7 +944,7 @@ impl RenderPass for HlfsPass {
                 .unwrap_or(&f.linear_sampler),
             gi_irradiance: ctx
                 .registry
-                .buffer_binding(helio_pass_gi::GI_IRRADIANCE)
+                .buffer_binding(helio_gi_api::GI_IRRADIANCE)
                 .unwrap_or(&f.empty_gi),
         };
         self.external.update(

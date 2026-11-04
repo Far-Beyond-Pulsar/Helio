@@ -1,11 +1,2 @@
 # Layer violations that exist today (scripts/architecture/check_layers.py).
 # This list may only shrink. Do not add to it: fix the dependency.
-helio-pass-deferred-light -> helio-pass-gi  (spine -> feature)
-helio-pass-deferred-light -> helio-pass-sky  (spine -> feature)
-helio-pass-gi -> helio-pass-sky  (feature -> feature)
-helio-pass-hlfs -> helio-pass-gi  (feature -> feature)
-helio-pass-volumetric-fog -> helio-pass-sky  (feature -> feature)
-helio-pass-voxel-planet -> helio-pass-foliage-place  (feature -> feature)
-helio-pass-voxel-planet -> helio-pass-gi  (feature -> feature)
-helio-pass-water-sim -> helio-pass-sky  (feature -> feature)
-helio-pass-water-sim -> helio-pass-voxel-planet  (feature -> feature)

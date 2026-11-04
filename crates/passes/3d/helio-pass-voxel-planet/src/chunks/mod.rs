@@ -2144,7 +2144,7 @@ pub struct ChunkWorld {
     /// in the primary volume.
     gi_cells: wgpu::Buffer,
     gi_cell_data: Vec<[i32; 4]>,
-    gi_clipmap: Option<helio_pass_gi::Clipmap>,
+    gi_clipmap: Option<helio_gi_api::Clipmap>,
     /// The publish with the host's scene materials (devices with texture
     /// binding arrays).
     scene: Option<SceneState>,
@@ -3033,7 +3033,7 @@ fn draw_source(plane: bool, counting: bool) -> String {
     let source = |rel: &str, embedded: &'static str| {
         helio_core::shader::hot::source_text(env!("CARGO_MANIFEST_DIR"), rel, embedded)
     };
-    (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + &source("shaders/noise.wgsl", include_str!("../../shaders/noise.wgsl")) + helio_pass_gi::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(&source("shaders/chunk_draw.wgsl", include_str!("../../shaders/chunk_draw.wgsl"))))
+    (format!("const DOMAIN_UNIT: f32 = {};\n", crate::grid::DOMAIN_UNIT) + &helio_core::shader::hot::source_text(helio_voxel_world::wgsl::DIR, helio_voxel_world::wgsl::NOISE_PATH, helio_voxel_world::wgsl::NOISE) + helio_gi_api::GI_COMMON_SNIPPET.source + helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source + &walk_templates(&source("shaders/chunk_draw.wgsl", include_str!("../../shaders/chunk_draw.wgsl"))))
         .replace("COUNTERS", if counting { "@group(0) @binding(9) var<storage, read_write> counters: array<atomic<u32>, 256>;" } else { "" })
         .replace("WCOUNT(1)", &wcount(1))
         .replace("WCOUNT(3)", &wcount(3))
@@ -3393,10 +3393,10 @@ impl ChunkWorld {
             ground_later: Vec::new(),
             gi_cells: buffer(
                 "chunk GI probe cells",
-                u64::from(helio_pass_gi::PROBES) * 16,
+                u64::from(helio_gi_api::PROBES) * 16,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             ),
-            gi_cell_data: vec![[0; 4]; helio_pass_gi::PROBES as usize],
+            gi_cell_data: vec![[0; 4]; helio_gi_api::PROBES as usize],
             gi_clipmap: None,
             scene,
             steady_shadows: false,
@@ -6792,7 +6792,7 @@ impl ChunkWorld {
         let gi_reach = self
             .gi_clipmap
             .filter(|_| gi)
-            .map(|c| c.spacing(helio_pass_gi::LEVELS - 1) * helio_pass_gi::SIDE as f64);
+            .map(|c| c.spacing(helio_gi_api::LEVELS - 1) * helio_gi_api::SIDE as f64);
         for vol in self
             .volumes
             .iter()
@@ -8087,11 +8087,11 @@ impl ChunkWorld {
                 pass.set_bind_group(0, group, &[]);
                 pass.set_bind_group(1, &gi_group, &[]);
                 pass.set_pipeline(&self.pipelines_of(primary).gi_trace);
-                pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
+                pass.dispatch_workgroups(helio_gi_api::MAX_RAYS.div_ceil(64), 1, 1);
                 for c in cross.iter().filter(|c| c.gi) {
                     pass.set_bind_group(0, &c.group, &[]);
                     pass.set_pipeline(&self.cross_pipelines(c.index).gi_trace);
-                    pass.dispatch_workgroups(helio_pass_gi::MAX_RAYS.div_ceil(64), 1, 1);
+                    pass.dispatch_workgroups(helio_gi_api::MAX_RAYS.div_ceil(64), 1, 1);
                 }
             }
             drop(pass);
@@ -8299,7 +8299,7 @@ impl ChunkWorld {
         encoder: &mut helio_core::CommandRecorder<'_>,
         queries: &wgpu::Buffer,
         hits: &wgpu::Buffer,
-        tiles: &[helio_pass_foliage_place::AskedTile],
+        tiles: &[helio_foliage_api::AskedTile],
         planet: &Planet,
         eye: DVec3,
         camera: Vec3,
@@ -8328,7 +8328,7 @@ impl ChunkWorld {
             .take(PROBE_TILES)
             .map(|t| {
                 // The tile's frame in the volume's.
-                let f = &helio_pass_foliage_place::TileFrame {
+                let f = &helio_foliage_api::TileFrame {
                     origin: transform.to_local(t.frame.origin),
                     axis_u: transform.dir_to_local(t.frame.axis_u),
                     axis_v: transform.dir_to_local(t.frame.axis_v),
@@ -8396,7 +8396,7 @@ impl ChunkWorld {
         }
     }
 
-    pub fn follow_gi(&mut self, clipmap: helio_pass_gi::Clipmap, world_eye: DVec3, eye: DVec3) {
+    pub fn follow_gi(&mut self, clipmap: helio_gi_api::Clipmap, world_eye: DVec3, eye: DVec3) {
         let Some(vol) = self
             .primary
             .and_then(|p| self.volumes[usize::from(p)].as_ref())
@@ -8411,7 +8411,7 @@ impl ChunkWorld {
             return;
         }
         let entered = if moved {
-            (0..helio_pass_gi::PROBES).collect()
+            (0..helio_gi_api::PROBES).collect()
         } else {
             clipmap.entered(self.gi_clipmap.as_ref())
         };

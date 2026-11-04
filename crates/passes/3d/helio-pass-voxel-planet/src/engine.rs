@@ -592,13 +592,13 @@ pub(crate) fn terrain_source(
     wide64: bool,
     generation: bool,
 ) -> String {
-    let noise = include_str!("../shaders/noise.wgsl");
+    let noise = helio_voxel_world::wgsl::NOISE;
     let mut s = if wide64 {
         hardware_wide(noise)
     } else {
         String::from(noise)
     };
-    s.push_str(include_str!("../shaders/world.wgsl"));
+    s.push_str(helio_voxel_world::wgsl::WORLD);
     s.push_str(include_str!("../shaders/material_state.wgsl"));
     s.push_str(&program.wgsl);
     if !program.wgsl.contains("fn terrain_climate") {
@@ -625,7 +625,7 @@ pub(crate) fn terrain_source(
         s.push_str("fn terrain_cave_gate(surface: u32, height: i32) -> i32 { return 256; }\n");
     }
     // The volume layer (`docs/volumes.md`), reading the `volumes` uniform.
-    s.push_str(include_str!("../shaders/volumes.wgsl"));
+    s.push_str(helio_voxel_world::wgsl::VOLUMES);
     s.push_str(&column_source(program, generation));
     s.push_str(
         "@group(0) @binding(1) var<uniform> world: World;
@@ -1345,7 +1345,7 @@ pub(crate) fn volume_constants(planet: &Planet) -> crate::volumes::VolumeConstan
 mod wide_tests {
     #[test]
     fn hardware_wide_replaces_the_region_with_either_line_end() {
-        let noise = include_str!("../shaders/noise.wgsl");
+        let noise = helio_voxel_world::wgsl::NOISE;
         for text in [
             noise.replace("\r\n", "\n"),
             noise.replace("\r\n", "\n").replace('\n', "\r\n"),

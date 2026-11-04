@@ -369,6 +369,14 @@ path = "technology_gallery_hlfs.rs"
 [[bin]]
 name = "voxel_craft"
 path = "voxel_craft/main.rs"
+# Voxel Flight: fly a voxel Earth, Moon or desert (presets in worlds.rs).
+[[bin]]
+name = "voxel_flight"
+path = "voxel_flight/main.rs"
+# Water World: Ultra-Water on a voxel coast (shares voxel_flight's worlds).
+[[bin]]
+name = "water_world"
+path = "water_world.rs"
 [[bin]]
 name = "lens_showcase"
 path = "lens_showcase.rs"

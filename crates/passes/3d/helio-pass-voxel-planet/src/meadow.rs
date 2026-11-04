@@ -10,8 +10,8 @@
 //! [`Meadow::range`]. Bands of tiles in the frame of the cube face under the eye carry it
 //! out to its range at the same cost on any planet.
 
-use helio_pass_foliage_place::components::{FoliageTypeRow, FoliageWindRow};
-use helio_pass_foliage_place::{
+use helio_foliage_api::components::{FoliageTypeRow, FoliageWindRow};
+use helio_foliage_api::{
     pack_kind_and_flags, FoliageKind, FoliageMaterial, GpuFoliageType, FOLIAGE_FLAG_GROUND_COLOUR,
     FOLIAGE_FLAG_RECEIVES_INTERACTION,
 };

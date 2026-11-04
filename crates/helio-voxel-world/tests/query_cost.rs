@@ -2,9 +2,9 @@
 //! run with `--ignored --nocapture`).
 
 use glam::DVec3;
-use helio_pass_voxel_planet::feature_recipe::FeatureRecipe;
-use helio_pass_voxel_planet::layers::TerrainLayers;
-use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Cell, Matter, Planet, PlanetRecipe};
+use helio_voxel_world::feature_recipe::FeatureRecipe;
+use helio_voxel_world::layers::TerrainLayers;
+use helio_voxel_world::{Brush, BrushOp, BrushShape, Cell, Matter, Planet, PlanetRecipe};
 use std::time::Instant;
 
 fn earth() -> Planet {

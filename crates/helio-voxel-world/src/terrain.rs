@@ -86,7 +86,7 @@
 //! column's footprint, `2^level`
 //! reference cells wide, so a field can omit detail finer than it. The CPU
 //! and GPU functions must return equal values for every input:
-//! [`crate::engine::verify_field`] compares them, and [`check_field`] checks
+//! `helio_pass_voxel_planet::engine::verify_field` compares them, and [`check_field`] checks
 //! the declared bounds against sampled columns.
 use crate::grid::{Grid, PLANE_FACE};
 use crate::planet::Planet;

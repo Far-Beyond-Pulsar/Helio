@@ -46,21 +46,11 @@ use crate::atmosphere::{
     ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET, ATMOSPHERE_TRANSMITTANCE,
 };
 
-/// Graph key of the clouds' shadow map (texture, [`CLOUD_SHADOW_FORMAT`]).
-pub const CLOUD_SHADOW_MAP: &str = "cloud_shadow_map";
-/// Graph key of the map's frame (uniform buffer, `CloudShadowFrame` in
-/// `shaders/cloud_shadow.wgsl`).
-pub const CLOUD_SHADOW_FRAME: &str = "cloud_shadow_frame";
-pub const CLOUD_SHADOW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-pub const CLOUD_SHADOW_FRAME_BYTES: u64 = 80;
-/// Texels along each side of each of the shadow map's cascades (the map is
-/// two of them wide).
-pub const CLOUD_SHADOW_SIDE: u32 = 256;
-/// Marker opting a shader into [`CLOUD_SHADOW_SNIPPET`].
-pub const CLOUD_SHADOW_MARKER: &str = "//!use cloud_shadow";
-/// `CloudShadowFrame` and `cloud_shadow(p)` (`shaders/cloud_shadow.wgsl`).
-pub const CLOUD_SHADOW_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::wgsl_snippet!(CLOUD_SHADOW_MARKER, "shaders/cloud_shadow.wgsl");
+pub use helio_sky_api::{
+    cloud_shadow_fallback, CLOUD_SHADOW_FORMAT, CLOUD_SHADOW_FRAME, CLOUD_SHADOW_FRAME_BYTES,
+    CLOUD_SHADOW_MAP, CLOUD_SHADOW_MARKER, CLOUD_SHADOW_SIDE, CLOUD_SHADOW_SNIPPET,
+    DIRECTIONAL_VISIBILITY, SUN_VISIBILITY,
+};
 /// Marker opting a shader into [`CLOUDS_SNIPPET`].
 pub const CLOUDS_MARKER: &str = "//!use atmosphere_clouds";
 /// The clouds' density and phase (`shaders/clouds_common.wgsl`).
@@ -73,12 +63,6 @@ pub const CLOUDS_SNIPPET: helio_core::shader::ShaderSnippet =
 /// geometry, km).
 pub const ATMOSPHERE_CLOUDS: &str = "atmosphere_clouds";
 pub const ATMOSPHERE_CLOUD_DEPTH: &str = "atmosphere_cloud_depth";
-/// Graph key of the sun's visibility at each pixel (full resolution,
-/// `Rgba16Float`: x the visibility, yzw the sun's direction it holds for),
-/// as the voxel terrain's `directional_visibility`, which it includes.
-pub const SUN_VISIBILITY: &str = "sun_visibility";
-/// Graph key of the terrain's sun visibility a voxel pass publishes.
-pub const DIRECTIONAL_VISIBILITY: &str = "directional_visibility";
 /// Graph keys of the clouds' noise volumes and of the planet's weather (a
 /// cube map, `shaders/cloud_planet_weather.wgsl`).
 pub const ATMOSPHERE_CLOUD_PLANET_WEATHER: &str = "atmosphere_cloud_planet_weather";
@@ -605,34 +589,6 @@ impl CloudVolumes {
         frame.write_texture_binding(ATMOSPHERE_CLOUD_SHAPE, &self.shape, "Atmosphere");
         frame.write_texture_binding(ATMOSPHERE_CLOUD_DETAIL, &self.detail, "Atmosphere");
     }
-}
-
-/// Placeholder resources for a consumer of the clouds' shadow while nothing
-/// publishes it: a 1x1 map and a zeroed frame (no clouds).
-pub fn cloud_shadow_fallback(device: &wgpu::Device) -> (wgpu::TextureView, wgpu::Buffer) {
-    let map = device
-        .create_texture(&wgpu::TextureDescriptor {
-            label: Some("No cloud shadow"),
-            size: wgpu::Extent3d {
-                width: 1,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: CLOUD_SHADOW_FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        })
-        .create_view(&Default::default());
-    let frame = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("No cloud shadow frame"),
-        size: CLOUD_SHADOW_FRAME_BYTES,
-        usage: wgpu::BufferUsages::UNIFORM,
-        mapped_at_creation: false,
-    });
-    (map, frame)
 }
 
 /// `TraceParams` (`cloud_trace.wgsl`).

@@ -47,44 +47,14 @@ use crate::clouds::{
     CLOUD_SHADOW_FRAME, CLOUD_SHADOW_MAP,
 };
 
-/// Graph key of the per-frame atmosphere buffer (`AtmosphereFrame`).
-pub const ATMOSPHERE_FRAME: &str = "atmosphere_frame";
+pub use helio_sky_api::{
+    ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_MARKER, ATMOSPHERE_SKY_TABLE,
+    ATMOSPHERE_SKY_TABLE_BYTES, ATMOSPHERE_SKY_TABLE_MARKER, ATMOSPHERE_SKY_TABLE_SNIPPET,
+    ATMOSPHERE_SKY_VIEW, ATMOSPHERE_SNIPPET, SKY_TABLE_ENTRIES,
+};
 pub const ATMOSPHERE_TRANSMITTANCE: &str = "atmosphere_transmittance";
 pub const ATMOSPHERE_MULTI_SCATTERING: &str = "atmosphere_multi_scattering";
-pub const ATMOSPHERE_SKY_VIEW: &str = "atmosphere_sky_view";
 pub const ATMOSPHERE_AERIAL: &str = "atmosphere_aerial";
-/// Bytes of `AtmosphereFrame`. The buffer is usable as a uniform as well as
-/// storage: consumers already at the per-stage storage-buffer limit (the
-/// deferred lighting pass) bind it as a uniform.
-pub const ATMOSPHERE_FRAME_BYTES: u64 = 528;
-/// Graph key of the sky's irradiance table (`SKY_TABLE_*` in
-/// `atmosphere_common.wgsl`): the sky over a surface anywhere in the air,
-/// by its altitude and sun angle. Usable as a uniform.
-pub const ATMOSPHERE_SKY_TABLE: &str = "atmosphere_sky_table";
-/// Entries of the sky table: 16 altitudes by 24 sun cosines, six vec4s
-/// each.
-const SKY_TABLE_ENTRIES: u64 = 16 * 24;
-pub const ATMOSPHERE_SKY_TABLE_BYTES: u64 = SKY_TABLE_ENTRIES * 6 * 16;
-
-/// Marker opting a shader into the shared atmosphere WGSL.
-pub const ATMOSPHERE_MARKER: &str = "//!use atmosphere";
-
-/// The atmosphere's shared WGSL (`AtmosphereFrame`, the medium, the LUT
-/// parameterisations) as a snippet: any pass reading the published
-/// `atmosphere_frame` opts in with [`ATMOSPHERE_MARKER`].
-pub const ATMOSPHERE_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::wgsl_snippet!(ATMOSPHERE_MARKER, "shaders/atmosphere_common.wgsl");
-
-/// Marker opting a shader into [`ATMOSPHERE_SKY_TABLE_SNIPPET`].
-pub const ATMOSPHERE_SKY_TABLE_MARKER: &str = "//!use atmosphere_sky_table";
-
-/// The sky over a surface anywhere in the atmosphere from the published
-/// sky table (`atmosphere_sky_table_eval`); with [`ATMOSPHERE_SNIPPET`],
-/// for a shader binding the table as `atmosphere_sky_table`.
-pub const ATMOSPHERE_SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
-    ATMOSPHERE_SKY_TABLE_MARKER,
-    "shaders/atmosphere_sky_table.wgsl"
-);
 
 /// Where an atmosphere's planet is.
 pub mod placement {

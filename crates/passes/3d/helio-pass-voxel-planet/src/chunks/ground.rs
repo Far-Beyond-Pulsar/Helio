@@ -21,7 +21,7 @@ use crate::grid::Grid;
 use crate::volume::VolumeTransform;
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
-use helio_pass_foliage_place::{GroundChart, GroundGeometry, TileFrame, FOLIAGE_TILE_SIZE_METERS};
+use helio_foliage_api::{GroundChart, GroundGeometry, TileFrame, FOLIAGE_TILE_SIZE_METERS};
 use std::sync::{Mutex, RwLock};
 
 /// Share of a face past its edges the eye may wander before the chart moves to the face

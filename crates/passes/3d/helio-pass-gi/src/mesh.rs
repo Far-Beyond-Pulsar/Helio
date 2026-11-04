@@ -18,7 +18,7 @@ use helio_pass_shadow_matrix::{
     SUN_OCCLUSION_FRAME, SUN_OCCLUSION_FRAME_BYTES, SUN_OCCLUSION_MAPS, SUN_OCCLUSION_PAGES,
     SUN_OCCLUSION_SNIPPET,
 };
-use helio_pass_sky::clouds::{
+use helio_sky_api::{
     CLOUD_SHADOW_FRAME, CLOUD_SHADOW_FRAME_BYTES, CLOUD_SHADOW_MAP, CLOUD_SHADOW_SNIPPET,
 };
 
@@ -263,7 +263,7 @@ impl GiMeshTracePass {
                 std::mem::size_of::<GpuTrace>() as u64,
                 uniform_usage,
             ),
-            no_clouds: helio_pass_sky::clouds::cloud_shadow_fallback(device),
+            no_clouds: helio_sky_api::cloud_shadow_fallback(device),
             no_occlusion: (
                 buffer(
                     device,

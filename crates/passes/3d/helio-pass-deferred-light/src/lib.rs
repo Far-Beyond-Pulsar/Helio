@@ -4,7 +4,7 @@ use helio_core::{
     DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, PassContext, PrepareContext,
     RenderPass, Result as HelioResult,
 };
-use helio_pass_sky::atmosphere::{
+use helio_sky_api::{
     ATMOSPHERE_FRAME, ATMOSPHERE_FRAME_BYTES, ATMOSPHERE_SKY_TABLE, ATMOSPHERE_SKY_TABLE_BYTES,
     ATMOSPHERE_SKY_TABLE_SNIPPET, ATMOSPHERE_SNIPPET,
 };
@@ -915,11 +915,11 @@ impl RenderPass for DeferredLightPass {
             "shadow_caster_counts",
             ATMOSPHERE_FRAME,
             ATMOSPHERE_SKY_TABLE,
-            helio_pass_sky::clouds::SUN_VISIBILITY,
+            helio_sky_api::SUN_VISIBILITY,
             "ssao",
             "tile_light_lists",
             "tile_light_counts",
-            helio_pass_gi::GI_IRRADIANCE,
+            helio_gi_api::GI_IRRADIANCE,
             "render_environment",
             "water_caustics",
             "water_caustics_deep",
@@ -1069,10 +1069,10 @@ impl RenderPass for DeferredLightPass {
         // (`sun_visibility`), or the terrain's alone without clouds.
         let directional_visibility_view = ctx
             .registry
-            .texture_binding(helio_pass_sky::clouds::SUN_VISIBILITY)
+            .texture_binding(helio_sky_api::SUN_VISIBILITY)
             .or_else(|| {
                 ctx.registry
-                    .texture_binding(helio_pass_sky::clouds::DIRECTIONAL_VISIBILITY)
+                    .texture_binding(helio_sky_api::DIRECTIONAL_VISIBILITY)
             })
             .unwrap_or(&self.fallback_ssr_view);
 
@@ -1387,7 +1387,7 @@ impl RenderPass for DeferredLightPass {
         // The GI probes' irradiance a pixel (helio-pass-gi's resolve).
         let gi_irradiance = ctx
             .registry
-            .buffer_binding(helio_pass_gi::GI_IRRADIANCE)
+            .buffer_binding(helio_gi_api::GI_IRRADIANCE)
             .unwrap_or(&self.fallback_gi_irradiance);
         let tile_key = [
             tile_lists.clone(),

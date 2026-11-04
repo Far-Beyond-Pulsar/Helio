@@ -7,7 +7,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use helio_core::RenderGraph;
 use serde_json::Value;

@@ -17,9 +17,9 @@
 //! `HELIO_PLANET_MAP_LAYERS=<json>` maps another layer stack (Earth's
 //! settings JSON, e.g. with another climate) at seed 7.
 use glam::DVec3;
-use helio_pass_voxel_planet::grid::face_of;
-use helio_pass_voxel_planet::terrain::{self, material, Column};
-use helio_pass_voxel_planet::{Planet, PlanetRecipe};
+use helio_voxel_world::grid::face_of;
+use helio_voxel_world::terrain::{self, material, Column};
+use helio_voxel_world::{Planet, PlanetRecipe};
 use std::path::Path;
 
 /// Height (mm), surface material and its slope-free colour at direction `d`
@@ -49,7 +49,7 @@ fn sample_at(planet: &Planet, d: DVec3, level: u32) -> (i32, u32, glam::IVec3) {
         .ground_material(p, surface, h, 0, 0, (top - 1) << level)
         & material::ID;
     // River channels show as water on the map.
-    let m = if surface == helio_pass_voxel_planet::landform::RIVER_BED {
+    let m = if surface == helio_voxel_world::landform::RIVER_BED {
         material::WATER
     } else {
         m
@@ -132,7 +132,7 @@ fn main() {
     std::fs::create_dir_all(&out).expect("output directory");
     let args: Vec<String> = args.collect();
     let started = std::time::Instant::now();
-    let stack: helio_pass_voxel_planet::layers::TerrainLayers =
+    let stack: helio_voxel_world::layers::TerrainLayers =
         std::env::var("HELIO_PLANET_MAP_LAYERS")
             .ok()
             .map(|json| serde_json::from_str(&json).expect("layer stack JSON"))
