@@ -23,13 +23,17 @@ may_use = ["leaf"]
 about = "Buffer contracts and the scene-input projection; materials ABI. No components."
 may_use = ["core", "leaf"]
 
+[layers.feature_api]
+about = "What a feature registers: node types, contracts, settings. Knows no renderer and no feature."
+may_use = ["scene", "core", "leaf"]
+
 [layers.spine]
 about = "Core deferred pipeline and its extension points."
-may_use = ["spine", "scene", "core", "leaf"]
+may_use = ["spine", "feature_api", "scene", "core", "leaf"]
 
 [layers.feature]
 about = "One rendering feature per group. Same group, spine and below; never another group."
-may_use = ["spine", "scene", "core", "leaf"]
+may_use = ["spine", "feature_api", "scene", "core", "leaf"]
 
 [layers.renderer]
 about = "The Renderer facade. Knows no feature."
@@ -37,11 +41,11 @@ may_use = ["renderer", "spine", "scene", "core", "leaf"]
 
 [layers.preset]
 about = "Graph assets, node registries, feature lists."
-may_use = ["preset", "renderer", "feature", "spine", "scene", "core", "leaf"]
+may_use = ["preset", "renderer", "feature", "spine", "feature_api", "scene", "core", "leaf"]
 
 [layers.host]
 about = "Examples, demos, importers, tools: anything goes."
-may_use = ["host", "preset", "renderer", "feature", "spine", "scene", "core", "leaf"]
+may_use = ["host", "preset", "renderer", "feature", "spine", "feature_api", "scene", "core", "leaf"]
 
 [crates]
 # leaf
@@ -56,6 +60,9 @@ helio-core = { layer = "core" }
 
 # scene
 helio-mats = { layer = "scene" }
+
+# feature api
+helio-feature-api = { layer = "feature_api" }
 
 # spine
 helio-pass-gbuffer = { layer = "spine" }

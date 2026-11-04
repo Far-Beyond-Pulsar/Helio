@@ -8,7 +8,7 @@ use helio::{GraphRebuilder, IntoGraph, PassBuildContext};
 use helio_core::RenderGraph;
 
 use crate::asset::{GraphAsset, NodeInstance};
-use crate::registry::{BuildEnv, NodeBuild, NodeRegistry};
+use helio_feature_api::{BuildEnv, NodeBuild, NodeRegistry};
 use crate::validate::{validate, Diagnostic, Severity};
 
 /// Called after each node is built with the node, the graph so far and the
@@ -51,7 +51,7 @@ pub(crate) fn build_graph(
     } else {
         RenderGraph::new_with_external_device(env.device, env.queue)
     };
-    graph.with_xr_mode(env.config.enable_xr);
+    graph.with_xr_mode(env.frame.xr);
     if let Some(path) = std::env::var_os("PULSAR_PIPELINE_CACHE") {
         graph.enable_pipeline_cache_persistence(path);
     }
@@ -89,7 +89,7 @@ pub(crate) fn build_graph(
     }
 
     if lock {
-        graph.lock_sized(env.config.render_size());
+        graph.lock_sized(env.frame.render_size());
     }
     Ok(graph)
 }
@@ -145,6 +145,32 @@ impl IntoGraph for GraphAssetPipeline {
     }
 }
 
+/// The [`BuildEnv`] for a renderer build context: its frame, plus the
+/// renderer's config, debug-draw state and scene handle as settings (the
+/// default passes' nodes read them; a feature reads its own settings type).
+pub fn build_env<'e>(ctx: &PassBuildContext<'e>) -> BuildEnv<'e> {
+    let config = &ctx.config;
+    BuildEnv::new(
+        ctx.device,
+        ctx.queue,
+        helio_feature_api::FrameDesc {
+            width: config.width,
+            height: config.height,
+            internal_width: config.internal_width(),
+            internal_height: config.internal_height(),
+            surface_format: config.surface_format,
+            xr: config.enable_xr,
+        },
+        ctx.camera_buffer,
+        ctx.debug_camera_buffer,
+        ctx.cull_stats_buffer,
+        ctx.owns_device,
+    )
+    .with_setting(ctx.config.clone())
+    .with_setting(ctx.debug_state.clone())
+    .with_setting(ctx.scene_db.clone())
+}
+
 fn build(
     asset: &Arc<GraphAsset>,
     registry: &Arc<NodeRegistry>,
@@ -152,17 +178,7 @@ fn build(
     swap_policy: Option<&helio_core::SwapPolicy>,
     ctx: PassBuildContext<'_>,
 ) -> RenderGraph {
-    let mut env = BuildEnv::new(
-        ctx.device,
-        ctx.queue,
-        ctx.config,
-        ctx.debug_state.clone(),
-        ctx.camera_buffer,
-        ctx.debug_camera_buffer,
-        ctx.cull_stats_buffer,
-        ctx.owns_device,
-        ctx.scene_db.clone(),
-    );
+    let mut env = build_env(&ctx);
     match compile(asset, registry, &mut env) {
         Ok(mut graph) => {
             if let Some(swap_policy) = swap_policy {

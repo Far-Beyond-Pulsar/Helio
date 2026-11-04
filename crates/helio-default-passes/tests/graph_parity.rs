@@ -262,17 +262,17 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
         let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
         let debug_camera = uniform_buffer(&device, "Debug Camera Buffer", 64);
         let cull_stats = uniform_buffer(&device, "Cull Stats Buffer", 64);
-        let mut env = BuildEnv::new(
-            &device,
-            &queue,
-            RendererConfig::new(320, 180, wgpu::TextureFormat::Rgba8Unorm),
-            Arc::clone(&debug_state),
-            &camera,
-            &debug_camera,
-            &cull_stats,
-            false,
-            scene_db.clone(),
-        );
+        let mut env = helio_graph_asset::build_env(&helio::PassBuildContext {
+            device: &device,
+            queue: &queue,
+            config: RendererConfig::new(320, 180, wgpu::TextureFormat::Rgba8Unorm),
+            debug_state: Arc::clone(&debug_state),
+            camera_buffer: &camera,
+            debug_camera_buffer: &debug_camera,
+            cull_stats_buffer: &cull_stats,
+            owns_device: false,
+            scene_db: scene_db.clone(),
+        });
 
         let registry = graphs::base_registry();
         let mut asset = GraphAsset::default();

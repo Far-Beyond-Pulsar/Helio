@@ -4,9 +4,9 @@
 use helio_core::graph::{ResourceFormat, ResourceSize};
 use wgpu::TextureFormat;
 
-use crate::asset::Params;
-use crate::pins::{PinDesc, PinType};
-use crate::registry::{NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType};
+use helio_feature_api::Params;
+use helio_feature_api::{PinDesc, PinType};
+use helio_feature_api::{NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType};
 use crate::resources::{
     intern, PersistentBufferPass, PersistentTextureDesc, PersistentTexturePass,
     TransientTexturePass,
@@ -217,7 +217,7 @@ pub fn register(registry: &mut NodeRegistry) {
                     "internal" => (iw, ih),
                     "half" => (iw / 2, ih / 2),
                     "quarter" => (iw / 4, ih / 4),
-                    "output" => (build.env.config.width, build.env.config.height),
+                    "output" => (build.env.frame.width, build.env.frame.height),
                     other => return Err(format!("unknown size `{other}`")),
                 };
                 let desc = PersistentTextureDesc { width: width.max(1), height: height.max(1), format };

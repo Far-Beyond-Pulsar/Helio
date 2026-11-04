@@ -1,20 +1,21 @@
 //! Node types: what a node looks like (pins, parameters) and how it adds its
 //! passes to a graph.
 //!
-//! This crate knows no pass. Pass crates, and crates that compose passes
-//! (`helio-default-passes`), register [`NodeDescriptor`]s for what they own;
-//! the editor lists whatever is registered.
+//! This crate knows no pass and no renderer. Features register
+//! [`NodeDescriptor`]s for what they own (see [`crate::Feature`]); editors list
+//! whatever is registered, and `helio-graph-asset` compiles graphs of them.
 
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
-use helio::{DebugDrawState, RendererConfig, SceneDbHandle};
 use helio_core::RenderGraph;
 use serde_json::Value;
 
-use crate::asset::Params;
 use crate::pins::{PinDesc, PinType};
+
+/// A node instance's parameters, by key.
+pub type Params = BTreeMap<String, Value>;
 
 /// How an editor edits a parameter.
 #[derive(Clone, Debug, PartialEq)]
@@ -78,18 +79,47 @@ pub struct NodePins {
     pub outputs: Vec<PinDesc>,
 }
 
-/// Things a node build needs from the renderer, plus a place for nodes to
-/// share state with each other.
+/// The frame a graph is built for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameDesc {
+    /// Output size.
+    pub width: u32,
+    pub height: u32,
+    /// Size passes render at (render scale applied).
+    pub internal_width: u32,
+    pub internal_height: u32,
+    pub surface_format: wgpu::TextureFormat,
+    /// Rendering stereo views for a headset.
+    pub xr: bool,
+}
+
+impl FrameDesc {
+    pub fn render_size(&self) -> helio_core::RenderSize {
+        helio_core::RenderSize::new(
+            [self.internal_width, self.internal_height],
+            [self.width, self.height],
+        )
+    }
+}
+
+/// What a node build gets from whoever builds the graph, plus a place for
+/// nodes to share state with each other.
+///
+/// Renderer-wide facts are fields. Everything else a node needs (its
+/// feature's settings, host objects such as a debug-draw state or the scene
+/// handle) is a **setting**: a value of its own type the builder of the graph
+/// supplies ([`Self::insert_setting`]) and the node asks for by type
+/// ([`Self::setting`], [`Self::require`]). The renderer knows no feature's
+/// settings type, and a feature knows no other feature's.
 pub struct BuildEnv<'e> {
     pub device: &'e Arc<wgpu::Device>,
     pub queue: &'e Arc<wgpu::Queue>,
-    pub config: RendererConfig,
-    pub debug_state: Arc<Mutex<DebugDrawState>>,
+    pub frame: FrameDesc,
     pub camera_buffer: &'e wgpu::Buffer,
     pub debug_camera_buffer: &'e wgpu::Buffer,
     pub cull_stats_buffer: &'e wgpu::Buffer,
     pub owns_device: bool,
-    pub scene_db: SceneDbHandle,
+    settings: HashMap<TypeId, Box<dyn Any>>,
     shared: HashMap<TypeId, Box<dyn Any>>,
 }
 
@@ -98,31 +128,57 @@ impl<'e> BuildEnv<'e> {
     pub fn new(
         device: &'e Arc<wgpu::Device>,
         queue: &'e Arc<wgpu::Queue>,
-        config: RendererConfig,
-        debug_state: Arc<Mutex<DebugDrawState>>,
+        frame: FrameDesc,
         camera_buffer: &'e wgpu::Buffer,
         debug_camera_buffer: &'e wgpu::Buffer,
         cull_stats_buffer: &'e wgpu::Buffer,
         owns_device: bool,
-        scene_db: SceneDbHandle,
     ) -> Self {
         Self {
             device,
             queue,
-            config,
-            debug_state,
+            frame,
             camera_buffer,
             debug_camera_buffer,
             cull_stats_buffer,
             owns_device,
-            scene_db,
+            settings: HashMap::new(),
             shared: HashMap::new(),
         }
     }
 
+    /// Supplies a setting of type `T`, replacing one already there.
+    pub fn insert_setting<T: Any>(&mut self, value: T) {
+        self.settings.insert(TypeId::of::<T>(), Box::new(value));
+    }
+
+    /// [`Self::insert_setting`], by value.
+    pub fn with_setting<T: Any>(mut self, value: T) -> Self {
+        self.insert_setting(value);
+        self
+    }
+
+    /// The setting of type `T`, if the graph's builder supplied one.
+    pub fn setting<T: Any>(&self) -> Option<&T> {
+        self.settings
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.downcast_ref::<T>())
+    }
+
+    /// The setting of type `T`, or an error naming it: a node that cannot
+    /// build without it fails by name instead of guessing.
+    pub fn require<T: Any>(&self) -> Result<&T, String> {
+        self.setting::<T>().ok_or_else(|| {
+            format!(
+                "this graph's builder supplies no `{}` setting",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+
     /// Render size passes are prepared at (`render_scale` applied).
     pub fn internal_size(&self) -> (u32, u32) {
-        (self.config.internal_width(), self.config.internal_height())
+        (self.frame.internal_width, self.frame.internal_height)
     }
 
     /// The shared value of type `T`, if an earlier node created it.
@@ -133,7 +189,7 @@ impl<'e> BuildEnv<'e> {
     }
 
     /// State shared between the nodes of one build, created on first use by
-    /// whichever node needs it. Keyed by type, so a pass crate's node types
+    /// whichever node needs it. Keyed by type, so a feature's node types
     /// can share a value no one else knows about.
     pub fn shared<T: Any>(&mut self, init: impl FnOnce() -> T) -> &mut T {
         self.shared
@@ -309,7 +365,8 @@ impl NodeDescriptor {
         (self.pins)(&self.effective_params(params))
     }
 
-    pub(crate) fn run(&self, build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
+    /// Adds the node's passes to `build.graph`.
+    pub fn run(&self, build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
         (self.build)(build)
     }
 }
@@ -331,17 +388,10 @@ pub type PinTable = Arc<std::sync::RwLock<HashMap<String, NodePins>>>;
 pub type MarkerFn = Arc<dyn Fn(&mut NodeBuild<'_, '_>, &str) + Send + Sync>;
 
 impl NodeRegistry {
-    /// An empty registry. Use [`NodeRegistry::with_core`] for the resource,
-    /// scene-input and output nodes every graph needs.
+    /// An empty registry (`helio_graph_asset::core_registry` adds the
+    /// resource, scene-input and output nodes every graph needs).
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// A registry holding the core nodes ([`crate::core_nodes`]).
-    pub fn with_core() -> Self {
-        let mut registry = Self::new();
-        crate::core_nodes::register(&mut registry);
-        registry
     }
 
     /// Adds or replaces a node type.

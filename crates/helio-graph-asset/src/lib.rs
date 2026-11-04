@@ -16,9 +16,7 @@ pub mod buffers;
 mod compile;
 pub mod core_nodes;
 pub mod layout;
-mod pins;
 mod probe;
-mod registry;
 pub mod resources;
 pub mod sections;
 mod validate;
@@ -30,10 +28,20 @@ pub use asset::{
 };
 pub use compile::{compile, Fallback, GraphAssetPipeline};
 pub use layout::{auto_layout, LANE_PREFIX};
-pub use pins::{PinDesc, PinKind, PinShape, PinType};
+pub use helio_feature_api::{PinDesc, PinKind, PinShape, PinType};
 pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
-pub use registry::{
-    BuildEnv, BuildFn, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc,
-    ParamType, PinTable, PinsFn,
+pub use compile::build_env;
+// A graph document is made of node types: they are part of this crate's API.
+pub use helio_feature_api::{
+    BuildEnv, BuildFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry,
+    ParamDesc, ParamType, PinTable, PinsFn,
 };
+
+/// A registry holding the core nodes ([`core_nodes`]): resources, scene
+/// inputs and outputs every graph needs. Features add theirs to it.
+pub fn core_registry() -> NodeRegistry {
+    let mut registry = NodeRegistry::new();
+    core_nodes::register(&mut registry);
+    registry
+}
 pub use validate::{validate, Diagnostic, Plan, Severity, Validation};

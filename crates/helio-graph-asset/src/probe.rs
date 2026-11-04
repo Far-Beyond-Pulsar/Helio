@@ -26,8 +26,8 @@ use helio_core::{DeclaredKind, PassDeclaration};
 
 use crate::asset::GraphAsset;
 use crate::compile::build_graph;
-use crate::pins::{PinDesc, PinType};
-use crate::registry::{BuildEnv, NodePins, NodeRegistry};
+use helio_feature_api::{PinDesc, PinType};
+use helio_feature_api::{BuildEnv, NodePins, NodeRegistry};
 use crate::validate::Diagnostic;
 
 /// Prefix of the resource name of a SceneDB buffer pin.
@@ -104,7 +104,14 @@ pub fn probe(
 
     let mut probe = Probe::default();
     let mut scene_buffers: BTreeSet<String> = env
-        .scene_db
+        .require::<helio::SceneDbHandle>()
+        .map_err(|message| {
+            vec![crate::Diagnostic {
+                severity: crate::Severity::Error,
+                node: None,
+                message,
+            }]
+        })?
         .store()
         .buffer_registry()
         .keys()

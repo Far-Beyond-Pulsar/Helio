@@ -23,9 +23,9 @@ use serde_json::Value;
 use crate::asset::{Connection, GraphAsset, NodeInstance, PinRef};
 use crate::core_nodes::{BUFFER_GET, BUFFER_SET};
 use crate::layout::stable_topological_order;
-use crate::pins::{PinKind, PinType};
+use helio_feature_api::{PinKind, PinType};
 use crate::probe::SCENEDB_PREFIX;
-use crate::registry::NodeRegistry;
+use helio_feature_api::NodeRegistry;
 use crate::validate::{Diagnostic, Severity};
 
 /// Parses a `buffer` parameter, `<tag>:<name>`.
@@ -335,8 +335,8 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
 mod tests {
     use super::*;
     use crate::core_nodes::{ON_FRAME_START, OUTPUT};
-    use crate::pins::PinDesc;
-    use crate::registry::NodeDescriptor;
+    use helio_feature_api::PinDesc;
+    use helio_feature_api::NodeDescriptor;
     use serde_json::json;
 
     fn node(id: &str, kind: &str) -> NodeInstance {
@@ -363,7 +363,7 @@ mod tests {
 
     /// A pass that reads and writes `pre_aa`.
     fn registry() -> NodeRegistry {
-        let mut registry = NodeRegistry::with_core();
+        let mut registry = crate::core_registry();
         registry.register(
             NodeDescriptor::new("t.pass", "Pass", "Test", "", |_| Ok(())).with_pins(
                 vec![
