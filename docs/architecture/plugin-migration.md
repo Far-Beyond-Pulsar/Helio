@@ -805,8 +805,7 @@ mesh crate (helio-mesh-api, helio-pass-gbuffer, -object-batch,
 -shadow-dirty, every `helio-pass-vg*`, helio-vg-format/-build/-stream,
 helio-asset-compat, helio-snapshot, the web and Android demos).
 - **Layout** (Pulsar `plugins/vendor/meshes/`): `api` (helio-mesh-api: the
-  vertex layout, mesh uploads, the ray instance rows and the proxy pool's
-  keys), `feature/*` (the passes, unchanged names; forward-lit is
+  meshes' whole public contract, below), `feature/*` (the passes, unchanged names; forward-lit is
   `feature/forward`), `vg/{format,build,stream}`, `asset-compat`, `host`
   (helio-mesh-host, below), `component` (meshes_component: registers the
   features, `RenderFeatureRegistration`), `editor` (meshes_plugin),
@@ -863,8 +862,61 @@ helio-asset-compat, helio-snapshot, the web and Android demos).
   Pulsar, and a mesh drawer of its own would be a second mesh renderer.
   Standalone hosts take the meshes' rows, projection, feature list and
   Helio's presets over it from `helio-mesh-host` (`presets::deferred`, ...);
-  its row components are the G-buffer crate's `host_rows` (`host-rows`
+  its row components are helio-mesh-api's `host_rows` (`host-rows`
   feature), as batch 2's kinds did.
+- **One owner per mesh concept** (the rule since 2026-11-03: a concept
+  other kinds use has one owner; they read it through the owner's api crate
+  or a frame contract, never a private copy, and add only their own
+  addressing). helio-mesh-api is the meshes' whole public contract: the
+  vertex layout and mesh uploads; the rows their components author (`rows`:
+  objects, render groups, sublevels, the mesh pools' keys) and, with
+  `host-rows`, those rows as host components; the batch's instance and draw
+  rows (`draw`: `GpuInstanceData`, `GpuDrawCall`, the indirect args, the
+  `INSTANCE_FLAG_*` bits, coordinate spaces); the frame data their passes
+  publish (the object batch's, the culled batch's, draw segments, draw
+  slots, the multi-draw they are issued with); the ray instance rows and
+  the proxy pool; and their WGSL as snippets, `RAY_SURFACE_SNIPPET`
+  (`//!use mesh_ray_surface`: the ray instance row and flags, the mesh and
+  proxy pools' vertex decode, `ray_triangle`, `ray_triangle_outside`) and
+  `DRAW_ROWS_SNIPPET` (`//!use mesh_draw_rows`).
+  - Copies deleted: GI's mesh tracer declared its own `RayInstance`, flags
+    and vertex and proxy decode and looked the mesh pools up by name (now
+    `mesh_ray_surface` and `MESH_VERTICES`/`MESH_INDICES`, the same math);
+    portal culling and the portal G-buffer program declared their own
+    instance row (culling's in a column layout), draw call, indirect args
+    and flag bit; the G-buffer crate kept a copy of helio-core's
+    `CoordinateSpacesFrameData`. Portals and particles read the draw slots,
+    segments and frame data from the G-buffer and object-batch crates; the
+    other kinds' component tests read helio-core's `ENTITY_GENERATIONS_KEY`
+    through the object batch; every other kind's example, test and feature
+    manifest lost its G-buffer and object-batch dependencies.
+  - How others do it: Unreal's primitive and instance data are one
+    renderer-owned definition every pass includes (`SceneData.ush`); Bevy's
+    `MeshUniform` is bevy_pbr's and other crates `#import` its WGSL. Here
+    the owner is the meshes plugin and the import is its snippet, so a
+    change to a row lands in one file and every reader compiles against it.
+  - Copies that stay, with what they wait on:
+    - Portals: culling re-culls the meshes' draw groups per portal chain,
+      and the portal G-buffer program (`gbuffer_portal.wgsl`, with the
+      G-buffer crate's `create_material_bgl`) is a second G-buffer drawer
+      for mesh content. Waits on the meshes' drawers drawing extra views (a
+      view remap, the chain's composed transform, with a clip mask): portals
+      then publish views and the meshes cull and draw them.
+    - Water's reflection capture builds its own graph of the meshes' passes
+      (object batch, indirect dispatch, occlusion culling, G-buffer,
+      forward). Waits on captures as views of the frame's phases.
+    - Helio core: the row join's `MESH_BOUNDS` placement (water hitboxes
+      from mesh instances' bounding spheres, `helio-scene-join`) reads a
+      mesh row. Waits on an owner-bounds contract the meshes publish (an
+      owner's box), which water and physics read.
+    - The materials' templates (`DEFAULT_PBR`, `transparent_base.wgsl`)
+      declare the instance row and the vertex input: the materials batch
+      (the surface function apart from the drawer that hosts it), with the
+      portal program's `GpuMaterial` copy. GI's `SceneLight` mirrors
+      `GpuLight`: the lights batch.
+    - The meshes' own shaders (object batch, culling, the drawers) each
+      declare the rows; they are the owner's, and adopt `mesh_draw_rows`
+      as they change.
 - **Presets**: the default features name no kind; the swap policy keeps what
   Helio vouches for (Hi-Z and the shadow matrices now rebuild the graph on a
   shader edit: their sampler and dirty flags are shared with an object
@@ -942,9 +994,8 @@ helio-asset-compat, helio-snapshot, the web and Android demos).
   - The materials' templates are whole G-buffer programs over the meshes'
     vertex layout (`DEFAULT_PBR`); splitting the surface function from the
     drawer that hosts it is the materials' step.
-  - Water's reflection capture builds its own graph of the meshes' passes;
-    portals and particles read the meshes' draw contracts (draw slots,
-    segments, frame data) from the feature crates, not an api crate yet.
+  - The copies of mesh concepts other kinds keep: see "One owner per mesh
+    concept" above.
   - Helio's Pages workflow is gone with the web demos; the plugin has no
     publishing workflow yet.
 
