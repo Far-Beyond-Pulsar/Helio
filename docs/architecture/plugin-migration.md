@@ -95,7 +95,7 @@ same path, like physics).
 
 | Plugin | Components | Feature owns | Leaves Helio/Pulsar today's |
 |---|---|---|---|
-| `pulsar.materials` | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | facade template registries, `set_material_sampler`, `MATERIAL_TEXTURES` |
+| `pulsar.materials` | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | done (batch 6): `plugins/vendor/materials/` (`api` = helio-mats, `feature` = helio-pass-materials: the material texture table, `component` = materials_component, `editor` = materials_plugin); the Helio repo has no material crate. Left: the material assets, graph compiler and cooked textures in `helio_component`, and the engine's material table being the meshes' join (see "As built, batch 6") |
 | `pulsar.meshes` | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | crates done (batch 4): `plugins/vendor/meshes/` (`api` = helio-mesh-api, `feature/*`, `vg/*`, `asset-compat`, `host` = helio-mesh-host, `component` = meshes_component: the features' registrations, `editor` = meshes_plugin, `examples` = meshes-examples, `snapshot`, `web-demos`, `android-demos`); the Helio repo has no mesh crate. Left: the SceneDB components, scene join installation, authored LOD selection, VG host and picking in `helio_component`/`engine_backend` (core crates read them by type; see "As built, batch 4") |
 | `pulsar.lights` | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | done (batch 5): `plugins/vendor/lights/` (`api` = helio-light-api, `feature/{cull,shadows,deferred,hlfs,billboard}`, `host` = helio-light-host, `component` = lights_component with `LightComponent`/`ReflectionCaptureComponent`, `editor` = lights_plugin, `examples` = lights-examples); the Helio repo has no light crate |
 | `pulsar.sky` | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (`sky_component`, `feature` = helio-pass-sky, `sky_plugin`, `sky-examples`); no api crate: what others read of it is the frame's |
@@ -429,7 +429,8 @@ Order:
    them from Pulsar. Done (batch 5; see "As built, batch 5": the components
    moved too).
 6. **materials** (`helio-mats`), last: about fifteen pass crates and the
-   facade read it, all gone from Helio by now.
+   facade read it, all gone from Helio by now. Done (batch 6; see "As
+   built, batch 6").
 
 Physics already is a plugin; it gains water's api in step 2. Voxel is
 done: `plugins/vendor/voxel/` (its sculpt tool and terrain panel still
@@ -1170,6 +1171,188 @@ crate (helio-pass-light-cull, -shadow-matrix, -deferred-light, -hlfs,
     lib and `plugin_pass_lists`: 818 pass. Not passing, both known from p9:
     water's caustics projection test and voxel's
     `chunk_pass_builds_settles_and_resizes_in_the_deferred_graph`.
+
+As built, batch 6 (2026-11-04, branch `rewrite/p12-materials` in both
+repos): the materials are the `pulsar.materials` plugin's; the Helio repo has
+no material crate (helio-mats moved) and, with it, no kind's crate at all
+outside its test host. Phase B is done.
+- **Layout** (Pulsar `plugins/vendor/materials/`): `api` (helio-mats: the
+  materials' whole public contract, below), `feature` (helio-pass-materials:
+  `MaterialsFeature`, the material texture table), `component`
+  (materials_component: the feature's registration and the material sampler
+  from the project's `streaming.texture_*` settings, moved from
+  `engine_backend`'s `material_sampler`), `editor` (materials_plugin). No
+  examples crate: the material demos (`radiant_demo`,
+  `architectural_materials`) are mesh scenes and stay in meshes-examples, as
+  the HLFS demos did in batch 5.
+- **Frame seams** (Helio):
+  - `helio_core::FrameInputPublisher`: a node adds one to the graph
+    (`RenderGraph::add_frame_input_publisher`); the host updates every
+    publisher once a frame (`update_frame_inputs`) and the graph publishes
+    them with the passes' frame inputs. The material texture table is one:
+    the facade no longer reads the scene's texture store, makes the white
+    fallback and the material sampler, or publishes `material_textures`.
+    How others do it: Bevy's material plugin prepares its bindless slabs in
+    the render world's prepare stage, before the graph; Unity SRP renderer
+    features set globals in `OnCameraSetup`. A publisher is not a pass, so
+    the pass lists do not change.
+  - `helio_core::TEXTURE_BINDING_ARRAYS` and `TEXTURE_TABLE_LIMIT`: the
+    device capabilities a bindless table needs, named for no kind (the
+    facade and helio-xr ask devices for them; helio-mats'
+    `BINDLESS_MATERIAL_FEATURES`/`MAX_MATERIAL_TEXTURES` are them).
+  - The spine declares only `render_environment`; `material_textures` is the
+    materials' host input (same node kind, so graph assets and pins are
+    unchanged).
+  - `helio-components` keeps the row helpers (`same_layout!`, `WorldRows`)
+    and the bake: `MaterialComponent` is the materials api's host row
+    (`host-rows`), as batches 2-5 did.
+- **One owner per material concept**. helio-mats holds every material
+  concept another kind reads: the row (`MaterialRow`/`GpuMaterial`,
+  `MATERIALS`, flags, classes, `MaterialRow::STAND_IN`, the new foliage
+  class), the texture table (`MaterialTextureTable`, `MaterialStandIn`,
+  `MaterialBindingConfig`, `MaterialTextureBindings`, `MATERIAL_TEXTURES`,
+  `MaterialSampler`), texture uploads and UV transforms (`texture`, from the
+  facade), the template system (`radiant`, `templates`, `MaterialTemplates`)
+  and the WGSL: `//!use material_row` (`GpuMaterial`, its words for raw
+  readers, `MaterialInput`, the flag/class/workflow constants,
+  `material_stand_in`, `material_transmission`,
+  `material_sheet_transmittance`) and `//!use material_surface` (texture
+  metadata, `SurfaceData`, `material_at`, `material_texture_data`,
+  `sample_texture`, `default_pbr_surface`, `material_cut_out`), over the
+  existing `pbr_eval` and `specular_aa`.
+  - **Templates are surface functions; programs are the drawers'**. A
+    template is only its `radiant_eval_surface` (or
+    `radiant_eval_transparent`) and helpers over `MaterialInput`;
+    `RadiantTemplate::compose(program, graph, max_textures, snippets)` puts
+    it into a drawer's program. `DEFAULT_PBR` split: its surface function is
+    the default template (`templates::DEFAULT_SURFACE`), its vertex layout,
+    instance rows (now `//!use mesh_draw_rows`) and G-buffer packing are the
+    meshes' `helio_pass_gbuffer::GBUFFER_PROGRAM`. `transparent_base`
+    likewise: `TRANSPARENT_DEFAULT` and the meshes'
+    `helio_pass_transparent::TRANSPARENT_PROGRAM`. `MaterialInput` (position,
+    geometric frame, UV, the view position and the frame) is the material's
+    contract with a drawer, as Unreal's material pixel parameters are with a
+    vertex factory and Bevy's `PbrInput` with a mesh: templates no longer
+    read a drawer's `cameras`/`globals`, so every template works in every
+    drawer (custom templates now compile into the forward drawer, which used
+    to take a G-buffer program for them).
+  - Copies deleted: the forward drawer's whole material evaluation (struct,
+    texture metadata, sampling, `evaluate_surface`, its default template);
+    the depth-material program's (row, metadata, sampling, cut-out test, now
+    `material_cut_out`); the portal G-buffer program's `GpuMaterial`
+    (task copy 2), metadata, sampling, `default_pbr_surface` and default
+    template (its cut-out threshold had drifted from the G-buffer's: alpha-
+    tested materials now cut at the same 0.5); the transparent program's row
+    and its light-free default; the object batch's and the meshes' join's
+    rows; shadow transmittance's row and its glass formula
+    (`material_sheet_transmittance`); VG cull/bin/debug's raw word offsets
+    and flag constants; VG shade's slicing of `DEFAULT_PBR` (it takes the
+    G-buffer program's view declarations and `compute_velocity`, and the
+    materials' snippets); the radiant demo's iridescent template (a whole
+    G-buffer program, now a surface function); the asset viewer's and the
+    engine's graph-material tests' use of the G-buffer program (each has its
+    own small program now); voxel's `SceneGpuMaterial` and its private
+    binding-capability mirror; the G-buffer's metadata sentinel (the table's
+    now); `engine_backend`'s material sampler.
+  - **Voxel's palette** (task copy 1). The per-volume uniform was a private
+    material format (`MaterialGpu`: colour, roughness, emission,
+    transmission, patches, links) with its own evaluation. It is now an
+    array of ordinary material rows (`GpuMaterial`, read with
+    `//!use material_row`): base colour, roughness, emission and, for
+    leaves, the foliage class with its transmission
+    (`MATERIAL_CLASS_FOLIAGE`, `class_params.x`), plus the voxel's own
+    variation of each row (`VoxelVariation`: dry/middle/lush patch tints of
+    the row's colour). What the voxel keeps is its addressing (per-voxel ids,
+    the face mapping, the triplanar texturing of `scene_materials.wgsl`) and
+    its procedural per-voxel variation (patches, pigment, edges, `detail`),
+    which needs the voxel grid's integer domain and so cannot be a material
+    graph's. How others do it: Teardown's voxels index a palette whose
+    entries are materials (colour, roughness, emission, glass); Minecraft's
+    blocks are textures tinted per biome by the world. Here the entries are
+    the engine's material rows and the tint is the voxel's. Emission follows
+    the voxel's variation (the row's emissive scaled by the voxel's albedo
+    over the row's colour), so a glowing voxel's pigment shows in its glow as
+    before. The appearance JSON (levels' `appearance_parameters`, voxel
+    world crate, GPU-free) is unchanged and converted to rows on upload.
+  - The foliage class (`MATERIAL_CLASS_FOLIAGE` = 5, custom templates start
+    at `FIRST_CUSTOM_MATERIAL_CLASS` = 6) has a template for meshes
+    (two-sided flag, transmitted colour): a voxel's leaves and a mesh's leaf
+    cards are one material.
+- **Without the plugin** a drawer binds `helio_mats::MaterialStandIn` (a
+  white texture table and one grey row, `MaterialRow::STAND_IN`), and
+  `material_at` returns the same grey row for an id past the table: every
+  surface draws default grey PBR, as batch 5's `Unlit` is the lights'
+  absence. `meshes-examples`'
+  `material_stand_in::without_the_materials_a_mesh_draws_the_grey_stand_in`
+  draws one box without the plugin and with an authored stand-in row and
+  compares.
+- Left, with why:
+  - **The engine's material table is the meshes' join**: a mesh section's
+    row embeds its resolved material (`helio_component::MeshSectionDraw`)
+    and the join writes one material row per section. Material rows
+    authored by another kind cannot join that table, so voxel volumes carry
+    their own rows (ordinary rows, read with the materials' code) instead of
+    indexing the scene's table. Waits on material instances as entities:
+    material assets (and per-slot overrides) as entities with the materials'
+    row component, mesh sections naming them, the join writing an object's
+    `material_slot` from that; then voxel slots name material assets too and
+    index the one table, and the appearance's colours become material
+    assets. Blocked, like the meshes' components, by core crates reading
+    `helio_component`'s material assets by type.
+  - The voxel appearance JSON describes slot materials by colour, roughness,
+    emission and transmission (converted to rows on upload); it becomes a
+    list of material references with the step above.
+  - GI's mesh tracer binds its own no-table fallback for `vg_alpha`
+    (opaque rows, white table); `MaterialStandIn` needs a queue its
+    constructor lacks.
+  - Material assets, the material graph compiler and cooked textures stay in
+    `helio_component` with the meshes' components (core crates read them).
+- **Verified** (against p11: Helio 60f0c59e / Pulsar b098737c1, its kept
+  snapshots and exes):
+  - Helio's preset snapshot (every preset, three configs, 648 lines) is
+    p11's with exactly one change: the 15 graphs' inputs lose
+    `material_textures`.
+  - Pulsar's `plugin_pass_lists` (now also asserting the table is an input)
+    is byte-identical to p11's (3792 lines): the table is a frame input, no
+    pass, and its node keeps the host input's kind.
+  - voxel_craft (`voxel_craft_p11.exe` vs p12, alternating, 8-frame bursts
+    at 4 poses): identical render-graph dump; mean |Δ| p11-p12 0.24-0.30
+    against p11-p11 0.33 and p12-p12 0.20, image means 61.39 / 61.42 (the
+    p11 runs again spent their first frame compiling pipelines). The palette
+    is gone with no visible change.
+  - The GI cathedral (p11's `indoor_cathedral_gi` exe vs p12, frame 240):
+    mean |Δ| 0.09-0.38 against p11-p11 0.31 and p12-p12 0.25 (candles
+    flicker by wall-clock time), means within 0.4 levels.
+  - `radiant_demo` (now with `HELIO_CAPTURE`) draws every built-in class and
+    the demo's opal, glass, water and iridescent templates composed into
+    the meshes' programs; there is no p11 build of it to compare.
+  - `cargo check --workspace --all-targets` clean in both repos; layer gate
+    0. Helio's tests: 427 pass, the known `helio-settings` one fails. Pulsar:
+    380 tests pass in the materials crates, every meshes feature and host,
+    portals, decals, sprites, GI, voxel (lib, `wgsl`, `presets`),
+    meshes-examples' `material_stand_in` and `material_segments`,
+    engine_backend's `material_graph_rendering` and pulsar_game's
+    `plugin_pass_lists`; new tests compose every template into every mesh
+    drawer and the portal program, natively and with expanded bindings.
+- **What Phase C needs**, in this order:
+  0. **A one-owner audit first.** Only batches 4-6 applied the rule (user,
+     2026-11-03), each to its own concepts; batches 1-3 (the leaves, media,
+     GI and sky) and the voxel move came before it. Sweep every plugin and
+     the frame for private copies of concepts owned elsewhere: the earlier
+     plugins' (wind, water, sky, fog, GI, sprites, portals, ...) and the
+     frame's own (camera and view structs, the G-buffer layout, the colour
+     chain, declared privately in WGSL). Delete each in favour of the owner's
+     api or snippet, or record what it waits on.
+  1. A plugin that isn't installed means its kind is absent (the stand-ins
+     above, `Unlit`, `GBufferClear` are the frame's side of it; the engine
+     still links every plugin).
+  2. The sculpt tool, the terrain panel and the light UI leave
+     `ui_level_editor` (plugin-provided tool modes, panels and undo).
+  3. The mesh components (and with them the material assets and the engine's
+     material table, above) leave `helio_component`.
+  4. The repo split, last: each plugin its own `Plugin_<Kind>` repository at
+     `plugins/vendor/<kind>/`, and the layer gate's rule that no Helio crate
+     outside the test host names a kind's contract.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
