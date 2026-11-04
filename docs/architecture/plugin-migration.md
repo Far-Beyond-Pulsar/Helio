@@ -97,7 +97,7 @@ same path, like physics).
 |---|---|---|---|
 | `pulsar.materials` | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | facade template registries, `set_material_sampler`, `MATERIAL_TEXTURES` |
 | `pulsar.meshes` | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | crates done (batch 4): `plugins/vendor/meshes/` (`api` = helio-mesh-api, `feature/*`, `vg/*`, `asset-compat`, `host` = helio-mesh-host, `component` = meshes_component: the features' registrations, `editor` = meshes_plugin, `examples` = meshes-examples, `snapshot`, `web-demos`, `android-demos`); the Helio repo has no mesh crate. Left: the SceneDB components, scene join installation, authored LOD selection, VG host and picking in `helio_component`/`engine_backend` (core crates read them by type; see "As built, batch 4") |
-| `pulsar.lights` | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | light part of the scene join, `GpuLight`/`SCENE_LIGHTS` in forward-lit, facade light setters |
+| `pulsar.lights` | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | done (batch 5): `plugins/vendor/lights/` (`api` = helio-light-api, `feature/{cull,shadows,deferred,hlfs,billboard}`, `host` = helio-light-host, `component` = lights_component with `LightComponent`/`ReflectionCaptureComponent`, `editor` = lights_plugin, `examples` = lights-examples); the Helio repo has no light crate |
 | `pulsar.sky` | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (`sky_component`, `feature` = helio-pass-sky, `sky_plugin`, `sky-examples`); no api crate: what others read of it is the frame's |
 | `pulsar.gi` | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | done (batch 3): `plugins/vendor/gi/` (`api` = helio-gi-api, `gi_component`: registrations and settings, `feature` = helio-pass-gi, `gi_plugin`, `gi-examples`) |
 | `pulsar.fog` | GlobalFog, LocalFogVolume | volumetric fog and its composite | done (batch 2): `plugins/vendor/fog/` (`fog_component`, `feature` = helio-pass-volumetric-fog, `fog_plugin`, `fog-examples`); publishes the frame's participating media |
@@ -426,7 +426,8 @@ Order:
 5. **lights** (light cull, shadow matrix/cull/dirty/atlas, deferred light,
    forward lit, hlfs, IES). The spine and facade drop shadow-matrix and
    deferred-light first; by then flare, gi, fog and VG shade already read
-   them from Pulsar.
+   them from Pulsar. Done (batch 5; see "As built, batch 5": the components
+   moved too).
 6. **materials** (`helio-mats`), last: about fifteen pass crates and the
    facade read it, all gone from Helio by now.
 
@@ -998,6 +999,177 @@ helio-asset-compat, helio-snapshot, the web and Android demos).
     concept" above.
   - Helio's Pages workflow is gone with the web demos; the plugin has no
     publishing workflow yet.
+
+As built, batch 5 (2026-11-04, branch `rewrite/p11-lights` in both repos):
+the lights are the `pulsar.lights` plugin's; the Helio repo has no light
+crate (helio-pass-light-cull, -shadow-matrix, -deferred-light, -hlfs,
+-billboard and the light icon `spotlight.png` moved).
+- **Layout** (Pulsar `plugins/vendor/lights/`): `api` (helio-light-api, the
+  lights' whole public contract, below), `feature/{cull, shadows, deferred,
+  hlfs, billboard}` (the passes, unchanged crate names), `host`
+  (helio-light-host: the features and the row components for standalone
+  hosts), `component` (lights_component: `LightComponent` and
+  `ReflectionCaptureComponent` moved from `helio_component`, the light
+  join's installation, the one-directional-light rule and every
+  registration), `editor` (lights_plugin) and `examples` (lights-examples:
+  `ies_demo`, `light_benchmark`, `billboard_demo`).
+- **Frame seams** (Helio), each the narrowest that lets the crates leave:
+  - **The lighting model is a kind's**: `helio_frame_api::lighting::LightingModel`
+    (a preset setting: `Deferred`, `LightField`, `Forward`) names the
+    extension point a model's nodes join (`lighting.model.deferred`,
+    `lighting.model.light_field`; forward draws lit in its phase). The
+    deferred preset expands its point, the HLFS preset its own; a point that
+    holds nothing gets the spine's `UnlitPass` (albedo + emissive over the
+    background), the intended failure without the lights.
+    `graph_parity::without_a_lighting_model_the_gbuffer_is_drawn_unlit` pins
+    it, and that a model at the point replaces it. How others do it: Bevy's
+    deferred lighting node is `bevy_pbr`'s, not `core_pipeline`'s (a core
+    pipeline without it shows no lit surfaces); Unity SRP's renderer asset
+    brings forward or deferred with its passes; Unreal builds the model in,
+    which is the coupling removed here. Light-field shading asks for its own
+    scene colour format in its preparer (the HLFS preset no longer names
+    `HlfsPass`).
+  - The lights register where the frame places them: the shadow views
+    (`ShadowViewsFeature`) first in the shadow-caster phase's compute (the
+    casters' dirty pass reads their flags), light binning (`LightCullFeature`)
+    in `Slot::Visibility` after a kind's culling, building nothing under
+    light-field shading. The spine lost `shadow_matrix`, `light_cull`,
+    `deferred_light` and `scene_buffer_or_dummy`.
+  - `helio_frame_api::lighting::LightingSettings` (the debug view and
+    environment reflections: what a host asks of whichever model) replaced
+    the spine settings' lighting fields.
+  - The shadow host settings left `helio-settings`' renderer group for the
+    shadows' own group (`helio_light_api::SHADOWS`, keys `shadows.quality`,
+    `memory_mb`, `max_resolution`, `updates_per_frame`, `update_megatexels`,
+    `max_distance`, `fade_frames`, `hysteresis`, `page_invalidation`;
+    projects' old `rendering.shadow_*` values fall back to the defaults, as
+    GI's and foliage's did). The facade no longer maps them (which also fixed
+    `default_settings_are_the_default_config` and `every_choice_maps`, failing
+    since A4) nor re-exports `GpuLight`, `LightType`, `ShadowQuality`.
+  - `LIGHT_LIST` and `DIRECTIONAL_LIGHT` are no longer frame contracts: the
+    light list is the lights' api contract (hard case 3).
+  - `helio_scene_join::RowJoinKeys::directional_light` is an `Option` the
+    kind placing a sun names: water's join sets the lights api's directional
+    light, so an engine's row keys name no light (hard case 4: water's sun is
+    the lights api's directional light).
+- **Pulsar engine seams** (inventory registrations; the engine names no
+  light):
+  - `helio_bridge::ObjectJoinRegistration` / `ObjectJoinContext`: a plugin's
+    object join (its source-row columns and its derivation), installed in the
+    engine's scene-join group after the meshes' join, ahead of the LOD
+    selection and the row joins (the seam batch 4 listed for the meshes'
+    join). The lights' join (with the editor's light icons) is the first.
+  - `level_rules::LevelSingletonRegistration` grew `held`, `default_is`,
+    `enabled_only` and `edits_checked`: the one-directional-light rule is the
+    lights plugin's registration (`lights_component::directional_lights`,
+    `ONE_DIRECTIONAL_LIGHT`), as the sky and the wind are. `level_rules` names
+    no component.
+  - `helio_component::components::MovabilityRegistration`: what a plugin's
+    instances author of their object's movability (`object_movability` read
+    `LightComponent` by type).
+  - `pulsar_scene` and `level_migrate` no longer force-link the light
+    components (they cannot depend on a plugin; as the portals in batch 1).
+- **One owner per light concept** (the user's rule, 2026-11-03).
+  helio-light-api is the lights' whole public contract: the light row
+  (`GpuLight`, `LightRow`, `LIGHT_LIST`, `MAX_LIGHTS`), the directional
+  light (`DIRECTIONAL_LIGHT`, now two `vec4`: toward the light, and its
+  radiance), the binning (`TILE_SIZE`, `MAX_LIGHTS_PER_TILE`,
+  `ClusterLightGrid`, the tile buffers' keys), the shadow views (matrices,
+  budget and residency, `ShadowSettings` and `SHADOWS`, `LightDirtyFlags`,
+  the atlases' keys), the sun's occlusion pages (which a terrain publishes),
+  and their WGSL: `//!use light_list` (`GpuLight`, the kinds, the shadow
+  request and the sun rule, the tile index), `//!use light_forward` (the
+  forward light function) and `//!use shadow_atlas` (`LightMatrix`, the cube
+  face order, the budgeted atlas's addressing and sampling, the glass tint).
+  How others do it: Bevy's `bevy_pbr` exports its light and cluster structs
+  and `#import`able WGSL; Unreal's light data is one renderer-owned
+  definition every shader includes. Here the owner is the plugin and the
+  import is its snippet.
+  - Copies deleted: GI's `SceneLight` (probe update and mesh tracer) and its
+    first-directional-light scan; the sky's raw-word light row and its scan
+    (both now the snippet's `light_is_sun`); fog's `GpuLight`,
+    `LightMatrix`, cube-face order, atlas addressing and sampling and glass
+    tint; the flare's `GpuLight`, `LightMatrix`, face order and atlas
+    addressing; the voxel terrain's `SceneLight`, tile constants and shadow
+    request; the meshes' forward drawer's `GpuLight`, tile constants and
+    light loop (it placed local lights from a transform buffer it bound to
+    another buffer, and read tile counts from the instance rows without a
+    binning; now the light list's own positions and a zero stand-in) and
+    the materials' transparent template's (both now call `light_forward`); every other kind's string copies of the lights'
+    resource names (`"scene_lights"`, the atlases, the tile lists).
+  - Copies that stay, with what they wait on:
+    - GI and the sky still pick the sun from the light list (by the lights'
+      rule) instead of reading `DIRECTIONAL_LIGHT`: standalone hosts write
+      the light list directly and run no light join, so they publish no
+      directional light. Waits on a directional-light derivation the lights
+      give standalone hosts (`helio-light-host`).
+    - The lights' own shaders (deferred, HLFS, light cull, the shadow
+      matrices) keep their own declarations of the row and the atlas
+      functions; they are the owner's and adopt the snippets as they change.
+    - Water's reflection capture builds a `DeferredLightPass` in its own
+      graph (with the meshes' passes): waits on captures as views of the
+      frame's phases (batch 4's note).
+    - The perf overlay (a spine diagnostic) reads `scene_lights` and
+      `tile_light_counts` by name and marks after `helio.pass.deferred_light`
+      by kind, as `FocusedTimingGroup` names fog: it adds no work or API.
+    - helio-bake's `LightSource` (the lightmap baker's input) is its own
+      light description; it is converted from the light row by
+      `helio-mesh-host`.
+- **Standalone hosts**: helio-mesh-host's presets add the lights' features
+  (`helio_light_host::features`), so the meshes' examples and every
+  plugin's examples draw lit as before; their light, billboard and
+  reflection-capture rows are `helio_light_host`'s (the api's and the
+  feature crates' `host_rows`). helio-components keeps the materials' row.
+- **Tests moved with the lights**: Helio's budgeted-shadow residency and the
+  billboards joining with their rows (`helio-light-host`), the light join's
+  shader validation and the shadow shaders' (shadows), engine_backend's
+  light hydration and level tests (`runtime_level`), class reload, and the
+  light cases of the scene-join rows (lights_component's tests); the
+  helio_component unfinished-components test.
+- Left, with why:
+  - The HLFS demos (`indoor_cathedral_hlfs`, `indoor_cathedral_fxaa_hlfs`,
+    `monumental_arch_hlfs`, with `hlfs_viewer` and `hlfs_capture`) stay in
+    meshes-examples: they are the cathedral and arch mesh scenes under the
+    light-field model, built from the meshes' scene modules.
+  - The light's editor UI (create, environment section, properties) stays
+    in `ui_level_editor`, acting through lights_component, as the other
+    kinds' tools do; `ObjectType::Light` (the scene format's object kind and
+    the editor's create menu) is core's, as `ObjectType::Mesh` is.
+- **Verified** (against p10: Helio e621b8a4 / Pulsar 540900129):
+  - Helio's preset snapshot (every preset, three configs): after the seams
+    commit byte-identical to p10 (912 lines); after the move the graphs lose
+    exactly ShadowMatrix, LightCull, DeferredLight or HLFS, Billboard (and
+    the perf markers after deferred lighting and billboards) and the
+    `billboards` host input, and the twelve G-buffer graphs gain `Unlit`
+    (648 lines); the HLFS graphs' scene colour falls back to the default
+    format (light-field shading asks for its own).
+  - Pulsar's `plugin_pass_lists` (now also asserting ShadowMatrix,
+    LightCull, DeferredLight and no `Unlit`) is byte-identical to p10's
+    (3792 lines).
+  - voxel_craft (the p10 baseline exe vs p11, alternating, 8-frame bursts at
+    4 poses, idle machine): identical render-graph dump; mean |Δ| p10-p11
+    0.03-0.54 against p10-p10 0.04-0.25 and p11-p11 0.09-0.53, pose means
+    within 0.12. (The base runs spent ~100 s in their first frame, compiling
+    pipelines; not frame cost.)
+  - The GI cathedral (frame 240, p11 against p10's kept captures): mean |Δ|
+    0.19-0.34 against p10-p10 0.06-0.17 and p11-p11 0.13-0.25, means within
+    0.3 levels; its candles flicker with wall-clock time.
+  - `ies_demo` (p10 built once from 540900129 with the same capture hook, vs
+    p11, alternating, frame 240): p10-p11 mean |Δ| 0.0003 (max 6), p10-p10
+    and p11-p11 0.
+  - `cargo check --workspace --all-targets` clean in both repos; layer gate
+    0; Helio's tests pass but the known `helio-settings` one (the facade's
+    two settings tests, failing since A4, now pass).
+  - Tests from Pulsar: the lights' crates (api, features, host, component
+    with the moved runtime-level, class-reload and scene-join tests, editor),
+    GI, the sky, fog, the flare, water, foliage, voxel component and feature
+    (presets, clouds, wgsl, voxel_pass_graph), the meshes' forward,
+    transparent, G-buffer (now also validating the transparent template
+    composed with the lights' snippets), shadow and host crates,
+    helio_component, engine_backend's lib and scene-join rows, pulsar_game's
+    lib and `plugin_pass_lists`: 818 pass. Not passing, both known from p9:
+    water's caustics projection test and voxel's
+    `chunk_pass_builds_settles_and_resizes_in_the_deferred_graph`.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
