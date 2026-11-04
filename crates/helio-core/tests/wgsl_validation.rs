@@ -71,6 +71,17 @@ fn is_fragment(source: &str) -> bool {
     !(source.contains("@vertex") || source.contains("@fragment") || source.contains("@compute"))
 }
 
+/// An entry-point-bearing piece a drawer composes with another crate's
+/// snippets: validated as composed by that drawer's crate, not on its own.
+/// The materials' transparent template is lit by the lights' forward
+/// function (`//!use light_forward`), a plugin's snippet the meshes'
+/// transparent drawer composes in (and validates).
+fn is_composed(path: &Path) -> bool {
+    const COMPOSED: &[&str] = &["helio-mats/templates/transparent_base.wgsl"];
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
+}
+
 /// Assembles the shaders their passes build from more than one piece, the
 /// same way the pass does, so they are validated as the GPU sees them.
 fn compose(path: &Path, source: String) -> String {
@@ -134,6 +145,9 @@ fn every_wgsl_shader_parses_and_validates() {
         let source = std::fs::read_to_string(path).expect("shader should be readable");
         let source = compose(path, source);
 
+        if is_composed(path) {
+            continue;
+        }
         if is_fragment(&source) {
             skipped.push(rel.display().to_string());
             continue;
