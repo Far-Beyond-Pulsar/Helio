@@ -76,12 +76,13 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             return Ok(());
         }
 
-        let color_texture =
-            if let Some(pre_aa) = ctx.registry.get(helio_core::ResourceKey::new(helio_frame_api::color::SCENE_COLOR)) {
-                pre_aa
-            } else {
-                ctx.target
-            };
+        let color_texture = if let Some(pre_aa) = ctx.registry.get(helio_core::ResourceKey::new(
+            helio_frame_api::color::SCENE_COLOR,
+        )) {
+            pre_aa
+        } else {
+            ctx.target
+        };
 
         if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
             ctx.compute_cmds()
@@ -293,7 +294,9 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
             ctx.registry
-                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(helio_frame_api::gbuffer::GROUP)),
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(
+                    helio_frame_api::gbuffer::GROUP,
+                )),
             ctx.registry
                 .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {

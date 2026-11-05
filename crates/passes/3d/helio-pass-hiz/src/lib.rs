@@ -450,11 +450,18 @@ impl RenderPass for HiZBuildPass {
     fn reads(&self) -> &'static [&'static str] {
         // The signature orders this pass after every depth-draw producer, so
         // `execute` sees this frame's value.
-        &[helio_frame_api::gbuffer::DEPTH, helio_core::resource_keys::DEPTH_DRAW_SIGNATURE]
+        &[
+            helio_frame_api::gbuffer::DEPTH,
+            helio_core::resource_keys::DEPTH_DRAW_SIGNATURE,
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &[helio_frame_api::depth::HIZ, helio_frame_api::depth::HIZ_NEAREST, helio_frame_api::depth::HIZ_SAMPLER]
+        &[
+            helio_frame_api::depth::HIZ,
+            helio_frame_api::depth::HIZ_NEAREST,
+            helio_frame_api::depth::HIZ_SAMPLER,
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -649,7 +656,8 @@ impl RenderPass for HiZBuildPass {
         // read it, and they declare that before the frame executes. The depth
         // copy feeds both pyramids, so it is needed only when one of them is
         // rebuilt this frame.
-        let nearest_wanted = helio_core::is_demanded(ctx.registry, helio_frame_api::depth::HIZ_NEAREST);
+        let nearest_wanted =
+            helio_core::is_demanded(ctx.registry, helio_frame_api::depth::HIZ_NEAREST);
         let farthest_rebuild = self.farthest_source.begin_frame(DepthInputs {
             camera_generation: ctx.camera_generation,
             scene_signature: ctx.scene_buffers.content_signature(),

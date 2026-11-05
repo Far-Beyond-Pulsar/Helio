@@ -83,7 +83,9 @@ impl Default for LightingSettings {
 
 /// The graph's [`LightingSettings`].
 pub fn lighting_settings(env: &BuildEnv<'_>) -> LightingSettings {
-    env.setting::<LightingSettings>().copied().unwrap_or_default()
+    env.setting::<LightingSettings>()
+        .copied()
+        .unwrap_or_default()
 }
 
 /// Indirect diffuse irradiance at each pixel: a storage buffer of

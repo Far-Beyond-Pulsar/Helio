@@ -124,13 +124,16 @@ impl RenderPass for SsrCompositePass {
         None
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let Some(gbuffer) = ctx
-            .registry
-            .read::<helio_core::ViewGroup<'_, 4>>(ResourceKey::new(helio_frame_api::gbuffer::GROUP), self.name())
-        else {
+        let Some(gbuffer) = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
+            ResourceKey::new(helio_frame_api::gbuffer::GROUP),
+            self.name(),
+        ) else {
             return Ok(());
         };
-        let Some(output) = ctx.registry.get(ResourceKey::new(helio_frame_api::color::SCENE_COLOR)) else {
+        let Some(output) = ctx
+            .registry
+            .get(ResourceKey::new(helio_frame_api::color::SCENE_COLOR))
+        else {
             return Ok(());
         };
         let Some(reflection) = ctx.resource_pool.get_view(self.layer) else {

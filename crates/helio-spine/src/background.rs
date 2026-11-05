@@ -42,7 +42,11 @@ impl RenderPass for BackgroundPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw(helio_frame_api::color::SCENE_COLOR, self.format, ResourceSize::MatchSurface);
+        builder.write_color_raw(
+            helio_frame_api::color::SCENE_COLOR,
+            self.format,
+            ResourceSize::MatchSurface,
+        );
     }
 
     fn render_pass_descriptor_with_storage<'a>(
@@ -52,7 +56,8 @@ impl RenderPass for BackgroundPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let target = resources.texture_view(ResourceKey::new(helio_frame_api::color::SCENE_COLOR))?;
+        let target =
+            resources.texture_view(ResourceKey::new(helio_frame_api::color::SCENE_COLOR))?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
             .retain_boxed_slice(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,

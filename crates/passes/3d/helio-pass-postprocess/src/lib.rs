@@ -30,7 +30,6 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 pub mod gpu_types;
 pub use gpu_types::*;
 
-
 mod lut_builder;
 pub use lut_builder::LutBuilder;
 
@@ -1632,7 +1631,9 @@ impl PostProcessPass {
         });
         let velocity_view = ctx
             .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(helio_frame_api::gbuffer::VELOCITY));
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                helio_frame_api::gbuffer::VELOCITY,
+            ));
         let lut_view = self.color_grading_lut.clone();
         let lut_view = lut_view.as_ref();
 

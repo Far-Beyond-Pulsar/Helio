@@ -880,7 +880,9 @@ impl RenderPass for SdfPass {
         {
             let depth_view = ctx
                 .registry
-                .get(helio_core::ResourceKey::new(helio_frame_api::depth::FULL_RES_DEPTH))
+                .get(helio_core::ResourceKey::new(
+                    helio_frame_api::depth::FULL_RES_DEPTH,
+                ))
                 .unwrap_or(ctx.depth);
             let color_load_op = if self.preserve_framebuffer {
                 wgpu::LoadOp::Load

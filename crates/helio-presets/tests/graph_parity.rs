@@ -281,14 +281,25 @@ fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: unlit stand-in");
         return;
     };
-    for preset in [Preset::Deferred, Preset::DeferredFxaa, Preset::Hlfs, Preset::HlfsFxaa] {
+    for preset in [
+        Preset::Deferred,
+        Preset::DeferredFxaa,
+        Preset::Hlfs,
+        Preset::HlfsFxaa,
+    ] {
         let graph = preset.build(fixtures.context());
         let unlit = passes(&graph)
             .into_iter()
             .find(|pass| pass.type_name == "helio_spine::unlit::UnlitPass")
             .unwrap_or_else(|| panic!("{} draws no unlit stand-in", preset.name()));
-        assert!(unlit.reads.iter().any(|read| read.name == helio_frame_api::gbuffer::GROUP));
-        assert!(unlit.writes.iter().all(|write| write.name != helio_frame_api::gbuffer::GROUP));
+        assert!(unlit
+            .reads
+            .iter()
+            .any(|read| read.name == helio_frame_api::gbuffer::GROUP));
+        assert!(unlit
+            .writes
+            .iter()
+            .all(|write| write.name != helio_frame_api::gbuffer::GROUP));
     }
 
     // A lighting model at the deferred point replaces the stand-in.
@@ -312,7 +323,9 @@ fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
         .build(fixtures.context());
     assert!(!has::<helio_spine::UnlitPass>(&with_model));
     // The forward preset draws lit in its phase: nothing resolves.
-    assert!(!has::<helio_spine::UnlitPass>(&Preset::Forward.build(fixtures.context())));
+    assert!(!has::<helio_spine::UnlitPass>(
+        &Preset::Forward.build(fixtures.context())
+    ));
 }
 
 #[test]

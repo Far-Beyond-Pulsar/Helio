@@ -72,7 +72,9 @@ pub fn attachment_format(
 ) -> Option<wgpu::TextureFormat> {
     match slot {
         AttachmentSlot::Target => None,
-        AttachmentSlot::Depth => pool.get_texture(crate::resource_keys::DEPTH).map(|t| t.format()),
+        AttachmentSlot::Depth => pool
+            .get_texture(crate::resource_keys::DEPTH)
+            .map(|t| t.format()),
         AttachmentSlot::Named(name) => pool.get_texture(name).map(|t| t.format()),
     }
 }

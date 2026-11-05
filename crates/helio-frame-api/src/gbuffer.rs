@@ -92,4 +92,3 @@ pub const GROUP_MEMBERS: [(&str, ResourceFormat); 4] = [
     (ORM, ORM_FORMAT),
     (EMISSIVE, EMISSIVE_FORMAT),
 ];
-

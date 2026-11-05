@@ -663,6 +663,9 @@ mod tests {
         assert_eq!(twice.matches("struct A {").count(), 1);
         assert_eq!(twice.matches("struct AB {").count(), 1);
         assert_eq!(twice.matches("struct Camera {").count(), 1);
-        assert_eq!(once.lines().count(), src.lines().count() + expanded_lines_with(src, &[A, AB]));
+        assert_eq!(
+            once.lines().count(),
+            src.lines().count() + expanded_lines_with(src, &[A, AB])
+        );
     }
 }

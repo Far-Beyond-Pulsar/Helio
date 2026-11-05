@@ -1412,8 +1412,10 @@ impl RenderPass for TsrPass {
         let motion = self
             .motion_vectors
             .then(|| {
-                ctx.registry
-                    .read_texture_view(helio_core::ResourceKey::new(helio_frame_api::gbuffer::VELOCITY), "TSR")
+                ctx.registry.read_texture_view(
+                    helio_core::ResourceKey::new(helio_frame_api::gbuffer::VELOCITY),
+                    "TSR",
+                )
             })
             .flatten();
         let motion_bound = motion.is_some();

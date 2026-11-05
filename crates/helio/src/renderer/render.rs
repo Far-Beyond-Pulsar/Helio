@@ -210,9 +210,7 @@ impl Renderer {
     fn submit_frame(&mut self, target: &wgpu::TextureView, multiview: bool) -> HelioResult<()> {
         // The frame's ray-traced scene, if its builder published one for this
         // frame (`helio_frame_api::rays`): good for this frame only.
-        let rays = self
-            .scene_payloads
-            .take(&helio_frame_api::rays::SCENE_RAYS);
+        let rays = self.scene_payloads.take(&helio_frame_api::rays::SCENE_RAYS);
         helio_core::cpu_scope!("Helio::Renderer::submit_frame");
         self.last_submission = None;
         #[cfg(not(target_arch = "wasm32"))]
@@ -242,12 +240,13 @@ impl Renderer {
         }
         // Frame inputs features supply (the materials' texture table):
         // refreshed before anything is published.
-        self.graph.update_frame_inputs(&helio_core::FrameInputContext {
-            device: &self.device,
-            queue: &self.queue,
-            camera: &self.camera_data,
-            frame_num: self.frame_count,
-        })?;
+        self.graph
+            .update_frame_inputs(&helio_core::FrameInputContext {
+                device: &self.device,
+                queue: &self.queue,
+                camera: &self.camera_data,
+                frame_num: self.frame_count,
+            })?;
         let mut resource_registry = helio_core::ResourceRegistry::empty();
         // Pass-owned buffers are published through the graph before any pass
         // executes. The renderer only consumes the generic contracts and no

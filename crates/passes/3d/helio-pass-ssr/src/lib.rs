@@ -293,12 +293,16 @@ impl RenderPass for SsrPass {
         };
 
         let depth_view = ctx.depth;
-        let pre_aa_view: &wgpu::TextureView =
-            match ctx.registry.get(helio_core::ResourceKey::new(helio_frame_api::color::SCENE_COLOR)) {
-                Some(v) => v,
-                None => return Ok(()),
-            };
-        let hiz_nearest_view = match ctx.resource_pool.get_view(helio_frame_api::depth::HIZ_NEAREST) {
+        let pre_aa_view: &wgpu::TextureView = match ctx.registry.get(helio_core::ResourceKey::new(
+            helio_frame_api::color::SCENE_COLOR,
+        )) {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        let hiz_nearest_view = match ctx
+            .resource_pool
+            .get_view(helio_frame_api::depth::HIZ_NEAREST)
+        {
             Some(v) => v,
             None => return Ok(()),
         };
@@ -354,7 +358,9 @@ impl RenderPass for SsrPass {
             if let Some(tlas_binding) = tlas {
                 let transmission = ctx
                     .registry
-                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(helio_frame_api::rays::RAY_TRANSMISSION))
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(
+                        helio_frame_api::rays::RAY_TRANSMISSION,
+                    ))
                     .unwrap_or(&self.transmission_fallback);
                 let rt_key = (tlas_binding.clone(), transmission.clone());
 

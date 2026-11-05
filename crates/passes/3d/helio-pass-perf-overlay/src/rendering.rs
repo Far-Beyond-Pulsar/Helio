@@ -806,7 +806,9 @@ impl RenderPass for PerfOverlayPass {
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
             ctx.registry
-                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(helio_frame_api::gbuffer::GROUP)),
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(
+                    helio_frame_api::gbuffer::GROUP,
+                )),
             ctx.registry
                 .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
         ) {
@@ -860,10 +862,14 @@ impl RenderPass for PerfOverlayPass {
         }
 
         if let (Some(_pre_aa), Some(gbuffer)) = (
+            ctx.registry.read_texture_view(
+                helio_core::ResourceKey::new(helio_frame_api::color::SCENE_COLOR),
+                "PerfOverlay",
+            ),
             ctx.registry
-                .read_texture_view(helio_core::ResourceKey::new(helio_frame_api::color::SCENE_COLOR), "PerfOverlay"),
-            ctx.registry
-                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(helio_frame_api::gbuffer::GROUP)),
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(
+                    helio_frame_api::gbuffer::GROUP,
+                )),
         ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let key = (gbuffer_orm_ptr, shared.targets_generation);

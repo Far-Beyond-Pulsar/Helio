@@ -301,11 +301,13 @@ impl FrameNode for NodeDescriptor {
     }
 
     fn drawer(self, phase: Phase, order: i32) -> Self {
-        self.at(phase.draw(), order).with_check(contract_check(phase))
+        self.at(phase.draw(), order)
+            .with_check(contract_check(phase))
     }
 
     fn opens(self, phase: Phase, order: i32) -> Self {
-        self.at(phase.open(), order).with_check(contract_check(phase))
+        self.at(phase.open(), order)
+            .with_check(contract_check(phase))
     }
 
     fn before_phase(self, phase: Phase, order: i32) -> Self {
@@ -365,9 +367,7 @@ mod tests {
         let mut points: Vec<&str> = Phase::ALL
             .iter()
             .flat_map(|p| [p.before().0, p.open().0, p.draw().0])
-            .chain(
-                Slot::ALL.map(|s| s.point().0),
-            )
+            .chain(Slot::ALL.map(|s| s.point().0))
             .collect();
         let count = points.len();
         points.sort_unstable();
@@ -377,7 +377,11 @@ mod tests {
 
     #[test]
     fn the_gbuffer_contract_lists_the_layout() {
-        let names: Vec<_> = Phase::GBuffer.attachments().iter().map(|a| a.name).collect();
+        let names: Vec<_> = Phase::GBuffer
+            .attachments()
+            .iter()
+            .map(|a| a.name)
+            .collect();
         assert!(names.contains(&gbuffer::ALBEDO) && names.contains(&gbuffer::DEPTH));
         assert_eq!(names.len(), 9);
     }

@@ -209,7 +209,7 @@ struct TsrUniform {
 // Fraction of the pixel's shading sampled stochastically per frame (lib.rs
 // STOCHASTIC_MASK); zero when the graph does not provide it.
 @group(0) @binding(13) var stochastic_mask: texture_2d<f32>;
-// Motion vectors (lib.rs MOTION_VECTORS): xy each texel's motion since last
+// Motion vectors (helio_frame_api::gbuffer::VELOCITY): xy each texel's motion since last
 // frame in input pixels, from last frame's raster position to this one's
 // (both jittered), for geometry that moves by itself (bit 0 of w); other
 // texels move with the camera. Read when tsr.flags bit 2 is set.
