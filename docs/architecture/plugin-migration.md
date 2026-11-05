@@ -95,7 +95,7 @@ same path, like physics).
 
 | Plugin | Components | Feature owns | Leaves Helio/Pulsar today's |
 |---|---|---|---|
-| `pulsar.materials` | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | done (batch 6): `plugins/vendor/materials/` (`api` = helio-mats, `feature` = helio-pass-materials: the material texture table, `component` = materials_component, `editor` = materials_plugin); the Helio repo has no material crate. Left: the material assets, graph compiler and cooked textures in `helio_component`, and the engine's material table being the meshes' join (see "As built, batch 6") |
+| `pulsar.materials` | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | done (batch 6): `plugins/vendor/materials/` (`api` = helio-mats, `feature` = helio-pass-materials: the material texture table, `component` = materials_component, `editor` = materials_plugin); the Helio repo has no material crate. The material assets and the graph compiler are the plugin's since Phase C step 3 part B (`assets`, `graph`, `graph_preview`; the meshes read them through `helio_mats::asset`); images stay core. Left: the engine's material table being the meshes' join (see "As built, batch 6") |
 | `pulsar.meshes` | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | crates done (batch 4): `plugins/vendor/meshes/` (`api` = helio-mesh-api, `feature/*`, `vg/*`, `asset-compat`, `host` = helio-mesh-host, `component` = meshes_component: the features' registrations, `editor` = meshes_plugin, `examples` = meshes-examples, `snapshot`, `web-demos`, `android-demos`); the Helio repo has no mesh crate. Left: the SceneDB components, scene join installation, authored LOD selection, VG host and picking in `helio_component`/`engine_backend` (core crates read them by type; see "As built, batch 4") |
 | `pulsar.lights` | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | done (batch 5): `plugins/vendor/lights/` (`api` = helio-light-api, `feature/{cull,shadows,deferred,hlfs,billboard}`, `host` = helio-light-host, `component` = lights_component with `LightComponent`/`ReflectionCaptureComponent`, `editor` = lights_plugin, `examples` = lights-examples); the Helio repo has no light crate |
 | `pulsar.sky` | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (`sky_component`, `feature` = helio-pass-sky, `sky_plugin`, `sky-examples`); no api crate: what others read of it is the frame's |
@@ -1351,7 +1351,9 @@ outside its test host. Phase B is done.
      `ui_level_editor` (plugin-provided tool modes, panels and undo). Done
      (see "As built, Phase C step 3").
   3. The mesh components (and with them the material assets and the engine's
-     material table, above) leave `helio_component`.
+     material table, above) leave `helio_component`. The material assets
+     done (see "As built, Phase C step 3 part B, materials"); the mesh
+     components are that section's "Left".
   4. The repo split, last: each plugin its own `Plugin_<Kind>` repository at
      `plugins/vendor/<kind>/`, and the layer gate's rule that no Helio crate
      outside the test host names a kind's contract.
@@ -1833,6 +1835,217 @@ snapshot and exe):
   (since p9). `render_acceptance`'s sky and sprite tests pass;
   `foliage_sways_in_the_global_wind_on_the_frame_clock` fails locally
   (0 texels moved; its code path matches p14's, not run on p14).
+
+As built, Phase C step 3 part B, materials (2026-11-05, branch
+`rewrite/p16-mesh-components` in both repos): **the material assets are the
+`pulsar.materials` plugin's.** `helio_component` no longer holds a material
+asset, the graph compiler or a graph preview; the meshes (still in
+`helio_component`, below) read material assets through the materials' api
+only, and no core crate names a material type. All of it is Pulsar's;
+Helio's only change is this section.
+
+How others do it, and why ours:
+- Unreal: a mesh component holds `UMaterialInterface`s (the material
+  module's interface: `GetRenderProxy`, `GetRelevance`); `UMaterial` and its
+  HLSL translator are behind it, so a mesh never sees a graph.
+- Unity: `Renderer.sharedMaterials` are `Material`s, an engine type; Shader
+  Graph compiles through the pipeline's own code.
+- Bevy: the mesh does not know materials at all; `MeshMaterial3d<M>` is a
+  second component on the entity and the material plugin queues the mesh's
+  draws.
+- Ours is Unreal's interface line: a mesh slot names a material asset by id
+  (SceneDB's `material` asset kind) and binds the loaded payload as
+  `helio_mats::asset::MaterialAsset`, which resolves to the row a section
+  draws (`resolve(id, version, scene, fallback)`). The interface is in the
+  materials' api crate, so the meshes link no material code, and a project
+  without the plugin has no loader for the kind: the asset fails to load and
+  the slot draws the mesh's imported surface, as `MaterialStandIn` is the
+  table's absence. Bevy's separate component is the direction for
+  per-entity material overrides (the "material instances as entities" step
+  below); it needs the meshes' join to index a material table it does not
+  write, which is that step's work, not this one's.
+
+**The materials' api** (`helio_mats::asset`, new): `MATERIAL_ASSET_KIND`,
+`SHADER_GRAPH_FILE`, `SurfaceValues` (scalar PBR values: a surface
+document's, and a model import's: the meshes' `ImportedSurfaceMaterial` is
+it), `SurfaceValues::row` (the one scalar-surface-to-row formula; the
+meshes' `surface_material` copy and the skeletal draw's use of it are
+gone), `SurfaceMaterialDocument` (the `.mat` file, moved from
+`static_mesh_component`), `ResolvedMaterial`, the `MaterialAsset` trait
+(`resolve`, `reads_time`, `warm`, `held_bytes`) and `MaterialPayload` (the
+kind's SceneDB payload).
+
+**The plugin** (`materials_component`): `assets` (the loader: a surface
+document, or a graph compiled on the loader thread with its textures
+decoded; the compiled-graph cache and the texture users for reloads;
+`LoadedMaterial` implements `MaterialAsset`), `graph` (the one material
+graph compiler, was `helio_component::material_graph`), `graph_preview`
+(the asset viewer's preview compile). The asset viewer reads the preview
+from it (an editor plugin; games never link it).
+
+**Generic asset seams** (`helio_component::asset_component`, core; each
+names no kind):
+- `AssetLoaderRegistration { origin, kind, load, size }`: the owner of a
+  SceneDB asset kind. `install_asset_loaders` installs every linked one once
+  per process; each load checks `pulsar_plugins::origin_enabled`, so a
+  disabled plugin's kind fails ("not enabled") and switching projects needs
+  nothing. `declared_asset_id(kind, source)` declares an asset with the
+  loaders installed; `load_asset_now` loads one on the caller's thread for
+  tools (thumbnails, the asset viewer) through the enabled owner.
+- `AssetReloadRegistration { origin, kind, sources_for_file }`: which world
+  assets a changed file reloads. `engine_backend::scene::reload_updated_asset`
+  asks every registration for the event's kind (it named the material,
+  mesh and texture functions); the materials register for material files
+  and for images (the graphs sampling them), images and meshes for their
+  own files.
+- `asset_source(path)`: the one authored-path normalization (was
+  `material_source`).
+How others do it: Unreal's `UFactory`/`UAssetManager` type registry and
+Bevy's `AssetLoader` registered per extension by the plugin that owns the
+type (`app.register_asset_loader`); ours registers by SceneDB asset kind,
+gated per project like every other registration.
+
+**Textures**: images stay core (`texture_assets`, `cooked_texture`,
+`texture_detail` in `helio_component`): sprites, decals and materials all
+read images, and cooking, residency and the scene texture store are not a
+material concept (Unreal's `UTexture` is the engine's, not the material
+module's). A material graph's texture slots are the material's: the plugin
+asks the image residency for each texture it samples. The texture-store
+upload helper moved into `texture_assets`. Deleted: `material_textures`'s
+`register_graph_texture` (nothing called it but its own test) and
+`engine_backend`'s never-called `reload_animation_asset`.
+
+**Tests moved with their owner**: `material_assets` (load, rebind, reload,
+bad input; through the meshes' slots) and `material_graph_rendering` (the
+compiler and GPU pixels) are the materials plugin's; the mesh upload and FBX
+cache tests that lived in `material_graph_rendering` are
+`helio_component`'s `mesh_uploads` (they move with the meshes).
+`absent_plugins` checks the material asset kind is absent with the plugin
+disabled (no loader, a slot naming a material draws its imported surface, a
+changed material file reloads nothing) and back when enabled.
+
+**Verified** (against p15: Helio 53248a95 / Pulsar 8d71139e1, its kept
+snapshot and exe):
+- Pulsar's `plugin_pass_lists` dump is byte-identical to p15's (3856
+  lines). Helio's preset snapshot is unchanged by construction (no Helio
+  code changed).
+- voxel_craft (`voxel_craft_p15.exe` vs p16, alternating, 8-frame bursts at
+  4 poses, `VOXEL_CRAFT_NO_CLOUDS`): mean |Δ| p15-p16 0.20 and 0.05 for the
+  runs made back to back, against p15-p15 0.47 and p16-p16 0.50 (runs
+  minutes apart), image means 58.42-58.55. The p15 exe again spends its
+  first frames compiling pipelines (142-153 s against 33-36 s).
+- `cargo clippy --workspace --all-targets` with CI's flags clean.
+  `one_owner` passes. Tests pass: `helio-mats` (20, the new `asset` ones
+  included), `materials_component` (lib 8, `material_assets`,
+  `material_graph_rendering` 12 with the GPU pixel suites),
+  `helio_component` (lib 114, `mesh_uploads`), `absent_plugins` (with the
+  material asset kind), `engine_backend` lib (90), `pulsar_game` lib (91)
+  and `asset_reload`, the lights' `class_reload`, `ui_level_editor`'s
+  `mesh_reimport` and lib (109; the known
+  `sculpt_stamps_do_not_rebuild_the_properties_section` fails, since p9).
+- `render_acceptance`'s `foliage_sways_in_the_global_wind_on_the_frame_clock`
+  (failing locally since p15) fails the same way on p14 (built once at
+  e0b17d138 for this): 0 texels move because the meadow is not drawn at all
+  (the frame shows only the editor grid). It predates p15 and this step;
+  not this step's to fix, recorded as a follow-up.
+
+**Left: the meshes' components** (not started; the next session's whole
+scope). Everything below is still in `helio_component` and read by type from
+core crates. The move target is `plugins/vendor/meshes/component`
+(`meshes_component`), which depends on `engine_backend`, so every
+`engine_backend` reader needs its seam in the same change (a dependency
+cycle otherwise).
+
+What moves (about 16k lines): `static_mesh_component` (+ `mesh_materials`,
+this step's mesh half of the material binding), `static_mesh_draw`,
+`skeletal_mesh_component` + `skeletal_notifies` + the five skeletal test
+files, `lod_component`, `virtual_geometry_component`, `mesh_cache`,
+`mesh_spatial`, `mesh_thumbnail`, `virtual_geometry_host`,
+`virtual_geometry_instances(.wgsl)`, `static_move_watch`, `motion_gate`'s
+mesh half, `anim_source`, the mesh functions of `subsystems`
+(`load_mesh_upload`, `load_mesh_asset_upload`), and `engine_backend`'s
+`authored_lod` (1300 lines, the meshes' LOD selection). Tests:
+`helio_component`'s `mesh_uploads`, `static_mesh_*`, `content_dedup*`,
+`virtual_geometry_instances_gpu`, `cook_cache`?; `engine_backend`'s
+`group_motion`, `movement_scaling`, `scene_join_rows`; the materials'
+`material_assets` test keeps working through the meshes' crate.
+
+Seams, by reader (file: what it reads -> the seam):
+- `engine_backend/src/scene/helio_bridge.rs`: the scene join keys (mesh
+  buffers, skin/palette handles), the mesh GPU column registrations, the
+  meshes' `SceneJoin` first in the scene-join group -> the meshes submit an
+  `ObjectJoinRegistration` with an order (theirs first; the lights' join
+  reads the mesh rows' placement); `row_join_keys().mesh_bounds` -> the
+  meshes' api key (`helio-mesh-api`), until the owner-bounds contract.
+  `engine_backend` then loses `helio-pass-object-batch`.
+- `engine_backend/src/scene/authored_lod.rs` + `authored_lod_selection`:
+  moves into the meshes; installed as a derivation after the VG derivations
+  -> a derivation stage on the registration (scene join < VG < LOD <
+  environment join).
+- `scene_renderer.rs` + `helio_bridge` VG wrappers + `sync_virtual_geometry`:
+  the `VirtualGeometryHost` -> a render-host part registration (per-renderer
+  state: `new(device)`, derivations, `configure(RendererConfig)` (hands its
+  runtime to `with_virtual_geometry`), `sync(world, mirror, settings)` each
+  frame). `engine_backend` then loses `helio-pass-vg`, `helio-vg-*`.
+  `scene_renderer.rs:509` (any enabled authored mesh) -> ask the part.
+- `interaction.rs:750-783, 940-952`: mesh picking (`raycast_mesh` against
+  the instance's geometry) and selection bounds -> a pick registration (a
+  ray against an entity's content, its local bounds), the meshes' and any
+  kind's.
+- `animated_content.rs`: `mesh_reads_time` -> the meshes submit an
+  `AnimatedContentRegistration` (the seam exists).
+- `engine_backend/src/lib.rs:22-23`: force-link and the re-export of the
+  animation notify catalogue (Blueprint's `engine_events.rs:232`) -> a
+  component event catalogue registration in `pulsar_world_registry` (class,
+  `events(root, assets)`), read by the Blueprint editor; Blueprint keeps the
+  class name literals (data, not a link). Needs a Plugin_Blueprints PR.
+- `engine_backend/src/services/core_project_builder.rs:945-963`: the starter
+  script attaches a cube via `pulsar_game::scene::StaticMeshComponent` ->
+  `pulsar_game::scene` stops re-exporting mesh types (`lib.rs:73`); the
+  template uses the meshes' crate when the project enables it, or attaches
+  by class name through `attach_value`/the registry.
+- `pulsar_game/src/tick.rs`: `StaticMoveWatch`, `run_animation_phase`,
+  `flush_animation_notifies` -> tick-phase registrations (before systems,
+  after systems with the script callback), the meshes' (skinned animation
+  runtime: per the step 1 audit the animation runtime is `skm_editor`'s and
+  the skinned draw the meshes'; this move keeps them together in the
+  meshes, the split is the animation plugin's step). `standalone.rs:331`
+  (headless mesh report) -> a report registration or a count by class.
+- `asset_import`: `importer.rs` (`options_schema`, `load_model_scene`,
+  `write_static_mesh`, ...), `rig.rs:225`, `companion.rs:247-264`
+  (`set_default_materials`) -> an importer registration by source extension
+  (`ImporterRegistration { extensions, options_schema, import }`), the
+  meshes' model importer; `asset_import` keeps the service, database and
+  queue. `ui_file_manager` (`configurator.rs`: `OptionsSchema`,
+  `ImportField`; `drag_drop.rs`: `is_importable_model`) reads the
+  registry, not the meshes.
+- `pulsar_class/src/records.rs`, `pulsar_scene/src/loader.rs:79`: record
+  migrations naming `"StaticMeshComponent"` (fold the legacy material
+  override, `props.mesh_asset`) -> a record-migration registration the
+  meshes submit.
+- Force-links only (`level_migrate/main.rs:29`, `pulsar_scene/loader.rs:23`,
+  `scene_inventory/lib.rs:21`, `ui_level_editor/lib.rs:11`) -> link
+  `installed_plugins` (runtime modules), as `scene_inventory` does.
+  `scene_inventory/ledger.toml` type paths and `architecture.rs:97` follow
+  the move.
+- `ui_level_editor/src/core/commands/executor.rs:793`: SetMovability names
+  the mesh and light classes -> `MovabilityRegistration` (exists).
+- Plugins: `physics_plugin/src/components/skeletal_rig.rs` (pose rows,
+  `apply_physics_bones`, `clear_physics_pose`) -> the skeletal component's
+  methods by name (`invoke_component_method`, the scripting path), no type
+  link (a Plugin_Physics PR); `asset_viewer` (`load_mesh_asset_upload`,
+  `MeshAssetUpload`, slots) and `portals/editor` (ghost geometry from mesh
+  vertices) may link `meshes_component` (editor plugins; or portals read
+  the vertices through a component method); `meshes/editor` already does.
+- Tests naming the types (`ui_level_editor` render/VG acceptance, skeletal
+  property editors, `pulsar_game` asset_reload/runtime parity, lights/
+  sprites/water scene-row tests) reach them through
+  `installed_plugins::meshes_component`.
+Then `absent_plugins` disables `pulsar.meshes` too (no mesh class, no
+object batch, no picking, the generated game's cargo tree has no
+`meshes_component`), and the "material instances as entities" step (mesh
+sections naming material entities, voxel slots indexing the same table)
+can start.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
