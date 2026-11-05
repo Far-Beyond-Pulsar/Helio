@@ -84,8 +84,8 @@ struct AtmosphereFrame {
     // Reference direction for the sky-view LUT's angular coordinate system;
     // w: cos of the atmosphere's default emitter radius.
     sun: vec4<f32>,
-    // Summed directional-light illuminance (rgb); w: distance (km) the
-    // aerial-perspective volume reaches.
+    // First light's legacy illuminance (rgb); all current sky lighting reads
+    // directional_lights below. w: aerial-perspective range in km.
     sun_illuminance: vec4<f32>,
     // Camera relative to the planet centre (km); w: unused.
     eye: vec4<f32>,
