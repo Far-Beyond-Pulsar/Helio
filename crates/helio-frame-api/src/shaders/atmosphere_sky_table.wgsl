@@ -6,9 +6,9 @@
 // The table's harmonics at `from_camera` (km, relative to the camera)
 // evaluated along `n`, each band scaled by `bands` (1, 1, 1: irradiance /
 // pi for a surface facing `n`; 1, 3/2, 4: the sky's radiance along `n`,
-// undoing the cosine convolution). In units of the sun's illuminance; above
-// the atmosphere the planet's glow falls with its solid angle. Zero without
-// an atmosphere.
+// undoing the cosine convolution). The result sums each directional light's
+// contribution; above the atmosphere the planet's glow falls with its solid
+// angle. Zero without an atmosphere.
 fn atmosphere_sky_table_eval(frame: AtmosphereFrame, from_camera: vec3<f32>, n: vec3<f32>, bands: vec3<f32>) -> vec3<f32> {
     if frame.planet.w < 0.5 { return vec3<f32>(0.0); }
     let bottom = frame.params.bottom_radius;
