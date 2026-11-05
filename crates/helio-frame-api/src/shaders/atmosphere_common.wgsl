@@ -68,12 +68,12 @@ struct AtmosphereParams {
     shooting_star_rate: f32,
     shooting_star_speed: f32,
     shooting_star_length: f32,
-    moon_enabled: u32,
-    moon_phase: f32,
-    moon_brightness: f32,
-    moon_angular_radius: f32,
-    moonlight_intensity: f32,
-    night_reserved: f32,
+    sky_texture_source: u32,
+    sky_texture_intensity: f32,
+    sky_texture_opacity: f32,
+    sky_texture_yaw: f32,
+    sky_texture_pitch: f32,
+    sky_texture_roll: f32,
 }
 
 // Per frame, resolved on the GPU (`resolve`).
