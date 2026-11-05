@@ -1808,8 +1808,31 @@ presets and listings are absent and come back.
   `pulsar_scene_model`) still give hierarchy icons and the assistant's
   object kinds; `SetMovability` names the mesh and light classes; the
   shell's tests generate the HLFS cathedral with `helio-mesh-api` (a
-  dev-dependency). The mesh components and material assets are step 3's
-  second part (below).
+  dev-dependency).
+- The mesh components, material assets and the engine's material table
+  leaving `helio_component` (step 3's second part, branch
+  `rewrite/p16-mesh-components`) is not started: about 60 files read them
+  by type, including the Blueprint and Physics plugin submodules; its scope
+  and seams are in the p16 handover note.
+
+**Verified** (against p14: Helio b3e0911c / Pulsar e0b17d138, its kept
+snapshot and exe):
+- Pulsar's `plugin_pass_lists` dump is byte-identical to p14's (3856
+  lines). Helio's preset snapshot is unchanged by construction (no Helio
+  code changed).
+- voxel_craft (`voxel_craft_p14.exe` vs p15, alternating, 8-frame bursts at
+  4 poses, `VOXEL_CRAFT_NO_CLOUDS`: the p14 exe spends 70 s compiling
+  pipelines against 22 s, and the clouds follow wall time): mean |Δ|
+  p14-p15 0.12-0.28 against p14-p14 0.28 and p15-p15 0.21, image means
+  58.53-58.56.
+- `cargo clippy --workspace --all-targets` with CI's flags clean;
+  `one_owner`, `installed_set`, `absent_plugins` (now with the editor UI),
+  `level_editor` (8, including the GPU kept-chunks save), the voxel
+  inspector tests, the plugins' lib tests and `ui_level_editor`'s lib (109)
+  pass. Known failure: `sculpt_stamps_do_not_rebuild_the_properties_section`
+  (since p9). `render_acceptance`'s sky and sprite tests pass;
+  `foliage_sways_in_the_global_wind_on_the_frame_clock` fails locally
+  (0 texels moved; its code path matches p14's, not run on p14).
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
