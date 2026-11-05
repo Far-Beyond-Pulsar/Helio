@@ -20,7 +20,10 @@ blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd1
 blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
-winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
+# The Linux backends are listed here, not left to whichever crate happens to
+# enable them: a crate that uses winit directly gets no backend otherwise, and
+# winit refuses to compile on Linux (Windows and macOS need no feature).
+winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 # Published Pulsar-Native profiler (including cross-thread scope contexts) -- the same
 # collector that powers the editor flamegraph. Feature-flag aliased below so
 # the fork's `profile_scope!` coexists with the compile-time `profiling`
