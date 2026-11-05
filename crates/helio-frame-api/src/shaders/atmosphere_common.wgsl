@@ -105,9 +105,9 @@ struct AtmosphereFrame {
     cloud_meso_fine_offset: vec4<f32>,
     cloud_shape_offset: vec4<f32>,
     cloud_detail_offset: vec4<f32>,
-    // Up to eight directional lights, each stored as direction, radiance,
+    // Up to 32 directional lights, each stored as direction, radiance,
     // then emitter metadata (radius, brightness, texture kind, enabled).
-    directional_lights: array<vec4<f32>, 24>,
+    directional_lights: array<vec4<f32>, 96>,
     directional_light_count: vec4<u32>,
 }
 

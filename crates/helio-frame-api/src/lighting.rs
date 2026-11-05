@@ -119,7 +119,7 @@ pub mod sky {
     /// Bytes of `AtmosphereFrame`. The buffer is usable as a uniform as well
     /// as storage: consumers already at the per-stage storage-buffer limit
     /// (the deferred lighting pass) bind it as a uniform.
-    pub const ATMOSPHERE_FRAME_BYTES: u64 = 992;
+    pub const ATMOSPHERE_FRAME_BYTES: u64 = 2144;
     /// Graph key of the sky's irradiance table (`SKY_TABLE_*` in
     /// `atmosphere_common.wgsl`): the sky over a surface anywhere in the air,
     /// by its altitude and sun angle. Usable as a uniform.
