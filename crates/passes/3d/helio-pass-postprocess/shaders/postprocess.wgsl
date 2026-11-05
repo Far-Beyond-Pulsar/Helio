@@ -43,6 +43,18 @@ const WG_BLOOM: u32 = 8u;
 const WG_EXPOSURE_X: u32 = 16u;
 const WG_EXPOSURE_Y: u32 = 16u;
 
+// Bound radiance before filtering or storing in rgba16float. One infinity
+// otherwise becomes inf/inf in bloom extraction and spreads NaNs through
+// the pyramid into a rectangular black patch. Preserve positive overflow
+// as a bright highlight; only NaNs and negative values are black.
+fn bounded_hdr(c: vec3<f32>) -> vec3<f32> {
+    let bits = bitcast<vec3<u32>>(c);
+    let magnitude = bits & vec3<u32>(0x7fffffffu);
+    let is_nan = magnitude > vec3<u32>(0x7f800000u);
+    let clean = select(c, vec3<f32>(0.0), is_nan);
+    return clamp(clean, vec3<f32>(0.0), vec3<f32>(65504.0));
+}
+
 // A renderer debug view is on: show the scene colour as the view wrote it
 // (no exposure, bloom, grade or tone curve). Set per pipeline.
 override DEBUG_VIEW: bool = false;
@@ -170,7 +182,7 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>,
         let depth_dims = textureDimensions(depth_input);
         let at = min(pixel * depth_dims / dims, depth_dims - 1u);
         if !helio_is_sky(textureLoad(depth_input, vec2<i32>(at), 0)) {
-            let col = textureLoad(hdr_input, vec2<i32>(pixel), 0).rgb;
+            let col = bounded_hdr(textureLoad(hdr_input, vec2<i32>(pixel), 0).rgb);
             atomicAdd(&wg_hist[exposure_bin(log2(max(luminance(col), 0.00001)))], 1u);
         }
     }
@@ -330,7 +342,7 @@ fn cs_local_exposure_grid(@builtin(local_invocation_id) lid: vec3<u32>,
     workgroupBarrier();
     // A bilinear tap averages 2x2 pixels: at 1080p the lattice covers the cell.
     let uv = (vec2<f32>(cell.xy) + (vec2<f32>(lid.xy) + 0.5) / f32(LE_TAPS)) / vec2<f32>(grid.xy);
-    let ev = local_exposure_ev(textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb, local_exposure_pivot());
+    let ev = local_exposure_ev(bounded_hdr(textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb), local_exposure_pivot());
     let z = (ev - LE_EV_MIN) / LE_EV_PER_BIN;
     let low = min(u32(z), LE_BINS - 1u);
     let high = min(low + 1u, LE_BINS - 1u);
@@ -455,7 +467,7 @@ fn cs_bloom_down_extract(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sx = ix * 2 + dx;
             let sy = iy * 2 + dy;
             if sx < hw && sy < hh {
-                color += textureLoad(hdr_input, vec2<i32>(sx, sy), 0).rgb;
+                color += bounded_hdr(textureLoad(hdr_input, vec2<i32>(sx, sy), 0).rgb);
             }
         }
     }
@@ -475,7 +487,7 @@ fn cs_bloom_down_extract(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     var brights = color * (excess / max(l, 0.0001));
     brights *= postprocess.bloom_intensity * postprocess.blend_weight_bloom;
-    textureStore(bloom_dst, vec2<i32>(ix, iy), vec4<f32>(brights * postprocess.bloom_tint, 0.0));
+    textureStore(bloom_dst, vec2<i32>(ix, iy), vec4<f32>(bounded_hdr(brights * postprocess.bloom_tint), 0.0));
 }
 
 // ── cs_bloom_down: 2x downsample bloom_src → bloom_dst ────────────────────────
@@ -504,7 +516,7 @@ fn cs_bloom_down(@builtin(global_invocation_id) gid: vec3<u32>) {
     let l = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 0.0,  2.0), 0.0).rgb;
     let m = textureSampleLevel(bloom_src, linear_samp, uv + texel * vec2( 2.0,  2.0), 0.0).rgb;
     let color = g * 0.125 + (a + c + k + m) * 0.03125 + (b + f + h + l) * 0.0625 + (d + e + i + j) * 0.125;
-    textureStore(bloom_dst, vec2<i32>(gid.xy), vec4<f32>(color, 0.0));
+    textureStore(bloom_dst, vec2<i32>(gid.xy), vec4<f32>(bounded_hdr(color), 0.0));
 }
 
 // ── cs_bloom_upsample: sum i = mip i + upsampled sum i+1 ──────────────────────
@@ -521,7 +533,7 @@ fn cs_bloom_upsample(@builtin(global_invocation_id) gid: vec3<u32>) {
     let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dst_dims);
     let sum = textureLoad(bloom_up_mip, vec2<i32>(gid.xy), 0).rgb
             + sample_bspline(bloom_up_coarser, uv);
-    textureStore(bloom_up_dst, vec2<i32>(gid.xy), vec4<f32>(sum, 0.0));
+    textureStore(bloom_up_dst, vec2<i32>(gid.xy), vec4<f32>(bounded_hdr(sum), 0.0));
 }
 
 // ── Tonemapping operators ──────────────────────────────────────────────────────
@@ -846,7 +858,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     // surface's depth before transparency and AA, so metering, bloom and lens
     // extraction below all see scattered light.
     let source = textureSampleLevel(hdr_input, linear_samp, uv, 0.0);
-    var color = source.rgb;
+    var color = bounded_hdr(source.rgb);
     if DEBUG_VIEW {
         return source;
     }
