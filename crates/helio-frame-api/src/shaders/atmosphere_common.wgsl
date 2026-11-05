@@ -58,6 +58,22 @@ struct AtmosphereParams {
     cloud_voxel_size: f32,
     cloud_voxel_fill: f32,
     cloud_reserved: vec2<f32>,
+    night_sky_enabled: u32,
+    star_count: f32,
+    star_brightness: f32,
+    star_twinkle_fraction: f32,
+    star_twinkle_speed: f32,
+    star_seed: u32,
+    shooting_stars_enabled: u32,
+    shooting_star_rate: f32,
+    shooting_star_speed: f32,
+    shooting_star_length: f32,
+    moon_enabled: u32,
+    moon_phase: f32,
+    moon_brightness: f32,
+    moon_angular_radius: f32,
+    moonlight_intensity: f32,
+    night_reserved: f32,
 }
 
 // Per frame, resolved on the GPU (`resolve`).
