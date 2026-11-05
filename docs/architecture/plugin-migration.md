@@ -1348,7 +1348,8 @@ outside its test host. Phase B is done.
      above, `Unlit`, `GBufferClear` are the frame's side of it; the engine
      still links every plugin). Done (see "As built, Phase C step 2").
   2. The sculpt tool, the terrain panel and the light UI leave
-     `ui_level_editor` (plugin-provided tool modes, panels and undo).
+     `ui_level_editor` (plugin-provided tool modes, panels and undo). Done
+     (see "As built, Phase C step 3").
   3. The mesh components (and with them the material assets and the engine's
      material table, above) leave `helio_component`.
   4. The repo split, last: each plugin its own `Plugin_<Kind>` repository at
@@ -1677,6 +1678,138 @@ snapshots and exes):
   `sculpt_stamps_do_not_rebuild_the_properties_section` (since p9); its
   sibling `the_layers_stack_offers_headings_and_cards_not_one_giant_row`
   passes now that the tests link the editor modules.
+
+As built, Phase C step 3 (2026-11-05, branch `rewrite/p15-plugin-editor-ui` in
+both repos): **the level editor is a shell; every kind's editor UI is its
+plugin's.** `ui_level_editor` depends on no plugin crate (its tests reach
+the components through `installed_plugins`' runtime modules). Step 2's
+runtime hiding (`register_tool_modes`' `is_enabled` calls,
+`create::available`, `environment::available`) is deleted: a disabled
+plugin's UI is absent because its editor crate's registrations are skipped,
+like every other registration. All of it is Pulsar's; Helio's only change is
+this section.
+
+How others do it, and why ours:
+- Unreal: the LevelEditor module exposes extensibility managers (menu and
+  toolbar `FExtender`s), `FEditorModeRegistry`/`UEdMode` for tool modes
+  (Landscape and Foliage are plugin modes), the PropertyEditor module's
+  per-class detail customizations, placement-mode categories, and
+  transactions (`FScopedTransaction`/`Modify`) for undo. Plugins depend on
+  the editor modules; the editor names no plugin.
+- Unity: attributes discovered by reflection over the loaded assemblies
+  (`[EditorTool]`, `[CustomEditor]`, `[MenuItem("GameObject/..")]`) and
+  `Undo.RecordObject`; removing a package removes its assembly.
+- Godot: an `EditorPlugin` per plugin (`add_control_to_dock`,
+  `add_custom_type`, `_forward_3d_gui_input`, `get_undo_redo()` with
+  do/undo methods), enabled per project in `project.godot`.
+- Bevy has no first-party editor; ecosystem editors take windows from
+  plugins through `App` extension traits, chosen at compile time.
+- Ours: Unreal's dependency direction (each plugin's editor crate depends
+  on the shell's extension points, the shell names no plugin), static
+  registration like Bevy's (`inventory`: no assembly scan, no module
+  loading, typed at compile time), gated per project as in step 2 (Godot's
+  per-project enable, Unreal's `.uproject`). Each extension point is one
+  type in `ui_level_editor::extend` (its one owner). Most are data the shell
+  renders the same way for every kind (a create entry, a level component's
+  section, an environment listing, a preset), so a plugin cannot make a
+  menu or a section behave differently from the others; code hooks are kept
+  for what is inherently code (a tool mode, an undo step, a save hook).
+  Adding a kind adds a crate and edits nothing in the shell; the lists are
+  sorted by `order`, read through `pulsar_plugins::registered` (a filter
+  over a few dozen statics).
+
+**The extension points** (`ui_level_editor::extend`, each with
+`origin: pulsar_plugins::origin!()`):
+- `ToolModeRegistration` (a `ToolMode`; `ToolMode::label`/`description`
+  return the plugin's own translated text, `ModeLayout::dock_width` replaced
+  the shell's per-mode width match). The shell keeps only Level Edit.
+- `CreateEntry` (id, Create-menu text, environment-mixer text, hierarchy
+  quick-add button, `offered` (one sun), `create`): the Create menu (grouped
+  by hundreds of `order`), the mixer's add buttons and the hierarchy's quick
+  adds are the registered entries. Entries are addressable by id
+  (`extend::create(state, "sky")`), so a plugin uses another's entry
+  without linking it (the lights' starter setups add the sky plugin's sky
+  when it is enabled). `extend::add_object` is the undoable add-and-select
+  most entries are.
+- `EnvironmentPreset` (the starter setups, the lights'),
+  `EnvironmentListing` (classes the mixer's sidebar lists, with the create
+  entry offered when the level has none).
+- `LevelComponentSection`: a component a level holds once (the sky's
+  atmosphere, the global wind), found by the owner's own method
+  (`level_atmosphere`, `level_wind`); the shell renders its World Settings
+  section (reflected property rows or a note and a create button) and its
+  mixer sidebar entry. The two hand-written sections are deleted.
+- `SaveHook` (work before a level save: the voxel worlds' journal
+  compaction and kept chunks) and `EditorData` (a key of the level file's
+  editor section: the foliage palette, `foliage_sets`; the section is a
+  flattened map, so the file format is unchanged and a key no enabled plugin
+  reads is kept as it was).
+- Undo: `SceneCommand::Extension(Box<dyn ExtensionCommand>)` (a plugin's
+  command; the shell captures the objects its `scope` names before and
+  after, one undo step: Add Voxel World) and
+  `SceneEdit::Extension(Box<dyn ExtensionUndo>)` with
+  `SceneDomain::commit_extension_edit` (a plugin's own compact step: a
+  sculpt stroke's appended edits). Undo labels are the shell's keys or the
+  plugin's text (`UndoLabel`).
+- `Interaction` (a tool's interaction across frames: the shell finishes it
+  before undo and polls it), `SelectionFollowUp` (the spline tool follows
+  selections made by assistant tools), `PropertyFollowUp` (after a property
+  edit: choosing a terrain's generator calls the voxel component's new
+  `ensure_generator_settings`, the method a script calls), `CameraFraming`
+  (Focus frames a voxel world over its ground).
+- `viewport::DebugOverlay` (the portals' links panel, badges and ghost
+  geometry): shown from the Overlays menu or by its debug view mode (the
+  renderer then draws lit); the viewport keeps which are shown by id.
+- `AiToolNamespace`: a module of `#[tool]` functions (the assistant's
+  spline tools); the registry is rebuilt when the project's plugins change.
+- Plugin state: `PluginStates` (`state.editor.plugins`, by type; a state
+  holding history opts out of tool-query copies) replaced the shell's
+  `TerrainDomain`, `SplineDomain`, `VoxelSculptDomain` and `voxel_stroke`
+  fields. `extend::panel_kit` (the tool grid, sections, steppers) is the
+  widget kit plugins' tool panels share.
+
+**Where the UI went** (each plugin's editor crate, `level_editor` module,
+with its own `locales/`; 214 keys left the shell's 16 locale files):
+- voxel: the Voxel Sculpt mode and panels, the Terrain mode (world presets,
+  the level's terrains), strokes and their undo step, Add Voxel World, the
+  save hooks, the generator follow-up, framing.
+- foliage: the foliage palette and brush, now its own **Foliage** mode
+  (Unreal splits Landscape and Foliage the same way; it was a tab of the
+  voxel plugin's Terrain panel), the palette as editor data, the global
+  wind's Create entry and section.
+- splines: the Spline mode, panel, preview, curve operations and the
+  assistant's spline tools.
+- lights: the Create menu's lights, the mixer's lights and reflection
+  capture, the three starter setups. sky: the Create entry and section.
+  fog, post, water: the mixer's entries and listings. sprites: the
+  hierarchy's quick-add. meshes: the Create menu's primitives. portals: the
+  debug overlay.
+
+**Tests moved with their kind**: the full Create menu, the plugins' modes
+and sections, a starter setup, Add Voxel World's undo, the foliage
+palette's save/load and the voxel chunks a save keeps are
+`installed_plugins`' `tests/level_editor.rs` (the editor as assembled: the
+plugins' editor crates depend on the shell, so linking them into the
+shell's own unit tests would link a second copy of it); the voxel
+inspectors' are `voxel_plugin`'s `tests/inspector.rs`; the absent-plugins
+test now also checks the disabled plugins' tool modes, create entries,
+presets and listings are absent and come back.
+
+**Left, with why**:
+- `requires` are unchanged: voxel requires sky, fog, post, foliage and
+  lights because its component crate links them (its presets compose a
+  world of those kinds; its air sync derives the sky and the haze from the
+  terrain; its runtime reads the sun), and fog requires post (`FogMode`,
+  the post settings' fog block). Dropping voxel's means acting on those
+  kinds through the world registry's by-name component methods and
+  properties (`invoke_component_method`, `set_component_property`, the
+  scripting path) instead of their types; recorded as a follow-up.
+- `ObjectType::Light`/`Mesh` (the level format's object kind,
+  `pulsar_scene_model`) still give hierarchy icons and the assistant's
+  object kinds; `SetMovability` names the mesh and light classes; the
+  shell's tests generate the HLFS cathedral with `helio-mesh-api` (a
+  dev-dependency). The mesh components and material assets are step 3's
+  second part (below).
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
