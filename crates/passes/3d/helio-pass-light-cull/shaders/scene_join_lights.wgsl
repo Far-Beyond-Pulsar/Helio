@@ -108,7 +108,6 @@ fn cs_join_lights(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(1)
 fn cs_directional_light() {
     var sun = vec4<f32>(0.0);
-    var found_fallback = false;
     for (var i = 0u; i < arrayLength(&lights_out); i++) {
         let light = lights_out[i];
         let direction = vec3<f32>(
@@ -117,14 +116,8 @@ fn cs_directional_light() {
             light.direction_outer[2],
         );
         if light.rest[LIGHT_TYPE_WORD] == DIRECTIONAL && light.color_intensity[3] > 0.0 && dot(direction, direction) > 0.0 {
-            if !found_fallback {
-                sun = vec4<f32>(-normalize(direction), 1.0);
-                found_fallback = true;
-            }
-            if (light.rest[ENABLED_WORD] & 0x40000000u) != 0u {
-                sun = vec4<f32>(-normalize(direction), 1.0);
-                break;
-            }
+            sun = vec4<f32>(-normalize(direction), 1.0);
+            break;
         }
     }
     directional_out[0] = sun;
