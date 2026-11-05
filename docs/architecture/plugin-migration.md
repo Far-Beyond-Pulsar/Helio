@@ -1342,7 +1342,8 @@ outside its test host. Phase B is done.
      plugins' (wind, water, sky, fog, GI, sprites, portals, ...) and the
      frame's own (camera and view structs, the G-buffer layout, the colour
      chain, declared privately in WGSL). Delete each in favour of the owner's
-     api or snippet, or record what it waits on.
+     api or snippet, or record what it waits on. Done (see "As built, Phase C
+     step 1").
   1. A plugin that isn't installed means its kind is absent (the stand-ins
      above, `Unlit`, `GBufferClear` are the frame's side of it; the engine
      still links every plugin).
@@ -1353,6 +1354,158 @@ outside its test host. Phase B is done.
   4. The repo split, last: each plugin its own `Plugin_<Kind>` repository at
      `plugins/vendor/<kind>/`, and the layer gate's rule that no Helio crate
      outside the test host names a kind's contract.
+
+As built, Phase C step 1 (2026-11-04, branch `rewrite/p13-one-owner-audit` in
+both repos): the one-owner audit. Every cross-kind concept has one owner (a
+plugin, or the frame: `helio-core`, `helio-frame-api`, `helio-spine`, the
+scene join); everything else reads it through the owner's api crate or WGSL
+snippet. Method: the WGSL declarations of every shader were compared, by name
+and by field layout, with every snippet's (`wgsl_snippet!` files, the
+prelude, the scene join's rows); the Rust string literals used as resource
+names were compared with every owner's key consts. The check that keeps it
+(`one_owner`, below) is that comparison.
+
+**Concept -> owner -> the copies deleted:**
+
+| Concept | Owner (where) | Copies deleted |
+|---|---|---|
+| Camera (`GpuCameraUniforms`) | frame: prelude `Camera` | 25 private structs (`Camera`, `CameraUniforms`, `CameraUniform`, `VgCamera`, two with `inv_view_proj`/`direction_far` names): decals, billboards, light cull, shadow matrices, forward/G-buffer/transparent programs, indirect dispatch, VG raster/resolve/debug, four portal shaders, sky LUTs, corona x2, post volume blend, the engine's authored LOD, Helio's tone map, SDF x2, simple cube; the unused `planar_reflection.wgsl`. VG raster/shade, voxel draw and the authored LOD now build through the prelude (`helio_core::shader::module`). Sprites' 2D view is its own (`SpriteCamera`). |
+| G-buffer targets (order, formats) | frame: `gbuffer::{TARGETS, TARGET_FORMATS, color_targets, GROUP_MEMBERS, *_FORMAT}` | voxel's `GBUFFER_FORMATS`, foliage's `GBUFFER_TARGET_FORMATS` (its "duplicated rather than imported" note), the meshes' and portals' 8-entry colour-target lists, the meshes' group/target declarations, VG shade's storage formats |
+| G-buffer surface tags (lightmap-UV channel) | frame: prelude `GBUFFER_TAG_UNLIGHTMAPPED/OWN_OCCLUSION/TRACED`, `gbuffer_tag_view_remap`, `gbuffer_has_lightmap`, `gbuffer_tagged`, `gbuffer_own_occlusion`, `view_remap_of` | raw `(-1,-2)`/`(-1,-1.5)`/`(-1,-1)`/`(-1,-3-c)` in voxel, foliage, portals, meshes, VG shade; the deferred lighting's `is_stored_voxel`/`is_foliage` (the lighting named two kinds) and the dead VG sentinel `is_vg` (nothing wrote `(-2,-2)`); frame-api's `VIEW_REMAP_SNIPPET` (the chain tag is a G-buffer tag) |
+| Motion vectors | frame: `gbuffer::VELOCITY` (the encoding documented there) | TSR's `MOTION_VECTORS` |
+| Depth names | frame: `resource_keys::DEPTH` (what the executor resolves), `depth::{FULL_RES_DEPTH, HIZ, HIZ_NEAREST, HIZ_SAMPLER}` | literals in the spine, Hi-Z, SSR, planar, SDF, simple cube, decals, foliage, occlusion culling, billboards, corona, portal overlay, transparency, the facade |
+| Scene colour, G-buffer, render environment, ray transmission, environment probes/cubes, sun visibility, ... (every frame key) | frame consts | about 300 literal uses across Helio's own crates, the plugins and the engine |
+| Participating-medium grid (depth mapping, composite) | frame: `media::SNIPPET` (`MEDIA_NEAR`, `media_slice_from_view_depth`, `media_view_depth_from_slice`, `media_grid_w`, `media_seen`) | transparency's hand-rolled `log(max(d,0.5)/0.5)/...`; the froxel mapping leaves the prelude (it was the media contract's) |
+| Ray transmission rows | frame: `rays::RAY_TRANSMISSION_SNIPPET` | `RayTransmissionData` + accessors in SSR (Helio) and HLFS |
+| Glare added in the tone map | frame: `color::{publish_glare, glare}` | the tone map reading the lens flare's `lens_output` by name (Helio named a kind); the flare publishes it |
+| Scene-join rows (owner links, pool handles, transforms, frame-origin rebasing) | frame: `helio_scene_join::join_source` (`scene_join_common.wgsl`, `Handle` added), `origin_pair` | the authored LOD's `Owner`/`Transform`/`Handle`, its hand-rolled `object_relative` and private Rust `origin_pair`; `Owner`/`Handle` in the LOD apply and the VG instance derivation; `Handle` in the meshes' joins |
+| Shadow views (`LightMatrix`), cascade selection, projection | lights: `//!use shadow_atlas`, new `//!use shadow_lookup` | the meshes' casters' `ShadowFace` x2 and shadow-dirty's `GpuShadowMatrix`; the prelude's `helio_csm_select`/`helio_shadow_project` (a lights concept in the frame) move to `shadow_lookup` for fog and the flare |
+| Foliage ground rows | foliage api: `GROUND_SNIPPET` (`GroundQuery`, `GroundHit`, `GroundArgs`, `GROUND_NONE`, `ground_miss`) | placement's and the voxel ground's copies |
+| Surface flags | materials: `pbr_eval` (`SURFACE_FLAG_TWO_SIDED`) | voxel's copy |
+| Material rows key | materials: `MATERIALS` | the object batch's `MATERIALS_KEY` literal and `"materials"` in eight mesh/portal passes |
+| Mesh pools, skin buffers, VG instances, static objects | meshes api: `MESH_VERTICES`, `MESH_INDICES`, `SKELETAL_SKIN_VERTICES`, `SKELETAL_BONE_PALETTE` (moved from `helio_component`), `VG_INSTANCES`, `STATIC_OBJECTS` | literals in five mesh drawers, portals, the mesh host, VG BVH, the engine's authored LOD and VG instance derivation |
+| Material stand-in | materials: `MaterialStandIn` | GI's mesh tracer's own no-table fallback (batch 6 leftover, cleared: the tracer takes a queue) |
+
+Name clashes that were not copies were renamed so a name means one thing: fog's
+`Medium`/`medium_at` (`FogMedium`, `fog_medium_at`; the atmosphere's are the
+frame's), sprites' `Camera` (`SpriteCamera`).
+
+**The check**: Pulsar crate `one_owner` (`crates/core/one_owner`, no
+dependencies, reads the tree; CI runs it with the workspace's tests). It fails
+on a WGSL struct, const or function that another owner's snippet declares,
+on a struct with the layout of another owner's snippet struct holding a
+matrix, and on a Rust string literal used as a resource name (in
+`ResourceKey::new`, `BufferKey::of`, graph reads and writes, pool lookups,
+`reads`/`writes` lists) that another owner defines as a key. It skips an
+owner's own files, test code, examples, attribute literals and `same_layout!`.
+`exceptions.txt` lists what stays, each with what it waits on; the test also
+fails when a listed copy is gone. Proof: `a_planted_copy_is_caught` (a
+struct by name, a struct by layout, a const and a key literal, and not a
+label, an attribute or test code), and planting `struct DecalView` with the
+camera's layout in `decal_apply.wgsl` and `ResourceKey::new("gbuffer_velocity")`
+in the decals' feature each failed the tree test.
+
+**Copies that stay, with what each waits on** (`exceptions.txt` holds the
+ones the check sees):
+- The perf overlay (a frame diagnostic) profiles the default BRDF with its own
+  copy and reads `scene_lights`/`tile_light_counts` by name, as
+  `FocusedTimingGroup` names fog, HLFS and SSR: waits on a diagnostics seam
+  where a kind registers its cost probe and counters.
+- Fog reads the post volumes' rows (`post_process_volumes`) for the post
+  settings' fog block, and the post settings ABI keeps `lens_enabled`: waits
+  on the post plugin splitting both out (batch 2's note).
+- The row join (`helio-scene-join`'s `row_join.wgsl`) holds water's and the
+  particles' placements (`SUN`, `WIND`, `POOL_RANGE`, `MESH_BOUNDS`): waits
+  on each kind bringing its placement as a snippet (batches 1, 2, 4).
+- The mesh host's ray-tracing projection refuses scenes holding
+  `foliage_layers` or `voxel_volumes` by name: waits on a traced-content
+  contract (a kind says it has content rays must see).
+- The G-buffer drawers each declare their fragment outputs (foliage writes
+  six targets, voxel adds `frag_depth`, so one WGSL struct does not fit);
+  their order and formats are `TARGETS`, their pipelines' targets
+  `color_targets()`.
+- The asset viewer's material program copies the meshes' G-buffer `Globals`
+  because compiled material graphs read `globals.time`: waits on the graph
+  compiler reading time from `MaterialInput`.
+- The owners' own shaders that predate their snippets keep their
+  declarations (the lights' `GpuLight`/`LightMatrix`/`budget_*` in deferred,
+  HLFS and light cull; the meshes' `GpuInstanceData`, `GpuDrawCall`,
+  `DrawIndexedIndirect`, `INSTANCE_FLAG_*` in culling, shadows and the object
+  batch; water's `WaterVolume` x7; sprites' `SpriteInstance` x4; portals'
+  `GpuPortalView` x4): one owner each, adopting the snippets as they change.
+- Batch 4-6 leftovers not cleared: the portals' second G-buffer drawer and
+  re-culling (waits on drawers drawing extra views); water's reflection
+  capture graph (captures as views); GI and the sky picking the sun from the
+  light list (a directional-light derivation for standalone hosts); the
+  engine's material table being the meshes' join, voxel volumes' own rows and
+  the appearance JSON (material assets as entities); the mesh components and
+  material assets in `helio_component` (Phase C step 3).
+
+**Pre-rewrite first-party plugins**, what each owns and how it relates to the
+rewrite plugins:
+
+| Plugin (repo) | Owns | Overlap | Decision |
+|---|---|---|---|
+| `skm_editor` (Plugin_SKM) | `skeletal_assets` (every skeletal format: `.skeleton`, `.animseq`, `.skmesh`, `.blendspace`, `.montage`, `.animgraph`, IK rigs and retargets, pose DBs; the animation runtime; CPU skinning) and the animation editor | `helio_component`'s `SkeletalMeshComponent` decodes `skeletal_assets::skmesh` and calls its skinning; the editor preview has its own `SkinVertex` and skinning WGSL; `material_ids.rs` reads and writes material documents | Owner of **animation** (skeletons, clips, graphs, the pose runtime: `pulsar.animation`), not of skinned drawing: the animation plugin writes joint palettes, `pulsar.meshes` owns the skinned vertex rows and skinning in its drawers and the palette/skin keys (moved to `helio-mesh-api` here). Its preview should draw through the engine renderer (as the asset viewer does), and its material ids go through the materials' component api once material assets leave `helio_component`. |
+| `shader_editor` (Plugin_Shaders) | the `.material` graph asset (`shader_graph_save.json`), the graph editor, its own PSGC compile and texture lowering, a Lambert "PBR" preview | a second graph compiler beside `helio_component::material_graph`; the preview is not the engine's BRDF; the import companion overlaps `meshes/asset-compat`'s material converter; the graph file name is a literal in seven crates | **Merge into `pulsar.materials`**: the graph UI becomes the materials plugin's editor, its compile path is deleted for the one compiler (which moves into `materials_component` with the material assets, Phase C step 3), the preview draws Radiant templates through the engine renderer. |
+| `matter_editor` (Plugin_Matter) | `.pif` texture painting (layers, history, brushes, tile compositor) | none in code: nothing reads `.pif`, painted textures do not reach the material texture table | **Separate, with a contract**: it produces images; the texture-asset pipeline (`texture_assets`, cooked textures) imports them, as any image. |
+| `asset_viewer` (in tree) | viewers for `.fbx`, `.mesh`, `.png`; per-slot default materials of a mesh | its own mesh pipeline and graph-material program; the `Globals` copy above | Its mesh viewer and slot materials become `pulsar.meshes`' editor (drawing through the engine renderer); the image viewer stays generic. |
+| `render_bps` (in tree) | the `.rendergraph` editor over `helio-graph-asset` | none (it uses the graph asset and the engine's node registry) | Stays; the frame owns the graph asset. |
+| `physics_plugin` (Plugin_Physics) | physics assets, rigid bodies, colliders, joints, Rapier | `RigidBodyComponent` duplicates the legacy `pulsar_physics::RigidbodyComponent` (still read by `level_migrate`) | Owner of physics; the legacy components go once `level_migrate` stops reading them. No rendering overlap (water hitboxes go through water's api). |
+| `input_plugin`, `ui_editor`, `blueprint_editor`, `code_editor`, `table_editor` | input actions/maps; widgets; blueprints; script editing; SQLite tables | none with the rewrite plugins | Stay. |
+
+How others split these, and why ours: Unreal keeps skeletal meshes,
+animation (AnimInstance, Persona) and materials (one HLSL translator the
+Material Editor and the cooker share) as engine modules; Unity splits
+`SkinnedMeshRenderer` from the Animator and has Shader Graph compile through
+the active pipeline's own code; Bevy splits `bevy_animation` from
+`bevy_pbr`'s skinning and has no graph. Ours takes the Bevy/Unity line for
+animation (the animation owner writes palettes, the mesh owner skins) and
+Unreal's for materials (one compiler, the editor is the owner's editor):
+each concept has one owner, an editor is never a second implementation of
+what it edits, and a project that drops the animation plugin still draws
+bind-posed meshes.
+
+**Superseded repos** (the user deletes from this list; nothing was deleted,
+renamed or archived): none of the `Plugin_*` repositories is superseded yet.
+Pending, each superseded once the named work lands:
+- `Plugin_Shaders`: superseded by `pulsar.materials` (its graph editor merged
+  as the materials' editor, its compiler replaced by the materials' one)
+  after the material assets leave `helio_component` (Phase C step 3) and the
+  merge lands. Do not delete before.
+- `Plugin_SKM`: not superseded; it becomes the animation plugin's repository
+  (rename, the user's call) at the repo split.
+- Not the rewrite's to judge, noted for the user: `Plugin_Trait` (an
+  in-tree `plugins/trait_editor` exists), `Plugin_Struct`, `Plugin_Enum`,
+  `Plugin_TypeAlias`, `Plugin_DAW`, `Plugin_Diagrams`, `Plugin_Terminal` and
+  `Plugins` are not linked by Pulsar's tree.
+
+**Verified** (against p12: Helio 83db5934 / Pulsar 0ca924809, its kept
+snapshots and exes):
+- Pulsar's `plugin_pass_lists` dump is byte-identical to p12's (3792 lines).
+- Helio's preset snapshot (every preset, three configs, 648 lines) is p12's
+  with one intended change: the 15 graphs' tone maps, which have no lens,
+  no longer read `lens_output` (the glare is published, not named).
+- voxel_craft (`voxel_craft_p12.exe` vs p13, alternating, 8-frame bursts at
+  4 poses): identical render-graph dumps in all four runs; mean |Δ| p12-p13
+  0.22-0.39 against p12-p12 0.29 and p13-p13 0.31, image means 61.39-61.46.
+- The GI cathedral (p12's `indoor_cathedral_gi` exe vs p13, frame 240):
+  identical graph dumps; mean |Δ| 0.019-0.023 for three of the four runs
+  against p12-p12 0.028, the fourth run 0.27 from every other (its candles
+  flicker by wall-clock time).
+- `portal_cube` (p12 built once in the p12 worktree vs p13, frame 240):
+  bit-identical, identical graph dumps.
+- Helio: `cargo check --workspace --all-targets` clean, layer gate 0, 427
+  tests pass (the known `helio-settings` one fails), including
+  `wgsl_validation` over the new snippets and
+  `resolving_twice_includes_once`.
+- Pulsar: `cargo check --workspace --all-targets` clean; `one_owner` passes
+  (and fails on each planted copy); the touched crates' tests pass (110 test
+  binaries of the lights, fog, lens, GI, sky, foliage, water, sprites,
+  particles, decals, post, portals and meshes crates, voxel's `wgsl` and
+  `presets`, engine_backend's lib with the authored LOD's GPU tests and
+  `scene_join_rows`, helio_component's lib), but water's known
+  `caustics_projection_writes_signal_for_the_cathedral_pool`.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
