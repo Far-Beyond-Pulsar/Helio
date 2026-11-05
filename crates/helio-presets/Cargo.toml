@@ -42,6 +42,5 @@ helio-components = { path = "../helio-components" }
 env_logger = { workspace = true }
 profiling = { workspace = true }
 pollster = { workspace = true }
-winit = { workspace = true }
 glam = { workspace = true }
 serde_json = { workspace = true }

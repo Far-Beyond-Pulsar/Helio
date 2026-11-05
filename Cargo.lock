@@ -1362,7 +1362,6 @@ dependencies = [
  "pulsar_scenedb",
  "serde_json",
  "wgpu",
- "winit",
 ]
 
 [[package]]
