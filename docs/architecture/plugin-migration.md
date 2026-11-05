@@ -96,7 +96,7 @@ same path, like physics).
 | Plugin | Components | Feature owns | Leaves Helio/Pulsar today's |
 |---|---|---|---|
 | `pulsar.materials` | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | facade template registries, `set_material_sampler`, `MATERIAL_TEXTURES` |
-| `pulsar.meshes` | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | gbuffer/shadow/forward/transparent mesh code, `asset_types.rs`, `RayInstance`, `with_virtual_geometry`, authored LOD derivation, VG host in helio_component |
+| `pulsar.meshes` | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | crates done (batch 4): `plugins/vendor/meshes/` (`api` = helio-mesh-api, `feature/*`, `vg/*`, `asset-compat`, `host` = helio-mesh-host, `component` = meshes_component: the features' registrations, `editor` = meshes_plugin, `examples` = meshes-examples, `snapshot`, `web-demos`, `android-demos`); the Helio repo has no mesh crate. Left: the SceneDB components, scene join installation, authored LOD selection, VG host and picking in `helio_component`/`engine_backend` (core crates read them by type; see "As built, batch 4") |
 | `pulsar.lights` | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | light part of the scene join, `GpuLight`/`SCENE_LIGHTS` in forward-lit, facade light setters |
 | `pulsar.sky` | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (`sky_component`, `feature` = helio-pass-sky, `sky_plugin`, `sky-examples`); no api crate: what others read of it is the frame's |
 | `pulsar.gi` | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | done (batch 3): `plugins/vendor/gi/` (`api` = helio-gi-api, `gi_component`: registrations and settings, `feature` = helio-pass-gi, `gi_plugin`, `gi-examples`) |
@@ -421,7 +421,8 @@ Order:
    First the spine and facade stop depending on mesh crates (the spine
    keeps phases, Hi-Z, TSR, the tone map; the G-buffer layout is
    frame-api's; the facade loses `find_pass_mut` users of object batch and
-   G-buffer), then the crates move.
+   G-buffer), then the crates move. Crates done (batch 4; see "As built,
+   batch 4" for the components still in the engine).
 5. **lights** (light cull, shadow matrix/cull/dirty/atlas, deferred light,
    forward lit, hlfs, IES). The spine and facade drop shadow-matrix and
    deferred-light first; by then flare, gi, fog and VG shade already read
@@ -796,6 +797,207 @@ GI and the sky are Pulsar plugins; the Helio repo has none of their crates
     the voxel editor that registers the terrain stack's editor). GI's
     `vg_ray_proxies` failed once in six runs (the VG wall let rays through;
     the other five passed): intermittent, as the proxies build in the background.
+
+As built, batch 4 (2026-11-04, branch `rewrite/p10-meshes` in both repos):
+the meshes' crates are the `pulsar.meshes` plugin's; the Helio repo has no
+mesh crate (helio-mesh-api, helio-pass-gbuffer, -object-batch,
+-occlusion-cull, -indirect-dispatch, -forward-lit, -transparent, -shadow,
+-shadow-dirty, every `helio-pass-vg*`, helio-vg-format/-build/-stream,
+helio-asset-compat, helio-snapshot, the web and Android demos).
+- **Layout** (Pulsar `plugins/vendor/meshes/`): `api` (helio-mesh-api: the
+  meshes' whole public contract, below), `feature/*` (the passes, unchanged names; forward-lit is
+  `feature/forward`), `vg/{format,build,stream}`, `asset-compat`, `host`
+  (helio-mesh-host, below), `component` (meshes_component: registers the
+  features, `RenderFeatureRegistration`), `editor` (meshes_plugin),
+  `examples` (meshes-examples: Helio's mesh scenes, with `test.fbx` and
+  `models/`), `snapshot` (the asset thumbnailer `ui_common` uses),
+  `web-demos` (with the `web` builder that was Helio's root bin; Helio's
+  Pages workflow that ran it is gone) and `android-demos`.
+- **Frame seams** (Helio), each the narrowest that lets the crates leave:
+  - `Slot::Visibility`: culling around the spine's depth pyramid (Hi-Z at
+    order 0, a kind's argument setup before it, its tests after). The object
+    batch is the meshes' (`ObjectBatchFeature`, first in `Slot::Prepare`), as
+    are indirect dispatch and occlusion culling (`MeshCulling`), so the
+    spine and the presets name no mesh pass. How others do it: Unreal and
+    Bevy cull inside the renderer, which knows every primitive type; here the
+    pyramid is the frame's and each kind culls its own content against it.
+  - **Shadow views vs casters**: the lights keep the views
+    (`ShadowMatrixPass`) and share their per-caster dirty flags
+    (`helio_pass_shadow_matrix::LightDirtyFlags`); what casts decides what
+    of its own content made faces stale and draws them (the meshes'
+    `ShadowDirtyPass` before the shadow-caster phase, `ShadowPass` opening
+    it). As in Unreal's virtual shadow maps: primitives invalidate the
+    light's cached pages, the light owns them. `helio-pass-shadow-cull` was
+    never constructed: deleted.
+  - **The frame's ray-traced scene is a payload**
+    (`helio_frame_api::rays::SCENE_RAYS`: the TLAS and named buffers, taken
+    for one frame): `Renderer::set_ray_tracing_frame`, `RayFrame` and
+    `FrameAcceleration` are gone. The renderer hands the TLAS to the frame
+    (`RenderEnvironment::tlas`) and each buffer as a graph resource under its
+    name, so a second kind of traced content joins the same TLAS without a
+    setter. `RAY_TRANSMISSION` is the frame's; the instance rows' and proxy
+    pool's keys are helio-mesh-api's. The meshes' projection publishes it
+    (`SceneDbRayTracing::publish`).
+  - **The G-buffer is the frame's**: when no kind opens its phase, the
+    spine clears it (`helio_spine::GBufferClearPass`, `gbuffer_clear`), as
+    Bevy's opaque pass node clears with no phase items. Without it a Helio
+    preset with no meshes read an unwritten G-buffer; with it an engine
+    without the meshes plugin still lights a defined G-buffer, and a voxel
+    drawer has one to load.
+  - The light list's row ABI (`GpuLight`, `LightType`, `LightRow`,
+    `SCENE_LIGHTS`) moved from forward-lit to `helio-pass-light-cull` (the
+    lights), the material row (`MaterialRow`, `MATERIALS`) from the G-buffer
+    crate to `helio-mats`, and the default surface template (`gbuffer.wgsl`,
+    every partial template's base) to `helio_mats::templates::DEFAULT_PBR`
+    with the other template sources: the materials' template registry
+    already used it as class 0.
+  - `helio-bake` takes `BakeMesh` only (`bake_mesh_id` keeps its id
+    encoding); converting a mesh is the mesh host's.
+  - `helio-wasm` knows no kind: an app registers its columns and names its
+    kinds' features (`HelioWasmApp::register_columns`, `::features`).
+- **Helio's test host**: `helio-components` keeps the kinds still in Helio
+  (lights, materials, billboards, reflection captures); Helio's examples keep
+  `simple_graph` and `debug_shapes` (a custom graph, the debug draw). Every
+  example that is a scene of meshes is the plugin's: Helio cannot depend on
+  Pulsar, and a mesh drawer of its own would be a second mesh renderer.
+  Standalone hosts take the meshes' rows, projection, feature list and
+  Helio's presets over it from `helio-mesh-host` (`presets::deferred`, ...);
+  its row components are helio-mesh-api's `host_rows` (`host-rows`
+  feature), as batch 2's kinds did.
+- **One owner per mesh concept** (the rule since 2026-11-03: a concept
+  other kinds use has one owner; they read it through the owner's api crate
+  or a frame contract, never a private copy, and add only their own
+  addressing). helio-mesh-api is the meshes' whole public contract: the
+  vertex layout and mesh uploads; the rows their components author (`rows`:
+  objects, render groups, sublevels, the mesh pools' keys) and, with
+  `host-rows`, those rows as host components; the batch's instance and draw
+  rows (`draw`: `GpuInstanceData`, `GpuDrawCall`, the indirect args, the
+  `INSTANCE_FLAG_*` bits, coordinate spaces); the frame data their passes
+  publish (the object batch's, the culled batch's, draw segments, draw
+  slots, the multi-draw they are issued with); the ray instance rows and
+  the proxy pool; and their WGSL as snippets, `RAY_SURFACE_SNIPPET`
+  (`//!use mesh_ray_surface`: the ray instance row and flags, the mesh and
+  proxy pools' vertex decode, `ray_triangle`, `ray_triangle_outside`) and
+  `DRAW_ROWS_SNIPPET` (`//!use mesh_draw_rows`).
+  - Copies deleted: GI's mesh tracer declared its own `RayInstance`, flags
+    and vertex and proxy decode and looked the mesh pools up by name (now
+    `mesh_ray_surface` and `MESH_VERTICES`/`MESH_INDICES`, the same math);
+    portal culling and the portal G-buffer program declared their own
+    instance row (culling's in a column layout), draw call, indirect args
+    and flag bit; the G-buffer crate kept a copy of helio-core's
+    `CoordinateSpacesFrameData`. Portals and particles read the draw slots,
+    segments and frame data from the G-buffer and object-batch crates; the
+    other kinds' component tests read helio-core's `ENTITY_GENERATIONS_KEY`
+    through the object batch; every other kind's example, test and feature
+    manifest lost its G-buffer and object-batch dependencies.
+  - How others do it: Unreal's primitive and instance data are one
+    renderer-owned definition every pass includes (`SceneData.ush`); Bevy's
+    `MeshUniform` is bevy_pbr's and other crates `#import` its WGSL. Here
+    the owner is the meshes plugin and the import is its snippet, so a
+    change to a row lands in one file and every reader compiles against it.
+  - Copies that stay, with what they wait on:
+    - Portals: culling re-culls the meshes' draw groups per portal chain,
+      and the portal G-buffer program (`gbuffer_portal.wgsl`, with the
+      G-buffer crate's `create_material_bgl`) is a second G-buffer drawer
+      for mesh content. Waits on the meshes' drawers drawing extra views (a
+      view remap, the chain's composed transform, with a clip mask): portals
+      then publish views and the meshes cull and draw them.
+    - Water's reflection capture builds its own graph of the meshes' passes
+      (object batch, indirect dispatch, occlusion culling, G-buffer,
+      forward). Waits on captures as views of the frame's phases.
+    - Helio core: the row join's `MESH_BOUNDS` placement (water hitboxes
+      from mesh instances' bounding spheres, `helio-scene-join`) reads a
+      mesh row. Waits on an owner-bounds contract the meshes publish (an
+      owner's box), which water and physics read.
+    - The materials' templates (`DEFAULT_PBR`, `transparent_base.wgsl`)
+      declare the instance row and the vertex input: the materials batch
+      (the surface function apart from the drawer that hosts it), with the
+      portal program's `GpuMaterial` copy. GI's `SceneLight` mirrors
+      `GpuLight`: the lights batch.
+    - The meshes' own shaders (object batch, culling, the drawers) each
+      declare the rows; they are the owner's, and adopt `mesh_draw_rows`
+      as they change.
+- **Presets**: the default features name no kind; the swap policy keeps what
+  Helio vouches for (Hi-Z and the shadow matrices now rebuild the graph on a
+  shader edit: their sampler and dirty flags are shared with an object
+  kind's passes). `with_virtual_geometry` moved to `helio-pass-vg`.
+- **Tests moved with the meshes**: the scene join's (object batch), the VG
+  graph's (vg), the limited-native shadow budget (shadow), HLFS's two tests
+  of the ray-tracing projection (`helio-mesh-host`, over HLFS's fixture read
+  by path), and Helio's example GPU tests (meshes-examples). Helio's preset
+  tests keep their frame parts (phases, shadow residency, HLFS's format).
+- **Fixed first** (own commits): helio-core's `wgsl_validation` composed the
+  joins from a path that had moved and aborted before most shaders; it now
+  validates all 60 standalone shaders. GI's `vg_ray_proxies` rendered frames
+  while its proxy built, so a slow build left light behind the wall; it now
+  prepares without rendering until the proxy is in.
+- **Verified**:
+  - Helio's preset snapshot (every preset, three configs): after the seams
+    commit byte-identical to p9 (1344 lines); after the move the retained
+    passes and the host inputs are byte-identical, the graphs lose exactly
+    ObjectBatch, ShadowDirty, Shadow, IndirectDispatch, OcclusionCull,
+    GBuffer or ForwardLit, TransparentPass (and the perf marker each mesh
+    drawer node carried), and the twelve G-buffer graphs gain GBufferClear
+    (912 lines).
+  - Pulsar's `plugin_pass_lists` (now also asserting the meshes' passes) is
+    byte-identical to p9's (3792 lines).
+  - voxel_craft (the p9 baseline exe vs p10, alternating, 8-frame bursts at
+    4 poses, idle machine): identical render-graph dump; mean |Δ| p9-p10
+    0.09-0.49 against p9-p9 0.05-0.44 and p10-p10 0.09-0.53, pose means
+    within 0.11. (A first round ran the base during a build: its clouds,
+    which follow frame time, had moved on.)
+  - The GI cathedral (p9's `indoor_cathedral_gi` exe vs p10, frame 240):
+    identical graph dump; mean |Δ| p9-p10 0.016-0.021 against p9-p9 0.020
+    and p10-p10 0.015 (an earlier pair took keyboard input and was dropped).
+  - Mesh-heavy: `move_benchmark` (16k objects, 9.2 M triangles, raster and
+    ray-traced, idle / move one / editor resync; p9 built once from
+    ca0a1f47): identical graph dumps. GPU time is bimodal from run to run in
+    both builds (about +3.5 ms in the slow mode, clock state); in the fast
+    mode p9 7.23 / 8.26 / 8.32 ms against p10 7.19-7.31 / 8.27-8.29 /
+    8.34-8.36 ms. The headless `test.fbx` snapshot has identical graphs and
+    renders black in both builds (one frame of a GPU-driven pipeline that
+    needs a frame of readbacks: not this batch's).
+  - `cargo check --workspace --all-targets` clean in both repos; layer gate
+    0. Helio's remaining tests pass (216; the hardware ray-query ones are
+    ignored as before).
+  - Tests from Pulsar: every meshes crate (api, features, vg, asset-compat,
+    host, snapshot, component, editor; meshes-examples' GPU tests), GI,
+    voxel, the other plugins' component and feature crates, pulsar_game's
+    lib and `plugin_pass_lists` / `runtime_render_parity`, engine_backend's
+    lib and its scene-join, bloom, material-graph, movement and group-motion
+    tests: 951 pass. Not passing, each known from p9 and not touched here:
+    voxel `foliage_grows_on_the_voxel_ground` and
+    `chunk_pass_builds_settles_and_resizes_in_the_deferred_graph`, water's
+    caustics projection test. Voxel's `clouds_cost` (the sky's cloud passes
+    under 4.0 ms at 1080p, the same graph as p9) measured 4.18 and 4.65 ms
+    and passed on a third run: GPU time at its budget. The `chunks` suite
+    was not run (it is the release suite). GI's `vg_ray_proxies` passed 6 of
+    6 runs.
+- Left, with why:
+  - The SceneDB components (`StaticMeshComponent`, `StaticMeshDraw`,
+    `SkeletalMeshComponent`, `LODComponent`, `VirtualGeometryComponent`)
+    stay in `helio_component`, with the scene join's installation
+    (`helio_bridge::scene_join`), the authored LOD selection, the VG host
+    (`scene_renderer`'s `VirtualGeometryHost`) and mesh picking
+    (`interaction`) in `engine_backend`. Core crates read them by type and
+    cannot depend on a plugin: `asset_import` (rigged imports make skeletal
+    meshes), `pulsar_package` (cooks mesh assets), `pulsar_class` (prefab and
+    class records), `pulsar_world_registry`, `level_migrate`, `pulsar_scene`
+    (the loader), besides 62 files across the engine, the editor, physics
+    and `skm_editor`. The seams that unblock it, each a registration the
+    plugin submits: asset importers and cook steps by asset type; class and
+    prefab records as reflected component records; an object-join
+    registration the engine runs in its scene-join group ahead of the LOD
+    selection (the mesh join must stay before it); a render-host part
+    (per-renderer state updated each frame that adds settings to the config:
+    the VG host); a pick registration (a ray against an entity's content).
+  - The materials' templates are whole G-buffer programs over the meshes'
+    vertex layout (`DEFAULT_PBR`); splitting the surface function from the
+    drawer that hosts it is the materials' step.
+  - The copies of mesh concepts other kinds keep: see "One owner per mesh
+    concept" above.
+  - Helio's Pages workflow is gone with the web demos; the plugin has no
+    publishing workflow yet.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,

@@ -90,7 +90,7 @@ fn key_selection_depends_on_active_lights_not_sparse_allocation() {
         ] {
             for flags in [4, 12] {
                 // Also exercise the temporal fingerprint path.
-                let mut lights = vec![helio_pass_forward_lit::GpuLight::zeroed(); capacity];
+                let mut lights = vec![helio_pass_light_cull::GpuLight::zeroed(); capacity];
                 let slots: Vec<_> = (0..count)
                     .map(|i| if capacity == count { i } else { 2000 + i * 7 })
                     .collect();

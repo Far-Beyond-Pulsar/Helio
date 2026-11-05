@@ -1,23 +1,7 @@
-[package]
-name = "helio-workspace"
-version = "0.0.0"
-edition = "2021"
-publish = false
-description = "Workspace root"
-
-[lib]
-path = "src/lib.rs"
-
-[[bin]]
-name = "web"
-path = "src/bin/web.rs"
-
 [workspace]
 members = [
     "crates/*",
     "crates/passes/3d/*",
-    "crates/api/*",
-    "crates_other/*",
 ]
 exclude = [
     "vendor/nebula",
@@ -36,7 +20,10 @@ blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd1
 blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
-winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
+# The Linux backends are listed here, not left to whichever crate happens to
+# enable them: a crate that uses winit directly gets no backend otherwise, and
+# winit refuses to compile on Linux (Windows and macOS need no feature).
+winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 # Published Pulsar-Native profiler (including cross-thread scope contexts) -- the same
 # collector that powers the editor flamegraph. Feature-flag aliased below so
 # the fork's `profile_scope!` coexists with the compile-time `profiling`
@@ -71,10 +58,8 @@ serde = { version = "1", features = ["derive"] }
 pollster = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 helio-core = { path = "crates/helio-core" }
-helio-mesh-api = { path = "crates/api/helio-mesh-api" }
 helio-scene-join = { path = "crates/helio-scene-join" }
 helio-settings = { path = "crates/helio-settings" }
-helio-vg-format = { path = "crates/helio-vg-format" }
 helio-mats = { path = "crates/helio-mats" }
 helio-bake-types = { path = "crates/helio-bake-types" }
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "017252c3c84331a29e53eaa627185597954a3241", features = ["gpu"] }
@@ -95,27 +80,15 @@ helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
 helio-pass-postprocess = { path = "crates/passes/3d/helio-pass-postprocess" }
 helio = { path = "crates/helio" }
 helio-xr = { path = "crates/helio-xr" }
-helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "crates/passes/3d/helio-pass-buffer-view" }
 helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
 helio-pass-shadow-matrix = { path = "crates/passes/3d/helio-pass-shadow-matrix" }
-helio-pass-forward-lit = { path = "crates/passes/3d/helio-pass-forward-lit" }
-helio-pass-gbuffer = { path = "crates/passes/3d/helio-pass-gbuffer" }
-helio-pass-object-batch = { path = "crates/passes/3d/helio-pass-object-batch" }
-helio-pass-occlusion-cull = { path = "crates/passes/3d/helio-pass-occlusion-cull" }
-helio-pass-indirect-dispatch = { path = "crates/passes/3d/helio-pass-indirect-dispatch" }
 helio-pass-light-cull = { path = "crates/passes/3d/helio-pass-light-cull" }
-helio-pass-transparent = { path = "crates/passes/3d/helio-pass-transparent" }
 helio-pass-hiz = { path = "crates/passes/3d/helio-pass-hiz" }
 helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"
-
-[dependencies]
-tiny_http = "0.12"
-ratatui = "0.29"
-crossterm = "0.28"
 
 # wgpu 30.0.1: the upstream v30.0.1 tag plus Helio's patches, on
 # Far-Beyond-Pulsar/wgpu branch helio/v30.0.1 (texture tracker start states,

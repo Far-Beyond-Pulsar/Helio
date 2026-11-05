@@ -10,7 +10,9 @@ pub struct Fixture {
     pub ambient: [f32; 3],
     pub publish_ray_frame: bool,
     pub transmission: Option<wgpu::Buffer>,
-    pub ray_frame: helio_core::FrameAcceleration,
+    /// A host projection's ray-traced scene for the next frame only, in
+    /// place of the fixture's own TLAS (`helio_frame_api::rays::SceneRays`).
+    pub rays: Option<helio_frame_api::rays::SceneRays>,
     pub device: Arc<wgpu::Device>,
     pub queue: Arc<wgpu::Queue>,
     pub scene: TestScene,
@@ -191,8 +193,8 @@ impl Fixture {
         Self {
             ambient: [0.03; 3],
             publish_ray_frame: true,
+            rays: None,
             transmission: None,
-            ray_frame: Default::default(),
             device,
             queue,
             scene,
@@ -248,7 +250,7 @@ impl Fixture {
             .unwrap()
             .set_config(&self.device, config);
     }
-    pub fn lights(&mut self, lights: Vec<helio_pass_forward_lit::GpuLight>) {
+    pub fn lights(&mut self, lights: Vec<helio_pass_light_cull::GpuLight>) {
         self.scene.movable_light_count = lights.len() as u32;
         self.scene.movable_lights_generation += 1;
         self.scene.lights.set_data(lights);
@@ -258,17 +260,23 @@ impl Fixture {
     }
     pub fn try_frame(&mut self) -> helio_core::Result<()> {
         self.scene.flush();
-        if self.publish_ray_frame {
-            self.ray_frame.publish(
-                self.scene.frame_count,
-                helio_core::RayFrame {
-                    tlas: self.scene.tlas_manager.tlas(),
-                    transmission: self.transmission.as_ref(),
-                    instances: None,
-                    proxies: None,
-                },
-            );
-        }
+        // The frame's ray-traced scene (`helio_frame_api::rays`): a host
+        // projection's for this frame, or the fixture's own TLAS with its
+        // transmission rows.
+        let rays = self.rays.take();
+        let (tlas, transmission) = match &rays {
+            Some(rays) => (
+                Some(&rays.tlas),
+                rays.buffer(helio_frame_api::rays::RAY_TRANSMISSION),
+            ),
+            None => {
+                let tlas = self
+                    .publish_ray_frame
+                    .then(|| self.scene.tlas_manager.tlas())
+                    .flatten();
+                (tlas, tlas.and(self.transmission.as_ref()))
+            }
+        };
         let mut resources = helio_core::ResourceRegistry::empty();
         resources.write(
             helio_core::resource_keys::render_environment(),
@@ -276,13 +284,13 @@ impl Fixture {
                 clear_color: [0.0; 4],
                 ambient_color: self.ambient,
                 ambient_intensity: 1.0,
-                tlas: self.ray_frame.tlas(self.scene.frame_count),
+                tlas,
             },
             "Fixture",
         );
-        if let Some(buffer) = self.ray_frame.transmission(self.scene.frame_count) {
+        if let Some(buffer) = transmission {
             resources.write(
-                helio_core::ResourceKey::new("ray_transmission"),
+                helio_core::ResourceKey::new(helio_frame_api::rays::RAY_TRANSMISSION),
                 buffer,
                 "Fixture",
             );
@@ -804,8 +812,8 @@ pub fn point(
     position: [f32; 3],
     color: [f32; 3],
     intensity: f32,
-) -> helio_pass_forward_lit::GpuLight {
-    helio_pass_forward_lit::GpuLight {
+) -> helio_pass_light_cull::GpuLight {
+    helio_pass_light_cull::GpuLight {
         position_range: [position[0], position[1], position[2], 20.0],
         color_intensity: [color[0], color[1], color[2], intensity],
         ..Default::default()

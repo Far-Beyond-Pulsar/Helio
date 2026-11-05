@@ -57,8 +57,6 @@ helio-settings = { layer = "leaf" }
 helio-bake-types = { layer = "leaf" }
 scenedb-inspector-agent = { layer = "leaf" }
 helio-passes = { layer = "leaf" }
-helio-apis = { layer = "leaf" }            # manifest-only container for the api/ glob          # manifest-only container for the passes/ glob
-helio-workspace = { layer = "host" }       # workspace root package (web bin)
 
 # core
 helio-core = { layer = "core" }
@@ -71,37 +69,16 @@ helio-scene-join = { layer = "scene" }
 helio-feature-api = { layer = "feature_api" }
 helio-frame-api = { layer = "feature_api" }
 
-# feature contracts (api)
-helio-mesh-api = { layer = "api" }
-
 # spine
-helio-pass-gbuffer = { layer = "spine" }
 helio-pass-deferred-light = { layer = "spine" }
-helio-pass-forward-lit = { layer = "spine" }
-helio-pass-object-batch = { layer = "spine" }
 helio-pass-light-cull = { layer = "spine" }
-helio-pass-shadow = { layer = "spine" }
 helio-pass-shadow-matrix = { layer = "spine" }
-helio-pass-shadow-cull = { layer = "spine" }
-helio-pass-shadow-dirty = { layer = "spine" }
 helio-pass-hiz = { layer = "spine" }
-helio-pass-occlusion-cull = { layer = "spine" }
-helio-pass-indirect-dispatch = { layer = "spine" }
-helio-pass-transparent = { layer = "spine" }
 helio-pass-tsr = { layer = "spine" }
 helio-pass-postprocess = { layer = "spine" }
 helio-spine = { layer = "spine" }
 
 # features
-helio-pass-vg = { layer = "feature", group = "vg" }
-helio-pass-vg-bvh = { layer = "feature", group = "vg" }
-helio-pass-vg-cull = { layer = "feature", group = "vg" }
-helio-pass-vg-dense = { layer = "feature", group = "vg" }
-helio-pass-vg-raster = { layer = "feature", group = "vg" }
-helio-pass-vg-shade = { layer = "feature", group = "vg" }
-helio-vg-format = { layer = "feature", group = "vg" }
-helio-vg-build = { layer = "feature", group = "vg" }
-helio-vg-stream = { layer = "feature", group = "vg" }
 helio-pass-billboard = { layer = "feature", group = "billboards" }
 helio-pass-ssr = { layer = "feature", group = "reflections" }
 helio-pass-planar-reflection = { layer = "feature", group = "reflections" }
@@ -125,12 +102,8 @@ helio-graph-asset = { layer = "preset" }
 
 # hosts
 examples = { layer = "host" }
-helio-asset-compat = { layer = "host" }
 helio-controls = { layer = "host" }
 helio-wasm = { layer = "host" }
-helio-web-demos = { layer = "host" }
-helio-android-demos = { layer = "host" }
-helio-snapshot = { layer = "host" }
 helio-components = { layer = "host" }       # SceneDB components for Helio's own hosts
 
 [budgets]

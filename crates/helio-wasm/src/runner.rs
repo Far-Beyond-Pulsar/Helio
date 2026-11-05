@@ -404,13 +404,15 @@ async fn init_wgpu<T: HelioWasmApp>(
     // SceneDB is the sole scene authority: create the frontend-owned World,
     // attach its GPU mirror, and hand the renderer only the cloneable mirror
     // handle. `demo` authors rows through `scene_db.world` in `init`.
-    let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+    let mut scene_db = new_scene_db_with_gpu_mirror::<T>(&device, &queue);
     let scene_db_handle = scene_db
         .world
         .gpu_mirror()
         .cloned()
         .expect("gpu mirror was just attached above");
 
+    // The default graph: the deferred preset over the app's kinds' features.
+    let nodes = std::sync::Arc::new(helio_presets::graphs::registry_with(&T::features()));
     let mut renderer = {
         let scene_db_handle = scene_db_handle.clone();
         helio::RendererBuilder::new(config, scene_db_handle.clone())
@@ -425,7 +427,9 @@ async fn init_wgpu<T: HelioWasmApp>(
                     ctx.cull_stats_buffer,
                 )
                 .unwrap_or_else(|| {
-                    helio_presets::deferred(ctx)
+                    helio_presets::Preset::Deferred
+                        .with_registry(std::sync::Arc::clone(&nodes))
+                        .build(ctx)
                 })
             }))
             .build(device.clone(), queue.clone(), width, height, surface_format)
@@ -517,15 +521,14 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     state.queue.present(output);
 }
 
-/// Create the frontend-owned SceneDB and register every GPU component column
-/// used by the standard Helio graphs before demos can spawn their first row.
+/// Create the frontend-owned SceneDB and register the app's GPU component
+/// columns ([`HelioWasmApp::register_columns`]) before demos can spawn their
+/// first row.
 ///
 /// Registration is intentionally eager: several generated GPU mirrors can
 /// lazily register their columns on first insertion, but doing that from the
-/// same dispatch that writes the first row loses that initial write. Keeping
-/// this setup in the runner also means every `HelioWasmApp` gets the same
-/// mirror contract without requiring demos to know about GPU storage.
-fn new_scene_db_with_gpu_mirror(
+/// same dispatch that writes the first row loses that initial write.
+fn new_scene_db_with_gpu_mirror<T: HelioWasmApp>(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
 ) -> pulsar_scenedb::SceneDb {
@@ -537,24 +540,7 @@ fn new_scene_db_with_gpu_mirror(
         max_cells_metadata: 0,
     };
     let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&gpu_ctx, gpu_cfg);
-
-    helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
-    helio_components::MaterialComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
-    );
-    helio_components::StaticObjectComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
-    );
-    helio_components::LightComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        helio_pass_forward_lit::MAX_LIGHTS,
-        device,
-    );
-
+    T::register_columns(&mut gpu_store, device);
     let mirror = pulsar_scenedb::gpu::GpuMirrorHandle::new(Arc::new(gpu_store), queue.clone());
     scene_db.world.attach_gpu_mirror(mirror);
     scene_db

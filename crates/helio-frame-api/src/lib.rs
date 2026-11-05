@@ -12,6 +12,8 @@
 //! - [`lighting`]: the inputs a lighting model reads, as generic contracts
 //!   with stand-ins: indirect diffuse and specular, the sun's visibility and
 //!   transmittance, transmission, the sky, the light list, view remaps.
+//! - [`rays`]: the frame's TLAS and the buffers that follow it, published by
+//!   whatever builds it.
 //! - [`static_names`]: the read lists of a pass whose reads are what a
 //!   publisher named (media, the sun's transmittance).
 //! - [`host_input`]: resources a host supplies every frame, declared by the
@@ -25,6 +27,7 @@ mod host;
 pub mod lighting;
 pub mod media;
 mod phase;
+pub mod rays;
 
 pub use host::{host_input, host_kind, HOST_INPUTS};
 pub use phase::{

@@ -231,7 +231,6 @@ impl Renderer {
             camera_generation: 0,
             camera_identity: None,
             frame_count: 0,
-            ray_frame: Default::default(),
             prev_view_proj_by_view: Default::default(),
             scene_derivations: Vec::new(),
             world_origin: glam::DVec3::ZERO,

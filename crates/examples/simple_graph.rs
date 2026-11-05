@@ -19,8 +19,8 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 
-mod v3_demo_common;
-use v3_demo_common::new_scene_db_with_gpu_mirror;
+mod common;
+use common::new_scene_db_with_gpu_mirror;
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -172,7 +172,7 @@ impl ApplicationHandler for App {
         // sole scene authority in every `RendererBuilder`, so an (unused)
         // GPU mirror is still required to build one.
         let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        let renderer = RendererBuilder::new(config, v3_demo_common::scene_db_handle(&scene_db))
+        let renderer = RendererBuilder::new(config, common::scene_db_handle(&scene_db))
             .with_pass_build_context(Box::new(helio_presets::simple))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");

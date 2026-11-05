@@ -79,7 +79,6 @@ pub struct Renderer {
     /// The camera `camera_generation` currently describes.
     pub(crate) camera_identity: Option<CameraIdentity>,
     pub(crate) frame_count: u64,
-    pub(crate) ray_frame: helio_core::FrameAcceleration,
     /// Previous projection per stable camera/view id, and the world origin
     /// it is expressed in. Stereo callers submit eyes sequentially, so a
     /// single matrix would make each eye reproject from the other eye's
@@ -229,14 +228,6 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Publish an already-built frontend acceleration projection (its TLAS
-    /// and the rows that follow its instance order) for the next frame
-    /// only. Call after flushing SceneDB and preparing its BLAS/TLAS; an
-    /// omitted update expires instead of reusing potentially stale geometry.
-    pub fn set_ray_tracing_frame(&mut self, rays: helio_core::RayFrame<'_>) {
-        self.ray_frame.publish(self.frame_count, rays);
-    }
-
     /// Raw depth-buffer texture (`Depth32Float`, already `COPY_SRC`) for
     /// external debug capture (e.g. an example dumping it to a PNG to
     /// answer "is anything actually being rasterized"). Every other

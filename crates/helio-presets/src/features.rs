@@ -20,22 +20,17 @@ use helio_frame_api::{FrameNode, Phase, Slot};
 pub use helio_feature_api::{pass_kind as kind, SceneColorFormat};
 pub use helio_frame_api::{host_kind, HOST_INPUTS};
 
-/// Helio's features, in registration order: the spine, the meshes' drawers,
-/// then every feature that joins the frame's slots and phases, then the
-/// renderer's own nodes. An engine adds its features to this set
-/// ([`crate::Preset::with_features`]): the features of object kinds Helio
-/// does not know (a voxel world) come from the plugin that owns the kind.
+/// Helio's features, in registration order: the spine, then every feature
+/// that joins the frame's slots and phases, then the renderer's own nodes.
+/// An engine adds its features to this set ([`crate::Preset::with_features`]):
+/// the features of object kinds Helio does not know (meshes, a voxel world)
+/// come from the plugin that owns the kind.
 pub fn default_features() -> FeatureSet {
     FeatureSet::new()
         .with(helio_spine::SpineFeature)
-        .with(helio_pass_gbuffer::GBufferDrawers)
-        .with(helio_pass_shadow::ShadowDrawers)
-        .with(helio_pass_forward_lit::ForwardDrawers)
-        .with(helio_pass_transparent::TransparentDrawers)
         .with(helio_pass_ssr::SsrFeature)
         .with(helio_pass_planar_reflection::PlanarReflectionFeature)
         .with(helio_pass_hlfs::HlfsFeature)
-        .with(helio_pass_vg::VgFeature)
         .with(helio_pass_billboard::BillboardFeature)
         .with(helio_pass_fxaa::FxaaFeature)
         .with(helio_pass_buffer_view::BufferViewFeature)

@@ -32,10 +32,7 @@ pub use helio_mats::{
     MaterialBindingConfig, MaterialBindingMode, BINDLESS_MATERIAL_FEATURES,
     EXPANDED_MATERIAL_TEXTURE_RESERVE, MAX_MATERIAL_TEXTURES,
 };
-pub use helio_pass_forward_lit::{GpuLight, LightType};
-pub use helio_pass_object_batch::{
-    DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData, INSTANCE_FLAG_MOVABLE,
-};
+pub use helio_pass_light_cull::{GpuLight, LightType};
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_frame_api::lighting::AmbientLight;
 pub use helio_pass_shadow_matrix::ShadowQuality;

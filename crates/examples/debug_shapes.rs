@@ -12,14 +12,14 @@
 //!   its continuous LOD transitions.
 //!   Escape               — release cursor / exit
 
-mod v3_demo_common;
+mod common;
 
 use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererConfig,
 };
 use pulsar_scenedb::SceneDb;
-use v3_demo_common::{build_default_renderer_with_context, new_scene_db_with_gpu_mirror};
+use common::{build_default_renderer_with_context, new_scene_db_with_gpu_mirror};
 
 use winit::{
     application::ApplicationHandler,
@@ -392,7 +392,7 @@ impl AppState {
             1000.0,
         );
 
-        v3_demo_common::flush_scene_db(&self.scene_db, &self.queue);
+        common::flush_scene_db(&self.scene_db, &self.queue);
         if let Err(e) = self.renderer.render_window_frame(&camera, &self.surface) {
             log::error!("Render error: {:?}", e);
         }

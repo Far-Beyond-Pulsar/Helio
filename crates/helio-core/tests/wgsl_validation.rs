@@ -15,7 +15,8 @@
 //! Sources go through `helio_core::shader::resolve_with` first — the same call
 //! (modulo which snippets a given pass registers) the runtime makes — so a
 //! prelude/snippet-using shader is validated as the GPU will see it, not as
-//! the bare file on disk. The snippet list here (HIZ, PBR, the frame's sky) is this
+//! the bare file on disk. The snippet list here (HIZ, PBR, the frame's sky and
+//! view remaps) is this
 //! test's own aggregation of every pass-owned snippet in the workspace, not
 //! something `helio-core` itself knows about — `resolve_with` never fails
 //! for a marker with no matching snippet, so listing all of them here is
@@ -30,6 +31,7 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_frame_api::lighting::sky::ATMOSPHERE_SNIPPET,
     helio_frame_api::lighting::sky::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
+    helio_frame_api::lighting::VIEW_REMAP_SNIPPET,
     helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET,
 ];
 
@@ -82,30 +84,6 @@ fn is_composed(path: &Path) -> bool {
         "helio-pass-hlfs/shaders/sample.wgsl",
         "helio-pass-hlfs/shaders/spatial.wgsl",
         "helio-pass-hlfs/shaders/temporal.wgsl",
-        "helio-pass-transparent/shaders/transparent_base.wgsl",
-        // The virtual geometry's kernels, assembled by their crates from
-        // shared declaration pieces (`include_str!` constants joined in
-        // Rust); validated when their passes build their pipelines (the
-        // crates' GPU tests).
-        "helio-pass-vg-bvh/shaders/vg_bvh_build.wgsl",
-        "helio-pass-vg-cull/shaders/vg_cull.wgsl",
-        "helio-pass-vg-dense/shaders/args.wgsl",
-        "helio-pass-vg-dense/shaders/bin.wgsl",
-        "helio-pass-vg-dense/shaders/collect.wgsl",
-        "helio-pass-vg-dense/shaders/footprint.wgsl",
-        "helio-pass-vg-dense/shaders/peel.wgsl",
-        "helio-pass-vg-dense/shaders/rt.wgsl",
-        "helio-pass-vg-dense/shaders/tiles.wgsl",
-        "helio-pass-vg-raster/shaders/vg_dense_count.wgsl",
-        "helio-pass-vg-raster/shaders/vg_hw_raster.wgsl",
-        "helio-pass-vg-raster/shaders/vg_hw_raster_masked.wgsl",
-        "helio-pass-vg-raster/shaders/vg_sw_bin.wgsl",
-        "helio-pass-vg-raster/shaders/vg_sw_raster.wgsl",
-        "helio-pass-vg-raster/shaders/vg_sw_raster_masked.wgsl",
-        "helio-pass-vg-raster/shaders/vg_tile_raster.wgsl",
-        "helio-pass-vg-shade/shaders/vg_debug.wgsl",
-        "helio-pass-vg-shade/shaders/vg_resolve.wgsl",
-        "helio-pass-vg-shade/shaders/vg_shade.wgsl",
     ];
     let normalized = path.to_string_lossy().replace('\\', "/");
     COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
@@ -113,34 +91,26 @@ fn is_composed(path: &Path) -> bool {
 
 /// Assembles the shaders their passes build from more than one piece, the
 /// same way the pass does, so they are validated as the GPU sees them.
-fn compose(root: &Path, path: &Path, source: String) -> String {
+fn compose(path: &Path, source: String) -> String {
     let normalized = path.to_string_lossy().replace('\\', "/");
-    // `SceneJoin` and `EnvironmentJoin` prefix the shared join declarations.
+    // The scene derivations prefix the shared join declarations
+    // (`helio_scene_join::join_source`), wherever their crate keeps them:
+    // the hierarchy resolve, the row join, and each kind's own join.
     const JOINS: &[&str] = &[
-        "helio-scene-derivations/shaders/scene_join_meshes.wgsl",
-        "helio-scene-derivations/shaders/scene_join_lights.wgsl",
-        "helio-scene-derivations/shaders/environment_join.wgsl",
-        "helio-scene-derivations/shaders/hierarchy_resolve.wgsl",
-        "helio-scene-derivations/shaders/scene_join_moved.wgsl",
+        "hierarchy_resolve.wgsl",
+        "row_join.wgsl",
+        "scene_join_lights.wgsl",
     ];
-    if JOINS.iter().any(|suffix| normalized.ends_with(suffix)) {
-        let common = root.join("crates/helio-scene-derivations/shaders/scene_join_common.wgsl");
-        let common = std::fs::read_to_string(common).expect("scene_join_common.wgsl");
-        return format!("{common}\n{source}");
-    }
-    // The depth passes prefix the alpha-tested depth material's declarations
-    // (`helio_pass_gbuffer::depth_material::DepthMaterialBindings::shader_source`).
-    const DEPTH_MATERIAL: &[&str] = &["helio-pass-shadow/shaders/shadow.wgsl"];
-    if DEPTH_MATERIAL
-        .iter()
-        .any(|suffix| normalized.ends_with(suffix))
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| JOINS.contains(&name))
     {
-        let material = root.join("crates/passes/3d/helio-pass-gbuffer/shaders/depth_material.wgsl");
-        let material = std::fs::read_to_string(material).expect("depth_material.wgsl");
-        return format!(
-            "{material}
-{source}"
-        );
+        return helio_scene_join::join_source(&source);
+    }
+    // The tone map prefixes the post settings' declarations.
+    if normalized.ends_with("helio-pass-postprocess/shaders/postprocess.wgsl") {
+        return helio_pass_postprocess::with_post_settings(&source);
     }
     source
 }
@@ -181,7 +151,7 @@ fn every_wgsl_shader_parses_and_validates() {
     for path in &shaders {
         let rel = path.strip_prefix(&root).unwrap_or(path);
         let source = std::fs::read_to_string(path).expect("shader should be readable");
-        let source = compose(&root, path, source);
+        let source = compose(path, source);
 
         if is_composed(path) {
             continue;

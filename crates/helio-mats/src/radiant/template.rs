@@ -179,12 +179,10 @@ pub struct RadiantTemplateRegistry {
 
 const MAX_DYNAMIC_TEMPLATES: usize = 1024;
 
-/// The base gbuffer.wgsl source, embedded at compile time.
+/// The default surface template, the base every template is composed into
+/// ([`crate::templates::DEFAULT_PBR`]).
 fn base_gbuffer_source() -> &'static str {
-    include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
-    ))
+    crate::templates::DEFAULT_PBR
 }
 
 /// Replace a function in the base WGSL with a custom override.
@@ -256,10 +254,7 @@ impl RadiantTemplateRegistry {
             0,
             RadiantTemplate {
                 name: Arc::from("default_pbr"),
-                wgsl_source: Arc::from(include_str!(concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/../passes/3d/helio-pass-gbuffer/shaders/gbuffer.wgsl"
-                ))),
+                wgsl_source: Arc::from(crate::templates::DEFAULT_PBR),
             },
         );
         reg.register_default_templates();
@@ -367,7 +362,7 @@ impl RadiantTemplateRegistry {
     /// Compose a transparent override function with the transparent base shader.
     /// Returns the composed WGSL source ready for registration.
     pub fn compose_transparent_override(&self, override_fn: &str) -> String {
-        let base = include_str!("../../templates/transparent_base.wgsl");
+        let base = crate::templates::TRANSPARENT_BASE;
         compose_fn_override(base, override_fn, "fn radiant_eval_transparent")
     }
 
@@ -386,7 +381,7 @@ impl RadiantTemplateRegistry {
     /// The `override_fn` should contain a `fn radiant_eval_transparent(...)` function body.
     /// Composed with the transparent base shader at registration time.
     pub fn register_transparent_partial_str(&mut self, name: &str, override_fn: String) -> u32 {
-        let base = include_str!("../../templates/transparent_base.wgsl");
+        let base = crate::templates::TRANSPARENT_BASE;
         let composed = compose_fn_override(base, &override_fn, "fn radiant_eval_transparent");
         self.register_str(name, composed)
     }

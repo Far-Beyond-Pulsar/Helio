@@ -669,3 +669,26 @@ pub const SHADOW_MATRICES: &str = "shadow_matrices";
 pub const fn shadow_matrices<T>() -> helio_core::ResourceKey<T> {
     helio_core::ResourceKey::new(SHADOW_MATRICES)
 }
+
+/// The shadow views' per-caster dirty flags: [`ShadowMatrixPass`] sets a
+/// caster's flag when its light's matrices change, and whatever draws into
+/// the shadow casters reads them to know which faces to redraw (the meshes'
+/// caster invalidation, which also dirties faces its own moved casters
+/// touch). One per graph: the node that builds the matrix pass shares it
+/// (`BuildEnv::shared`), the casters' nodes take it from there.
+pub struct LightDirtyFlags(pub std::sync::Arc<wgpu::Buffer>);
+
+impl LightDirtyFlags {
+    pub fn new(device: &wgpu::Device) -> Self {
+        Self(std::sync::Arc::new(device.create_buffer(
+            &wgpu::BufferDescriptor {
+                label: Some("Shadow Dirty Flags"),
+                size: MAX_SHADOW_CASTERS as u64 * 4,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            },
+        )))
+    }
+}

@@ -59,7 +59,7 @@ pub struct TestScene {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pub camera: Values<GpuCameraUniforms>,
-    pub lights: Values<helio_pass_forward_lit::GpuLight>,
+    pub lights: Values<helio_pass_light_cull::GpuLight>,
     pub shadow_matrices: Values<helio_pass_shadow_matrix::GpuShadowMatrix>,
     pub blas_manager: BlasManager,
     pub tlas_manager: TlasManager,
@@ -102,7 +102,7 @@ impl TestScene {
                 BufferHandle {
                     buffer: self.lights.buffer.clone(),
                     epoch: self.movable_lights_generation,
-                    row_bytes: std::mem::size_of::<helio_pass_forward_lit::GpuLight>() as u64,
+                    row_bytes: std::mem::size_of::<helio_pass_light_cull::GpuLight>() as u64,
                     content_generation: self.movable_lights_generation,
                 },
             )])

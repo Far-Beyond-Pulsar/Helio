@@ -462,9 +462,7 @@ pub use render_environment::RenderEnvironment;
 
 // Re-export managers
 pub use crate::acceleration::{
-    AccelerationError, BlasGeometry, BlasManager, FrameAcceleration, RayFrame,
-    RayProxies, TlasInstanceInput, TlasManager, RAY_INSTANCES, RAY_PROXY_INDICES, RAY_PROXY_VERTEX_BYTES,
-    RAY_PROXY_VERTICES,
+    AccelerationError, BlasGeometry, BlasManager, TlasInstanceInput, TlasManager,
 };
 // Re-export core types
 pub use actor::Actor;

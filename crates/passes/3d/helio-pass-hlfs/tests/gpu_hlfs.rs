@@ -272,7 +272,7 @@ fn mixed_lighting_converges_at_full_and_half_resolution() {
                 )
             })
             .collect();
-        lights.push(helio_pass_forward_lit::GpuLight {
+        lights.push(helio_pass_light_cull::GpuLight {
             light_type: 0,
             direction_outer: [0.0, 0.0, -1.0, 0.0],
             color_intensity: [1.0, 0.8, 0.5, 3.0],

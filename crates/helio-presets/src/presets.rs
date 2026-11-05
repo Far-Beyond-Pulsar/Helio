@@ -150,16 +150,14 @@ impl Preset {
         }
         let aa = self.aa(config);
 
-        // Scene prep: batches, per-frame tables, the lights' shadow views and
-        // their casters, culling.
-        nodes.pass("object_batch");
+        // Scene prep: per-frame tables (an object kind's batches first), the
+        // lights' shadow views and what casts into them, the background,
+        // visibility against the depth pyramid.
         nodes.slot(Slot::Prepare);
         nodes.pass("shadow_matrix");
-        nodes.pass("shadow_dirty");
         nodes.phase(Phase::ShadowCasters);
-        for name in ["background", "indirect_dispatch", "hiz", "occlusion_cull"] {
-            nodes.pass(name);
-        }
+        nodes.pass("background");
+        nodes.slot(Slot::Visibility);
         if !self.hlfs() {
             nodes.pass("light_cull");
         }
@@ -407,23 +405,30 @@ impl Nodes<'_> {
     }
 
     /// A draw phase: the compute it needs first, the drawer that opens it,
-    /// then its other drawers.
+    /// then its other drawers. The G-buffer is the frame's: when no kind
+    /// opens its phase, the spine clears it (`gbuffer_clear`), so its
+    /// readers and the drawers that load it find it written.
     ///
     /// # Panics
     ///
-    /// When a phase whose attachments nobody else clears has drawers but not
-    /// exactly one opener: its frame would show stale pixels, or clear twice.
+    /// When a phase whose attachments nobody else clears has more than one
+    /// opener (it would clear twice), or drawers and no opener nor a clear of
+    /// the spine's (its frame would show stale pixels).
     fn phase(&mut self, phase: Phase) {
         let openers = self.registry.placed(phase.open()).len();
         let drawers = self.registry.placed(phase.draw()).len();
-        if phase.needs_opener() && drawers > 0 {
+        let spine_clears = phase == Phase::GBuffer && openers == 0;
+        if phase.needs_opener() {
             assert!(
-                openers == 1,
+                openers <= 1 && (drawers == 0 || openers == 1 || spine_clears),
                 "phase `{}` has {drawers} drawers and {openers} openers; it needs exactly one",
                 phase.name()
             );
         }
         self.at(phase.before());
+        if spine_clears {
+            self.pass("gbuffer_clear");
+        }
         self.at(phase.open());
         self.at(phase.draw());
     }

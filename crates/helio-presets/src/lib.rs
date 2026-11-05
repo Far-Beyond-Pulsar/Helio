@@ -6,7 +6,6 @@
 //!   feature crate's nodes), the renderer's own nodes and the config bridge.
 //! - [`graphs`]: node registries, the editor's template, the pin probe.
 //! - [`pipelines`]: the presets as named pipelines for a host's registry.
-//! - Config helper: [`with_virtual_geometry`].
 //!
 //! The presets name no feature beyond the feature list: each feature declares
 //! what it needs of the others (GI's terrain tracer, TSR's stochastic mask)
@@ -16,34 +15,21 @@ pub mod features;
 pub mod graphs;
 pub mod pipelines;
 pub mod presets;
-pub mod virtual_geometry;
-pub use helio_pass_vg::{
-    virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
-};
-pub use helio_vg_format::debug_view as vg_debug_view;
 pub use presets::{
     deferred, deferred_fxaa, forward, hlfs, hlfs_fxaa, registry, simple, Preset, PresetGraph,
 };
-pub use virtual_geometry::with_virtual_geometry;
 
 use helio_pass_billboard::BillboardPass;
 use helio_pass_debug_overlay::DebugOverlayPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_hiz::HiZBuildPass;
 use helio_pass_hlfs::HlfsPass;
-use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_light_cull::LightCullPass;
-use helio_pass_object_batch::ObjectBatchPass;
-use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
 use helio_pass_postprocess::PostProcessPass;
-use helio_pass_shadow::ShadowPass;
-use helio_pass_shadow_dirty::ShadowDirtyPass;
-use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
 use helio_spine::BackgroundPass;
@@ -56,19 +42,17 @@ use helio_spine::BackgroundPass;
 /// feature's) for handles the nodes create and share between passes. Those passes form a group and
 /// are swapped together:
 ///
-/// * shadows: `ShadowMatrixPass` + `ShadowDirtyPass` (dirty-flag buffer),
-///   `ShadowDirtyPass` + `ShadowPass` (face dirty and geometry count buffers)
-/// * `HiZBuildPass` + `OcclusionCullPass` (Hi-Z sampler)
 /// * every perf-overlay pass (one shared `PerfOverlayShared`)
 ///
 /// Everything else listed as independent takes only renderer-owned handles
 /// (camera, debug camera and cull-stats buffers, debug-draw state, SceneDB,
 /// the debug-overlay state) and plain configuration; those are the same objects
-/// in the live and the replacement graph. `GBufferPass`, `ForwardLitPass`
-/// and `TransparentPass` are left out on purpose: they build part of their
-/// WGSL at runtime and keep material/template registrations, so edits to them
-/// rebuild the whole graph. So are passes an engine's features add, which
-/// this crate cannot vouch for.
+/// in the live and the replacement graph. Left out, so an edit to them
+/// rebuilds the whole graph: the shadow views' `ShadowMatrixPass` (its light
+/// dirty flags are shared with what casts into the views) and the Hi-Z
+/// pyramid (its sampler is shared with an object kind's occlusion culling),
+/// and every pass an engine's features add (an object kind's batches,
+/// culling and drawers), which this crate cannot vouch for.
 ///
 /// Dropping the replacement's unswapped passes has no side effects beyond the
 /// ones a resize already has: none of these constructors spawns a thread,
@@ -77,8 +61,6 @@ use helio_spine::BackgroundPass;
 pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
     use helio_core::graph::type_name_of as name;
     helio_core::SwapPolicy::new()
-        .independent::<ObjectBatchPass>()
-        .independent::<IndirectDispatchPass>()
         .independent::<BackgroundPass>()
         .independent::<LightCullPass>()
         .independent::<SsrPass>()
@@ -92,12 +74,6 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<TsrPass>()
         .independent::<FxaaPass>()
         .independent::<PostProcessPass>()
-        .group_types(&[
-            name::<ShadowMatrixPass>(),
-            name::<ShadowDirtyPass>(),
-            name::<ShadowPass>(),
-        ])
-        .group_types(&[name::<HiZBuildPass>(), name::<OcclusionCullPass>()])
         .group_types(&[
             name::<PerfOverlayAnalyzerPass>(),
             name::<PerfOverlayCostAnalyzerPass>(),

@@ -39,9 +39,16 @@ use crate::gbuffer;
 /// kind), so a feature joins the pipeline without the preset naming it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Slot {
-    /// After the scene's batches are gathered, before the shadow views:
-    /// per-frame tables everything after reads (the atmosphere's).
+    /// First in the frame, before the shadow views: per-frame tables
+    /// everything after reads (an object kind's batches, first; the
+    /// atmosphere's tables).
     Prepare,
+    /// After the background is cleared, before the lights are binned:
+    /// visibility against the frame's depth pyramid. The spine builds the
+    /// pyramid at order 0 (from the depth the last frame left); a kind's
+    /// culling prepares its arguments before it (negative orders) and tests
+    /// against it after (positive orders).
+    Visibility,
     /// After the G-buffer phase, before decals: what reads the complete
     /// G-buffer (GI's tracers).
     Geometry,
@@ -68,8 +75,9 @@ pub enum Slot {
 }
 
 impl Slot {
-    pub const ALL: [Slot; 8] = [
+    pub const ALL: [Slot; 9] = [
         Slot::Prepare,
+        Slot::Visibility,
         Slot::Geometry,
         Slot::LightingInputs,
         Slot::Lighting,
@@ -82,6 +90,7 @@ impl Slot {
     pub fn point(self) -> ExtensionPoint {
         ExtensionPoint(match self {
             Slot::Prepare => "slot.prepare",
+            Slot::Visibility => "slot.visibility",
             Slot::Geometry => "slot.geometry",
             Slot::LightingInputs => "slot.lighting_inputs",
             Slot::Lighting => "slot.lighting",
