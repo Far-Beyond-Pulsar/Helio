@@ -60,6 +60,14 @@ pub const TARGETS: [(&str, ResourceFormat); 8] = [
     (VELOCITY, VELOCITY_FORMAT),
 ];
 
+/// Marker opting a shader into [`OUTPUT_SNIPPET`].
+pub const OUTPUT_MARKER: &str = "//!use gbuffer_output";
+/// `GBufferOutput` (the fragment outputs for [`TARGETS`], in location order)
+/// and `GBufferDepthOutput` (the same with `frag_depth`): every G-buffer
+/// drawer's fragment returns one, so the layout has one owner.
+pub const OUTPUT_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(OUTPUT_MARKER, "shaders/gbuffer_output.wgsl");
+
 /// [`TARGETS`]' formats, in location order.
 pub const TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     ALBEDO_FORMAT.to_wgpu(),

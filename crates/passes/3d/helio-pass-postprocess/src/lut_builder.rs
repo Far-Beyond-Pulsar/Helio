@@ -1,4 +1,3 @@
-use helio_core::Result as HelioResult;
 
 pub struct LutBuilder {
     pipeline: wgpu::ComputePipeline,

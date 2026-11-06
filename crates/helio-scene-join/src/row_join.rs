@@ -18,8 +18,12 @@
 //! The kind that owns the rows describes its tables and builds its own
 //! `RowJoin` (fog, post-process volumes, the lens, water, foliage, the sky,
 //! decals, particle emitters, sprites); several joins run side by side as
-//! separate scene derivations. The placements are the shader's
-//! (`row_join.wgsl`); a kind picks the one its rows need.
+//! separate scene derivations. The join itself knows only what every kind
+//! shares: attachment, visibility, gates, slices, packing and the owner's
+//! world box ([`placement::OWNER_AABB`]). Anything a kind's rows need beyond
+//! that is the kind's own [`Placement`]: WGSL hooks the join calls for its
+//! table (see `row_join.wgsl`), compiled into a pipeline of its own, so the
+//! join names no kind and a new kind places its rows without changing it.
 
 use crate::{
     entry, signature, BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation,
@@ -27,39 +31,129 @@ use crate::{
     MESH_BOUNDS_ROW_BYTES, OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
 };
 
-/// How a table's placed rows are moved into the frame (bits; see
+/// What the join itself does with a table's placed rows (bits; see
 /// `row_join.wgsl`'s `JoinUniforms`).
 pub mod placement {
     /// The source starts with a local size `vec4`, the output with its
-    /// world AABB (`min`, `max`) from the owner's transform.
+    /// world AABB (`min`, `max`; `w` 0) from the owner's transform.
     pub const OWNER_AABB: u32 = 1;
     /// A hidden owner turns the row off.
     pub const GATE_HIDDEN: u32 = 2;
-    /// The output's `bounds_max.w` is the owner's Y plus the source size's
-    /// `w`, scaled like the box (a surface height).
-    pub const SURFACE_HEIGHT: u32 = 4;
-    /// A world-aligned square layer centred on its owner (`write_layer`).
-    pub const SQUARE_LAYER: u32 = 8;
-    /// Words 0..2 move to the owner's position when word 3 says so
-    /// (`PLACEMENT_CENTER`).
-    pub const CENTRED: u32 = 16;
-    /// A box: the transform maps world space into the owner-placed box
-    /// (`write_decal_transform`).
-    pub const OWNER_BOX: u32 = 32;
-    /// Placed at the owner's transform, with the next range of a particle
-    /// pool ([`super::RowTable::pool`]; `write_emitter_transform`).
-    pub const POOL_RANGE: u32 = 64;
-    /// Takes a directional light ([`super::RowJoinKeys::directional_light`]:
-    /// the lights' directional light, which the kind placing a sun names;
-    /// `write_sun`).
-    pub const SUN: u32 = 128;
-    /// A wind row written over the table's rows (`write_water_wind`).
-    pub const WIND: u32 = 256;
-    /// Bounded by the meshes its owner holds (`write_hitbox`).
-    pub const MESH_BOUNDS: u32 = 512;
-    /// A 2D placement at the owner's X and Y, turned by its roll
-    /// (`write_sprite_placement`).
-    pub const PLANAR_2D: u32 = 1024;
+    /// Set by the join for a [`super::Placement`] that reads transforms.
+    pub(crate) const READS_TRANSFORMS: u32 = 4;
+}
+
+/// A kind's placement: WGSL defining any of the row join's placement hooks
+/// (`placement_placed`, `placement_write_row`, `placement_source_header`,
+/// `placement_write`, `placement_request`, `placement_range`; see
+/// `row_join.wgsl` for what each does and what it may read). Hooks it leaves
+/// out keep their defaults. The kind's crate owns it, next to the rows it
+/// places.
+#[derive(Clone, Copy, Debug)]
+pub struct Placement {
+    /// Names the placement's pipeline (one per distinct name in a join).
+    pub name: &'static str,
+    pub wgsl: &'static str,
+    /// Places from the owner's transform (an owner without one is not
+    /// placed).
+    pub reads_transforms: bool,
+    /// Writes positions, which follow the frame's world origin.
+    pub follows_origin: bool,
+    /// Reads `directional_light` ([`RowJoinKeys::directional_light`]).
+    pub reads_lights: bool,
+    /// Reads `mesh_bounds` ([`RowJoinKeys::mesh_bounds`]).
+    pub reads_mesh_bounds: bool,
+}
+
+impl Placement {
+    /// A placement named `name` from `wgsl`, reading nothing but its rows.
+    pub const fn new(name: &'static str, wgsl: &'static str) -> Self {
+        Self {
+            name,
+            wgsl,
+            reads_transforms: false,
+            follows_origin: false,
+            reads_lights: false,
+            reads_mesh_bounds: false,
+        }
+    }
+
+    /// Places from the owner's transform, writing positions.
+    pub const fn from_owner(self) -> Self {
+        Self {
+            reads_transforms: true,
+            follows_origin: true,
+            ..self
+        }
+    }
+
+    /// Reads the owner's transform without writing positions (a rotation).
+    pub const fn reads_owner(self) -> Self {
+        Self {
+            reads_transforms: true,
+            ..self
+        }
+    }
+
+    /// Reads the directional light.
+    pub const fn lit(self) -> Self {
+        Self {
+            reads_lights: true,
+            ..self
+        }
+    }
+
+    /// Reads the owners' mesh bounds.
+    pub const fn mesh_bounded(self) -> Self {
+        Self {
+            reads_mesh_bounds: true,
+            ..self
+        }
+    }
+}
+
+/// The hooks a placement may leave out, with their defaults.
+const DEFAULT_HOOKS: [(&str, &str); 6] = [
+    (
+        "fn placement_placed(",
+        "fn placement_placed(row: u32) -> bool { return true; }",
+    ),
+    (
+        "fn placement_write_row(",
+        "fn placement_write_row(row: u32, slot: u32, output: u32) -> bool { return false; }",
+    ),
+    (
+        "fn placement_source_header(",
+        "fn placement_source_header() -> u32 { return 0u; }",
+    ),
+    (
+        "fn placement_write(",
+        "fn placement_write(row: u32, output: u32) {}",
+    ),
+    (
+        "fn placement_request(",
+        "fn placement_request(row: u32) -> u32 { return 0u; }",
+    ),
+    (
+        "fn placement_range(",
+        "fn placement_range(row: u32, slot: u32, offset: u32) {}",
+    ),
+];
+
+/// The row join's shader with `placement`'s hooks (or none: every default).
+pub fn placement_source(placement: Option<&Placement>) -> String {
+    let wgsl = placement.map_or("", |placement| placement.wgsl);
+    let mut source = crate::row_join_base();
+    source.push('\n');
+    source.push_str(wgsl);
+    for (signature, default) in DEFAULT_HOOKS {
+        if !wgsl.contains(signature) {
+            source.push('\n');
+            source.push_str(default);
+        }
+    }
+    source.push('\n');
+    source
 }
 
 use placement::*;
@@ -74,12 +168,13 @@ pub struct RowJoinKeys {
     pub generations: BufferKey,
     pub hidden: BufferKey,
     pub transforms: BufferKey,
-    /// Mesh instances' local bounding spheres ([`placement::MESH_BOUNDS`]).
+    /// Mesh instances' local bounding spheres, for a placement bounded by
+    /// its owner's meshes ([`Placement::mesh_bounded`]).
     pub mesh_bounds: BufferKey,
-    /// The directional light [`placement::SUN`] takes (its first `vec4`:
-    /// the direction toward it and 1), named by the kind that places a sun
-    /// (water: the lights' directional light). `None`: no sun; the rows
-    /// face straight up.
+    /// The directional light a placement takes ([`Placement::lit`]: its
+    /// first `vec4`, the direction toward it and 1), named by the kind that
+    /// places a sun (water: the lights' directional lights). `None`: no
+    /// sun.
     pub directional_light: Option<BufferKey>,
 }
 
@@ -125,6 +220,8 @@ pub struct RowTable {
     gate_word: u32,
     pool: u32,
     phase_period: f64,
+    /// The kind's placement, if its rows need one.
+    placement: Option<Placement>,
     /// Sources written over this one (see [`RowTable::over`]).
     layers: Vec<RowTable>,
 }
@@ -132,7 +229,8 @@ pub struct RowTable {
 impl RowTable {
     /// A table published as `key`, of `output_words`-word rows, from the
     /// `source_row_bytes`-byte rows at `source`, placed by `flags`
-    /// ([`placement`]).
+    /// ([`placement`]) and, if it has one, the kind's
+    /// [`placement`](RowTable::placed_by).
     pub fn new(
         label: &'static str,
         key: BufferKey,
@@ -154,7 +252,16 @@ impl RowTable {
             gate_word: NO_GATE_WORD,
             pool: 0,
             phase_period: 0.0,
+            placement: None,
             layers: Vec::new(),
+        }
+    }
+
+    /// The kind's own placement of the rows.
+    pub fn placed_by(self, placement: Placement) -> Self {
+        Self {
+            placement: Some(placement),
+            ..self
         }
     }
 
@@ -180,7 +287,8 @@ impl RowTable {
         Self { gate_word, ..self }
     }
 
-    /// The particle pool [`placement::POOL_RANGE`] rows take ranges of.
+    /// The size of the pool the placement allocates from
+    /// (`placement_request`, `placement_range`).
     pub fn pool(self, pool: u32) -> Self {
         Self { pool, ..self }
     }
@@ -215,24 +323,28 @@ impl RowTable {
     }
 
     fn reads_lights(&self) -> bool {
-        self.flags & SUN != 0
+        self.placement.is_some_and(|placement| placement.reads_lights)
     }
 
     fn reads_mesh_bounds(&self) -> bool {
-        self.flags & MESH_BOUNDS != 0
+        self.placement.is_some_and(|placement| placement.reads_mesh_bounds)
     }
 
     /// Whether this table holds positions, which follow the frame's world
     /// origin.
     fn follows_origin(&self) -> bool {
-        self.flags & (OWNER_AABB | SURFACE_HEIGHT | SQUARE_LAYER | OWNER_BOX | POOL_RANGE | MESH_BOUNDS)
-            != 0
+        self.flags & OWNER_AABB != 0
+            || self.placement.is_some_and(|placement| placement.follows_origin)
     }
 
     fn reads_transforms(&self) -> bool {
-        self.flags
-            & (OWNER_AABB | SQUARE_LAYER | CENTRED | OWNER_BOX | POOL_RANGE | MESH_BOUNDS | PLANAR_2D)
-            != 0
+        self.flags & OWNER_AABB != 0
+            || self.placement.is_some_and(|placement| placement.reads_transforms)
+    }
+
+    fn uniform_flags(&self) -> u32 {
+        let reads = self.placement.is_some_and(|placement| placement.reads_transforms);
+        self.flags | if reads { READS_TRANSFORMS } else { 0 }
     }
 
     fn output_row_bytes(&self) -> u64 {
@@ -318,13 +430,46 @@ fn allocate(device: &wgpu::Device, label: &str, row_bytes: u64, rows: u32) -> wg
     })
 }
 
+/// A placement's pipelines: rows in place, rows packed.
+struct Pipelines {
+    rows: wgpu::ComputePipeline,
+    compact: wgpu::ComputePipeline,
+}
+
+impl Pipelines {
+    fn new(device: &wgpu::Device, name: &'static str, placement: Option<&Placement>) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(name),
+            source: wgpu::ShaderSource::Wgsl(placement_source(placement).into()),
+        });
+        let pipeline = |entry_point| {
+            helio_core::shader::create_compute_pipeline(
+                device,
+                wgpu::ComputePipelineDescriptor {
+                    label: Some(name),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some(entry_point),
+                    compilation_options: Default::default(),
+                    cache: None,
+                },
+            )
+        };
+        Self {
+            rows: pipeline("cs_join_rows"),
+            compact: pipeline("cs_compact_rows"),
+        }
+    }
+}
+
 /// A kind's tables, derived from its component rows every frame one of
 /// their inputs changed (see the [module docs](self)).
 pub struct RowJoin {
     name: &'static str,
     keys: RowJoinKeys,
-    pipeline: wgpu::ComputePipeline,
-    compact: wgpu::ComputePipeline,
+    /// Per placement (by name; `None`: the join's own): the in-place and
+    /// packing pipelines.
+    pipelines: Vec<(Option<&'static str>, Pipelines)>,
     empty: wgpu::Buffer,
     tables: Vec<Table>,
     reported: Vec<BufferKey>,
@@ -338,28 +483,20 @@ impl RowJoin {
         keys: RowJoinKeys,
         tables: Vec<RowTable>,
     ) -> Self {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(name),
-            source: wgpu::ShaderSource::Wgsl(crate::row_join_source().into()),
+        let mut pipelines: Vec<(Option<&'static str>, Pipelines)> = Vec::new();
+        let placements = tables.iter().flat_map(|table| {
+            std::iter::once(table.placement).chain(table.layers.iter().map(|layer| layer.placement))
         });
-        let pipeline = |entry_point| {
-            helio_core::shader::create_compute_pipeline(
-                &device,
-                wgpu::ComputePipelineDescriptor {
-                    label: Some(name),
-                    layout: None,
-                    module: &module,
-                    entry_point: Some(entry_point),
-                    compilation_options: Default::default(),
-                    cache: None,
-                },
-            )
-        };
+        for placement in placements {
+            let key = placement.map(|placement| placement.name);
+            if !pipelines.iter().any(|(name, _)| *name == key) {
+                pipelines.push((key, Pipelines::new(device, name, placement.as_ref())));
+            }
+        }
         Self {
             name,
             keys,
-            pipeline: pipeline("cs_join_rows"),
-            compact: pipeline("cs_compact_rows"),
+            pipelines,
             empty: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Row Join Empty Input"),
                 size: 256,
@@ -444,8 +581,16 @@ impl SceneDerivation for RowJoin {
                     .iter()
                     .any(|(layer, _)| layer.reads_transforms());
             let placed_from = transforms.filter(|_| reads_transforms);
-            let lit_by = lights.filter(|_| spec.reads_lights());
-            let bounded_by = mesh_bounds.filter(|_| spec.reads_mesh_bounds());
+            let lit_by = lights.filter(|_| {
+                spec.reads_lights() || table.layers.iter().any(|(layer, _)| layer.reads_lights())
+            });
+            let bounded_by = mesh_bounds.filter(|_| {
+                spec.reads_mesh_bounds()
+                    || table
+                        .layers
+                        .iter()
+                        .any(|(layer, _)| layer.reads_mesh_bounds())
+            });
             let mut table_inputs = vec![
                 owners,
                 generations,
@@ -506,7 +651,7 @@ impl SceneDerivation for RowJoin {
                         },
                         source_words: (spec.source_row_bytes / 4) as u32,
                         output_words: spec.output_words,
-                        flags: spec.flags,
+                        flags: spec.uniform_flags(),
                         capacity: spec.capacity.unwrap_or(0),
                         source_offset: spec.source_offset,
                         copy_words: spec.copy_words,
@@ -518,9 +663,16 @@ impl SceneDerivation for RowJoin {
                         phase: spec.phase(ctx.world_origin),
                     }),
                 );
+                let key = spec.placement.map(|placement| placement.name);
+                let pipelines = &self
+                    .pipelines
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .expect("a pipeline per placement")
+                    .1;
                 let (pipeline, workgroups) = match spec.capacity {
-                    Some(_) => (&self.compact, 1),
-                    None => (&self.pipeline, rows.div_ceil(WORKGROUP).max(1)),
+                    Some(_) => (&pipelines.compact, 1),
+                    None => (&pipelines.rows, rows.div_ceil(WORKGROUP).max(1)),
                 };
                 let layout = pipeline.get_bind_group_layout(0);
                 let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {

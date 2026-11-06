@@ -2174,12 +2174,15 @@ functions drawers compose, `SetMovability` was already generic over a
   synthetic, so it no longer read the light list with a 48-byte struct of its
   own over 128-byte rows.
 
-**Lights and sky**: the directional light is derived once, by one kernel
-(`helio_pass_light_cull::directional`, `light_is_sun`), for every host: the
-lights' join records it after joining, and `DirectionalLightDerivation`
-(brought by the binning feature) derives it from a light list a standalone
-host wrote itself, unless a derivation before it published one. GI's sun and
-the atmosphere's sun read `DIRECTIONAL_LIGHT`; neither scans the light list.
+**Lights and sky**: the directional lights are derived once, by one kernel
+(`cs_directional_lights`, `light_is_sun`), for every host: the lights' join
+records them after joining, and `DirectionalLightsDerivation` (brought by the
+binning feature) derives them from a light list a standalone host wrote
+itself, unless a derivation before it published them. `DIRECTIONAL_LIGHTS`
+is a list (up to 32 suns in light-list order: direction, radiance, emitter
+disk; the first is the primary), so a sky with two suns (Tristan's p10
+multi-sun atmosphere) keeps working: the atmosphere copies the list into its
+frame, GI and water read the primary. Nobody scans the light list.
 
 **How others do it, and why ours**: Unreal's renderer picks the atmosphere
 lights once per scene (`FScene::AtmosphereLights`) and every consumer reads
@@ -2249,6 +2252,104 @@ brought up to date).
 **CI**: `.config/nextest.toml`'s `ci` profile leaves out, by name, the suites
 that render frames (lavapipe SIGSEGVs and minutes per frame took ~90 tests and
 the 60-minute limit on p16); the CPU tests of the same crates still run.
+
+**Resumed p17** (after the coordinator's list, same branches):
+- *Tristan's p10 commits* went up every level of both stacks (p11..p17,
+  pushed at each level, each level pinning its Helio level). His code moved
+  to its owners: the light-icon picking became the engine's generic
+  `ViewIconRegistration` (any kind submits a billboard icon; the lights
+  submit theirs), the billboard pipeline test went to the billboard crate,
+  water's private `GpuLight` copy became the lights' `LIGHT_LIST` snippet,
+  the bloom test went to Helio's post-process crate, the sky rig to the
+  lights editor's presets.
+- *Render acceptance*, every failure a real bug or a stale test: the buffer
+  view's depth/normal modes (shader compared 40/41, Rust sends 42/43: the
+  shader takes a `normals` flag now); a water row was always an ocean, so a
+  lake's fog followed the camera everywhere (`WaterVolumeComponent::bounded`
+  clips surface, underwater fog, shafts and caustics to the box; the row
+  join keeps `world_phase.zw`); point and spot shadows never darkened (a
+  constant NDC bias exceeds forward-perspective depth separation at tens of
+  metres: `shadow_receiver_depth` biases local lights two texels toward the
+  light in world space, Unreal's receiver-plane normal offset); the foliage
+  coverage threshold measured a 256^2 frame against a 192^2 depth buffer (TSR
+  render scale); the whole suite ran out of memory because device-loss
+  watching kept every `wgpu::Device` alive (entries now release with their
+  last clone); the windy lake test asked for wind trains Tristan removed on
+  10-29 (wind seas are the spectral FFT ocean; the solver moves only bodies'
+  own disturbances, which the test now checks); the lens prescription test
+  raced the background bank bake.
+- *The graph editor is the materials' editor*: Plugin_Shaders' graph UI is
+  `plugins/vendor/materials/graph_editor` (`materials_graph_editor`),
+  provided to the editor by `pulsar.materials` through
+  `plugin_manager::PluginEditorProvider` (origin-gated, so a project without
+  materials has no graph editor); the submodule and `ui_core`'s link are
+  gone. **Plugin_Shaders is superseded** by `pulsar.materials` once these
+  stacks land (nothing was deleted or renamed).
+- *Untraced geometry is declared, not named*: the meshes' ray-tracing host
+  refused `foliage_layers`/`voxel_volumes` by name. A feature now declares
+  the geometry it draws that the scene's ray tracing does not see
+  (`FeatureRegistrar::untraced_geometry`), the compiled graph carries the
+  list, and a host reads `Renderer::untraced_geometry()`; foliage and VG
+  declare theirs.
+- *Fog left the post settings*: Helio's post-process ABI carried a 64-byte
+  fog block (`GpuFogUniforms`, `FogMode`, override bits 40..=49) that the
+  fog pass read back from post-process volume rows, a second fog model
+  beside the fog plugin's media. The block is gone (settings 464 bytes, lens
+  at 368; bits 40..=49 retired, `PostProcessProperty::RETIRED`, so saved
+  masks keep their meaning); the fog pass reads only global and local media
+  rows (no post-process bindings, no `fog_components`); the fog plugin owns
+  `FogMode` and requires nothing, and the shader's medium modes are the fog
+  row's `fog_mode` constants. A bounded fog pocket is a local fog volume
+  (the cathedral example moved). How others do it: Unreal's Exponential
+  Height Fog and Local Fog Volumes are their own components, and its post
+  process volume carries no fog medium; Unity HDRP's Fog is a volume
+  override, one model owned by the fog. Ours is Unreal's: the post plugin
+  grades a frame, the fog plugin owns every medium, and neither reads the
+  other's rows.
+
+- *Material instances are entities; the material table is theirs*: the
+  scene's `"materials"` rows were the meshes' join output (every section of
+  every instance embedded a resolved `GpuMaterial`, one row per section,
+  nothing shared). A material instance is now an entity carrying
+  `helio_mats::instance::MaterialInstanceComponent`: its source (a material
+  asset, or an explicit surface) and the surface it falls back to (loading,
+  failed, materials plugin disabled). SceneDB mirrors each instance into the
+  packed `"materials"` row (`MaterialComponent`) and a `"material_keys"` row
+  (shading class, graph hash) at its entity row; its asset is declared to the
+  handle ledger, loaded by the materials plugin's loader and bound into the
+  instance, so a reload rewrites one row. Users acquire instances by source
+  (`acquire`/`release`, interned per world: equal sources share one row).
+  The meshes keep a scene subsystem (`MeshMaterialInstances`, change cursors
+  on static and skeletal meshes) that gives each slot its instance; a section
+  row is `{first, count, material_row}` (16 bytes, was 128) and the join
+  copies the row into the object row and reads class and hash from the key
+  row (a class change regroups draws), writing no material data. Voxel faces
+  that show scene materials (`VoxelMaterialMap`) index the same rows; the
+  voxel palette (per-voxel colour, patches, flecks) stays the voxel's own
+  appearance data. How others do it: Unreal keeps one uniform buffer per
+  material proxy that components reference; Bevy prepares one bind group per
+  material asset handle. Ours is Bevy's sharing with SceneDB entities as the
+  handles, so drawers index one table by entity row, the table is written
+  once per material, and a project without the materials plugin still draws
+  every slot with its fallback surface.
+- *A kind places its own rows*: the row join's shader carried every kind's
+  placement (a decal's box transform, an emitter's pool range, water's sun,
+  wind and hitboxes, a sprite's 2D placement, a foliage layer's square, an
+  atmosphere's centre), selected by flag bits Helio named. The join now knows
+  only what kinds share (attachment, visibility, gates, slices, packing, the
+  owner's world box); a kind's placement is its own WGSL hooks
+  (`helio_scene_join::Placement`: `placement_placed`, `placement_write_row`,
+  `placement_source_header`, `placement_write`, `placement_request`,
+  `placement_range`), compiled into a pipeline per placement and kept in the
+  kind's feature crate. How others do it: Unreal's render proxies place
+  themselves (`CreateSceneProxy`), each primitive type owning its upload;
+  ours keeps the one GPU join but lets the owner write its placement, so a
+  new kind needs no change to Helio.
+- *The G-buffer output has one owner*: the meshes, portals, foliage and
+  voxel drawers each declared the eight-target fragment struct. The frame
+  api now owns it (`helio_frame_api::gbuffer::OUTPUT_SNIPPET`:
+  `GBufferOutput`, and `GBufferDepthOutput` for a drawer that writes depth)
+  beside `TARGETS`, so the layout changes in one place.
 
 **Not done yet** (p17 continues on the same branches; nothing here is
 handed off): render acceptance's water fog after a move, a light's shadows

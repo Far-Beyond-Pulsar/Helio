@@ -13,7 +13,7 @@
 
 mod row_join;
 
-pub use row_join::{placement, RowJoin, RowJoinKeys, RowTable};
+pub use row_join::{placement, placement_source, Placement, RowJoin, RowJoinKeys, RowTable};
 
 pub use helio_core::{
     BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation, SceneDerivationContext,
@@ -42,8 +42,15 @@ pub fn join_source(source: &str) -> String {
     )
 }
 
-/// The row join's shader as compiled (shader validation without a device).
+/// The row join's shader as compiled with no kind's placement (every hook's
+/// default; shader validation without a device). A kind's is
+/// [`placement_source`].
 pub fn row_join_source() -> String {
+    placement_source(None)
+}
+
+/// The row join's shader without any placement hook.
+fn row_join_base() -> String {
     join_source(include_str!("../shaders/row_join.wgsl"))
 }
 
