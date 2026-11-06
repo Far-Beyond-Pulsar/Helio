@@ -137,152 +137,66 @@ pub struct GpuPostProcessUniforms {
     pub pad_bw0: f32,
     pub pad_bw1: f32,
 
-    // ── Volumetric Fog (64 bytes) ──
-    // Consumed by helio-pass-volumetric-fog (accumulation) and by fs_uber (composite).
-    //
-    // Field order is deliberate: the two vec3s sit at offsets 304 and 320, both
-    // multiples of 16. WGSL aligns vec3<f32> to 16 bytes, so a vec3 placed at a
-    // non-multiple-of-16 offset is silently pushed forward on the GPU while
-    // #[repr(C)] keeps it put — skewing every field after it. The scalars are
-    // grouped ahead of the vectors to pad the block out naturally.
-    pub fog_enabled: u32,               // 272
-    pub fog_mode: u32,                  // 276 — FogMode discriminant
-    pub fog_density: f32,               // 280
-    pub fog_height_falloff: f32,        // 284 — exponential decay for height fog
-    pub fog_start_distance: f32,        // 288 — distance from camera where fog begins
-    pub fog_max_distance: f32,          // 292 — distance at which fog reaches full opacity
-    pub fog_height: f32,                // 296 — base world height for height fog
-    pub fog_scattering_anisotropy: f32, // 300 — Henyey-Greenstein g, (-1, 1)
-    pub fog_color: [f32; 3],            // 304 ← 16-aligned
-    pub pad_fog_color: f32,             // 316
-    pub fog_emissive: [f32; 3],         // 320 ← 16-aligned
-    pub pad_fog_emissive: f32,          // 332
-
     // ── HDR Output (16 bytes) ──
-    pub hdr_output_mode: u32,   // 336
-    pub hdr_max_nits: f32,      // 340
-    pub hdr_ui_brightness: f32, // 344
-    pub pad_hdr_end: f32,       // 348
+    pub hdr_output_mode: u32,   // 272
+    pub hdr_max_nits: f32,      // 276
+    pub hdr_ui_brightness: f32, // 280
+    pub pad_hdr_end: f32,       // 284
 
     // ── Advanced Color Grading (48 bytes) ──
-    pub lift_color: [f32; 3],          // 352 — shadow tint
-    pub pad_lift: f32,                 // 364
-    pub gamma_color: [f32; 3],         // 368 — midtone tint
-    pub pad_gamma: f32,                // 380
-    pub gain_color: [f32; 3],          // 384 — highlight tint
-    pub pad_gain: f32,                 // 396
-    pub shadows_max: f32,              // 400 — luminance threshold for shadow region
-    pub highlights_min: f32,           // 404 — luminance threshold for highlight region
-    pub shadow_highlight_balance: f32, // 408 — 0-1 blend between shadow and highlight
-    pub hue_shift: f32,                // 412 — global hue rotation (degrees)
-    pub lut_generation: u32,           // 416 — incremented when LUT needs rebuilding
-    pub lut_intensity: f32,            // 420 — blend 0-1 between graded and ungraded
-    pub lut_platform: u32,             // 424 — 0=none, 1=16x16x16, 2=32x32x32
-    pub pad_grading_end: f32,          // 428
+    pub lift_color: [f32; 3],          // 288 — shadow tint
+    pub pad_lift: f32,                 // 300
+    pub gamma_color: [f32; 3],         // 304 — midtone tint
+    pub pad_gamma: f32,                // 316
+    pub gain_color: [f32; 3],          // 320 — highlight tint
+    pub pad_gain: f32,                 // 332
+    pub shadows_max: f32,              // 336 — luminance threshold for shadow region
+    pub highlights_min: f32,           // 340 — luminance threshold for highlight region
+    pub shadow_highlight_balance: f32, // 344 — 0-1 blend between shadow and highlight
+    pub hue_shift: f32,                // 348 — global hue rotation (degrees)
+    pub lut_generation: u32,           // 352 — incremented when LUT needs rebuilding
+    pub lut_intensity: f32,            // 356 — blend 0-1 between graded and ungraded
+    pub lut_platform: u32,             // 360 — 0=none, 1=16x16x16, 2=32x32x32
+    pub pad_grading_end: f32,          // 364
 
     // Lens flare: appended 96-byte block (24 words); shared with the optics
     // pass. Camera optics (f-number, focal length, sensor, iris) are not here:
     // they belong to the camera's `LensRow` (the lens plugin's `helio-pass-lens`).
-    pub lens_enabled: u32,          // 432
-    pub lens_quality: u32,          // 436
-    pub lens_profile: u32,          // 440
-    pub lens_ghost_count: u32,      // 444
-    pub lens_intensity: f32,        // 448
-    pub lens_threshold: f32,        // 452
-    pub lens_soft_knee: f32,        // 456
-    pub lens_ghost_intensity: f32,  // 460
-    pub lens_halo_intensity: f32,   // 464
-    pub lens_glare_intensity: f32,  // 468
-    pub lens_streak_intensity: f32, // 472
-    pub lens_dispersion: f32,       // 476
+    pub lens_enabled: u32,          // 368
+    pub lens_quality: u32,          // 372
+    pub lens_profile: u32,          // 376
+    pub lens_ghost_count: u32,      // 380
+    pub lens_intensity: f32,        // 384
+    pub lens_threshold: f32,        // 388
+    pub lens_soft_knee: f32,        // 392
+    pub lens_ghost_intensity: f32,  // 396
+    pub lens_halo_intensity: f32,   // 400
+    pub lens_glare_intensity: f32,  // 404
+    pub lens_streak_intensity: f32, // 408
+    pub lens_dispersion: f32,       // 412
     /// Reserved: natural cos^4 falloff is the lens plugin's (`helio-pass-lens`).
-    pub reserved_lens_vignette: f32, // 480
-    pub lens_starburst_intensity: f32, // 484
-    pub lens_starburst_length: f32, // 488
-    pub lens_coating_strength: f32, // 492
-    pub lens_ghost_rim: f32,        // 496
-    pub lens_dirt_intensity: f32,   // 500
-    pub lens_light_sources: u32,    // 504
-    pub lens_light_intensity: f32,  // 508
-    pub lens_field_margin: f32,     // 512
+    pub reserved_lens_vignette: f32, // 416
+    pub lens_starburst_intensity: f32, // 420
+    pub lens_starburst_length: f32, // 424
+    pub lens_coating_strength: f32, // 428
+    pub lens_ghost_rim: f32,        // 432
+    pub lens_dirt_intensity: f32,   // 436
+    pub lens_light_sources: u32,    // 440
+    pub lens_light_intensity: f32,  // 444
+    pub lens_field_margin: f32,     // 448
     /// Temporal response time constant in seconds (0 = instantaneous).
-    pub lens_response_time: f32, // 516
-    pub pad_lens: [f32; 2],         // 520..528
+    pub lens_response_time: f32, // 452
+    pub pad_lens: [f32; 2],         // 456..464
 }
 
-// Total: 528 bytes (33 uniform slots). Fog sits at 272; the lens block starts at 432.
+// Total: 464 bytes (29 uniform slots); the lens block starts at 368. (The fog
+// block that sat at 272 left: fog is the fog plugin's media, not a post setting.)
 //
 // This struct is mirrored by hand in helio-pass-postprocess/shaders/postprocess.wgsl
 // and is embedded in GpuPostProcessVolume, which cs_volume_blend reads as a storage
 // array. A field added here without updating that mirror misreads the buffer silently.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 528);
+const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 464);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() % 16 == 0);
-
-// ── GpuFogUniforms ─────────────────────────────────────────────────────────────
-
-/// The fog block of [`GpuPostProcessUniforms`], standalone.
-///
-/// The volumetric fog pass binds this instead of mirroring all 368 bytes of
-/// `GpuPostProcessUniforms` in WGSL: it needs 64 of them, and a third hand-written
-/// mirror of the full struct is a third thing to keep in sync. The pass copies the
-/// block out of the post-process uniform buffer at [`GpuPostProcessUniforms::FOG_BLOCK_OFFSET`],
-/// so the settings still have exactly one source of truth.
-///
-/// Field order must stay byte-identical to the fog block — the asserts below check
-/// the size and that the block is the struct's tail, but nothing can check the order.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
-pub struct GpuFogUniforms {
-    pub fog_enabled: u32,
-    pub fog_mode: u32,
-    pub fog_density: f32,
-    pub fog_height_falloff: f32,
-    pub fog_start_distance: f32,
-    pub fog_max_distance: f32,
-    pub fog_height: f32,
-    pub fog_scattering_anisotropy: f32,
-    pub fog_color: [f32; 3],
-    pub pad_fog_color: f32,
-    pub fog_emissive: [f32; 3],
-    pub pad_fog_emissive: f32,
-}
-
-impl GpuPostProcessUniforms {
-    /// Byte offset of the fog block, for passes that bind only [`GpuFogUniforms`].
-    pub const FOG_BLOCK_OFFSET: u64 =
-        std::mem::offset_of!(GpuPostProcessUniforms, fog_enabled) as u64;
-    /// Byte length of the fog block.
-    pub const FOG_BLOCK_SIZE: u64 = std::mem::size_of::<GpuFogUniforms>() as u64;
-}
-
-const _: () = assert!(std::mem::size_of::<GpuFogUniforms>() == 64);
-// wgpu requires copy offsets to be 4-byte aligned; the fog pass copies from this offset.
-const _: () = assert!(GpuPostProcessUniforms::FOG_BLOCK_OFFSET % 4 == 0);
-// HDR fields (hdr_output_mode, hdr_max_nits, hdr_ui_brightness, pad_hdr_end)
-// follow the fog block. The fog copy pass copies exactly GpuFogUniforms bytes
-// starting at FOG_BLOCK_OFFSET, so the fields after fog are not included.
-const _: () = assert!(
-    GpuPostProcessUniforms::FOG_BLOCK_OFFSET as usize + std::mem::size_of::<GpuFogUniforms>()
-        == std::mem::offset_of!(GpuPostProcessUniforms, hdr_output_mode)
-);
-
-// ── Fog mode ───────────────────────────────────────────────────────────────────
-
-/// How fog density is evaluated at a ray-march sample point.
-///
-/// The spec'd `VolumeTexture` (3D-texture-driven density) mode is deliberately absent:
-/// nothing samples a density texture yet, and a discriminant the shader silently treats
-/// as `Uniform` is worse than no discriminant at all.
-#[repr(u32)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FogMode {
-    /// Constant density everywhere inside the fog region.
-    Uniform = 0,
-    /// Density decays exponentially with world height above `fog_height`.
-    HeightBased = 1,
-    /// Animated world-space billows with height falloff, for smoke volumes.
-    Smoke = 2,
-}
 
 // ── Defaults ───────────────────────────────────────────────────────────────────
 
@@ -365,18 +279,6 @@ impl Default for GpuPostProcessUniforms {
             hdr_ui_brightness: 200.0,
             pad_hdr_end: 0.0,
 
-            fog_enabled: 0,
-            fog_mode: FogMode::Uniform as u32,
-            fog_density: 0.02,
-            fog_height_falloff: 0.05,
-            fog_start_distance: 0.0,
-            fog_max_distance: 1000.0,
-            fog_height: 0.0,
-            fog_scattering_anisotropy: 0.0,
-            fog_color: [0.5, 0.6, 0.7],
-            pad_fog_color: 0.0,
-            fog_emissive: [0.0, 0.0, 0.0],
-            pad_fog_emissive: 0.0,
 
             lift_color: [0.0; 3],
             pad_lift: 0.0,
@@ -498,22 +400,6 @@ pub struct PostProcessSettings {
     pub hdr_max_nits: f32,
     pub hdr_ui_brightness: f32,
 
-    // Volumetric Fog
-    pub fog_enabled: bool,
-    pub fog_mode: FogMode,
-    pub fog_density: f32,
-    pub fog_height_falloff: f32,
-    pub fog_start_distance: f32,
-    pub fog_max_distance: f32,
-    pub fog_height: f32,
-    /// Henyey-Greenstein g. 0 = isotropic, >0 forward-scattering (sun haze),
-    /// <0 back-scattering. Clamped to (-1, 1) on upload — |g| = 1 is a
-    /// singularity in the phase function.
-    pub fog_scattering_anisotropy: f32,
-    pub fog_color: [f32; 3],
-    /// Self-illumination, added independently of any light (lava glow, etc.).
-    pub fog_emissive: [f32; 3],
-
     // Advanced Color Grading
     pub lift_color: [f32; 3],
     pub gamma_color: [f32; 3],
@@ -599,20 +485,6 @@ impl PostProcessSettings {
             hdr_max_nits: self.hdr_max_nits,
             hdr_ui_brightness: self.hdr_ui_brightness,
             pad_hdr_end: 0.0,
-
-            fog_enabled: self.fog_enabled as u32,
-            fog_mode: self.fog_mode as u32,
-            fog_density: self.fog_density.max(0.0),
-            fog_height_falloff: self.fog_height_falloff,
-            fog_start_distance: self.fog_start_distance.max(0.0),
-            fog_max_distance: self.fog_max_distance,
-            fog_height: self.fog_height,
-            // |g| = 1 makes the Henyey-Greenstein denominator collapse to zero.
-            fog_scattering_anisotropy: self.fog_scattering_anisotropy.clamp(-0.99, 0.99),
-            fog_color: self.fog_color,
-            pad_fog_color: 0.0,
-            fog_emissive: self.fog_emissive,
-            pad_fog_emissive: 0.0,
 
             lift_color: self.lift_color,
             pad_lift: 0.0,
@@ -718,17 +590,6 @@ impl Default for PostProcessSettings {
             blend_weight_grain: 1.0,
             blend_weight_exposure: 1.0,
 
-            fog_enabled: false,
-            fog_mode: FogMode::Uniform,
-            fog_density: 0.02,
-            fog_height_falloff: 0.05,
-            fog_start_distance: 0.0,
-            fog_max_distance: 1000.0,
-            fog_height: 0.0,
-            fog_scattering_anisotropy: 0.0,
-            fog_color: [0.5, 0.6, 0.7],
-            fog_emissive: [0.0, 0.0, 0.0],
-
             lift_color: [0.0; 3],
             gamma_color: [0.0; 3],
             gain_color: [1.0; 3],
@@ -770,8 +631,8 @@ pub struct GpuPostProcessVolume {
 // WGSL places `settings` at 64 because GpuPostProcessUniforms aligns to 16.
 const _: () = assert!(std::mem::offset_of!(GpuPostProcessVolume, settings) == 64);
 // Storage-buffer array stride must match WGSL's, which rounds to the 16-byte alignment.
-// 64 (header) + 528 (settings) = 592.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 592);
+// 64 (header) + 464 (settings) = 528.
+const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 528);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() % 16 == 0);
 
 // ── PostProcessVolume descriptor (CPU-side) ────────────────────────────────────
@@ -895,11 +756,10 @@ impl Default for LensFlareSettings {
 }
 
 impl GpuPostProcessUniforms {
-    pub const LENS_BLOCK_OFFSET: u64 = 432;
+    pub const LENS_BLOCK_OFFSET: u64 = 368;
     pub const LENS_BLOCK_SIZE: u64 = 96;
 }
-const _: () = assert!(GpuPostProcessUniforms::FOG_BLOCK_OFFSET == 272);
-const _: () = assert!(std::mem::offset_of!(GpuPostProcessUniforms, lens_enabled) == 432);
+const _: () = assert!(std::mem::offset_of!(GpuPostProcessUniforms, lens_enabled) == 368);
 
 /// Override bit indices, in non-padding, non-reserved GPU declaration order, with later
 /// additions appended (saved masks keep their meaning). Vector colors use one bit.
@@ -949,16 +809,9 @@ impl PostProcessProperty {
     pub const BLEND_WEIGHT_VIGNETTE: usize = 37;
     pub const BLEND_WEIGHT_GRAIN: usize = 38;
     pub const BLEND_WEIGHT_EXPOSURE: usize = 39;
-    pub const FOG_ENABLED: usize = 40;
-    pub const FOG_MODE: usize = 41;
-    pub const FOG_DENSITY: usize = 42;
-    pub const FOG_HEIGHT_FALLOFF: usize = 43;
-    pub const FOG_START_DISTANCE: usize = 44;
-    pub const FOG_MAX_DISTANCE: usize = 45;
-    pub const FOG_HEIGHT: usize = 46;
-    pub const FOG_SCATTERING_ANISOTROPY: usize = 47;
-    pub const FOG_COLOR: usize = 48;
-    pub const FOG_EMISSIVE: usize = 49;
+    // 40..=49 were the fog block's (retired: fog is the fog plugin's media);
+    // the numbers are not reused, so saved masks keep their meaning.
+    pub const RETIRED: std::ops::RangeInclusive<usize> = 40..=49;
     pub const HDR_OUTPUT_MODE: usize = 50;
     pub const HDR_MAX_NITS: usize = 51;
     pub const HDR_UI_BRIGHTNESS: usize = 52;
@@ -1036,54 +889,12 @@ impl PostProcessBlender {
             .collect();
         ordered.sort_by(|a, b| a.priority.partial_cmp(&b.priority).unwrap());
         let mut result = baseline;
-        let mut medium = baseline;
         for v in ordered {
             let weight = volume_weight(camera_pos, v);
             if weight > 0.0 {
                 result = blend_properties(result, &v.settings, weight, &v.override_mask);
             }
-            if v.unbound != 0 {
-                medium = blend_properties(
-                    medium,
-                    &v.settings,
-                    v.blend_weight.clamp(0.0, 1.0),
-                    &v.override_mask,
-                );
-            }
         }
-        // Bounded media are evaluated by the fog pass in world space, not at the camera.
-        result.fog_enabled = medium.fog_enabled;
-        result.fog_mode = medium.fog_mode;
-        result.fog_density = medium.fog_density;
-        result.fog_height_falloff = medium.fog_height_falloff;
-        result.fog_start_distance = medium.fog_start_distance;
-        result.fog_max_distance = medium.fog_max_distance;
-        result.fog_height = medium.fog_height;
-        result.fog_scattering_anisotropy = medium.fog_scattering_anisotropy;
-        result.fog_color = medium.fog_color;
-        result.fog_emissive = medium.fog_emissive;
-        result.fog_density = if medium.fog_enabled != 0 {
-            medium.fog_density
-        } else {
-            0.0
-        };
-        let mut range = if medium.fog_enabled != 0 {
-            medium.fog_max_distance
-        } else {
-            0.0
-        };
-        for v in volumes {
-            if v.unbound == 0
-                && v.blend_weight > 0.0
-                && PostProcessProperty::contains(&v.override_mask, PostProcessProperty::FOG_ENABLED)
-                && v.settings.fog_enabled != 0
-                && v.settings.fog_density > 0.0
-            {
-                result.fog_enabled = 1;
-                range = range.max(v.settings.fog_max_distance);
-            }
-        }
-        result.fog_max_distance = range.max(1.0);
         result
     }
 }
@@ -1265,45 +1076,6 @@ fn blend_properties(
     }
     if PostProcessProperty::contains(mask, 39) {
         a.blend_weight_exposure += (b.blend_weight_exposure - a.blend_weight_exposure) * t;
-    }
-    if PostProcessProperty::contains(mask, 40) {
-        if t >= 0.5 {
-            a.fog_enabled = b.fog_enabled;
-        }
-    }
-    if PostProcessProperty::contains(mask, 41) {
-        if t >= 0.5 {
-            a.fog_mode = b.fog_mode;
-        }
-    }
-    if PostProcessProperty::contains(mask, 42) {
-        a.fog_density += (b.fog_density - a.fog_density) * t;
-    }
-    if PostProcessProperty::contains(mask, 43) {
-        a.fog_height_falloff += (b.fog_height_falloff - a.fog_height_falloff) * t;
-    }
-    if PostProcessProperty::contains(mask, 44) {
-        a.fog_start_distance += (b.fog_start_distance - a.fog_start_distance) * t;
-    }
-    if PostProcessProperty::contains(mask, 45) {
-        a.fog_max_distance += (b.fog_max_distance - a.fog_max_distance) * t;
-    }
-    if PostProcessProperty::contains(mask, 46) {
-        a.fog_height += (b.fog_height - a.fog_height) * t;
-    }
-    if PostProcessProperty::contains(mask, 47) {
-        a.fog_scattering_anisotropy +=
-            (b.fog_scattering_anisotropy - a.fog_scattering_anisotropy) * t;
-    }
-    if PostProcessProperty::contains(mask, 48) {
-        for c in 0..3 {
-            a.fog_color[c] += (b.fog_color[c] - a.fog_color[c]) * t;
-        }
-    }
-    if PostProcessProperty::contains(mask, 49) {
-        for c in 0..3 {
-            a.fog_emissive[c] += (b.fog_emissive[c] - a.fog_emissive[c]) * t;
-        }
     }
     if PostProcessProperty::contains(mask, 50) {
         if t >= 0.5 {

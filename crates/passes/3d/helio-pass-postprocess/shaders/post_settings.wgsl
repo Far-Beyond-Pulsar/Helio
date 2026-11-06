@@ -58,65 +58,49 @@ struct GpuPostProcessUniforms {
     blend_weight_exposure:     f32,
     _pad14:                    f32,
     _pad15:                    f32,
-    // ── Volumetric fog (64 bytes, offsets 272..336) ──
-    // fog_color lands at 304 and fog_emissive at 320 — both multiples of 16, which
-    // is what lets this match #[repr(C)] on the CPU. vec3<f32> aligns to 16 in WGSL
-    // but to 4 in Rust, so reordering these fields silently desyncs the two sides.
-    fog_enabled:               u32,   // 272
-    fog_mode:                  u32,   // 276
-    fog_density:               f32,   // 280
-    fog_height_falloff:        f32,   // 284
-    fog_start_distance:        f32,   // 288
-    fog_max_distance:          f32,   // 292
-    fog_height:                f32,   // 296
-    fog_scattering_anisotropy: f32,   // 300
-    fog_color:                 vec3<f32>, // 304
-    _pad_fog_color:            f32,   // 316
-    fog_emissive:              vec3<f32>, // 320
-    _pad_fog_emissive:         f32,   // 332
     // ── HDR Output (16 bytes) ──
-    hdr_output_mode:           u32,   // 336
-    hdr_max_nits:              f32,   // 340
-    hdr_ui_brightness:         f32,   // 344
-    _pad_hdr_end:              f32,   // 348
+    hdr_output_mode:           u32,   // 272
+    hdr_max_nits:              f32,   // 276
+    hdr_ui_brightness:         f32,   // 280
+    _pad_hdr_end:              f32,   // 284
     // ── Advanced Color Grading (80 bytes) ──
-    lift_color:                vec3<f32>, // 352
-    _pad_lift:                 f32,   // 364
-    gamma_color:               vec3<f32>, // 368
-    _pad_gamma:                f32,   // 380
-    gain_color:                vec3<f32>, // 384
-    _pad_gain:                 f32,   // 396
-    shadows_max:               f32,   // 400
-    highlights_min:            f32,   // 404
-    shadow_highlight_balance:  f32,   // 408
-    hue_shift:                 f32,   // 412
-    lut_generation:            u32,   // 416
-    lut_intensity:             f32,   // 420
-    lut_platform:              u32,   // 424
-    _pad_grading_end:          f32,   // 428
-    lens_enabled: u32,             // 432
-    lens_quality: u32,             // 436
-    lens_profile: u32,             // 440
-    lens_ghost_count: u32,         // 444
-    lens_intensity: f32,           // 448
-    lens_threshold: f32,           // 452
-    lens_soft_knee: f32,           // 456
-    lens_ghost_intensity: f32,     // 460
-    lens_halo_intensity: f32,      // 464
-    lens_glare_intensity: f32,     // 468
-    lens_streak_intensity: f32,    // 472
-    lens_dispersion: f32,          // 476
-    _reserved_lens_vignette: f32,  // 480
-    lens_starburst_intensity: f32, // 484
-    lens_starburst_length: f32,    // 488
-    lens_coating_strength: f32,    // 492
-    lens_ghost_rim: f32,           // 496
-    lens_dirt_intensity: f32,      // 500
-    lens_light_sources: u32,       // 504
-    lens_light_intensity: f32,     // 508
-    lens_field_margin: f32,        // 512
-    lens_response_time: f32,       // 516
-    _pad_lens0: f32,               // 520
-    _pad_lens1: f32,               // 524 → struct ends at 528
+    lift_color:                vec3<f32>, // 288
+    _pad_lift:                 f32,   // 300
+    gamma_color:               vec3<f32>, // 304
+    _pad_gamma:                f32,   // 316
+    gain_color:                vec3<f32>, // 320
+    _pad_gain:                 f32,   // 332
+    shadows_max:               f32,   // 336
+    highlights_min:            f32,   // 340
+    shadow_highlight_balance:  f32,   // 344
+    hue_shift:                 f32,   // 348
+    lut_generation:            u32,   // 352
+    lut_intensity:             f32,   // 356
+    lut_platform:              u32,   // 360
+    _pad_grading_end:          f32,   // 364
+    lens_enabled: u32,             // 368
+    lens_quality: u32,             // 372
+    lens_profile: u32,             // 376
+    lens_ghost_count: u32,         // 380
+    lens_intensity: f32,           // 384
+    lens_threshold: f32,           // 388
+    lens_soft_knee: f32,           // 392
+    lens_ghost_intensity: f32,     // 396
+    lens_halo_intensity: f32,      // 400
+    lens_glare_intensity: f32,     // 404
+    lens_streak_intensity: f32,    // 408
+    lens_dispersion: f32,          // 412
+    _reserved_lens_vignette: f32,  // 416
+    lens_starburst_intensity: f32, // 420
+    lens_starburst_length: f32,    // 424
+    lens_coating_strength: f32,    // 428
+    lens_ghost_rim: f32,           // 432
+    lens_dirt_intensity: f32,      // 436
+    lens_light_sources: u32,       // 440
+    lens_light_intensity: f32,     // 444
+    lens_field_margin: f32,        // 448
+    lens_response_time: f32,       // 452
+    _pad_lens0: f32,               // 456
+    _pad_lens1: f32,               // 460 → struct ends at 464
 }
 

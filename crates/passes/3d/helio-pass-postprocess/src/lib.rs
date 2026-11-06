@@ -3,8 +3,8 @@
 //! The tone map reads the frame's post settings ([`POST_SETTINGS`], a
 //! `GpuPostProcessUniforms` buffer) and the scene colour the colour chain
 //! hands it. Whoever resolves the scene's settings (the post-process volumes
-//! feature) publishes them early in the frame, so earlier readers (fog) see
-//! the same values; without a publisher the tone map uses the defaults.
+//! feature) publishes them early in the frame, so every reader sees the
+//! same values; without a publisher the tone map uses the defaults.
 //!
 //! Sub-stages (execution order in `execute()`):
 //!   1. `cs_exposure`/`cs_exposure_reduce`/`cs_exposure_adapt` — metered log luminance and eye adaptation (compute)
@@ -173,12 +173,6 @@ pub const BLOOM_MAYBE_ACTIVE: &str = "bloom_maybe_active";
 /// manual this frame and nothing reads the metered luminance. Tracked like
 /// [`BLOOM_MAYBE_ACTIVE`].
 pub const AUTO_EXPOSURE_MAYBE_ACTIVE: &str = "auto_exposure_maybe_active";
-
-/// `bool` registry key: false only when no source the post settings' publisher blends from
-/// can enable the post-process fog block, and no volume row carries an
-/// enabled fog medium (VolumetricFogPass also reads volume rows as bounded
-/// media). Tracked like [`BLOOM_MAYBE_ACTIVE`].
-pub const FOG_SETTINGS_MAYBE_ACTIVE: &str = "fog_settings_maybe_active";
 
 /// `GpuPostProcessUniforms` in WGSL, for the post settings' publishers and
 /// readers ([`with_post_settings`]).
@@ -1687,10 +1681,8 @@ impl PostProcessPass {
         // must follow them on that same encoder.
         let mut cmds = ctx.graphics_cmds();
 
-        // 0. Volume blending now runs in PostProcessVolumeBlendPass, scheduled
-        //    ahead of this pass — see volume_blend.rs. It cannot happen here:
-        //    VolumetricFogPass reads the blended fog config earlier in the graph,
-        //    and would silently get the unblended camera defaults instead.
+        // 0. Volume blending runs in the post plugin's volume blend pass,
+        //    scheduled ahead of this pass (it publishes POST_SETTINGS).
 
         // 1. Sampled log luminance: one sample per 4x4 block, then one final
         // workgroup reduction. Each partial has a unique writer. Only auto
