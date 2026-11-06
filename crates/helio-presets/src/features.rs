@@ -6,7 +6,8 @@
 //!
 //! - the debug-draw nodes, whose pass and state are the renderer's;
 //! - a preparer that turns the renderer's config into the settings the
-//!   features read ([`helio_spine::SpineSettings`], the reflections'
+//!   features read ([`helio_spine::SpineSettings`], the lighting's
+//!   [`helio_frame_api::lighting::LightingSettings`], the reflections'
 //!   switches, the perf overlay's mode),
 //!   so no feature reads `RendererConfig`;
 //! - [`default_features`], the feature list Helio's presets build from.
@@ -30,8 +31,6 @@ pub fn default_features() -> FeatureSet {
         .with(helio_spine::SpineFeature)
         .with(helio_pass_ssr::SsrFeature)
         .with(helio_pass_planar_reflection::PlanarReflectionFeature)
-        .with(helio_pass_hlfs::HlfsFeature)
-        .with(helio_pass_billboard::BillboardFeature)
         .with(helio_pass_fxaa::FxaaFeature)
         .with(helio_pass_buffer_view::BufferViewFeature)
         .with(helio_pass_perf_overlay::PerfOverlayFeature)
@@ -54,6 +53,8 @@ impl Feature for RendererNodes {
             };
             env.insert_setting(helio_spine::SpineSettings {
                 background_color: config.background_color,
+            });
+            env.insert_setting(helio_frame_api::lighting::LightingSettings {
                 debug_mode: config.debug_mode,
                 environment_reflections: config.enable_environment_reflections,
             });

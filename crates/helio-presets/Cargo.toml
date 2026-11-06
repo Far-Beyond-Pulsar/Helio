@@ -18,18 +18,13 @@ helio-core = { workspace = true }
 image = { workspace = true, features = ["png"] }
 wgpu = { workspace = true }
 serde_json = { workspace = true }
-helio-pass-billboard = { path = "../passes/3d/helio-pass-billboard" }
 helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
-helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "../passes/3d/helio-pass-buffer-view" }
 helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
-helio-pass-hlfs = { path = "../passes/3d/helio-pass-hlfs" }
-helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
-helio-pass-shadow-matrix = { path = "../passes/3d/helio-pass-shadow-matrix" }
 helio-pass-simple-cube = { path = "../passes/3d/helio-pass-simple-cube" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
 helio-pass-tsr = { workspace = true }

@@ -28,7 +28,6 @@ log = { workspace = true, optional = true }
 pollster = { workspace = true }
 helio-mats = { workspace = true }
 helio-pass-hiz = { workspace = true }
-helio-pass-shadow-matrix = { workspace = true }
 helio-frame-api = { path = "../helio-frame-api" }
 helio-scene-derivations = { workspace = true }
 helio-scene-join = { workspace = true }

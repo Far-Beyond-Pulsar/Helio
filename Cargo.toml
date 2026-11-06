@@ -83,9 +83,6 @@ helio-xr = { path = "crates/helio-xr" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "crates/passes/3d/helio-pass-buffer-view" }
-helio-pass-billboard = { path = "crates/passes/3d/helio-pass-billboard" }
-helio-pass-shadow-matrix = { path = "crates/passes/3d/helio-pass-shadow-matrix" }
-helio-pass-light-cull = { path = "crates/passes/3d/helio-pass-light-cull" }
 helio-pass-hiz = { path = "crates/passes/3d/helio-pass-hiz" }
 helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"

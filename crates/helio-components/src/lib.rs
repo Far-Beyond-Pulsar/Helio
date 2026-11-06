@@ -1,7 +1,6 @@
 //! SceneDB components for Helio's standalone hosts (examples, tests) of the
-//! kinds still in Helio: lights, materials, billboards, reflection captures.
-//! A plugin's kind brings its own host components (the meshes'
-//! `helio-mesh-host`).
+//! kinds still in Helio: materials. A plugin's kind brings its own host
+//! components (the meshes' `helio-mesh-host`, the lights' api `host_rows`).
 //!
 //! Helio defines no components (docs/architecture/layered-rewrite.md,
 //! phase 1): its passes read buffers under [`helio_core::BufferContract`]s,

@@ -308,7 +308,7 @@ mod tests {
             .iter()
             .map(|d| d.kind.clone())
             .collect();
-        for host in ["material_textures", "render_environment", "billboards"] {
+        for host in ["material_textures", "render_environment"] {
             assert!(hosts.contains(&host_kind(host)), "{host}: {hosts:?}");
         }
         assert!(registry.get(core_nodes::ON_FRAME_START).is_some());
@@ -338,10 +338,10 @@ mod tests {
             .map(|i| flat.nodes[*i].id.as_str())
             .collect();
         let at = |id: &str| ids.iter().position(|k| *k == id).unwrap();
-        assert!(at("start") < at("shadow_matrix"));
-        assert!(at("shadow_matrix") < at("background") && at("background") < at("hiz"));
-        assert!(at("hiz") < at("deferred_light"));
-        assert!(at("deferred_light") < at("post_process"));
+        assert!(at("start") < at("background") && at("background") < at("hiz"));
+        // Without the lights, the G-buffer resolves unlit.
+        assert!(at("hiz") < at("unlit"));
+        assert!(at("unlit") < at("post_process"));
         // The execution chain — the nodes with flow pins — ends at the Output; the
         // host declarations are data-only nodes and build after the chain.
         let chain: Vec<&str> = plan
@@ -395,7 +395,7 @@ mod tests {
             ),
         );
         probe.nodes.insert(
-            kind("deferred_light"),
+            kind("unlit"),
             pins(
                 vec![
                     PinDesc::resource(PinType::BUFFER, format!("{SCENEDB_PREFIX}materials")),
@@ -424,23 +424,23 @@ mod tests {
         // A pass reads through its own Get and writes through its own Set; nothing is
         // wired from one pass to another.
         assert!(has(
-            ("get:hiz@deferred_light", "hiz"),
-            ("deferred_light", "hiz")
+            ("get:hiz@unlit", "hiz"),
+            ("unlit", "hiz")
         ));
         assert!(has(("hiz", "out_hiz"), ("set:hiz@hiz", "hiz")));
         assert!(has(("get:depth@hiz", "depth"), ("hiz", "depth")));
         assert!(has(
-            ("deferred_light", "out_depth"),
-            ("set:depth@deferred_light", "depth")
+            ("unlit", "out_depth"),
+            ("set:depth@unlit", "depth")
         ));
         assert!(has(
-            ("get:scenedb.materials@deferred_light", "scenedb.materials"),
-            ("deferred_light", "scenedb.materials")
+            ("get:scenedb.materials@unlit", "scenedb.materials"),
+            ("unlit", "scenedb.materials")
         ));
         // Nothing is wired from one pass to another but the chain's flow wire.
         assert!(all
             .iter()
-            .filter(|c| c.from.node == "hiz" && c.to.node == "deferred_light")
+            .filter(|c| c.from.node == "hiz" && c.to.node == "unlit")
             .all(|c| c.from.pin == "out" && c.to.pin == "in"));
 
         // The buffers resolve: the lighting reads what Hi-Z set, and Hi-Z reads
@@ -461,10 +461,10 @@ mod tests {
                 to: PinRef::new(to.0, to.1),
             })
         };
-        assert!(flat_has(("hiz", "out_hiz"), ("deferred_light", "hiz")));
-        assert!(flat_has(("deferred_light", "out_depth"), ("hiz", "depth")));
+        assert!(flat_has(("hiz", "out_hiz"), ("unlit", "hiz")));
+        assert!(flat_has(("unlit", "out_depth"), ("hiz", "depth")));
         // The execution chain runs from On Frame Start through the sections.
-        assert!(flat_has(("start", "out"), ("shadow_matrix", "in")));
+        assert!(flat_has(("start", "out"), ("background", "in")));
 
         // A Get sits left of the pass that reads it, a Set right of the pass that writes.
         let x = |id: &str| {
@@ -476,7 +476,7 @@ mod tests {
                 .unwrap()
                 .position[0]
         };
-        assert!(x("get:scenedb.materials@deferred_light") < x("deferred_light"));
-        assert!(x("set:depth@deferred_light") > x("deferred_light"));
+        assert!(x("get:scenedb.materials@unlit") < x("unlit"));
+        assert!(x("set:depth@unlit") > x("unlit"));
     }
 }

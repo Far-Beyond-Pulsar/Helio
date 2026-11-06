@@ -11,16 +11,80 @@
 //! | [`sun_transmittance`] | world-space map along the sun + frame | clouds | fully lit |
 //! | [`TRANSMISSION`] | rgba16f, internal res | water caustics | nothing added |
 //! | [`sky`] | atmosphere frame + sky table | the atmosphere | no atmosphere |
-//! | [`LIGHT_LIST`] | SceneDB rows | lights | no lights |
-//! | [`DIRECTIONAL_LIGHT`] | SceneDB row, direction toward it | lights | none |
 //! | [`VIEW_REMAPS`] | SceneDB `mat4` per chain + G-buffer tag | portals | no remap |
 //!
 //! A lighting model (deferred, forward, HLFS) binds every contract it uses,
 //! the stand-in where it is absent; a publisher writes it at
 //! [`crate::Slot::LightingInputs`] (or before the G-buffer when it needs no
-//! G-buffer). Neither side knows the other.
+//! G-buffer). Neither side knows the other. The lights themselves (their
+//! list, shadows, the directional light) are not frame contracts: they are
+//! the lights' own, and what reads them reads the lights' api.
+//!
+//! The model is a kind's too: a preset asks for one ([`LightingModel`]) and
+//! places what is installed at its point, or the spine's unlit stand-in
+//! when nothing is.
 
-use helio_feature_api::BuildEnv;
+use helio_feature_api::{BuildEnv, ExtensionPoint};
+
+/// The lighting model a graph resolves its G-buffer with: a setting its
+/// preset supplies. Deferred and light-field models are nodes placed at
+/// their [`LightingModel::point`] by whatever owns lighting (the lights
+/// plugin); a preset whose point holds nothing draws the G-buffer unlit
+/// (`helio_spine::UnlitPass`). How others do it: Bevy's deferred lighting
+/// node is `bevy_pbr`'s, not the core pipeline's, and a core pipeline
+/// without it shows no lit surfaces; Unity SRP's renderer asset picks
+/// forward or deferred and its passes come with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LightingModel {
+    /// A full-screen pass over the G-buffer.
+    Deferred,
+    /// Hybrid light-field shading of the G-buffer.
+    LightField,
+    /// The forward phase's drawers light what they draw (through the
+    /// lights' forward function); nothing resolves a G-buffer.
+    Forward,
+}
+
+impl LightingModel {
+    /// Where the model's nodes are placed (`None`: forward, which draws
+    /// lit).
+    pub fn point(self) -> Option<ExtensionPoint> {
+        match self {
+            Self::Deferred => Some(ExtensionPoint("lighting.model.deferred")),
+            Self::LightField => Some(ExtensionPoint("lighting.model.light_field")),
+            Self::Forward => None,
+        }
+    }
+}
+
+/// The graph's [`LightingModel`], when its preset said.
+pub fn lighting_model(env: &BuildEnv<'_>) -> Option<LightingModel> {
+    env.setting::<LightingModel>().copied()
+}
+
+/// What a host asks of whichever lighting model is installed (a graph's
+/// builder sets it; Helio's presets from their renderer config).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightingSettings {
+    /// The lighting's debug view (0: none).
+    pub debug_mode: u32,
+    /// Environment-cubemap indirect specular.
+    pub environment_reflections: bool,
+}
+
+impl Default for LightingSettings {
+    fn default() -> Self {
+        Self {
+            debug_mode: 0,
+            environment_reflections: true,
+        }
+    }
+}
+
+/// The graph's [`LightingSettings`].
+pub fn lighting_settings(env: &BuildEnv<'_>) -> LightingSettings {
+    env.setting::<LightingSettings>().copied().unwrap_or_default()
+}
 
 /// Indirect diffuse irradiance at each pixel: a storage buffer of
 /// `vec2<u32>` per internal-resolution pixel, row-major,
@@ -80,15 +144,6 @@ pub const DIRECTIONAL_VISIBILITY: &str = "directional_visibility";
 /// lighting's indirect term. Absent: nothing added.
 pub const TRANSMISSION: &str = "transmission";
 pub const TRANSMISSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-
-/// The scene's lights: SceneDB rows (`GpuLight`), whatever kinds of light
-/// the lights publish.
-pub const LIGHT_LIST: &str = "scene_lights";
-
-/// The lights' directional light (the sun of what reads one: water, media):
-/// one SceneDB row, a `vec4<f32>`, the unit direction toward the light and
-/// 1, published with the light list. Zero, or absent: no directional light.
-pub const DIRECTIONAL_LIGHT: &str = "directional_light";
 
 /// View remaps: per chain, the matrix taking a point of the host world into
 /// the world the pixels of that chain show (portals). SceneDB buffer of 256

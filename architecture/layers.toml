@@ -70,19 +70,14 @@ helio-feature-api = { layer = "feature_api" }
 helio-frame-api = { layer = "feature_api" }
 
 # spine
-helio-pass-deferred-light = { layer = "spine" }
-helio-pass-light-cull = { layer = "spine" }
-helio-pass-shadow-matrix = { layer = "spine" }
 helio-pass-hiz = { layer = "spine" }
 helio-pass-tsr = { layer = "spine" }
 helio-pass-postprocess = { layer = "spine" }
 helio-spine = { layer = "spine" }
 
 # features
-helio-pass-billboard = { layer = "feature", group = "billboards" }
 helio-pass-ssr = { layer = "feature", group = "reflections" }
 helio-pass-planar-reflection = { layer = "feature", group = "reflections" }
-helio-pass-hlfs = { layer = "feature", group = "hlfs" }
 helio-pass-fxaa = { layer = "feature", group = "post-aa" }
 helio-pass-debug-overlay = { layer = "feature", group = "debug" }
 helio-pass-perf-overlay = { layer = "feature", group = "debug" }

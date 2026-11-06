@@ -49,8 +49,9 @@ pub mod placement {
     /// Placed at the owner's transform, with the next range of a particle
     /// pool ([`super::RowTable::pool`]; `write_emitter_transform`).
     pub const POOL_RANGE: u32 = 64;
-    /// Takes the lights' directional light
-    /// (`helio_frame_api::lighting::DIRECTIONAL_LIGHT`; `write_sun`).
+    /// Takes a directional light ([`super::RowJoinKeys::directional_light`]:
+    /// the lights' directional light, which the kind placing a sun names;
+    /// `write_sun`).
     pub const SUN: u32 = 128;
     /// A wind row written over the table's rows (`write_water_wind`).
     pub const WIND: u32 = 256;
@@ -75,9 +76,11 @@ pub struct RowJoinKeys {
     pub transforms: BufferKey,
     /// Mesh instances' local bounding spheres ([`placement::MESH_BOUNDS`]).
     pub mesh_bounds: BufferKey,
-    /// The lights' directional light ([`placement::SUN`]): one `vec4`, the
-    /// direction toward it and 1.
-    pub directional_light: BufferKey,
+    /// The directional light [`placement::SUN`] takes (its first `vec4`:
+    /// the direction toward it and 1), named by the kind that places a sun
+    /// (water: the lights' directional light). `None`: no sun; the rows
+    /// face straight up.
+    pub directional_light: Option<BufferKey>,
 }
 
 #[repr(C)]
@@ -413,7 +416,7 @@ impl SceneDerivation for RowJoin {
             Self::input(reported, name, inputs, keys.generations, GENERATION_ROW_BYTES);
         let hidden = Self::input(reported, name, inputs, keys.hidden, HIDDEN_ROW_BYTES);
         let transforms = Self::input(reported, name, inputs, keys.transforms, TRANSFORM_ROW_BYTES);
-        let lights = inputs.get(keys.directional_light);
+        let lights = keys.directional_light.and_then(|key| inputs.get(key));
         let mesh_bounds =
             Self::input(reported, name, inputs, keys.mesh_bounds, MESH_BOUNDS_ROW_BYTES);
         let mut recorded = false;

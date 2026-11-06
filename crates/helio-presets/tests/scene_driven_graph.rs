@@ -1,8 +1,9 @@
-//! The default graph follows the scene: in an empty scene with no
-//! billboards and no debug mode, those passes are dormant (no prepare, no
+//! The default graph follows the scene: in an empty scene with no debug
+//! lines and no debug mode, those passes are dormant (no prepare, no
 //! execute, no content resources). Each joins when its content appears: a
-//! debug line, a debug view, a billboard row in a column the host registered
-//! up front. A resize keeps every pass.
+//! debug line, a debug view. A resize keeps every pass. (A kind's passes
+//! joining with their rows are tested in its plugin: the lights' billboards
+//! in the billboard feature.)
 
 use std::sync::Arc;
 
@@ -10,11 +11,9 @@ use glam::Vec3;
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, RendererBuilder, RendererConfig,
 };
-use helio_components::BillboardComponent;
 
 /// Passes that need scene content or a debug mode the room does not have.
 const CONTENT_PASSES: &[&str] = &[
-    "Billboard",
     "BufferView",
     "DebugDraw",
     "PerfOverlay",
@@ -33,9 +32,6 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
             max_cells_metadata: 0,
         },
     );
-    // Registered before any billboard exists, as editors do: the column's
-    // presence alone must not wake the billboard pass.
-    BillboardComponent::register_gpu_columns_growable(&mut store, 64, device);
     scene_db
         .world
         .attach_gpu_mirror(pulsar_scenedb::gpu::GpuMirrorHandle::new(
@@ -142,33 +138,15 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
     frames(&mut renderer, &mut scene, &view, 1);
     assert!(!has(&renderer, "BufferView"));
 
-    // A billboard row in the up-front column: the billboard pass joins once
-    // the row has been read back (a frame or two).
-    let billboard = scene.world.spawn();
-    scene.world.insert(
-        billboard,
-        BillboardComponent {
-            world_pos: [0.0, 1.0, 0.0, 0.0],
-            scale_flags: [1.0, 1.0, 0.0, 0.0],
-            color: [1.0, 0.0, 0.0, 1.0],
-        },
-    );
-    frames(&mut renderer, &mut scene, &view, 4);
-    assert!(
-        has(&renderer, "Billboard"),
-        "{:?}",
-        renderer.graph_members()
-    );
-
     // A resize resizes in place: the same pass objects, at the new size.
     let before = renderer
-        .find_pass::<helio_pass_deferred_light::DeferredLightPass>()
+        .find_pass::<helio_spine::UnlitPass>()
         .map(|pass| pass as *const _ as usize);
     renderer.set_render_size(80, 60);
     view = target_for(80, 60);
     frames(&mut renderer, &mut scene, &view, 2);
     let after = renderer
-        .find_pass::<helio_pass_deferred_light::DeferredLightPass>()
+        .find_pass::<helio_spine::UnlitPass>()
         .map(|pass| pass as *const _ as usize);
     assert!(before.is_some());
     assert_eq!(before, after, "a resize kept the passes");

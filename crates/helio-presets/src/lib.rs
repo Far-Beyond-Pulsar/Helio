@@ -19,12 +19,8 @@ pub use presets::{
     deferred, deferred_fxaa, forward, hlfs, hlfs_fxaa, registry, simple, Preset, PresetGraph,
 };
 
-use helio_pass_billboard::BillboardPass;
 use helio_pass_debug_overlay::DebugOverlayPass;
-use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
-use helio_pass_hlfs::HlfsPass;
-use helio_pass_light_cull::LightCullPass;
 use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass,
 };
@@ -62,13 +58,10 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
     use helio_core::graph::type_name_of as name;
     helio_core::SwapPolicy::new()
         .independent::<BackgroundPass>()
-        .independent::<LightCullPass>()
+        .independent::<helio_spine::UnlitPass>()
         .independent::<SsrPass>()
         .independent::<helio_pass_ssr::SsrCompositePass>()
         .independent::<PlanarReflectionPass>()
-        .independent::<DeferredLightPass>()
-        .independent::<HlfsPass>()
-        .independent::<BillboardPass>()
         .independent::<helio::DebugDrawPass>()
         .independent::<DebugOverlayPass>()
         .independent::<TsrPass>()

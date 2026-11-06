@@ -1,7 +1,8 @@
 //! The shipped pipelines as node graphs: the editor's laid-out template builds
 //! the deferred preset's graph, each preset follows the renderer config (the
-//! anti-aliasing, reflections), and HLFS lights in one
-//! format end to end. (An engine's features joining the presets is tested
+//! anti-aliasing, reflections), a preset without a lighting model draws
+//! its G-buffer unlit, and the light-field preset writes one scene format
+//! end to end. (An engine's features joining the presets is tested
 //! where they live: the voxel terrain's in its plugin's feature crate.)
 //!
 //! Everything needs a device: the graphs build their passes for real
@@ -50,7 +51,6 @@ fn mirror(
         },
     );
     helio_components::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
-    helio_components::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
     GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(queue))
 }
 
@@ -267,13 +267,57 @@ fn presets_follow_the_config() {
     let phases = Preset::Forward.phases();
     assert!(phases.contains(&helio_frame_api::Phase::Forward));
     assert!(!phases.contains(&helio_frame_api::Phase::GBuffer));
-    assert!(!has::<helio_pass_deferred_light::DeferredLightPass>(&graph));
+    assert!(!has::<helio_spine::UnlitPass>(&graph));
     let graph = Preset::Simple.build(fixtures.context());
     assert_eq!(graph.pass_count(), 1);
 }
 
+/// Helio has no lighting model (it is the lights plugin's): every G-buffer
+/// preset resolves its G-buffer with the spine's unlit stand-in, the
+/// intended failure, so a host without the lights still shows its surfaces.
+/// A feature placed at the model's point takes its place.
 #[test]
-fn hlfs_lights_in_its_format_end_to_end() {
+fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
+    let Some(mut fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: unlit stand-in");
+        return;
+    };
+    for preset in [Preset::Deferred, Preset::DeferredFxaa, Preset::Hlfs, Preset::HlfsFxaa] {
+        let graph = preset.build(fixtures.context());
+        let unlit = passes(&graph)
+            .into_iter()
+            .find(|pass| pass.type_name == "helio_spine::unlit::UnlitPass")
+            .unwrap_or_else(|| panic!("{} draws no unlit stand-in", preset.name()));
+        assert!(unlit.reads.iter().any(|read| read.name == "gbuffer"));
+        assert!(unlit.writes.iter().all(|write| write.name != "gbuffer"));
+    }
+
+    // A lighting model at the deferred point replaces the stand-in.
+    struct Model;
+    impl helio_feature_api::Feature for Model {
+        fn id(&self) -> &'static str {
+            "test.lighting_model"
+        }
+        fn register(&self, registrar: &mut helio_feature_api::FeatureRegistrar<'_>) {
+            let point = helio_frame_api::lighting::LightingModel::Deferred
+                .point()
+                .unwrap();
+            registrar.node(
+                helio_feature_api::pass_node("test_model", "Test model", "Test", "", |_| Ok(()))
+                    .at(point, 0),
+            );
+        }
+    }
+    let with_model = Preset::Deferred
+        .with_features(&helio_feature_api::FeatureSet::new().with(Model))
+        .build(fixtures.context());
+    assert!(!has::<helio_spine::UnlitPass>(&with_model));
+    // The forward preset draws lit in its phase: nothing resolves.
+    assert!(!has::<helio_spine::UnlitPass>(&Preset::Forward.build(fixtures.context())));
+}
+
+#[test]
+fn the_light_field_preset_writes_one_scene_format() {
     let Some(mut fixtures) = fixtures() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: HLFS format");
         return;
@@ -291,10 +335,9 @@ fn hlfs_lights_in_its_format_end_to_end() {
         .filter_map(|write| write.format)
         .collect();
     assert_eq!(formats.len(), 1, "pre_aa is written as {formats:?}");
-    assert!(has::<helio_pass_hlfs::HlfsPass>(&graph));
-    assert!(!has::<helio_pass_deferred_light::DeferredLightPass>(&graph));
-    // Under TSR, HLFS asks what draws after lighting for a reactive mask
-    // TSR reads: the meshes' transparency writes it (the plugin's pass lists).
+    // Under TSR, light-field shading asks what draws after lighting for a
+    // reactive mask TSR reads: the meshes' transparency writes it (the
+    // plugin's pass lists).
     assert!(passes(&graph)
         .iter()
         .any(|pass| pass.type_name == "helio_pass_tsr::TsrPass"));

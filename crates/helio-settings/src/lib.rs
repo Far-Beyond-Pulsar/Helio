@@ -296,13 +296,6 @@ pub const fn live(mut setting: Setting) -> Setting {
     setting
 }
 
-const QUALITY_TIERS: &[Choice] = &[
-    choice("low", "Low"),
-    choice("medium", "Medium"),
-    choice("high", "High"),
-    choice("ultra", "Ultra"),
-];
-
 /// The renderer: its graph (`helio::RendererConfig`) and its quality.
 pub static RENDERER: Group = Group {
     key: "rendering",
@@ -340,63 +333,6 @@ pub static RENDERER: Group = Group {
             &[choice("deferred", "Deferred"), choice("forward_opaque", "Forward Opaque"), choice("forward_only", "Forward Only")],
             "deferred",
             "Renderer path",
-        ),
-        pick("shadow_quality", "Shadow Quality", "Shadows", QUALITY_TIERS, "medium", "Shadow filtering quality"),
-        number(
-            "shadow_memory_mb",
-            "Shadow Memory (MB)",
-            "Shadows",
-            (16.0, 2048.0, 16.0),
-            160.0,
-            "GPU memory of the shadow atlases; sets their size",
-        ),
-        pick(
-            "shadow_max_resolution",
-            "Shadow Max Resolution",
-            "Shadows",
-            &[choice("512", "512"), choice("1024", "1024"), choice("2048", "2048"), choice("4096", "4096"), choice("8192", "8192")],
-            "2048",
-            "Largest shadow tile a light gets",
-        ),
-        integer(
-            "shadow_updates_per_frame",
-            "Shadow Updates per Frame",
-            "Shadows",
-            (1, 1024),
-            32,
-            "Shadow faces redrawn a frame at most",
-        ),
-        number(
-            "shadow_update_megatexels",
-            "Shadow Update Texels (M)",
-            "Shadows",
-            (0.25, 64.0, 0.25),
-            4.0,
-            "Millions of shadow texels redrawn a frame at most",
-        ),
-        number(
-            "shadow_max_distance",
-            "Shadow Distance",
-            "Shadows",
-            (10.0, 100_000.0, 10.0),
-            500.0,
-            "Metres from the eye that local lights cast shadows",
-        ),
-        integer("shadow_fade_frames", "Shadow Fade Frames", "Shadows", (0, 240), 12, "Frames a shadow fades in or out over"),
-        number(
-            "shadow_hysteresis",
-            "Shadow Hysteresis",
-            "Shadows",
-            (0.0, 1.0, 0.05),
-            0.2,
-            "How much a light's shadow resolution must change before its tile is reallocated",
-        ),
-        toggle(
-            "shadow_page_invalidation",
-            "Shadow Page Invalidation",
-            "Shadows",
-            true,
-            "Redraw only the shadow pages a moving caster touches",
         ),
         toggle(
             "environment_reflections",
@@ -472,14 +408,12 @@ mod tests {
     fn host_values_are_clamped_parsed_or_dropped() {
         let r = RENDERER.resolve(|key| match key {
             "render_scale" => Some(Value::Number(4.0)),
-            "shadow_updates_per_frame" => Some(Value::Text("64".into())),
-            "shadow_quality" => Some(Value::Text("bogus".into())),
+            "render_mode" => Some(Value::Text("bogus".into())),
             "planar_reflections" => Some(Value::Number(1.0)),
             _ => None,
         });
         assert_eq!(r.number("render_scale"), 1.0);
-        assert_eq!(r.number("shadow_updates_per_frame"), 64.0);
-        assert_eq!(r.text("shadow_quality"), "medium");
+        assert_eq!(r.text("render_mode"), "deferred");
         assert!(r.bool("planar_reflections"));
     }
 
