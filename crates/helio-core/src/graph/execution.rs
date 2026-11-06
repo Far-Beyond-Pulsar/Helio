@@ -295,6 +295,8 @@ pub struct RenderGraph {
     /// graph. `validate_dependencies` treats every name in this set as
     /// available from pass index 0. See `docs/helio_3_0_spec.md` §6.
     external_inputs: std::collections::HashSet<&'static str>,
+    /// Frame inputs features supply ([`Self::add_frame_input_publisher`]).
+    frame_input_publishers: Vec<Box<dyn crate::FrameInputPublisher>>,
     /// Executor-owned transient descriptor storage. Passes that build dynamic
     /// attachment slices can retain them here for the duration of a frame.
     pub(crate) frame_storage: RenderFrameStorage,
@@ -433,6 +435,7 @@ impl RenderGraph {
             graph_data: None,
             swap_policy: None,
             external_inputs: std::collections::HashSet::new(),
+            frame_input_publishers: Vec::new(),
             frame_storage: RenderFrameStorage::new(),
             uploads: crate::upload::FrameUploads::new(device, queue, "graph uploads"),
         }
@@ -691,6 +694,24 @@ impl RenderGraph {
         self.external_inputs.insert(name);
     }
 
+    /// Adds a feature's frame-input publisher (see
+    /// [`crate::FrameInputPublisher`]): updated and published every frame
+    /// before any pass runs. The node adding it also declares what it
+    /// publishes ([`Self::declare_external_input`]).
+    pub fn add_frame_input_publisher(&mut self, publisher: Box<dyn crate::FrameInputPublisher>) {
+        self.frame_input_publishers.push(publisher);
+    }
+
+    /// Refreshes every frame-input publisher; the host calls this once a
+    /// frame, before [`Self::publish_frame_inputs`].
+    pub fn update_frame_inputs(&mut self, ctx: &crate::FrameInputContext<'_>) -> crate::Result<()> {
+        for publisher in &mut self.frame_input_publishers {
+            let _scope = crate::CpuScope::new(publisher.name());
+            publisher.update(ctx)?;
+        }
+        Ok(())
+    }
+
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
         assert!(!self.locked, "RenderGraph: cannot add_pass() after lock()");
         let type_id = pass.as_any().type_id();
@@ -920,6 +941,14 @@ impl RenderGraph {
             unsafe {
                 pass.publish_frame_inputs(camera, &mut *frame_ptr);
             }
+        }
+        for publisher in &self.frame_input_publishers {
+            // The same lifetime bridge as the passes' publications: the
+            // publishers live in the graph, which outlives the frame's
+            // registry, and nothing mutates them until the next update.
+            let publisher: &'a dyn crate::FrameInputPublisher =
+                unsafe { &*(publisher.as_ref() as *const dyn crate::FrameInputPublisher) };
+            publisher.publish(unsafe { &mut *frame_ptr });
         }
     }
 

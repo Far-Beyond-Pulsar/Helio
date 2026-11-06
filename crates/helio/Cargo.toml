@@ -19,7 +19,6 @@ helio-settings = { workspace = true }
 helio-feature-api = { path = "../helio-feature-api" }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }
-helio-mats = { workspace = true }
 helio-bake-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }

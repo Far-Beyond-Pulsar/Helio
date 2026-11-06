@@ -51,8 +51,9 @@ fn settings(env: &BuildEnv<'_>) -> SpineSettings {
 }
 
 /// Resources the renderer supplies every frame that the spine's passes read
-/// (features declare their own, `helio_frame_api::host_input`).
-const HOST_INPUTS: [&str; 2] = ["material_textures", "render_environment"];
+/// (features declare their own, `helio_frame_api::host_input`, and may
+/// supply them: the materials' texture table).
+const HOST_INPUTS: [&str; 1] = ["render_environment"];
 
 fn tsr_quality(name: &str) -> TsrQuality {
     match name {

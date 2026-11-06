@@ -22,9 +22,6 @@ use wgpu::{
 
 use crate::{Result, XrError};
 
-/// Bindless texture-table cap for the XR device (mirrors helio's native limit).
-const MAX_TEXTURES: usize = 256;
-
 /// Create a wgpu [`Instance`] whose underlying `VkInstance` was created through
 /// OpenXR, so the runtime's required instance extensions are present and the
 /// device it later exposes is known to be usable by the compositor.
@@ -169,15 +166,15 @@ pub fn create_wgpu_device(
         ));
     }
 
-    // Limits: cap the bindless texture table at MAX_TEXTURES and ask for two
+    // Limits: cap the bindless texture table at helio_core::TEXTURE_TABLE_LIMIT and ask for two
     // multiview layers (min'd against what the adapter reports).
     let mut limits = hal_adapter.capabilities.limits.clone();
     limits.max_sampled_textures_per_shader_stage = limits
         .max_sampled_textures_per_shader_stage
-        .min(MAX_TEXTURES as u32);
+        .min(helio_core::TEXTURE_TABLE_LIMIT as u32);
     limits.max_samplers_per_shader_stage = limits
         .max_samplers_per_shader_stage
-        .min(MAX_TEXTURES as u32);
+        .min(helio_core::TEXTURE_TABLE_LIMIT as u32);
     limits.max_multiview_view_count = limits.max_multiview_view_count.max(2);
     // Same clamp as `helio::required_wgpu_limits`, and it has to be repeated because this
     // path builds its limits from the HAL adapter directly rather than going through that

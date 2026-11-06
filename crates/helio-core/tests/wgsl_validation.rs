@@ -15,7 +15,7 @@
 //! Sources go through `helio_core::shader::resolve_with` first — the same call
 //! (modulo which snippets a given pass registers) the runtime makes — so a
 //! prelude/snippet-using shader is validated as the GPU will see it, not as
-//! the bare file on disk. The snippet list here (HIZ, PBR, the frame's sky and
+//! the bare file on disk. The snippet list here (HIZ, the frame's sky and
 //! view remaps) is this
 //! test's own aggregation of every pass-owned snippet in the workspace, not
 //! something `helio-core` itself knows about — `resolve_with` never fails
@@ -26,8 +26,6 @@ use std::path::{Path, PathBuf};
 
 const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_hiz::HIZ_SNIPPET,
-    helio_mats::PBR_EVAL_SNIPPET,
-    helio_mats::SPECULAR_AA_SNIPPET,
     helio_frame_api::lighting::sky::ATMOSPHERE_SNIPPET,
     helio_frame_api::lighting::sky::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
@@ -69,17 +67,6 @@ fn collect_wgsl(dir: &Path, out: &mut Vec<PathBuf>) {
 /// bindings it does not declare and cannot validate on its own.
 fn is_fragment(source: &str) -> bool {
     !(source.contains("@vertex") || source.contains("@fragment") || source.contains("@compute"))
-}
-
-/// An entry-point-bearing piece a drawer composes with another crate's
-/// snippets: validated as composed by that drawer's crate, not on its own.
-/// The materials' transparent template is lit by the lights' forward
-/// function (`//!use light_forward`), a plugin's snippet the meshes'
-/// transparent drawer composes in (and validates).
-fn is_composed(path: &Path) -> bool {
-    const COMPOSED: &[&str] = &["helio-mats/templates/transparent_base.wgsl"];
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    COMPOSED.iter().any(|suffix| normalized.ends_with(suffix))
 }
 
 /// Assembles the shaders their passes build from more than one piece, the
@@ -145,9 +132,6 @@ fn every_wgsl_shader_parses_and_validates() {
         let source = std::fs::read_to_string(path).expect("shader should be readable");
         let source = compose(path, source);
 
-        if is_composed(path) {
-            continue;
-        }
         if is_fragment(&source) {
             skipped.push(rel.display().to_string());
             continue;
@@ -195,7 +179,8 @@ fn every_wgsl_shader_parses_and_validates() {
     // baked maps, joined them), and the virtual geometry's declaration pieces
     // (vg-format, vg-stream, vg-bvh, vg-dense, vg-raster, vg-shade,
     // helio-mats' vg_alpha). 58 (2026-10-30): Ultra-Water's snippets
-    // (water-sim's water_sky.wgsl and water_surface_shared.wgsl).
+    // (water-sim's water_sky.wgsl and water_surface_shared.wgsl). Every kind
+    // has left the repo since (Phase B), with its pieces.
     assert!(
         skipped.len() <= 58,
         "{} shaders were skipped as fragments/composed modules, which is more than expected:\n{}",

@@ -397,6 +397,7 @@ pub mod entity;
 pub mod error;
 pub mod frame_demands;
 mod frame_inputs;
+pub mod frame_input_publisher;
 pub mod frame_storage;
 pub mod gpu_cache;
 pub mod graph;
@@ -470,6 +471,7 @@ pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};
 pub use frame_demands::{is_demanded, FrameDemands, FRAME_DEMANDS};
+pub use frame_input_publisher::{FrameInputContext, FrameInputPublisher};
 pub use frame_inputs::{CoordinateSpaceAllocator, CoordinateSpacesFrameData, RenderFrameInputs};
 pub use frame_storage::RenderFrameStorage;
 pub use graph::{
@@ -480,6 +482,32 @@ pub use graph::{
     SwapPolicy,
 };
 pub use instance::wgpu_instance_descriptor;
+
+/// Descriptor-indexed texture arrays: a table of textures and samplers a
+/// shader indexes per pixel (a kind's bindless table: the materials'). The
+/// pair is one capability; a device with only one of them uses none.
+pub const TEXTURE_BINDING_ARRAYS: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
+    .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
+
+/// The most sampled textures (and samplers) per shader stage a host asks a
+/// device for: the size cap of a texture table. WebGPU's baseline
+/// guarantees 16; native Vulkan/D3D12 offer 256. Mobile GPUs (Apple,
+/// Android/Adreno) get the baseline too: their shader compilers and
+/// descriptor limits choke on a 256-wide binding array.
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
+pub const TEXTURE_TABLE_LIMIT: usize = 256;
+#[cfg(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+))]
+pub const TEXTURE_TABLE_LIMIT: usize = 16;
 pub use profiling::{
     FocusedTiming, FocusedTimingGroup, FocusedTimingReport, GpuTimingAvailability, Profiler,
     RenderPassTiming, RenderTimingSnapshot,

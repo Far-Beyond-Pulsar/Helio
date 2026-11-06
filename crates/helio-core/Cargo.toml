@@ -26,7 +26,6 @@ log = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
-helio-mats = { workspace = true }
 helio-pass-hiz = { workspace = true }
 helio-frame-api = { path = "../helio-frame-api" }
 helio-scene-derivations = { workspace = true }

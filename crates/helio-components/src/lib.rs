@@ -1,6 +1,9 @@
-//! SceneDB components for Helio's standalone hosts (examples, tests) of the
-//! kinds still in Helio: materials. A plugin's kind brings its own host
-//! components (the meshes' `helio-mesh-host`, the lights' api `host_rows`).
+//! What Helio's standalone hosts (examples, tests) and the plugins' host
+//! rows share: tying a row component to its contract row ([`same_layout!`],
+//! [`RowComponent`], [`WorldRows`]) and the lightmap bake. Helio has no kind,
+//! so it has no components: each plugin brings its own host components (the
+//! meshes' `helio-mesh-host`, the lights' and the materials' api
+//! `host_rows`).
 //!
 //! Helio defines no components (docs/architecture/layered-rewrite.md,
 //! phase 1): its passes read buffers under [`helio_core::BufferContract`]s,
@@ -8,16 +11,13 @@
 //! Pulsar registers its own; this crate is the same thing for Helio's own
 //! hosts. Nothing below the host layer may depend on it.
 //!
-//! Row components ([`rows`]) carry their contract row's exact fields, so
+//! Row components carry their contract row's exact fields, so
 //! struct literals read like the row; `same_layout!` fails the build if they
 //! drift apart. Insert a bare row with [`WorldRows::insert_row`]: SceneDB
 //! accepts any `Send + Sync` value as a component, so `world.insert(e, row)`
 //! compiles but is never mirrored to the GPU.
 
 use pulsar_scenedb::{Entity, World};
-
-pub mod rows;
-pub use rows::*;
 
 /// A contract row with the component that stores it.
 pub trait RowComponent: Sized {
