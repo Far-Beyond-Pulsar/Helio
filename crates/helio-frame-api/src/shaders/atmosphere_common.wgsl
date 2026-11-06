@@ -3,7 +3,8 @@
 // LUT kernels and the composite. Distances are kilometres, positions are
 // relative to the planet centre unless named otherwise.
 
-// `AtmosphereComponent` (SceneDB row, packed): coefficients per kilometre.
+// An atmosphere row (the frame's `sky` contract, packed): coefficients per
+// kilometre.
 struct AtmosphereParams {
     center: vec3<f32>,
     // 0: ground at the world origin (planet centre straight below it),

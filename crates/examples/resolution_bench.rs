@@ -17,13 +17,13 @@
 //!                        fixtures (bloom) and alpha-blended glass panes.
 //! * `cathedral_large` -- the HLFS large cathedral (416k tris, many lights,
 //!                        stained glass) with its chandelier and candle lights.
-//! * `sky`             -- a floor under an open sky: the fixed per-pixel cost
-//!                        of the graph with almost no geometry.
+//! * `open`            -- a floor in the open: the fixed per-pixel cost of
+//!                        the graph with almost no geometry.
 //!
 //! Usage (all flags optional):
 //!
 //! ```text
-//! resolution_bench --scenes fog_hall,cathedral_large,sky \
+//! resolution_bench --scenes fog_hall,cathedral_large,open \
 //!                  --res 1920x1080,2560x1440,3840x2160 \
 //!                  --frames 6 --warmup 6 --scale 0.75 --out bench_out --tag before
 //! ```
@@ -45,7 +45,9 @@
 //!
 //! Fog and water left Helio with their plugins (Pulsar `plugins/vendor/fog`,
 //! `plugins/vendor/water`): `fog_hall` no longer has its haze, and
-//! `--global-fog`, `--pp-fog` and `--water` are gone.
+//! `--global-fog`, `--pp-fog` and `--water` are gone. So did the sky and
+//! GI (`plugins/vendor/sky`, `plugins/vendor/gi`): no scene has an
+//! atmosphere or GI probes, and the `sky` scene is `open`.
 //!
 //! `--bloom` enables bloom and `--auto-exposure` auto exposure through the
 //! host's post-process baseline (they can be combined). (The camera lens
@@ -122,7 +124,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut args = Args {
-        scenes: vec!["fog_hall".into(), "cathedral_large".into(), "sky".into()],
+        scenes: vec!["fog_hall".into(), "cathedral_large".into(), "open".into()],
         resolutions: vec![(1920, 1080), (2560, 1440), (3840, 2160)],
         frames: 6,
         warmup: 6,
@@ -204,7 +206,6 @@ fn fog_hall(world: &mut World, aspect: f32) -> Camera {
     const HALF_X: f32 = 7.0;
     const HALF_Z: f32 = 30.0;
     const ROOF_Y: f32 = 9.0;
-    spawn_sky(world, [0.8, 0.9, 1.0]);
     let stone = spawn_material(
         world,
         make_material([0.62, 0.60, 0.58, 1.0], 0.85, 0.0, [0.0; 3], 0.0),
@@ -319,7 +320,6 @@ fn fog_hall(world: &mut World, aspect: f32) -> Camera {
 }
 
 fn cathedral(world: &mut World, aspect: f32) -> Camera {
-    spawn_indoor_cathedral_sky(world);
     cathedral_large::populate(world);
     for &z in LARGE_CHANDELIER_Z {
         spawn_light(
@@ -341,8 +341,7 @@ fn cathedral(world: &mut World, aspect: f32) -> Camera {
     )
 }
 
-fn sky(world: &mut World, aspect: f32) -> Camera {
-    spawn_sky(world, [0.8, 0.9, 1.0]);
+fn open(world: &mut World, aspect: f32) -> Camera {
     let material = spawn_material(
         world,
         make_material([0.5, 0.5, 0.48, 1.0], 0.8, 0.0, [0.0; 3], 0.0),
@@ -498,7 +497,7 @@ fn run(
     let camera = match scene_name {
         "fog_hall" => fog_hall(&mut scene_db.world, aspect),
         "cathedral_large" => cathedral(&mut scene_db.world, aspect),
-        "sky" => sky(&mut scene_db.world, aspect),
+        "open" => open(&mut scene_db.world, aspect),
         other => panic!("unknown scene {other}"),
     };
     if args.shadows {

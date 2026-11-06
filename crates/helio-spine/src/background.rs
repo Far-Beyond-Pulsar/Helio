@@ -1,9 +1,9 @@
 //! The scene's background: `pre_aa` cleared to the configured colour before anything draws
 //! into it.
 //!
-//! The sky is the atmosphere (`helio_pass_sky::AtmosphereCompositePass`),
-//! drawn over this background where no geometry is. Without an atmosphere
-//! the background stays black. This pass took over the clear the retired
+//! A sky (an engine's atmosphere feature, compositing at `Slot::Lighting`)
+//! draws over this background where no geometry is. Without one the
+//! background stays this colour. This pass took over the clear the retired
 //! procedural `SkyPass` did (Pulsar-Native #1057), so every graph's lighting
 //! and geometry passes load a defined `pre_aa`: forward lighting draws over
 //! it, HLFS reads it at uncovered pixels, and SSR and planar reflections

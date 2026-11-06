@@ -72,8 +72,6 @@ helio-feature-api = { layer = "feature_api" }
 helio-frame-api = { layer = "feature_api" }
 
 # feature contracts (api)
-helio-sky-api = { layer = "api" }
-helio-gi-api = { layer = "api" }
 helio-mesh-api = { layer = "api" }
 
 # spine
@@ -95,8 +93,6 @@ helio-pass-postprocess = { layer = "spine" }
 helio-spine = { layer = "spine" }
 
 # features
-helio-pass-sky = { layer = "feature", group = "sky" }
-helio-pass-gi = { layer = "feature", group = "gi" }
 helio-pass-vg = { layer = "feature", group = "vg" }
 helio-pass-vg-bvh = { layer = "feature", group = "vg" }
 helio-pass-vg-cull = { layer = "feature", group = "vg" }

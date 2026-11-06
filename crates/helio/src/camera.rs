@@ -7,7 +7,7 @@
 //! coordinates relative to it, where f32 keeps sub-millimetre precision. The
 //! camera's view in that frame is [`Camera::view_in`].
 
-use glam::{DMat4, DVec3, Mat4, Vec3};
+use glam::{DMat4, DVec3, Mat4, Vec3, Vec4};
 
 /// Camera parameters supplied for a render frame.
 #[derive(Debug, Clone)]
@@ -139,6 +139,38 @@ impl Camera {
                 column.y *= inverse;
             }
         }
+        self
+    }
+
+    /// Crop this camera to a pixel rectangle of a larger output image. This
+    /// lets a renderer draw one tile while preserving the projection of the
+    /// complete image.
+    pub fn with_pixel_crop(
+        mut self,
+        full_size: [u32; 2],
+        origin: [u32; 2],
+        tile_size: [u32; 2],
+    ) -> Self {
+        let [full_w, full_h] = full_size;
+        let [tile_w, tile_h] = tile_size;
+        if full_w == 0 || full_h == 0 || tile_w == 0 || tile_h == 0 {
+            return self;
+        }
+        let left = 2.0 * origin[0] as f32 / full_w as f32 - 1.0;
+        let right = 2.0 * (origin[0] + tile_w) as f32 / full_w as f32 - 1.0;
+        let top = 1.0 - 2.0 * origin[1] as f32 / full_h as f32;
+        let bottom = 1.0 - 2.0 * (origin[1] + tile_h) as f32 / full_h as f32;
+        let sx = 2.0 / (right - left);
+        let sy = 2.0 / (top - bottom);
+        let tx = -(left + right) / (right - left);
+        let ty = -(top + bottom) / (top - bottom);
+        let crop = Mat4::from_cols(
+            Vec4::new(sx, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, sy, 0.0, 0.0),
+            Vec4::Z,
+            Vec4::new(tx, ty, 0.0, 1.0),
+        );
+        self.proj = crop * self.proj;
         self
     }
 }

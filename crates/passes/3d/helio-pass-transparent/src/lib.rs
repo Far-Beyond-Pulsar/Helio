@@ -49,19 +49,6 @@ struct TransparentGlobals {
     _pad2: u32,
 }
 
-/// `names` as a `'static` slice, one per distinct list (a graph's passes
-/// declare `'static` lists; this pass's depend on what it was built over).
-fn static_names(names: &[&'static str]) -> &'static [&'static str] {
-    static LISTS: OnceLock<std::sync::Mutex<Vec<&'static [&'static str]>>> = OnceLock::new();
-    let mut lists = LISTS.get_or_init(Default::default).lock().unwrap();
-    if let Some(list) = lists.iter().find(|list| **list == names) {
-        return list;
-    }
-    let list: &'static [&'static str] = Box::leak(names.to_vec().into_boxed_slice());
-    lists.push(list);
-    list
-}
-
 pub struct TransparentPass {
     /// The frame's integrated medium (`helio_frame_api::media`), when a
     /// media feature published one.
@@ -442,7 +429,7 @@ impl RenderPass for TransparentPass {
             reads.extend([media.grid, media.parameters]);
         }
         reads.extend(["depth", "cluster_light_grid", "object_batch", "culled_batch"]);
-        static_names(&reads)
+        helio_frame_api::static_names(&reads)
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -451,7 +438,7 @@ impl RenderPass for TransparentPass {
         if self.reactive_mask {
             writes.push("transparency_reactivity");
         }
-        static_names(&writes)
+        helio_frame_api::static_names(&writes)
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

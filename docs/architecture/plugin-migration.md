@@ -98,8 +98,8 @@ same path, like physics).
 | `pulsar.materials` | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | facade template registries, `set_material_sampler`, `MATERIAL_TEXTURES` |
 | `pulsar.meshes` | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | gbuffer/shadow/forward/transparent mesh code, `asset_types.rs`, `RayInstance`, `with_virtual_geometry`, authored LOD derivation, VG host in helio_component |
 | `pulsar.lights` | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | light part of the scene join, `GpuLight`/`SCENE_LIGHTS` in forward-lit, facade light setters |
-| `pulsar.sky` | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility` | helio-sky-api readers name `sky` contracts only |
-| `pulsar.gi` | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | — |
+| `pulsar.sky` | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (`sky_component`, `feature` = helio-pass-sky, `sky_plugin`, `sky-examples`); no api crate: what others read of it is the frame's |
+| `pulsar.gi` | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | done (batch 3): `plugins/vendor/gi/` (`api` = helio-gi-api, `gi_component`: registrations and settings, `feature` = helio-pass-gi, `gi_plugin`, `gi-examples`) |
 | `pulsar.fog` | GlobalFog, LocalFogVolume | volumetric fog and its composite | done (batch 2): `plugins/vendor/fog/` (`fog_component`, `feature` = helio-pass-volumetric-fog, `fog_plugin`, `fog-examples`); publishes the frame's participating media |
 | `pulsar.post` | PostProcessVolume, CameraPostProcess | volume blend, publishes post settings | done (batch 2): `plugins/vendor/post/` (`post_component`, `feature` = helio-pass-post-volumes, `post_plugin`, `post-examples`); blends over the host's `POST_BASELINE` |
 | `pulsar.lens` | CameraLens | lens, flare (reads `light_list` via lights api) | done (batch 1): `plugins/vendor/lens/` (`lens_component`, `feature/{lens,flare,optics}`, `lens_plugin`, `lens-examples`); the view overscan through `ViewOverscanRegistration` |
@@ -410,12 +410,13 @@ Order:
 2. **Media and placement** (done, batch 2): fog and post volumes (fog's
    tests read the post volumes' rows: move them together, or fog first),
    water (reads foliage-api's wind rows), foliage (after water).
-3. **gi, then sky.** gi-api's one reader, hlfs, switches to the frame's
+3. **gi, then sky** (done, batch 3). gi-api's one reader, hlfs, switches to the frame's
    `INDIRECT_DIFFUSE` key (the same buffer) so gi-api leaves with gi. The
    sky goes after gi, fog and water, which read `helio-sky-api`'s cloud
    shadow; by then they are Pulsar plugins and read the sky plugin's api
    crate (or the frame's `SUN_VISIBILITY` input, if the cloud shadow
-   becomes it).
+   becomes it). As built: the frame's world-space `sun_transmittance`
+   (see "As built, batch 3").
 4. **meshes** (with VG, LOD, skeletal, `helio-mesh-api`, asset-compat).
    First the spine and facade stop depending on mesh crates (the spine
    keeps phases, Hi-Z, TSR, the tone map; the G-buffer layout is
@@ -694,6 +695,107 @@ helio-foliage-api, helio-pass-foliage-place, helio-pass-foliage-gbuffer).
     ("a settled still view asked for frame 0"; it fails the same way on
     p7). Run in parallel, voxel_pass_graph's GPU-heavy cases also lost the
     device; single-threaded they pass.
+
+As built, batch 3 (2026-11-03, branch `rewrite/p9-gi-sky` in both repos):
+GI and the sky are Pulsar plugins; the Helio repo has none of their crates
+(helio-pass-gi, helio-gi-api, helio-pass-sky, helio-sky-api).
+- **Layout** as batches 1 and 2: `plugins/vendor/gi/` with `api` (helio-gi-api:
+  the probe clipmap's contract, which the voxel terrain traces), `component`
+  (`gi_component`: GI has no SceneDB component, so it holds the feature's and
+  the settings group's registrations), `feature` (helio-pass-gi), `editor`
+  (`gi_plugin`) and `examples` (`gi-examples`: `indoor_cathedral_gi`);
+  `plugins/vendor/sky/` with `component` (`sky_component`: the
+  `AtmosphereComponent` moved from `helio_component`, its source row and every
+  registration), `feature` (helio-pass-sky, with the atmosphere host row behind
+  `host-rows`), `editor` (`sky_plugin`) and `examples` (`sky-examples`:
+  `render_v2_sky`). The sky has no api crate: nothing outside it reads its
+  crates.
+- **The clouds' shadow is the frame's sun transmittance**
+  (`helio_frame_api::lighting::sun_transmittance`): a world-space Beer shadow
+  map along the sun round the camera plus its frame, the WGSL that reads it
+  (`sun_transmittance_at(p)`) and a stand-in. It is published by producer name
+  the way batch 2's media are (`publish` / `current`): the sky's atmosphere
+  node publishes its `cloud_shadow_map` / `cloud_shadow_frame`, and fog's
+  froxels and GI's probe update and mesh rays bind whatever was published, or
+  the stand-in (fully lit). Why not `SUN_VISIBILITY` /
+  `DIRECTIONAL_VISIBILITY`: those are per pixel of the G-buffer, while a
+  medium's froxels and the probes' ray hits are points off the surface and
+  off the screen; the clouds fold the map into `SUN_VISIBILITY` for surfaces,
+  as before. Why not the sky plugin's api crate: every reader would then
+  depend on the sky, while the map's form (a Beer shadow map, as Hillaire's
+  and Frostbite's clouds and Unreal's cloud shadow on the atmosphere light
+  use) is any medium's above the scene (a weather or smoke plugin publishes
+  the same and fog and GI shade under it unchanged). With it gone,
+  helio-sky-api had nothing left (its sky inputs were frame-api's since
+  Phase A): water reads `helio_frame_api::lighting::sky`.
+- **Other frame seams**:
+  - `lighting::InputsOrder` (a preset setting): the forward preset named the
+    clouds' trace node by kind after its draw phase. It now places
+    `Slot::LightingInputs` there and says the lighting already ran
+    (`AfterLighting`), so publishers only the lighting reads (GI's resolve,
+    water's transmission) build nothing, and the clouds' trace (whose clouds
+    the composite draws) still does.
+  - `helio_frame_api::static_names`, from the transparency pass: the read
+    lists of passes whose reads are what a publisher named.
+  - HLFS reads the frame's `INDIRECT_DIFFUSE` (gi-api's `GI_IRRADIANCE` was
+    the same key).
+- **Helio**: presets' default features and swap policy drop GI and the sky;
+  `config_with_host_settings` (it bridged only GI's probe spacing) is
+  deleted, and the spacing left `helio-settings`' renderer group for GI's own
+  group (`helio_pass_gi::GI`, key `gi.probe_spacing`; projects' old
+  `rendering.gi_probe_spacing` falls back to the default, as foliage's did in
+  batch 2); `helio-components` lost `AtmosphereComponent`; helio-core's WGSL
+  validation and the presets' tests lost their GI and sky parts (the GI graph
+  tests `mesh_gi_graph` and `vg_ray_proxies` moved to the GI feature).
+- **Pulsar engine**: `environment_join` runs only registered joins (the
+  atmospheres' is the sky component's `SceneRowsRegistration`) and
+  `ensure_gpu_mirror` registers no atmosphere column; `level_rules` lost the
+  sky special case: the sky is a `LevelSingletonRegistration` like the
+  global wind. `project_settings::renderer_config` is `with_settings`; GI's
+  settings come in through its `RenderFeatureRegistration::configure`.
+- **Editor**: the World Settings sky section and the environment section
+  create the sky with the component crate's default value and edit it through
+  its reflected properties (`SetComponentProperty`), as the wind; they and
+  the scene-edit helpers read the level's sky through
+  `sky_component::level_atmosphere`. GI has no editor operation: its settings
+  are a project settings group.
+- **Examples**: Helio's examples that spawned a sky or relied on GI say they
+  have neither (`v3_demo_common::spawn_sky` is gone; `resolution_bench`'s
+  `sky` scene is `open`); `render_v2_sky` moved to the sky's examples, and the
+  GI plugin's `indoor_cathedral_gi` is Helio's `indoor_cathedral` over the
+  lighting plugins. The other plugins' examples and the voxel examples and
+  tests add the sky's and GI's features, as the engine does.
+- **Verified against p8**: Pulsar's `plugin_pass_lists` snapshot is
+  byte-identical (3792 lines; the test now also asserts the sky's three
+  passes and, where mesh rays run, GI's three); Helio's preset snapshot loses
+  exactly the moved passes (324 lines: Atmosphere, CloudTrace and
+  AtmosphereComposite in 15 graphs, GI, GIMeshRays and GIResolve in 12) and
+  gains nothing. voxel_craft (p8 exe vs p9, alternating, 8-frame bursts at 4
+  poses): the render-graph dump is identical (29 passes), mean |Δ| p8-p9
+  0.07-0.49 against p8-p8 0.05-0.36 and p9-p9 0.12-0.43, run times 29/29/26/24 s.
+  The GI cathedral (Helio p8 `indoor_cathedral` vs `indoor_cathedral_gi`):
+  graph dumps identical, mean |Δ| 0.03-0.23 across the four p8-p9 pairs
+  against 0.21 (p8-p8) and 0.20 (p9-p9). The sky demo has no capture hook;
+  the voxel `clouds` GPU tests and the sky feature's tests cover it.
+- Left, with why:
+  - `scene_inventory`'s ledger still lists the batch 1-3 pass crates as
+    Helio pass crates (its scan reads only Helio's `passes/` and voxel, so
+    each is "not a pass crate"); its ledger and architecture tests were
+    already failing on stale rows before batch 1 (unlisted buffers, sites,
+    renderer queries). The atmosphere's class rows point at the sky plugin
+    now. Bringing the ledger up to date is its own task.
+  - Failing before this batch and unchanged by it: helio-core's
+    `wgsl_validation` (it reads `scene_join_common.wgsl` from
+    `helio-scene-derivations`; the file is in `helio-scene-join`), so it
+    stops before most shaders (the moved WGSL is checked by the sky's
+    `shaders` test and the GI and fog GPU tests); helio-settings'
+    `host_values_are_clamped_parsed_or_dropped` (a number for a toggle);
+    water's `gpu_caustics`; voxel's `foliage_grows_on_the_voxel_ground` and
+    `chunk_pass_builds_settles_and_resizes_in_the_deferred_graph`;
+    `ui_level_editor`'s two voxel inspector tests (its lib tests do not link
+    the voxel editor that registers the terrain stack's editor). GI's
+    `vg_ray_proxies` failed once in six runs (the VG wall let rays through;
+    the other five passed): intermittent, as the proxies build in the background.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,

@@ -5,6 +5,11 @@
 //!   Space/Shift — move up/down
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 
 mod v3_demo_common;
 
@@ -15,8 +20,7 @@ use helio::{
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     build_default_renderer_with_context, cube_mesh, make_material, new_scene_db_with_gpu_mirror,
-    plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky,
-    update_light,
+    plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh, spawn_object, update_light,
 };
 
 use winit::{
@@ -109,7 +113,6 @@ impl ApplicationHandler for App {
         let config = RendererConfig::new(size.width, size.height, surface_format)
             .with_render_mode(RenderMode::ForwardOpaque);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
-        spawn_sky(&mut scene_db.world, [0.15, 0.25, 0.45]);
         let mut renderer = build_default_renderer_with_context(&scene_db, &mut graphics, config);
         let surface = graphics.surface;
         renderer.set_editor_mode(true);

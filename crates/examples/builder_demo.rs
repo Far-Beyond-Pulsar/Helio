@@ -8,6 +8,11 @@
 //!   Space/Shift — move up/down
 //!   Left click  — grab cursor, drag to look
 //!   Escape      — release cursor / exit
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 
 mod v3_demo_common;
 
@@ -137,9 +142,6 @@ impl ApplicationHandler for App {
             &mut scene_db.world,
             make_material([0.22, 0.22, 0.25, 1.0], 0.7, 0.05, [0.0, 0.0, 0.0], 0.0),
         );
-
-        // ── Sky ─────────────────────────────────────────────────────────────
-        v3_demo_common::spawn_sky(&mut scene_db.world, [0.15, 0.25, 0.45]);
 
         // ── Ground ──────────────────────────────────────────────────────────
         let ground_mesh = spawn_mesh(&mut scene_db.world, plane_mesh([0.0, 0.0, 0.0], 12.0));

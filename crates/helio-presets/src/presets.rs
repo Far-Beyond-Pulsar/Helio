@@ -26,7 +26,7 @@ use helio::{IntoGraph, PassBuildContext, RendererConfig};
 use helio_core::RenderGraph;
 use helio_feature_api::ExtensionPoint;
 use helio_frame_api::color::ReactiveMask;
-use helio_frame_api::lighting::SpecularLayers;
+use helio_frame_api::lighting::{InputsOrder, SpecularLayers};
 use helio_frame_api::{Phase, PhaseList, Slot, HOST_INPUTS};
 use helio_graph_asset::{
     core_nodes, Connection, GraphAsset, GraphAssetPipeline, NodeInstance, NodeRegistry, Params,
@@ -127,6 +127,15 @@ impl Preset {
         }
     }
 
+    /// Where the preset's lighting inputs run: after the forward phase,
+    /// which lit the scene, or before the lighting.
+    fn inputs_order(self) -> InputsOrder {
+        match self {
+            Preset::Forward => InputsOrder::AfterLighting,
+            _ => InputsOrder::BeforeLighting,
+        }
+    }
+
     /// The preset's nodes for `config`, in execution order: the spine's
     /// passes it names, and the frame's slots and draw phases, each expanded
     /// to the nodes the registry holds there.
@@ -158,7 +167,7 @@ impl Preset {
         // Geometry and lighting.
         if self == Preset::Forward {
             nodes.phase(Phase::Forward);
-            nodes.pass("cloud_trace");
+            nodes.slot(Slot::LightingInputs);
         } else {
             nodes.phase(Phase::GBuffer);
             nodes.slot(Slot::Geometry);
@@ -239,6 +248,7 @@ impl Preset {
                 }
                 env.insert_setting(PhaseList(self.phases()));
                 env.insert_setting(self.specular_layers());
+                env.insert_setting(self.inputs_order());
                 if self.hlfs() && self.aa(&config) == Aa::Tsr {
                     env.insert_setting(ReactiveMask);
                 }

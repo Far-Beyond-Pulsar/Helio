@@ -51,6 +51,11 @@
 //! No window or surface is created. On a machine without a GPU, Mesa's
 //! lavapipe works: `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
 //! Results are printed as a Markdown table and written as CSV to `--out`.
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 
 #![allow(dead_code)]
 
@@ -431,7 +436,6 @@ fn populate_grid(
 
 /// The HLFS large cathedral with its interior lights plus one small movable prop.
 fn populate_cathedral_large(world: &mut World) -> BenchScene {
-    v3_demo_common::spawn_indoor_cathedral_sky(world);
     cathedral_large::populate(world);
     for &z in LARGE_CHANDELIER_Z {
         spawn_light(

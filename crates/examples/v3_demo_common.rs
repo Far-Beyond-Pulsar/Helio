@@ -1,7 +1,7 @@
 use glam::{Mat4, Vec3};
 use helio::{GpuLight, LightType, Renderer, RendererBuilder, RendererConfig, SceneDbHandle};
 use helio_mesh_api::{MeshUpload, PackedVertex};
-use helio_components::{AtmosphereComponent, MaterialComponent, ReflectionCaptureComponent};
+use helio_components::{MaterialComponent, ReflectionCaptureComponent};
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
 
@@ -43,7 +43,6 @@ pub fn new_scene_db_with_gpu_mirror_and(
         max_cells_metadata: 0,
     };
     let mut gpu_store = pulsar_scenedb::gpu::SceneGpuStore::new(&ctx, gpu_cfg);
-    helio_components::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
     helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 4096, device);
     helio_components::MaterialComponent::register_gpu_columns_growable(
         &mut gpu_store,
@@ -440,22 +439,6 @@ pub fn spot_light(
 pub use helio_components::LightComponent;
 pub use helio_components::{MeshComponent, StaticObjectComponent};
 
-/// Insert the scene's atmosphere: Earth's air, its Rayleigh scattering
-/// tinted towards `tint` (each channel scaled by `tint` over its largest
-/// channel). The sky is scene content too: the renderer only receives the
-/// keyed SceneDB buffer, and the scene's first directional light is its sun;
-/// without one the sky is black.
-pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
-    let mut sky = AtmosphereComponent::from(helio_pass_sky::AtmosphereRow::earth());
-    let peak = tint[0].max(tint[1]).max(tint[2]).max(f32::EPSILON);
-    for (scattering, channel) in sky.rayleigh_scattering.iter_mut().zip(tint) {
-        *scattering *= channel / peak;
-    }
-    let entity = world.spawn();
-    world.insert(entity, sky);
-    entity
-}
-
 /// Spawn an oriented-box reflection-capture influence volume, replacing the
 /// removed `Scene::insert_reflection_capture(ReflectionCaptureDescriptor::
 /// boxed(..))` API. `transform`'s translation/rotation places the box (scale
@@ -488,14 +471,6 @@ pub fn spawn_reflection_capture_box(
         )),
     );
     entity
-}
-
-/// Spawn the atmosphere shared by the indoor-cathedral demo family: a dim,
-/// blue-tinted air. (Its
-/// cloud layer went with the procedural sky pass; clouds will return as
-/// part of the atmosphere.)
-pub fn spawn_indoor_cathedral_sky(world: &mut World) -> Entity {
-    spawn_sky(world, [0.05, 0.05, 0.1])
 }
 
 /// Insert a mesh payload into SceneDB's shared geometry pools and return its

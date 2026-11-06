@@ -5,6 +5,11 @@
 //! Escape releases it (or exits when released).
 //! Fog left Helio with its plugin (Pulsar `plugins/vendor/fog`); the museum
 //! no longer has a medium.
+//!
+//! The sky (the atmosphere and its clouds) and GI left Helio with their
+//! plugins (Pulsar `plugins/vendor/sky`, `plugins/vendor/gi`): this scene
+//! has no sky and no GI probes; the background colour and the ambient
+//! light stand in.
 
 #![recursion_limit = "512"]
 
@@ -36,7 +41,7 @@ use helio_vg_stream::{VgRuntime, VgRuntimeSettings};
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     directional_light, make_material, new_scene_db_with_gpu_mirror, point_light, scene_db_handle,
-    spawn_light, spawn_material, spawn_mesh, spawn_object, spawn_sky, spot_light,
+    spawn_light, spawn_material, spawn_mesh, spawn_object, spot_light,
 };
 
 use winit::{
@@ -659,7 +664,6 @@ impl ApplicationHandler for App {
             let entity = spawn_material(&mut scene_db.world, row);
             materials.insert(material, entity);
         }
-        spawn_sky(&mut scene_db.world, [1.0, 1.0, 1.0]);
         let sun_light = spawn_light(
             &mut scene_db.world,
             directional_light([0.35, -0.8, -0.3], [1.0, 0.94, 0.82], 3.0),

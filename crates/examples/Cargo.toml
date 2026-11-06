@@ -19,10 +19,6 @@ name = "render_v2_basic"
 path = "render_v2_basic.rs"
 
 [[bin]]
-name = "render_v2_sky"
-path = "render_v2_sky.rs"
-
-[[bin]]
 name = "debug_shapes"
 path = "debug_shapes.rs"
 
@@ -241,7 +237,6 @@ helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
-helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
 helio-presets = { path = "../helio-presets" }
 helio-scene-derivations = { path = "../helio-scene-derivations" }
 helio-controls = { workspace = true, features = ["winit"] }
