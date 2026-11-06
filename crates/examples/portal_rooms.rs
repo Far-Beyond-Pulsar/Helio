@@ -371,9 +371,9 @@ impl ApplicationHandler for App {
             // the entire face — full corner-to-corner coverage, no doorway
             // inset — which is what makes the face itself *be* the portal
             // instead of a hole cut into a wall.
-            let a = helio::portal_pose_facing(normal * HUB_HALF_SIZE, normal, up);
+            let a = helio_pass_portal_cull::portal_pose_facing(normal * HUB_HALF_SIZE, normal, up);
             let entrance = room_center - ROOM_FORWARD * ROOM_HALF_SIZE;
-            let b = helio::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
+            let b = helio_pass_portal_cull::portal_pose_facing(entrance, ROOM_FORWARD, ROOM_UP);
             let (source_entity, target_entity) = authored_portal_entities[i];
             let source = PortalComponent::from(helio_pass_portal_cull::PortalRow::new(
                 Some(target_entity),
@@ -412,7 +412,7 @@ impl ApplicationHandler for App {
             projection_entities[0],
         )
         .expect("portal_rooms dense projection rows");
-        renderer.set_portal_projection_frame(&projection_frame);
+        helio_default_passes::portals::set_projection_frame(&mut renderer, &projection_frame);
 
         // ── A light near the hub's center so its own walls read clearly.
         light_ids.push(spawn_light(

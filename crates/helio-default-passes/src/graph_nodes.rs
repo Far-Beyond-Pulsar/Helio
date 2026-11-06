@@ -19,11 +19,9 @@
 use std::sync::{Arc, Mutex};
 
 use helio::{DebugDrawState, RendererConfig};
-use helio_graph_asset::resources::intern;
 use helio_feature_api::{Feature, FeatureRegistrar, FeatureSet};
-use helio_graph_asset::{
-    BuildEnv, MarkerFn, NodeBuild, NodeDescriptor, ParamDesc, PinType,
-};
+use helio_graph_asset::resources::intern;
+use helio_graph_asset::{BuildEnv, MarkerFn, NodeBuild, NodeDescriptor, ParamDesc, PinType};
 use helio_pass_perf_overlay::PerfOverlayShared;
 
 use crate::{

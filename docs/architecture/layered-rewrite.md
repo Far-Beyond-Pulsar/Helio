@@ -479,6 +479,27 @@ As built:
 - Pulsar: `p.render().feature(..)`; render_bps lists nodes from the registry
   *after* features registered (drop its `OnceLock` snapshot).
 
+As built (2026-11-02): the renderer depends on no feature crate (layer
+violations 19 → 9; the 9 left are feature/spine edges for the API crates).
+- `FeatureSettings` (feature API): one value per feature's settings type;
+  `RendererConfig::features` carries it (the config is `Clone`, no longer
+  `Copy`) and `build_env` hands it to nodes. Foliage's five config fields
+  are `helio_pass_foliage_place::FoliageSettings` (host settings mapping
+  included); VG's runtime id is `helio_vg_stream::VgSettings`
+  (`helio_default_passes::with_virtual_geometry`). Engines build their
+  config with `helio_default_passes::config_with_host_settings`.
+- `Renderer::install_persistent_pass`: a pass the host keeps in every graph
+  (made fresh after each rebuild). Baking is a host operation
+  (`helio_components::bake`) that installs its inject pass that way; the
+  renderer lost `helio-bake` and its `bake` feature.
+- Portal host API (`set_projection_frame`, debug texts and geometry) moved
+  to `helio_default_passes::portals`; billboard, sky, portal re-exports and
+  the unused corona/fog dependencies left the renderer.
+- Not done here (next phases): extension points and the sky/GI `*-api`
+  crates for the remaining spine/feature edges, presets as assets replacing
+  the `build_*_graph` functions, XR as views.
+
+
 ### Phase 4: voxel pilot (the pain we feel)
 - Split `helio-pass-voxel-planet` into `voxel-api` (handle trait, buffer
   contracts, published keys like `voxel.surface`), `voxel-world`

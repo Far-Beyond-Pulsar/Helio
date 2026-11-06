@@ -712,7 +712,7 @@ impl ApplicationHandler for App {
         }
         let mut config = RendererConfig::new(size.width, size.height, format);
         if vg_supported {
-            config = config.with_virtual_geometry(&runtime);
+            config = helio_default_passes::with_virtual_geometry(config, &runtime);
         }
         let derivation =
             SceneVgDerivation::new(&device, runtime.clone(), targets.clone(), vg_supported);

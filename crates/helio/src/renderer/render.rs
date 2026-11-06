@@ -129,46 +129,6 @@ impl Renderer {
             self.apply_rebuild_now();
         }
 
-        #[cfg(feature = "bake")]
-        if let Some(request) = self.bake_pending.take() {
-            let obj_count = request.scene.meshes.len();
-            let light_count = request.scene.lights.len();
-
-            log::info!(
-                "[helio-bake] Starting pre-frame-1 bake for scene '{}' (cache: {})…",
-                request.config.scene_name,
-                request.config.cache_dir.display(),
-            );
-
-            let bake_start = Instant::now();
-            let baked = helio_bake::run_bake_blocking(
-                &self.device,
-                &self.queue,
-                &request.scene,
-                &request.config,
-            )
-            .map_err(|e| helio_core::Error::InvalidPassConfig(e.to_string()))?;
-            let bake_duration = bake_start.elapsed();
-
-            let baked = std::sync::Arc::new(baked);
-
-            log::info!(
-                "[helio-bake] ✓ Bake complete in {:.2}s — {} objects, {} lights (avg {:.1}ms/obj)",
-                bake_duration.as_secs_f32(),
-                obj_count,
-                light_count,
-                if obj_count > 0 {
-                    bake_duration.as_millis() as f32 / obj_count as f32
-                } else {
-                    0.0
-                }
-            );
-
-            // The graph owns the result (Helio#256): BakeInjectPass publishes
-            // the baked resources as frame inputs and survives graph rebuilds.
-            self.install_baked_data(baked);
-        }
-
         let now = Instant::now();
         let dt = now
             .duration_since(self.last_render_time)

@@ -228,17 +228,21 @@ fn a_mesh_scene_s_probes_trace_its_meshes_on_frames_with_a_tlas() {
     let mut scene = scene_db(&device, &queue);
     room(&mut scene.world);
     let mut config = RendererConfig::new(64, 64, wgpu::TextureFormat::Rgba8Unorm);
-    config.enable_foliage = false;
-    let mut renderer = RendererBuilder::new(config, scene.world.gpu_mirror().cloned().unwrap())
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-        .with_external_device()
-        .build(
-            device.clone(),
-            queue.clone(),
-            config.width,
-            config.height,
-            config.surface_format,
-        );
+    config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = false;
+    let mut renderer =
+        RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_external_device()
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
     assert!(
         renderer.find_pass::<GiMeshTracePass>().is_some(),
         "no mesh tracer in the graph"
@@ -318,17 +322,21 @@ fn without_ray_queries_a_mesh_scene_has_no_gi() {
     let mut scene = scene_db(&device, &queue);
     room(&mut scene.world);
     let mut config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
-    config.enable_foliage = false;
-    let mut renderer = RendererBuilder::new(config, scene.world.gpu_mirror().cloned().unwrap())
-        .with_pass_build_context(Box::new(build_default_graph_external_with_context))
-        .with_external_device()
-        .build(
-            device.clone(),
-            queue.clone(),
-            config.width,
-            config.height,
-            config.surface_format,
-        );
+    config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = false;
+    let mut renderer =
+        RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
+            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_external_device()
+            .build(
+                device.clone(),
+                queue.clone(),
+                config.width,
+                config.height,
+                config.surface_format,
+            );
     assert!(
         renderer.find_pass::<GiPass>().is_none(),
         "GI without a tracer"

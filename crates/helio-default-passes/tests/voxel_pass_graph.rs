@@ -100,7 +100,10 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
         let factory: VoxelPassFactory =
             Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
         let mut config = RendererConfig::new(640, 360, wgpu::TextureFormat::Rgba8Unorm);
-        config.enable_foliage = false;
+        config
+            .features
+            .edit::<helio_pass_foliage_place::FoliageSettings>()
+            .enabled = false;
         let observed = Arc::new(Mutex::new(Vec::new()));
         let captured = observed.clone();
         let final_factory: GraphPassFactory = Arc::new(move |_, _, width, height| {
@@ -109,7 +112,7 @@ fn chunk_pass_builds_settles_and_resizes_in_the_deferred_graph() {
                 observed: captured.clone(),
             })
         });
-        let mut renderer = RendererBuilder::new(config, mirror)
+        let mut renderer = RendererBuilder::new(config.clone(), mirror)
             .with_ambient([0.5, 0.5, 0.6], 1.0)
             .with_external_device()
             .with_pass_build_context(Box::new(move |ctx| {
@@ -384,8 +387,11 @@ fn editor(width: u32, height: u32) -> Option<Editor> {
     let factory: VoxelPassFactory =
         Arc::new(move |_, _, _, _| Box::new(ChunkPass::new(Arc::clone(&pass_source))));
     let mut config = RendererConfig::new(width, height, wgpu::TextureFormat::Rgba8Unorm);
-    config.enable_foliage = false;
-    let mut renderer = RendererBuilder::new(config, mirror)
+    config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = false;
+    let mut renderer = RendererBuilder::new(config.clone(), mirror)
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
         .with_pass_build_context(Box::new(move |ctx| {

@@ -63,11 +63,14 @@ fn build(
     runtime: Option<&VgRuntime>,
 ) -> helio::Renderer {
     let mut config = RendererConfig::new(320, 180, wgpu::TextureFormat::Rgba8Unorm);
-    config.enable_foliage = false;
+    config
+        .features
+        .edit::<helio_pass_foliage_place::FoliageSettings>()
+        .enabled = false;
     if let Some(runtime) = runtime {
-        config = config.with_virtual_geometry(runtime);
+        config = helio_default_passes::with_virtual_geometry(config, runtime);
     }
-    RendererBuilder::new(config, mirror(device, queue))
+    RendererBuilder::new(config.clone(), mirror(device, queue))
         .with_ambient([0.5, 0.5, 0.6], 1.0)
         .with_external_device()
         .with_pass_build_context(Box::new(build_default_graph_external_with_context))
@@ -155,23 +158,32 @@ fn vg_debug_view_env_var_selects_the_initial_debug_mode() {
 
     std::env::set_var(ENV_VAR, "lod");
     assert_eq!(
-        config().with_virtual_geometry(&runtime).debug_mode,
+        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
         VgDebugView::LodLevel.id()
     );
     std::env::set_var(ENV_VAR, "21");
     assert_eq!(
-        config().with_virtual_geometry(&runtime).debug_mode,
+        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
         VgDebugView::ClusterId.id()
     );
     std::env::set_var(ENV_VAR, "not a view");
-    assert_eq!(config().with_virtual_geometry(&runtime).debug_mode, 0);
+    assert_eq!(
+        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
+        0
+    );
     // An explicit mode wins over the environment.
     std::env::set_var(ENV_VAR, "lod");
     let mut explicit = config();
     explicit.debug_mode = 5;
-    assert_eq!(explicit.with_virtual_geometry(&runtime).debug_mode, 5);
+    assert_eq!(
+        helio_default_passes::with_virtual_geometry(explicit, &runtime).debug_mode,
+        5
+    );
     std::env::remove_var(ENV_VAR);
-    assert_eq!(config().with_virtual_geometry(&runtime).debug_mode, 0);
+    assert_eq!(
+        helio_default_passes::with_virtual_geometry(config(), &runtime).debug_mode,
+        0
+    );
 
     if let Some(previous) = previous {
         std::env::set_var(ENV_VAR, previous);

@@ -31,6 +31,23 @@ pub mod scheduler;
 pub mod source;
 pub mod store;
 
+/// The virtual-geometry feature's settings (a renderer config carries them in
+/// its feature settings): which runtime the graph builds VG passes for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VgSettings {
+    /// `VgRuntime::handle_id` of the runtime, or `None` for classic
+    /// rendering only.
+    pub runtime: Option<u64>,
+}
+
+impl VgSettings {
+    pub fn for_runtime(runtime: &runtime::VgRuntime) -> Self {
+        Self {
+            runtime: Some(runtime.handle_id()),
+        }
+    }
+}
+
 pub use crate::core::{PageBytes, StoreCore, VgStreamConfig, VgStreamError, PAGE_NOT_RESIDENT};
 pub use feedback::{Feedback, FeedbackLayout};
 pub use proxy::{

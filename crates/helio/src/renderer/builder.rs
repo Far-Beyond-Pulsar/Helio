@@ -251,7 +251,7 @@ impl RendererBuilder {
         let graph = pass_graph_fn(PassBuildContext {
             device: &device,
             queue: &queue,
-            config,
+            config: config.clone(),
             debug_state: debug_state.clone(),
             camera_buffer: &camera_buffer,
             debug_camera_buffer: &debug_camera_buffer,

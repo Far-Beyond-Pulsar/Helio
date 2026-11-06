@@ -54,7 +54,6 @@ impl RendererConfig {
     /// temporal preset is the host's to resolve ([`TsrSetting`]): this sets
     /// the render scale it uses while TSR is off.
     pub fn with_settings(mut self, settings: &Resolved) -> Self {
-        use helio_pass_foliage_place::FoliageQuality;
         use helio_pass_postprocess::HdrOutputMode;
         use helio_pass_shadow_matrix::ShadowQuality;
         debug_assert!(std::ptr::eq(settings.group(), &helio_settings::RENDERER));
@@ -91,21 +90,6 @@ impl RendererConfig {
         self.enable_ssr = settings.bool("screen_space_reflections");
         self.enable_planar_reflections = settings.bool("planar_reflections");
         self.gi_probe_spacing = settings.optional("gi_probe_spacing").map(|m| m as f32);
-        self.enable_foliage = settings.bool("foliage");
-        self.foliage_quality = tier(
-            settings.text("foliage_quality"),
-            [
-                FoliageQuality::Low,
-                FoliageQuality::Medium,
-                FoliageQuality::High,
-                FoliageQuality::Ultra,
-            ],
-        );
-        self.foliage_range = settings.optional("foliage_range").map(|m| m as f32);
-        self.foliage_tufts_per_m2 = settings.optional("foliage_tufts_per_m2").map(|n| n as f32);
-        self.foliage_blades_per_tuft = settings
-            .optional("foliage_blades_per_tuft")
-            .map(|n| n as f32);
         self.hdr_output_mode = match settings.text("hdr_output_mode") {
             "hdr10" => HdrOutputMode::Hdr10,
             "scrgb" => HdrOutputMode::ScRgb,
@@ -158,8 +142,10 @@ mod tests {
                 let is_default =
                     setting.default == helio_settings::Value::Text(option.value.into());
                 let unchanged = format!("{configured:?}") == format!("{default:?}");
-                // `tsr_quality` is resolved by the host, not the config.
-                if setting.key != "tsr_quality" {
+                // `tsr_quality` is resolved by the host, not the config;
+                // `foliage_quality` lands in the foliage feature's settings
+                // (`FoliageSettings::with_host_settings`, tested there).
+                if !["tsr_quality", "foliage_quality"].contains(&setting.key) {
                     assert_eq!(unchanged, is_default, "{} = {}", setting.key, option.value);
                 }
             }

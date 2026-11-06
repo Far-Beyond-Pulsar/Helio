@@ -37,7 +37,7 @@ may_use = ["spine", "feature_api", "scene", "core", "leaf"]
 
 [layers.renderer]
 about = "The Renderer facade. Knows no feature."
-may_use = ["renderer", "spine", "scene", "core", "leaf"]
+may_use = ["renderer", "spine", "feature_api", "scene", "core", "leaf"]
 
 [layers.preset]
 about = "Graph assets, node registries, feature lists."

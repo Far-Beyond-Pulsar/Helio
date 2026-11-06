@@ -233,7 +233,7 @@ impl Renderer {
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
-            graph_config: config,
+            graph_config: config.clone(),
             coordinate_spaces: Vec::new(),
             portal_projection_counts: None,
             xr_mode: false,
@@ -257,10 +257,6 @@ impl Renderer {
             frame_delta_override: None,
             frame_clock: 0.0,
             frame_clock_delta: None,
-            #[cfg(feature = "bake")]
-            bake_pending: None,
-            #[cfg(feature = "bake")]
-            bake_scene: None,
             clear_target_next_frame: true,
             xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,
@@ -270,6 +266,7 @@ impl Renderer {
             cull_stats_buffer,
             graph_rebuilder,
             graph_rebuild_hook: None,
+            persistent_passes: Vec::new(),
             #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
             shader_reload: Default::default(),
             scene_db,
