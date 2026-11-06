@@ -70,6 +70,9 @@ pub struct Renderer {
     /// ones, run each frame between the SceneDB snapshot and the graph. See
     /// `helio_core::scene_derivation`.
     pub(crate) scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
+    /// The names of the derivations the graphs' features brought, made once
+    /// each and run after the host's ([`helio_core::SceneDerivationFactory`]).
+    pub(crate) feature_derivations: Vec<&'static str>,
     /// This frame's world origin: every frame is camera-relative, its
     /// coordinates world positions minus this. Follows the eye
     /// ([`Renderer::origin_for`]).
@@ -672,7 +675,9 @@ impl Renderer {
     /// learn it through `set_debug_mode`.
     pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
         graph.set_debug_mode(self.debug_mode);
+        let derivations = graph.take_scene_derivations();
         self.graph = graph;
+        self.adopt_scene_derivations(derivations);
         let persistent: Vec<PassFactory> = self
             .persistent_passes
             .iter()
@@ -680,6 +685,20 @@ impl Renderer {
             .collect();
         for factory in persistent {
             self.place_pass(factory());
+        }
+    }
+
+    /// Makes the scene derivations a graph's features bring that this
+    /// renderer has not made yet (by name), run after the host's.
+    pub(crate) fn adopt_scene_derivations(
+        &mut self,
+        factories: Vec<helio_core::SceneDerivationFactory>,
+    ) {
+        for factory in factories {
+            if !self.feature_derivations.contains(&factory.name) {
+                self.feature_derivations.push(factory.name);
+                self.scene_derivations.push((factory.make)(&self.device));
+            }
         }
     }
 

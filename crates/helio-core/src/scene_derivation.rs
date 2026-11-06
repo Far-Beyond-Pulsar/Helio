@@ -63,6 +63,27 @@ pub trait SceneDerivation: Send {
     fn after_submit(&mut self) {}
 }
 
+/// A derivation a feature brings with its passes
+/// (`helio_feature_api::FeatureRegistrar::scene_derivation`): the renderer
+/// makes one per `name`, once, and runs it after the host's own derivations
+/// (`RendererBuilder::with_scene_derivation`), so it sees what they
+/// published. It is how a kind derives a buffer every host needs from what
+/// any host writes (the lights' directional light from a light list),
+/// without each host installing it.
+#[derive(Clone, Copy)]
+pub struct SceneDerivationFactory {
+    pub name: &'static str,
+    pub make: fn(&Arc<wgpu::Device>) -> Box<dyn SceneDerivation>,
+}
+
+impl std::fmt::Debug for SceneDerivationFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SceneDerivationFactory")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
 /// Run `derivations` in order against `projection`, publishing each one's
 /// outputs into it (replacing a frontend buffer under the same key).
 /// Returns the command buffer to submit before the graph, if any

@@ -104,6 +104,8 @@ pub(crate) fn build_graph(
         })?;
     }
 
+    graph.set_scene_derivations(registry.scene_derivations().to_vec());
+
     if lock {
         graph.lock_sized(env.frame.render_size());
     }
@@ -217,8 +219,9 @@ fn build(pipeline: Arc<GraphAssetPipeline>, ctx: PassBuildContext<'_>) -> Render
     };
     match compile(&asset, &pipeline.registry, &mut env) {
         Ok(mut graph) => {
+            // The preset's own passes and what its features declared.
             if let Some(swap_policy) = &pipeline.swap_policy {
-                graph.set_swap_policy(swap_policy.clone());
+                graph.set_swap_policy(swap_policy.clone().merged(pipeline.registry.swap_policy()));
             }
             // Resize and shader reload rebuild the same way.
             let owns_device = ctx.owns_device;

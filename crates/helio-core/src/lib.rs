@@ -513,7 +513,8 @@ pub use profiling::{
     RenderPassTiming, RenderTimingSnapshot,
 };
 pub use scene_derivation::{
-    run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
+    run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationFactory,
+    SceneDerivationOutput,
 };
 pub use scene_input::{
     BufferContract, BufferHandle, BufferKey, ContractError, FlushedRows, PayloadContract,

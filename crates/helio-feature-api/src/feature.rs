@@ -60,6 +60,28 @@ impl FeatureRegistrar<'_> {
         self.registry.add_finisher(finish);
     }
 
+    /// Adds a scene derivation the feature's graphs bring: made once per
+    /// renderer and run after the host's derivations (see
+    /// [`helio_core::SceneDerivationFactory`]).
+    pub fn scene_derivation(&mut self, derivation: helio_core::SceneDerivationFactory) {
+        self.registry.add_scene_derivation(derivation);
+    }
+
+    /// Declares a pass type of the feature that shares no builder-created
+    /// resource with another pass: shader hot reload swaps it alone instead
+    /// of rebuilding the graph (see [`helio_core::SwapPolicy`]).
+    pub fn swappable<T: ?Sized>(&mut self) {
+        self.registry
+            .add_swap_policy(&helio_core::SwapPolicy::new().independent::<T>());
+    }
+
+    /// Declares pass types (`helio_core::graph::type_name_of`) that share
+    /// builder-created resources: hot reload swaps them together.
+    pub fn swap_group(&mut self, members: &[&'static str]) {
+        self.registry
+            .add_swap_policy(&helio_core::SwapPolicy::new().group_types(members));
+    }
+
     /// Sets what adds a performance marker after nodes built
     /// `with_marker_after`.
     pub fn marker(&mut self, marker: MarkerFn) {
