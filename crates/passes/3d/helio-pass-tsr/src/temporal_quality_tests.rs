@@ -150,7 +150,7 @@ fn stochastic_foliage(frag: vec2<f32>) -> vec3<f32> {
 
 struct Out {
     @location(0) colour: vec4<f32>,
-    // helio-pass-tsr MOTION_VECTORS: the bar's, when it writes them.
+    // helio_frame_api::gbuffer::VELOCITY: the bar's, when it writes them.
     @location(1) motion: vec4<f32>,
     @builtin(frag_depth) depth: f32,
 }
@@ -227,7 +227,7 @@ struct Content {
     foliage: bool,
     /// Mark the foliage's stochastic lighting in the pass's stochastic mask.
     masked: bool,
-    /// The bar writes motion vectors (`MOTION_VECTORS`) for its own motion.
+    /// The bar writes motion vectors (`helio_frame_api::gbuffer::VELOCITY`) for its own motion.
     motion_vectors: bool,
 }
 
@@ -327,7 +327,7 @@ struct Fixture {
     color_view: wgpu::TextureView,
     /// The stochastic mask the fixture publishes (`STOCHASTIC_MASK`).
     mask_view: wgpu::TextureView,
-    /// The motion vectors it publishes (`MOTION_VECTORS`), and the reference
+    /// The motion vectors it publishes (`helio_frame_api::gbuffer::VELOCITY`), and the reference
     /// draw's (unused).
     motion_view: wgpu::TextureView,
     reference_motion_view: wgpu::TextureView,
@@ -699,7 +699,7 @@ impl Fixture {
         });
         self.queue().submit([encoder.finish()]);
         registry.write(
-            helio_core::ResourceKey::new("pre_aa"),
+            helio_core::ResourceKey::new(helio_frame_api::color::SCENE_COLOR),
             &self.color_view,
             "Fixture",
         );
@@ -709,7 +709,7 @@ impl Fixture {
             "Fixture",
         );
         registry.write(
-            helio_core::ResourceKey::new(MOTION_VECTORS),
+            helio_core::ResourceKey::new(helio_frame_api::gbuffer::VELOCITY),
             &self.motion_view,
             "Fixture",
         );

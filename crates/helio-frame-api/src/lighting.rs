@@ -83,7 +83,9 @@ impl Default for LightingSettings {
 
 /// The graph's [`LightingSettings`].
 pub fn lighting_settings(env: &BuildEnv<'_>) -> LightingSettings {
-    env.setting::<LightingSettings>().copied().unwrap_or_default()
+    env.setting::<LightingSettings>()
+        .copied()
+        .unwrap_or_default()
 }
 
 /// Indirect diffuse irradiance at each pixel: a storage buffer of
@@ -148,20 +150,13 @@ pub const TRANSMISSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16
 /// View remaps: per chain, the matrix taking a point of the host world into
 /// the world the pixels of that chain show (portals). SceneDB buffer of 256
 /// `mat4x4<f32>`; a pixel belongs to chain `c` when its G-buffer lightmap UV
-/// is `(-1, -3 - c)` ([`VIEW_REMAP_SNIPPET`]'s `view_remap_of`). Absent: no
+/// is `(-1, -3 - c)` (the prelude's `gbuffer_tag_view_remap` and `view_remap_of`). Absent: no
 /// pixel is remapped. Bound as a uniform (fragment stages are at their
 /// storage-buffer limit).
 pub const VIEW_REMAPS: &str = "view_remaps";
 /// Chains [`VIEW_REMAPS`] holds.
 pub const VIEW_REMAP_CHAINS: u64 = 256;
 pub const VIEW_REMAPS_BYTES: u64 = VIEW_REMAP_CHAINS * 64;
-
-/// Marker opting a shader into [`VIEW_REMAP_SNIPPET`].
-pub const VIEW_REMAP_MARKER: &str = "//!use view_remap";
-/// `view_remap_of(lightmap_uv) -> i32`: the remap chain a pixel belongs to,
-/// or -1.
-pub const VIEW_REMAP_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::wgsl_snippet!(VIEW_REMAP_MARKER, "shaders/view_remap.wgsl");
 
 /// The sky: what lights a surface from the air above it and what the air
 /// takes from the sun on its way. Published by an atmosphere; read by

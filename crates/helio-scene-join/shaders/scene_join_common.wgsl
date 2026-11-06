@@ -1,5 +1,6 @@
-// Shared by scene_join_meshes.wgsl and scene_join_lights.wgsl: the
-// frontend's object rows and the owner join (see `scene_join.rs`).
+// The rows every scene join reads (`helio_scene_join::join_source` puts this
+// before a join shader): owner links, pool handles, object transforms and
+// the frame-origin rebasing. Joins never declare their own copies.
 
 const NO_OWNER: u32 = 0xFFFFFFFFu;
 
@@ -10,6 +11,13 @@ struct Owner {
     owner_index: u32,
     owner_generation: u32,
     enabled: u32,
+}
+
+/// A component's slice of a variable-length SceneDB pool (`PoolContract`):
+/// `count` entries from `offset`.
+struct Handle {
+    offset: u32,
+    count: u32,
 }
 
 /// An object's world transform (`TransformRow`, 48 bytes), keyed by the

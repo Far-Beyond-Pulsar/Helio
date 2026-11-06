@@ -26,7 +26,11 @@ impl RenderPass for GBufferClearPass {
         // Declared as the frame's layout with the usages every G-buffer
         // writer's attachments carry, so a drawer that loads them after this
         // pass sees the same textures it would after a kind's opener.
-        builder.write_group(gbuffer::GROUP, gbuffer::GROUP_MEMBERS, ResourceSize::MatchSurface);
+        builder.write_group(
+            gbuffer::GROUP,
+            gbuffer::GROUP_MEMBERS,
+            ResourceSize::MatchSurface,
+        );
         builder.with_group_extra_usage(gbuffer::GROUP, wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             gbuffer::LIGHTMAP_UV,
@@ -34,7 +38,11 @@ impl RenderPass for GBufferClearPass {
             ResourceSize::MatchSurface,
         );
         for name in [gbuffer::SSS, gbuffer::EXTRA, gbuffer::VELOCITY] {
-            builder.write_color_raw(name, wgpu::TextureFormat::Rgba16Float, ResourceSize::MatchSurface);
+            builder.write_color_raw(
+                name,
+                wgpu::TextureFormat::Rgba16Float,
+                ResourceSize::MatchSurface,
+            );
             builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         }
     }
@@ -70,7 +78,12 @@ impl RenderPass for GBufferClearPass {
             "GBufferClear",
         )?;
         let mut views: Vec<&'a wgpu::TextureView> = group.views.to_vec();
-        for name in [gbuffer::LIGHTMAP_UV, gbuffer::SSS, gbuffer::EXTRA, gbuffer::VELOCITY] {
+        for name in [
+            gbuffer::LIGHTMAP_UV,
+            gbuffer::SSS,
+            gbuffer::EXTRA,
+            gbuffer::VELOCITY,
+        ] {
             views.push(resources.read(ResourceKey::new(name), "GBufferClear")?);
         }
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage

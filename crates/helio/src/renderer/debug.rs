@@ -857,10 +857,9 @@ impl DebugPass {
         self.ensure_bind_group(ctx.device);
 
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx
-                .registry
-                .get(helio_core::ResourceKey::new("full_res_depth"))
-            {
+            let depth_view = if let Some(frd) = ctx.registry.get(helio_core::ResourceKey::new(
+                helio_frame_api::depth::FULL_RES_DEPTH,
+            )) {
                 frd
             } else {
                 ctx.depth
@@ -923,7 +922,9 @@ impl RenderPass for DebugPass {
         // `full_res_depth`, or wgpu rejects the pass for mismatched
         // attachment extents whenever render_scale < 1.0.
         let pre_aa = if self.use_scene_depth {
-            resources.get(helio_core::ResourceKey::new("pre_aa"))
+            resources.get(helio_core::ResourceKey::new(
+                helio_frame_api::color::SCENE_COLOR,
+            ))
         } else {
             None
         };
@@ -937,8 +938,9 @@ impl RenderPass for DebugPass {
             // which makes the same trade.
             let depth_view = if self.use_scene_depth && pre_aa.is_some() {
                 depth
-            } else if let Some(frd) = resources.get(helio_core::ResourceKey::new("full_res_depth"))
-            {
+            } else if let Some(frd) = resources.get(helio_core::ResourceKey::new(
+                helio_frame_api::depth::FULL_RES_DEPTH,
+            )) {
                 frd
             } else {
                 depth

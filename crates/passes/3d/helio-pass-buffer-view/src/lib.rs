@@ -148,7 +148,7 @@ impl RenderPass for BufferViewPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("gbuffer");
+        builder.read(helio_frame_api::gbuffer::GROUP);
     }
 
     fn render_pass_descriptor_with_storage<'a>(
@@ -186,7 +186,7 @@ impl RenderPass for BufferViewPass {
             return Ok(());
         }
         let Some(gbuffer) = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
-            helio_core::ResourceKey::new("gbuffer"),
+            helio_core::ResourceKey::new(helio_frame_api::gbuffer::GROUP),
             "BufferView",
         ) else {
             return Ok(());

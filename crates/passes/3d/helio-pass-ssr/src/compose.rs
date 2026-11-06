@@ -107,13 +107,13 @@ impl RenderPass for SsrCompositePass {
         "SsrCompositePass"
     }
     fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
+        &[helio_frame_api::color::SCENE_COLOR]
     }
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("gbuffer");
-        builder.read("depth");
+        builder.read(helio_frame_api::gbuffer::GROUP);
+        builder.read(helio_frame_api::gbuffer::DEPTH);
         builder.read(self.layer);
-        builder.read("pre_aa");
+        builder.read(helio_frame_api::color::SCENE_COLOR);
     }
     fn render_pass_descriptor<'a>(
         &'a self,
@@ -124,13 +124,16 @@ impl RenderPass for SsrCompositePass {
         None
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let Some(gbuffer) = ctx
-            .registry
-            .read::<helio_core::ViewGroup<'_, 4>>(ResourceKey::new("gbuffer"), self.name())
-        else {
+        let Some(gbuffer) = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
+            ResourceKey::new(helio_frame_api::gbuffer::GROUP),
+            self.name(),
+        ) else {
             return Ok(());
         };
-        let Some(output) = ctx.registry.get(ResourceKey::new("pre_aa")) else {
+        let Some(output) = ctx
+            .registry
+            .get(ResourceKey::new(helio_frame_api::color::SCENE_COLOR))
+        else {
             return Ok(());
         };
         let Some(reflection) = ctx.resource_pool.get_view(self.layer) else {

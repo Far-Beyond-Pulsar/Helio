@@ -53,7 +53,7 @@ fn settings(env: &BuildEnv<'_>) -> SpineSettings {
 /// Resources the renderer supplies every frame that the spine's passes read
 /// (features declare their own, `helio_frame_api::host_input`, and may
 /// supply them: the materials' texture table).
-const HOST_INPUTS: [&str; 1] = ["render_environment"];
+const HOST_INPUTS: [&str; 1] = [helio_core::resource_keys::RENDER_ENVIRONMENT];
 
 fn tsr_quality(name: &str) -> TsrQuality {
     match name {
@@ -206,42 +206,41 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
         )),
     );
 
-    registry.node(
-        pass_node(
-            "post_process",
-            "Post: Tone Map + Grade",
-            CATEGORY,
-            "Bloom, exposure, tone mapping and colour grading into the output.",
-            |build| {
-                let input = color::current(build.env);
-                let alias = color::alias(build.env);
-                let frame = build.env.frame;
-                let effects = build
-                    .env
-                    .setting::<helio_pass_postprocess::UserEffects>()
-                    .map(|effects| effects.0);
-                build.graph.add_pass(Box::new(
-                    PostProcessPass::new_with_user_effects(
-                        build.env.device,
-                        build.env.queue,
-                        frame.width,
-                        frame.height,
-                        frame.surface_format,
-                        effects,
-                    )
-                    .with_color_input(input)
-                    .with_color_alias(alias)
-                    .with_color_grading_lut(
-                        build
-                            .env
-                            .setting::<helio_pass_postprocess::ColorGradingLut>()
-                            .map(|lut| lut.0.clone()),
-                    ),
-                ));
-                Ok(())
-            },
-        )
-    );
+    registry.node(pass_node(
+        "post_process",
+        "Post: Tone Map + Grade",
+        CATEGORY,
+        "Bloom, exposure, tone mapping and colour grading into the output.",
+        |build| {
+            let input = color::current(build.env);
+            let alias = color::alias(build.env);
+            let frame = build.env.frame;
+            let effects = build
+                .env
+                .setting::<helio_pass_postprocess::UserEffects>()
+                .map(|effects| effects.0);
+            build.graph.add_pass(Box::new(
+                PostProcessPass::new_with_user_effects(
+                    build.env.device,
+                    build.env.queue,
+                    frame.width,
+                    frame.height,
+                    frame.surface_format,
+                    effects,
+                )
+                .with_color_input(input)
+                .with_color_alias(alias)
+                .with_glare(color::glare(build.env))
+                .with_color_grading_lut(
+                    build
+                        .env
+                        .setting::<helio_pass_postprocess::ColorGradingLut>()
+                        .map(|lut| lut.0.clone()),
+                ),
+            ));
+            Ok(())
+        },
+    ));
 }
 
 #[cfg(test)]

@@ -138,7 +138,11 @@ impl RenderPass for PlanarReflectionPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "depth", "pre_aa"]
+        &[
+            helio_frame_api::gbuffer::GROUP,
+            helio_frame_api::gbuffer::DEPTH,
+            helio_frame_api::color::SCENE_COLOR,
+        ]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -189,20 +193,22 @@ impl RenderPass for PlanarReflectionPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let gbuffer = match ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
-            helio_core::ResourceKey::new("gbuffer"),
+            helio_core::ResourceKey::new(helio_frame_api::gbuffer::GROUP),
             "PlanarReflection",
         ) {
             Some(g) => g,
             None => return Ok(()),
         };
         let depth_view = ctx.depth;
-        let pre_aa_view = match ctx
-            .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("pre_aa"))
-        {
-            Some(v) => v,
-            None => return Ok(()),
-        };
+        let pre_aa_view =
+            match ctx
+                .registry
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                    helio_frame_api::color::SCENE_COLOR,
+                )) {
+                Some(v) => v,
+                None => return Ok(()),
+            };
         let planar_tex = match ctx.resource_pool.get_view(self.output) {
             Some(v) => v,
             None => return Ok(()),

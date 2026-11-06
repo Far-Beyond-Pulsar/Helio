@@ -19,8 +19,19 @@
 //!
 //! A surface at depth `d` and colour `c` is seen as `c * a + rgb`, sampled
 //! at `d`.
+//!
+//! The grid's depth mapping and that composite are [`SNIPPET`]'s WGSL
+//! (`MEDIA_NEAR`, `media_slice_from_view_depth`, `media_view_depth_from_slice`,
+//! `media_grid_w`, `media_seen`): the publisher writes slices by it and every
+//! reader samples by it, so none keeps its own copy.
 
 use helio_feature_api::BuildEnv;
+
+/// Marker opting a shader into [`SNIPPET`].
+pub const MARKER: &str = "//!use frame_media";
+/// The grid's depth mapping and the composite (see the module).
+pub const SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(MARKER, "shaders/media.wgsl");
 
 /// The resources a media feature published (see the module).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

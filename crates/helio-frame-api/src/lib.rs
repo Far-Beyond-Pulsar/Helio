@@ -5,7 +5,9 @@
 //!   feature places its nodes at a slot, or registers **drawers** into a phase
 //!   (and compute that must run before it); a preset lists slots and phases,
 //!   never a feature's nodes.
-//! - [`gbuffer`]: the G-buffer layout every GBuffer drawer writes.
+//! - [`gbuffer`]: the G-buffer layout every GBuffer drawer writes, and its
+//!   surface tags.
+//! - [`depth`]: the frame's depth resources (full-resolution depth, Hi-Z).
 //! - [`color`]: the scene colour chain post features read and advance.
 //! - [`media`]: the participating medium integrated along view rays, for
 //!   what composites at its own depth.
@@ -22,6 +24,7 @@
 //! Depends on `helio-core` and `helio-feature-api` only.
 
 pub mod color;
+pub mod depth;
 pub mod gbuffer;
 mod host;
 pub mod lighting;

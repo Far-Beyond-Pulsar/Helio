@@ -2583,23 +2583,27 @@ impl RenderGraph {
             });
             tex.create_view(&wgpu::TextureViewDescriptor::default())
         };
-        let dummy_depth = self.pool.get_view("depth").cloned().unwrap_or_else(|| {
-            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Lock Dummy Depth"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
+        let dummy_depth = self
+            .pool
+            .get_view(crate::resource_keys::DEPTH)
+            .cloned()
+            .unwrap_or_else(|| {
+                let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Lock Dummy Depth"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                tex.create_view(&wgpu::TextureViewDescriptor::default())
             });
-            tex.create_view(&wgpu::TextureViewDescriptor::default())
-        });
 
         let probes: Vec<Option<(usize, Vec<usize>)>> = self
             .passes

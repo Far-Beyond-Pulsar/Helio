@@ -30,7 +30,6 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 pub mod gpu_types;
 pub use gpu_types::*;
 
-
 mod lut_builder;
 pub use lut_builder::LutBuilder;
 
@@ -229,6 +228,9 @@ pub struct UserEffectEntry {
 pub struct PostProcessPass {
     color_input: &'static str,
     color_alias: Option<&'static str>,
+    /// The glare an optical effect published (`helio_frame_api::color::glare`),
+    /// composited with the scene's exposure; black without one.
+    glare: Option<&'static str>,
     /// The host's [`POST_BASELINE`] (`PostProcessSettings::default()`
     /// without one): the post settings while nothing publishes
     /// [`POST_SETTINGS`].
@@ -306,7 +308,7 @@ pub struct PostProcessPass {
     noise_texture: wgpu::Texture,
     noise_view: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
-    /// 1x1 black stand-in bound at b17 when the graph has no lens pass.
+    /// 1x1 black stand-in bound at b17 when nothing published glare.
     fallback_lens_view: wgpu::TextureView,
     /// 1x1 (0,0) stand-in bound at b18 when the graph has no velocity pass.
     fallback_velocity_view: wgpu::TextureView,
@@ -399,18 +401,13 @@ impl PostProcessPass {
         self.color_alias = alias;
         self
     }
-    /// Consume the linear HDR intermediate published by FXAA.
-    pub fn with_fxaa_input(mut self) -> Self {
-        self.color_input = "fxaa_color";
+
+    /// The glare to composite (`helio_frame_api::color::glare`): light an
+    /// optical effect adds inside the tone map with the scene's exposure.
+    pub fn with_glare(mut self, glare: Option<&'static str>) -> Self {
+        self.glare = glare;
         self
     }
-
-    /// Consume the HDR history resolve published by TSR.
-    pub fn with_tsr_input(mut self) -> Self {
-        self.color_input = "tsr_color";
-        self
-    }
-
     /// Optional GPU timestamps around the full-screen tonemap and effects pass.
     pub fn enable_uber_timing(&mut self, device: &wgpu::Device) -> bool {
         if !device.features().contains(
@@ -871,7 +868,7 @@ impl PostProcessPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        // Stand-in for the lens response when no LensFlarePass is in the graph.
+        // Stand-in for the glare when nothing published one.
         // Textures are zero-initialised, and black adds nothing.
         let fallback_lens_view = device
             .create_texture(&wgpu::TextureDescriptor {
@@ -992,8 +989,9 @@ impl PostProcessPass {
         );
 
         Self {
-            color_input: "pre_aa",
+            color_input: helio_frame_api::color::SCENE_COLOR,
             color_alias: None,
+            glare: None,
             default_settings,
             baseline: PostProcessSettings::default().to_gpu(),
             uber_timing_query: None,
@@ -1463,7 +1461,10 @@ impl RenderPass for PostProcessPass {
 
     fn reads(&self) -> &'static [&'static str] {
         // The scene colour it tone maps is the chain's (`declare_resources`).
-        &[POST_SETTINGS, "lens_output"]
+        match self.glare {
+            Some(glare) => helio_frame_api::static_names(&[POST_SETTINGS, glare]),
+            None => &[POST_SETTINGS],
+        }
     }
 
     fn render_pass_descriptor<'a>(
@@ -1484,12 +1485,14 @@ impl RenderPass for PostProcessPass {
         }
         // The frame's post settings; the defaults without a publisher.
         builder.read(POST_SETTINGS);
-        // Optional: graphs without a LensFlarePass never publish this, and the
-        // uber shader binds a 1x1 black fallback.
-        builder.read("lens_output");
+        // Optional: without a published glare the uber shader binds a 1x1
+        // black fallback.
+        if let Some(glare) = self.glare {
+            builder.read(glare);
+        }
         // Optional: graphs without a GBuffer pass or velocity pass fall back to
         // a 1x1 zero-velocity texture (no per-object motion blur).
-        builder.read("gbuffer_velocity");
+        builder.read(helio_frame_api::gbuffer::VELOCITY);
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
@@ -1618,16 +1621,19 @@ impl PostProcessPass {
 
         let camera_buf = ctx.camera;
 
-        // None when no LensFlarePass is in the graph; rebuild_bind_groups then
-        // binds the 1x1 black fallback. Part of the key so that a lens pass
+        // None when nothing published glare; rebuild_bind_groups then
+        // binds the 1x1 black fallback. Part of the key so that a glare pass
         // being added, removed, or resized rebuilds the group instead of
         // leaving b17 pointing at a stale view.
-        let lens_view = ctx
-            .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("lens_output"));
+        let lens_view = self.glare.and_then(|glare| {
+            ctx.registry
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(glare))
+        });
         let velocity_view = ctx
             .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"));
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                helio_frame_api::gbuffer::VELOCITY,
+            ));
         let lut_view = self.color_grading_lut.clone();
         let lut_view = lut_view.as_ref();
 

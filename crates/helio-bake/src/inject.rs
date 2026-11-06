@@ -100,14 +100,14 @@ impl RenderPass for BakeInjectPass {
         // Reflection cubemap
         if let Some(ref view) = self.data.reflection_view {
             frame.write(
-                helio_core::ResourceKey::new("baked_reflection"),
+                helio_core::ResourceKey::new(helio_frame_api::lighting::ENVIRONMENT_CUBES),
                 unsafe { extend_lifetime(view.as_ref()) },
                 "BakeInject",
             );
         }
         if let Some(ref sampler) = self.data.reflection_sampler {
             frame.write(
-                helio_core::ResourceKey::new("baked_reflection_sampler"),
+                helio_core::ResourceKey::new(helio_frame_api::lighting::ENVIRONMENT_CUBES_SAMPLER),
                 unsafe { extend_lifetime(sampler.as_ref()) },
                 "BakeInject",
             );

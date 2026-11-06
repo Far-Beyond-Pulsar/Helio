@@ -47,6 +47,25 @@ pub fn alias(env: &mut BuildEnv<'_>) -> Option<&'static str> {
     chain(env).1
 }
 
+/// Light an optical effect adds to the image inside the tone map (a lens's
+/// flares, ghosts, halo and streaks): a scene-linear `Rgba16Float` texture
+/// at any resolution, composited after exposure is metered and with the
+/// scene's exposure, so it never brightens its own metering. A post feature
+/// publishes its image by its own name with [`publish_glare`] when its node
+/// builds; the tone map reads [`glare`] when it builds and composites black
+/// when nothing published. Neither side knows the other.
+struct Glare(Option<&'static str>);
+
+/// Publishes `name` as the frame's glare for the nodes built after this one.
+pub fn publish_glare(env: &mut BuildEnv<'_>, name: &'static str) {
+    env.shared(|| Glare(None)).0 = Some(name);
+}
+
+/// The glare a node built so far published, if any.
+pub fn glare(env: &mut BuildEnv<'_>) -> Option<&'static str> {
+    env.shared(|| Glare(None)).0
+}
+
 /// Set by a preset whose anti-aliasing wants a reactive mask from what draws
 /// over the scene colour after lighting (transparency under HLFS and TSR).
 #[derive(Clone, Copy, Debug)]

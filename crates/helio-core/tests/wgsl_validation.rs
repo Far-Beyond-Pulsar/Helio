@@ -29,7 +29,8 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_frame_api::lighting::sky::ATMOSPHERE_SNIPPET,
     helio_frame_api::lighting::sky::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
-    helio_frame_api::lighting::VIEW_REMAP_SNIPPET,
+    helio_frame_api::media::SNIPPET,
+    helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
 ];
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
