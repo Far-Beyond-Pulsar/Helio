@@ -1346,7 +1346,7 @@ outside its test host. Phase B is done.
      step 1").
   1. A plugin that isn't installed means its kind is absent (the stand-ins
      above, `Unlit`, `GBufferClear` are the frame's side of it; the engine
-     still links every plugin).
+     still links every plugin). Done (see "As built, Phase C step 2").
   2. The sculpt tool, the terrain panel and the light UI leave
      `ui_level_editor` (plugin-provided tool modes, panels and undo).
   3. The mesh components (and with them the material assets and the engine's
@@ -1506,6 +1506,177 @@ snapshots and exes):
   `presets`, engine_backend's lib with the authored LOD's GPU tests and
   `scene_join_rows`, helio_component's lib), but water's known
   `caustics_projection_writes_signal_for_the_cathedral_pool`.
+
+As built, Phase C step 2 (2026-11-05, branch `rewrite/p14-absent-plugins` in
+both repos): **a plugin a project does not enable is absent.** Its components
+are not registered, its Helio features are not in the render graph (the
+frame's stand-ins take their place), its settings, tool modes and menus do not
+appear, and a game built for the project does not link it. All of it is
+Pulsar's; Helio's only change here is this section.
+
+How others do it, and why ours:
+- Unreal: a `.uplugin` describes a plugin (modules by type, `EnabledByDefault`,
+  plugin dependencies); the `.uproject`'s `Plugins` list enables or disables
+  them per project; the editor loads only enabled plugins' module DLLs, and a
+  packaged game links only theirs (UnrealBuildTool generates the module list).
+- Bevy: `PluginGroup`s (`DefaultPlugins.build().disable::<T>()`), chosen in
+  code per binary; no per-project data, and an editor serving many projects
+  would need one build each.
+- Unity: packages in the project manifest; scripts compile per project.
+- Ours is Unreal's model with the list in data, minus DLL loading: one editor
+  binary serves every project, so the editor links every installed plugin and
+  the project's list decides which register (a runtime gate, the same thing
+  Unreal gets from not loading a DLL); a game is built per project, so it
+  links only the enabled plugins (Unreal's packaged build). A kind is decided
+  in one place (the project file), never by editing a host's dependencies, and
+  the gate is generic: no host, registry or editor panel names a plugin to
+  gate it.
+
+**The pieces** (Pulsar):
+- **Descriptor** `plugins/vendor/<kind>/pulsar-plugin.toml` (16 plugins): `id`,
+  `name`, `description`, `enabled_by_default`, `requires` (other plugins its
+  modules link), `[modules] runtime` (what a game links: the component crate)
+  and `editor` (the editor crate). The runtime module carries it
+  (`pulsar_plugins::installed!("../pulsar-plugin.toml")`, which also gives the
+  crate `plugin_descriptor()`; the editor crates' `PluginMetadata` name and
+  description are the descriptor's now, one owner). Linked = installed.
+- **Project list**: `Pulsar.toml`'s `[plugins]` table, `"pulsar.voxel" = false`;
+  a plugin the list does not name keeps its default. `pulsar_plugins::resolve`:
+  enabled = listed or default; an enabled plugin's requirements are enabled
+  with it unless the list turns one off; a plugin whose requirement is off or
+  not installed is disabled, with a problem saying why (logged). Today's
+  requirements are the component crates' real links: voxel requires sky, fog,
+  post, foliage and lights (presets, the sun, its fog and sky rows), fog
+  requires post (`FogMode`).
+- **The gate** (`crates/core/pulsar_plugins`, no engine dependencies): every
+  registration a plugin submits names its **origin**, the package that
+  submitted it (`origin: pulsar_plugins::origin!()`); the registries iterate
+  `pulsar_plugins::registered::<T>()` instead of `inventory::iter`, which skips
+  a registration whose origin is a module of a disabled plugin
+  (`origin_enabled`). Types gated: `RenderFeatureRegistration`,
+  `AnimatedContentRegistration`, `ViewOverscanRegistration`,
+  `EditorLinesRegistration`, `SceneRowsRegistration`, `ObjectJoinRegistration`,
+  `LevelSingletonRegistration`, `SpaceProducerRegistration` (engine_backend),
+  `SettingsGroupRegistration` (pulsar_settings), `SceneSubsystemRegistration`,
+  `ScenePayloadRegistration` (pulsar_world_registry),
+  `TextureBindingRegistration`, `MovabilityRegistration`, `GroundMaterialNames`
+  (helio_component). World component classes: `WorldComponentRegistration`
+  gained `origin` (emitted by `#[register_world_component]`); the registry's
+  own copy filters the class list and the classes' ticks, events and
+  unfinished reports (cached per activation; `ABI_VERSION` 2). A disabled
+  plugin's stored components load as `UnresolvedComponent`s, kept verbatim, so
+  saving loses nothing; `level_rules::check_new_components` refuses a class
+  nothing registers (`NOT_REGISTERED`).
+- **Activation**: `engine_state::set_project_path` calls
+  `pulsar_plugins::activate_project` (read, resolve, activate). Nothing
+  activated (a game, a test) = every linked plugin enabled.
+- **Linking, editor**: `plugins/installed` (`installed_plugins`) depends on and
+  re-exports every installed plugin's runtime modules and, with `editor`, its
+  editor modules; its manifest blocks and re-exports are generated from the
+  descriptors (`tests/installed_set.rs` fails on drift,
+  `UPDATE_INSTALLED_PLUGINS=1` rewrites; it also checks every descriptor is
+  installed by its runtime module and that a plugin submits registrations only
+  from crates its descriptor lists). The editor binary (`pulsar_engine`) links
+  it. `ui_core` lost its 16 `*_plugin` dependencies.
+- **Linking, game**: `pulsar_game` names no plugin (16 `*_component`
+  dependencies, the `extern crate`s and the `scene::LightComponent` re-export
+  are gone). `engine_backend/build.rs` bakes the installed descriptors and
+  each runtime module's dependency spec (`game_plugins.rs`); the project
+  builder writes a plugin block in the generated game's `[dependencies]`
+  (regenerated every build from `Pulsar.toml`, a user-owned manifest's own line
+  for a module wins) and `src/plugins.rs` (`use <module> as _;` per enabled
+  runtime module, `mod plugins;` in `main.rs` and the PIE `lib.rs`).
+- **Other hosts**: `scene_inventory` links `installed_plugins`;
+  `pulsar_package`'s, `pulsar_game`'s and `ui_level_editor`'s tests reach
+  plugin types through `installed_plugins` (dev-dependency, runtime modules)
+  where they named the crates.
+- **A drawer without its views**: the meshes' shadow drawer (the only
+  shadow-caster phase drawer) built a `ShadowDirtyPass` that needs the lights'
+  `LightDirtyFlags`, so a preset without the lights failed to build ("Shadow
+  Dirty Flags needs the Shadow Matrices node"). The phase's views are the
+  lights' shadow faces: without them both nodes now build nothing.
+- **Editor UI still in `ui_level_editor`** (step 3 moves it into the plugins):
+  minimal runtime gates so a disabled plugin's UI does not appear. Tool modes
+  (spline, voxel sculpt, terrain) register only while their plugin is enabled
+  (`register_tool_modes`); the Create menu offers a kind only while its class
+  is registered (`create::available`); the World Settings sky and wind
+  sections, the environment mixer's add buttons, sidebar entries and starter
+  setups likewise (`environment::available`). Every add goes through
+  `level_rules`, which refuses an unregistered class.
+
+**What step 3 must finish** (also the handover note):
+- `ui_level_editor` still depends on `voxel_component`, `lights_component`,
+  `splines_component`, `sprites_component`, `portals_component`,
+  `fog_component`, `post_component`, `water_component`, `foliage_component`
+  and `sky_component`, so the editor links them through it as well as through
+  `installed_plugins`. Move the sculpt and terrain modes, the spline mode, the
+  terrain panel, the light UI, the World Settings sky/wind/environment
+  sections, the portal debug overlay and the create entries into the plugins'
+  editor crates as registrations carrying an origin (tool modes, panels,
+  create entries, undo, save hooks), then drop those dependencies and the
+  `pulsar_plugins::is_enabled("pulsar.*")` calls in `register_tool_modes`.
+- `helio_component` and `engine_backend` still name the meshes' and the
+  materials' crates (mesh components, material assets, the engine's material
+  table, VG host, LOD, picking): the meshes and materials plugins are absent
+  from the graph and the registries when disabled, but their crates link
+  through the engine. The mesh components leaving `helio_component` (step 3)
+  ends that.
+- Cross-plugin links recorded as `requires`: voxel's component crate reads
+  sky, fog, post, wind and light components; fog reads post's `FogMode`. Each
+  should become the owner's api (or an optional contract), so voxel works with
+  any of them disabled.
+- The pre-rewrite plugins (physics, input, skm, ui_editor, asset_viewer,
+  blueprint, code/matter/shader/table editors) have no descriptor; the
+  linked editor provider registration (`plugin_manager::LinkedEditorProvider`)
+  has no origin (the Blueprint submodule constructs it). Give them descriptors
+  at the repo split (step 4).
+- `pulsar_scenedb`'s GPU mirror/clear/handle-ledger registrations and
+  `pulsar_reflection`'s method/property-editor registrations (external
+  crates) carry no origin: a disabled plugin's are inert (no instance of its
+  classes exists) but still linked in the editor.
+
+**Verified** (against p13: Helio 6214f73a / Pulsar 22b5b4f69, its kept
+snapshots and exes):
+- **Absent**: `installed_plugins`' `absent_plugins` test (every installed
+  plugin linked, as in the editor; a project disabling voxel, lights and
+  materials, activated through `engine_state::set_project_path`): their
+  component classes are not registered (others are); their features
+  (`helio.voxel`, the lights' five, `pulsar.materials`) are not in the
+  renderer's set and no preset's graph has a light or voxel pass or the
+  material texture table input, the G-buffer presets resolve through
+  `Unlit`; their settings groups are absent; a level holding a light and a
+  voxel terrain loads, keeps both records verbatim and refuses new ones; the
+  game renderer draws the level's cube unlit in its own albedo (centre pixel
+  145, 73, 8); another project enabling them brings everything back.
+  engine_backend's `generated_game_links_only_enabled_plugins`: the generated
+  manifest and `src/plugins.rs` name the 13 other runtime modules, follow the
+  list when it changes, and keep a user's own line.
+  `a_project_without_some_plugins_compiles_without_them` (pulsar_game,
+  ignored like the drift check, run once: 738 s): the generated game for a
+  project disabling the three compiles (`cargo check`), and `cargo tree` of it
+  has none of their crates.
+- **Nothing else changed**: Pulsar's `plugin_pass_lists` dump is p13's with
+  one difference: voxel's `VoxelChunks` now appears in 16 graphs (and TSR
+  reads its `tsr_stochastic`). The p13 test named 15 component crates and
+  never linked voxel (it came only through `pulsar_game`, which the test
+  binary never referenced); it now links the installed set. With those lines
+  removed the dump is byte-identical (3792 lines). Helio's preset snapshot is
+  unchanged by construction: no Helio code changed.
+- voxel_craft (`voxel_craft_p13.exe` vs p14, alternating, 8-frame bursts at 4
+  poses): identical render-graph dumps (29 passes); mean |Δ| p13-p14
+  0.21-0.36 against p13-p13 0.18 and p14-p14 0.37, image means 61.40-61.45.
+  The p13 runs again spent their first frame compiling pipelines (130 s and
+  96 s against 22 s).
+- `cargo clippy --workspace --all-targets` with CI's flags: no errors (it
+  includes `cargo check`). `one_owner` passes. `pulsar_plugins` (8 tests:
+  descriptors, project list, defaults, requirements, problems),
+  `installed_plugins`' `installed_set` (3), the lib tests of `pulsar_game`,
+  `engine_backend`, `ui_level_editor` and the 32 plugin component and editor
+  crates (469 pass), `pulsar_world_registry` (all pass). Known failure, not
+  this step's: ui_level_editor's
+  `sculpt_stamps_do_not_rebuild_the_properties_section` (since p9); its
+  sibling `the_layers_stack_offers_headings_and_cards_not_one_giant_row`
+  passes now that the tests link the editor modules.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
