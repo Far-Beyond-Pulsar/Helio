@@ -443,7 +443,13 @@ fn cs_bloom_down_extract(@builtin(global_invocation_id) gid: vec3<u32>) {
             let sx = ix * 2 + dx;
             let sy = iy * 2 + dy;
             if sx < hw && sy < hh {
-                color += textureLoad(hdr_input, vec2<i32>(sx, sy), 0).rgb;
+                // Reject invalid channels before the first spatial average.
+                // One NaN/inf otherwise contaminates the entire bloom pyramid
+                // footprint, covering valid sky, geometry and editor overlays
+                // with a camera-dependent black rectangle at composition.
+                let tap = textureLoad(hdr_input, vec2<i32>(sx, sy), 0).rgb;
+                let invalid = (bitcast<vec3<u32>>(tap) & vec3<u32>(0x7f800000u)) == vec3<u32>(0x7f800000u);
+                color += select(tap, vec3<f32>(0.0), invalid);
             }
         }
     }
