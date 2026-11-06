@@ -21,9 +21,13 @@ fn perf(env: &mut BuildEnv<'_>) -> Arc<Mutex<PerfOverlayShared>> {
     let counter = diagnostics::tile_counter(env);
     let probe = diagnostics::surface_probe(env);
     let (device, (width, height)) = (env.device, env.internal_size());
-    env.shared(|| PerfState(PerfOverlayShared::new(device, width, height, counter, probe)))
-        .0
-        .clone()
+    env.shared(|| {
+        PerfState(PerfOverlayShared::new(
+            device, width, height, counter, probe,
+        ))
+    })
+    .0
+    .clone()
 }
 
 /// The performance overlay ([`crate`]). Its mode is a setting

@@ -835,13 +835,10 @@ impl RenderPass for PerfOverlayPass {
                 .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(
                     helio_frame_api::gbuffer::GROUP,
                 )),
-            shared
-                .tile_counter
-                .as_ref()
-                .and_then(|counter| {
-                    ctx.registry
-                        .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(counter.resource))
-                }),
+            shared.tile_counter.as_ref().and_then(|counter| {
+                ctx.registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(counter.resource))
+            }),
         ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
@@ -1035,7 +1032,10 @@ impl MaterialProfiler {
         // Every snippet of the probe, the ones its own text uses included.
         let snippets = probe.map_or_else(|| vec![LAMBERT_PROBE], |probe| probe.snippets.clone());
         let markers: String = snippets.iter().map(|s| format!("{}\n", s.marker)).collect();
-        let source = format!("{markers}{}", include_str!("../shaders/profile_material.wgsl"));
+        let source = format!(
+            "{markers}{}",
+            include_str!("../shaders/profile_material.wgsl")
+        );
         let profile_shader = helio_core::shader::module_with(
             device,
             "Material Profile Shader",
@@ -1045,18 +1045,16 @@ impl MaterialProfiler {
 
         let profile_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Material Profile BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-            ],
+                count: None,
+            }],
         });
 
         let profile_pipeline_layout =
@@ -1179,12 +1177,10 @@ impl MaterialProfiler {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Material Profile BG"),
             layout: &self.profile_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buf.as_entire_binding(),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            }],
         });
 
         encoder.write_timestamp(&self.query_set, 0);
