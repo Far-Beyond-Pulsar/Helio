@@ -224,7 +224,13 @@ impl RenderPass for BufferViewPass {
         ctx.write_buffer(
             &self.view_buf,
             0,
-            &[self.mode.to_le_bytes(), [0; 4], [0; 4], [0; 4]].concat(),
+            &[
+                u32::from(self.mode == NORMALS_VIEW).to_le_bytes(),
+                [0; 4],
+                [0; 4],
+                [0; 4],
+            ]
+            .concat(),
         );
         let Some(mut rp) = ctx.render_cmds() else {
             return Ok(());
