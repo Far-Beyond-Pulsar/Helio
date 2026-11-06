@@ -58,6 +58,22 @@ struct AtmosphereParams {
     cloud_voxel_size: f32,
     cloud_voxel_fill: f32,
     cloud_reserved: vec2<f32>,
+    night_sky_enabled: u32,
+    star_count: f32,
+    star_brightness: f32,
+    star_twinkle_fraction: f32,
+    star_twinkle_speed: f32,
+    star_seed: u32,
+    shooting_stars_enabled: u32,
+    shooting_star_rate: f32,
+    shooting_star_speed: f32,
+    shooting_star_length: f32,
+    sky_texture_source: u32,
+    sky_texture_intensity: f32,
+    sky_texture_opacity: f32,
+    sky_texture_yaw: f32,
+    sky_texture_pitch: f32,
+    sky_texture_roll: f32,
 }
 
 // Per frame, resolved on the GPU (`resolve`).
@@ -65,10 +81,11 @@ struct AtmosphereFrame {
     // Planet centre relative to the camera (km); w: 1 when an atmosphere is
     // active.
     planet: vec4<f32>,
-    // Direction towards the sun; w: cos of its angular radius.
+    // Reference direction for the sky-view LUT's angular coordinate system;
+    // w: cos of the atmosphere's default emitter radius.
     sun: vec4<f32>,
-    // The sun's illuminance (the directional light's colour x intensity);
-    // w: distance (km) the aerial-perspective volume reaches.
+    // First light's legacy illuminance (rgb); all current sky lighting reads
+    // directional_lights below. w: aerial-perspective range in km.
     sun_illuminance: vec4<f32>,
     // Camera relative to the planet centre (km); w: unused.
     eye: vec4<f32>,
@@ -89,6 +106,10 @@ struct AtmosphereFrame {
     cloud_meso_fine_offset: vec4<f32>,
     cloud_shape_offset: vec4<f32>,
     cloud_detail_offset: vec4<f32>,
+    // Up to 32 directional lights, each stored as direction, radiance,
+    // then emitter metadata (radius, brightness, texture kind, enabled).
+    directional_lights: array<vec4<f32>, 96>,
+    directional_light_count: vec4<u32>,
 }
 
 // Whether the frame draws clouds.
