@@ -25,6 +25,7 @@
 
 pub mod color;
 pub mod depth;
+pub mod diagnostics;
 pub mod gbuffer;
 mod host;
 pub mod lighting;

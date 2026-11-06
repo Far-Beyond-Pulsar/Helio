@@ -2137,6 +2137,132 @@ could make):
   random world, the sculpt stamps perf test) are the cleanup phase's (p17):
   each fails identically on p15 and none is in code this step changed.
 
+As built, p17 (2026-11-06, branch `rewrite/p17-cleanup` in both repos): the
+cleanup phase before the repo split. Every open item of p5-p16 was checked
+against the code (some had been fixed since: GI's mesh tracer already binds
+`MaterialStandIn`, `DEFAULT_PBR` is gone since the templates became surface
+functions drawers compose, `SetMovability` was already generic over a
+`movability` property and only its message named kinds).
+
+**New Helio seams** (each generic; no kind named in Helio):
+- *A feature brings scene derivations*
+  (`FeatureRegistrar::scene_derivation(SceneDerivationFactory)`): the node
+  registry keeps them, the compiled graph carries them, and the renderer makes
+  each one once, by name, after the host's own derivations
+  (`with_scene_derivation`), so it reads what they published. A host needs no
+  wiring for a kind's derived buffers.
+- *A feature declares its swappable passes* (`FeatureRegistrar::swappable`,
+  `swap_group`): merged into the preset's `SwapPolicy` when the graph
+  compiles. Phase B had dropped every moved pass from the policy, so a shader
+  reload of a plugin's pass rebuilt the whole graph; each plugin feature now
+  declares its own (the shadow and Hi-Z groups by the meshes, which link both
+  sides).
+- *Indirect specular layers at any resolution*
+  (`helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET`,
+  `indirect_specular_at(layer, uv)`): SSR traces at half the internal
+  resolution while the deferred lighting `textureLoad`ed the layer at the
+  full-resolution pixel, reading the wrong texel (a quarter of the screen,
+  magnified). The contract now says a layer may be any resolution and readers
+  reconstruct it with the frame's premultiplied 2x2 filter (SSR's compose pass
+  had its own copy; both use the snippet now).
+- *Diagnostics offers* (`helio_frame_api::diagnostics`): the performance
+  overlay measures what kinds offer while a graph builds, a `TileCounter`
+  (the lights' tile light counts, written after their deferred node) and a
+  `SurfaceProbe` (the materials' default BRDF through `pbr_eval`), with a
+  Lambert stand-in. Its GGX copy and the `scene_lights`/`tile_light_counts`
+  literals are gone (seven `one_owner` exceptions); its probe lights are
+  synthetic, so it no longer read the light list with a 48-byte struct of its
+  own over 128-byte rows.
+
+**Lights and sky**: the directional light is derived once, by one kernel
+(`helio_pass_light_cull::directional`, `light_is_sun`), for every host: the
+lights' join records it after joining, and `DirectionalLightDerivation`
+(brought by the binning feature) derives it from a light list a standalone
+host wrote itself, unless a derivation before it published one. GI's sun and
+the atmosphere's sun read `DIRECTIONAL_LIGHT`; neither scans the light list.
+
+**How others do it, and why ours**: Unreal's renderer picks the atmosphere
+lights once per scene (`FScene::AtmosphereLights`) and every consumer reads
+them; Unity HDRP resolves one sun for the frame; Bevy's atmosphere takes the
+first directional light. Ours is the same one-pick rule, but owned by the
+lights and run on the GPU for any host, which a plugin layout needs: a host
+that never heard of a sky still gets the row the sky reads. Unreal hot-reloads
+by shader type without rebuilding the renderer's pass setup; ours lets each
+owner say which of its passes are self-contained. Unreal traces SSR at reduced
+resolution and upsamples in the reflection composite; ours puts the
+reconstruction in the frame contract so every reader of every layer agrees.
+Unreal's shader-complexity and light-complexity views read what the material
+compiler and the light grid report; ours lets the owners offer the same.
+
+**Voxel requires nothing**: `pulsar.voxel` linked the sky, fog, post,
+foliage and lights component crates (presets compose those kinds, the air
+sync derived the sky and haze from the terrain, the runtime read the sun).
+Now:
+- *A ground's dependents follow it by method*: the air rules moved to their
+  owners as component methods, `AtmosphereComponent::follow_ground` and
+  `GlobalFogComponent::follow_ground` (the sky's air presets and the fog's
+  haze presets are those plugins' vocabulary); voxel's sync calls
+  `follow_ground` on whatever instances of its terrain's object answer it
+  (`components_with_method`, change cursors by component id), so it names
+  no kind and a third kind can follow a ground the same way.
+- *Presets and the sun by class name and property* (`voxel_component::others`):
+  the replaced sky, wind, haze and ground cover, the updated sun and look,
+  and the runtime's sun are found by `ComponentMeta::class_name` and read
+  through `pulsar_world_registry::get_component_property`, the scripting
+  path. Voxel's descriptor requires nothing; the five crates are its tests'
+  dev-dependencies.
+How others do it: Unreal's landscape and sky are independent actors a level
+template composes, and Unity's terrain knows no sky; Bevy plugins meet at
+components another plugin queries by type, which is a link. Ours composes
+by name and method, so a plugin never links another kind's crate, and the
+owner of a concept (the sky's air) keeps its rules.
+
+**Foliage on a ground that exists**: since p14 the voxel feature is in
+every editor graph and offered its ground to foliage at build time even
+with no terrain, so a meadow grew on nothing (both render-acceptance
+foliage tests). `GroundGeometry::present` (default true) says whether a
+ground has content; the voxel ground reports false without volumes, and
+placement grows on its built-in ground meanwhile (an offered ground that is
+present but loading still has no chart, so nothing pops).
+
+**Smaller owners' fixes**: the asset viewer's material program had a copy of
+the meshes' G-buffer `Globals` only for `frame` and `time`; it has its own
+two-field clock (the template's time hook keys on the tag, not the layout).
+The owners' own shaders take their declarations from their snippets: the
+lights (`GpuLight`, `LightMatrix` in culling, deferred, HLFS, shadows),
+water (`WaterVolume`, one snippet for nine shaders), sprites
+(`SpriteInstance`) and portals (`GpuPortalView`).
+
+**Tests** (each failure's cause, and whether the test or the code was wrong,
+is in the p17 handover note): ui_build's plan tests (test wrong: stale after
+the regeneration step), plugin_manager's dependency order (Linux: a plugin
+loaded through `/proc/self/fd/N` whose fd was closed made the next plugin
+reuse its name), the packaging smoke (the packager now links the installed
+plugins, so their record migrations run in the cook), the random world
+(example wrong for Earth's 7-layer preset: `remove_layers_of_kind`), the
+sculpt stamps (a property type unregistered for JSON made every change read
+as shown), water caustics (test rebuilt a stale pipeline: it now drives
+`CausticsProjection`), scene_inventory (renderer roots are every plugin's
+`feature`/`host` crates; pass crates scanned in every plugin; ledger rows
+brought up to date).
+
+**CI**: `.config/nextest.toml`'s `ci` profile leaves out, by name, the suites
+that render frames (lavapipe SIGSEGVs and minutes per frame took ~90 tests and
+the 60-minute limit on p16); the CPU tests of the same crates still run.
+
+**Not done yet** (p17 continues on the same branches; nothing here is
+handed off): render acceptance's water fog after a move, a light's shadows
+off, the lens prescription, the depth and normal debug views and the windy
+lake; dense VG acceptance (3); the material table as entities (sections and
+voxel slots indexing one table; voxel's unused `VoxelMaterialMap` path is
+the start); `shader_editor` into `pulsar.materials`; animation out of
+`SkeletalMeshComponent`; the portals' second G-buffer drawer and water's
+capture graph (drawers drawing extra views); the row join's per-kind
+placements; the mesh host's by-name ray-tracing refusal; the fog block in
+Helio's post-process ABI (fog -> post); per-drawer G-buffer output
+structs; descriptors for the pre-rewrite (DLL) plugins; `ObjectType::Light`/
+`Mesh`.
+
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
 helio-xr, helio-settings, and a test host (`helio-components` +

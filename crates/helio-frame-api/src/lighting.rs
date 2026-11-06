@@ -5,7 +5,7 @@
 //! | Contract | Form | Published today by | Stand-in |
 //! |---|---|---|---|
 //! | [`INDIRECT_DIFFUSE`] | buffer, 2 words a pixel | GI probes' resolve | sky/ambient only |
-//! | [`INDIRECT_SPECULAR_LAYERS`] | rgba16f textures, straight alpha | SSR, planar reflections | no layer |
+//! | [`INDIRECT_SPECULAR_LAYERS`] | rgba16f textures, straight alpha, any resolution | SSR (half res), planar reflections | no layer |
 //! | [`ENVIRONMENT_PROBES`] + [`ENVIRONMENT_CUBES`] | probe rows + cube array | reflection captures, bake | sky cube only |
 //! | [`SUN_VISIBILITY`] / [`DIRECTIONAL_VISIBILITY`] | rgba16f, full res | clouds / terrain | fully visible |
 //! | [`sun_transmittance`] | world-space map along the sun + frame | clouds | fully lit |
@@ -96,12 +96,23 @@ pub fn lighting_settings(env: &BuildEnv<'_>) -> LightingSettings {
 pub const INDIRECT_DIFFUSE: &str = "indirect_diffuse";
 
 /// Screen-space indirect specular layers, composited over the environment
-/// probes in index order: each is an `Rgba16Float` texture loaded at the
-/// lighting pixel, `rgb` the reflected radiance before Fresnel and `a` its
-/// coverage (`spec = mix(spec, rgb * F, a)`). A publisher takes the next free
-/// layer with [`claim_specular_layer`] when it builds, so publishers built
-/// later win where they cover.
+/// probes in index order: each is an `Rgba16Float` texture at whatever
+/// resolution its publisher traces (SSR: half the internal resolution), `rgb`
+/// the reflected radiance before Fresnel and `a` its coverage. A reader takes
+/// a layer at a lighting pixel with [`INDIRECT_SPECULAR_SNIPPET`]'s
+/// `indirect_specular_at` (never a `textureLoad` at the pixel, which reads a
+/// smaller layer at the wrong place) and composites it as
+/// `spec * (1 - a) + rgb * F`. A publisher takes the next free layer with
+/// [`claim_specular_layer`] when it builds, so publishers built later win
+/// where they cover.
 pub const INDIRECT_SPECULAR_LAYERS: [&str; 2] = ["indirect_specular_0", "indirect_specular_1"];
+
+/// Marker opting a shader into [`INDIRECT_SPECULAR_SNIPPET`].
+pub const INDIRECT_SPECULAR_MARKER: &str = "//!use frame_indirect_specular";
+/// `indirect_specular_at(layer, uv)`: an [`INDIRECT_SPECULAR_LAYERS`] layer
+/// at a lighting pixel whatever its resolution (premultiplied bilinear).
+pub const INDIRECT_SPECULAR_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(INDIRECT_SPECULAR_MARKER, "shaders/indirect_specular.wgsl");
 
 /// Indirect-specular layers claimed by the nodes built so far.
 struct ClaimedLayers(usize);

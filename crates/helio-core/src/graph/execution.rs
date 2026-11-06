@@ -290,6 +290,10 @@ pub struct RenderGraph {
     /// Kept apart from `graph_data` (which holds a single value, the
     /// rebuilder) so a builder can set both. See [`SwapPolicy`].
     swap_policy: Option<crate::graph::SwapPolicy>,
+    /// The scene derivations the graph's features bring
+    /// ([`crate::SceneDerivationFactory`]), taken by the renderer that
+    /// installs the graph.
+    scene_derivations: Vec<crate::SceneDerivationFactory>,
     /// Resource names registered via [`declare_external_input`](Self::declare_external_input) —
     /// resources supplied by the host rather than written by any pass in the
     /// graph. `validate_dependencies` treats every name in this set as
@@ -434,6 +438,7 @@ impl RenderGraph {
             resize_pending: false,
             graph_data: None,
             swap_policy: None,
+            scene_derivations: Vec::new(),
             external_inputs: std::collections::HashSet::new(),
             frame_input_publishers: Vec::new(),
             frame_storage: RenderFrameStorage::new(),
@@ -573,6 +578,18 @@ impl RenderGraph {
     /// graph without a policy is always rebuilt whole.
     pub fn set_swap_policy(&mut self, policy: crate::graph::SwapPolicy) {
         self.swap_policy = Some(policy);
+    }
+
+    /// Records the scene derivations the graph's features bring, for the
+    /// renderer that installs it ([`take_scene_derivations`](Self::take_scene_derivations)).
+    pub fn set_scene_derivations(&mut self, derivations: Vec<crate::SceneDerivationFactory>) {
+        self.scene_derivations = derivations;
+    }
+
+    /// The scene derivations the graph's features bring (once: the renderer
+    /// makes each it has not made yet).
+    pub fn take_scene_derivations(&mut self) -> Vec<crate::SceneDerivationFactory> {
+        std::mem::take(&mut self.scene_derivations)
     }
 
     /// The policy set by [`set_swap_policy`](Self::set_swap_policy), if any.

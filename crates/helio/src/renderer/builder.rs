@@ -275,7 +275,10 @@ impl RendererBuilder {
 
         renderer.owns_device = self.owns_device;
         renderer.set_editor_mode(self.editor_mode);
-        renderer.scene_derivations = self.scene_derivations;
+        // The host's derivations first, then the ones the features brought
+        // (made at construction), which may read what the host's published.
+        let features = std::mem::replace(&mut renderer.scene_derivations, self.scene_derivations);
+        renderer.scene_derivations.extend(features);
         renderer.set_clear_color(self.clear_color);
 
         renderer

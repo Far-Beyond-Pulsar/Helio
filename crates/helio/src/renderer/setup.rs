@@ -164,7 +164,8 @@ impl Renderer {
         let enable_jitter = graph.requires_camera_jitter();
 
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        let renderer = Self {
+        let feature_derivations = graph.take_scene_derivations();
+        let mut renderer = Self {
             device,
             queue,
             graph,
@@ -183,6 +184,7 @@ impl Renderer {
             frame_count: 0,
             prev_view_proj_by_view: Default::default(),
             scene_derivations: Vec::new(),
+            feature_derivations: Vec::new(),
             world_origin: glam::DVec3::ZERO,
             debug_camera_buffer,
             clear_color: [0.02, 0.02, 0.03, 1.0],
@@ -246,7 +248,7 @@ impl Renderer {
             #[cfg(not(target_arch = "wasm32"))]
             xr_mirror_size: [0, 0],
         };
-
+        renderer.adopt_scene_derivations(feature_derivations);
         renderer
     }
 }

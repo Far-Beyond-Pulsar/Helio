@@ -469,6 +469,8 @@ pub struct NodeRegistry {
     marker: Option<MarkerFn>,
     preparers: Vec<PrepareFn>,
     finishers: Vec<FinishFn>,
+    scene_derivations: Vec<helio_core::SceneDerivationFactory>,
+    swap_policy: helio_core::SwapPolicy,
 }
 
 /// Pins of generated nodes by kind, shared by a registry and its clones so a
@@ -575,6 +577,31 @@ impl NodeRegistry {
     /// Adds a step run before any node of a graph is built.
     pub fn add_preparer(&mut self, prepare: PrepareFn) {
         self.preparers.push(prepare);
+    }
+
+    /// Adds a scene derivation the registry's graphs bring (see
+    /// [`helio_core::SceneDerivationFactory`]); a later one with the same
+    /// name replaces the earlier.
+    pub fn add_scene_derivation(&mut self, derivation: helio_core::SceneDerivationFactory) {
+        self.scene_derivations
+            .retain(|existing| existing.name != derivation.name);
+        self.scene_derivations.push(derivation);
+    }
+
+    /// The scene derivations the features registered, in registration order.
+    pub fn scene_derivations(&self) -> &[helio_core::SceneDerivationFactory] {
+        &self.scene_derivations
+    }
+
+    /// Declares what of the features' passes shader hot reload may swap
+    /// without rebuilding the graph (see [`helio_core::SwapPolicy`]).
+    pub fn add_swap_policy(&mut self, policy: &helio_core::SwapPolicy) {
+        self.swap_policy = std::mem::take(&mut self.swap_policy).merged(policy);
+    }
+
+    /// What the features declared swappable.
+    pub fn swap_policy(&self) -> &helio_core::SwapPolicy {
+        &self.swap_policy
     }
 
     /// The steps run before any node is built, in registration order.

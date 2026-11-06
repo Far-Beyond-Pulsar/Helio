@@ -103,6 +103,23 @@ impl SwapPolicy {
         self
     }
 
+    /// This policy and `other`'s declarations: a preset's own passes and
+    /// what the features it builds with declared for theirs
+    /// (`FeatureRegistrar::swappable`, `FeatureRegistrar::swap_group`).
+    pub fn merged(mut self, other: &SwapPolicy) -> Self {
+        for listed in &other.independent {
+            if !self.independent.contains(listed) {
+                self.independent.push(listed);
+            }
+        }
+        for group in &other.groups {
+            if !self.groups.contains(group) {
+                self.groups.push(group.clone());
+            }
+        }
+        self
+    }
+
     fn lists(&self, type_name: &str) -> bool {
         self.independent.iter().any(|listed| *listed == type_name)
             || self
