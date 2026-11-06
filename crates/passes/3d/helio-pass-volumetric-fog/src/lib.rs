@@ -89,7 +89,7 @@ pub fn shader_source() -> String {
     format!(
         "{}\n{}\n{source}",
         helio_pass_shadow_matrix::SUN_OCCLUSION_SNIPPET.source,
-        helio_pass_sky::clouds::CLOUD_SHADOW_SNIPPET.source
+        helio_sky_api::CLOUD_SHADOW_SNIPPET.source
     )
 }
 
@@ -697,7 +697,7 @@ impl VolumetricFogPass {
                     mapped_at_creation: false,
                 }),
             ),
-            fallback_cloud_shadow: helio_pass_sky::clouds::cloud_shadow_fallback(device),
+            fallback_cloud_shadow: helio_sky_api::cloud_shadow_fallback(device),
             inject_pipeline,
             integrate_pipeline,
             inject_bgl,
@@ -791,8 +791,8 @@ impl RenderPass for VolumetricFogPass {
             helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
             helio_pass_shadow_matrix::SUN_OCCLUSION_PAGES,
             helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
-            helio_pass_sky::clouds::CLOUD_SHADOW_MAP,
-            helio_pass_sky::clouds::CLOUD_SHADOW_FRAME,
+            helio_sky_api::CLOUD_SHADOW_MAP,
+            helio_sky_api::CLOUD_SHADOW_FRAME,
         ]
     }
 
@@ -973,10 +973,10 @@ impl RenderPass for VolumetricFogPass {
         };
         let cloud_shadow = ctx
             .registry
-            .texture_binding(helio_pass_sky::clouds::CLOUD_SHADOW_MAP)
+            .texture_binding(helio_sky_api::CLOUD_SHADOW_MAP)
             .zip(
                 ctx.registry
-                    .buffer_binding(helio_pass_sky::clouds::CLOUD_SHADOW_FRAME),
+                    .buffer_binding(helio_sky_api::CLOUD_SHADOW_FRAME),
             )
             .unwrap_or((&self.fallback_cloud_shadow.0, &self.fallback_cloud_shadow.1));
 

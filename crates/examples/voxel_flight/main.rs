@@ -2,7 +2,7 @@
 //! (helio-pass-voxel-planet's docs/chunk-octree.md): held views with GPU
 //! timings, streaming flights, digging, picks and captures.
 //!
-//! cargo run -p helio-default-passes --release --example voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
+//! cargo run -p examples --release --bin voxel_flight -- OUTPUT [WIDTH HEIGHT [native|quality]]
 //!
 //! Modes (environment):
 //! * `HELIO_VOXEL_FLIGHT_HOLD=ground|mountain_slope|mountain_air|tunnel|face_edge|cave|overhang|feature|eye|altitude`

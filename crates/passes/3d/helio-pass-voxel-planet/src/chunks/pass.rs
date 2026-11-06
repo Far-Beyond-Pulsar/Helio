@@ -72,7 +72,7 @@ pub struct ChunkPass {
     )>,
     /// Every hit walks its own sun ray (`set_steady_shadows`).
     steady_shadows: bool,
-    /// The eye's world position this frame (`helio_pass_gi::eye`), where
+    /// The eye's world position this frame (`helio_gi_api::eye`), where
     /// the GI clipmap the terrain traces rays of is centred.
     gi_eye: Option<DVec3>,
     /// The last frame's projection jitter (NDC).
@@ -81,7 +81,7 @@ pub struct ChunkPass {
     /// The terrain as the ground foliage grows on (`chunks::ground`): shared with a
     /// foliage placement pass ([`Self::foliage_ground`]), its tiling and its answers.
     planet_ground: std::sync::Arc<super::ground::PlanetGround>,
-    foliage_ground: std::sync::Arc<helio_pass_foliage_place::GroundLink>,
+    foliage_ground: std::sync::Arc<helio_foliage_api::GroundLink>,
 }
 
 impl ChunkPass {
@@ -95,7 +95,7 @@ impl ChunkPass {
     pub fn with_config(source: SharedPlanetFrame, config: ResidencyConfig) -> Self {
         let planet_ground = std::sync::Arc::new(super::ground::PlanetGround::default());
         let foliage_ground =
-            std::sync::Arc::new(helio_pass_foliage_place::GroundLink::answered_elsewhere(
+            std::sync::Arc::new(helio_foliage_api::GroundLink::answered_elsewhere(
                 Box::new(planet_ground.clone()),
             ));
         Self {
@@ -127,14 +127,14 @@ impl ChunkPass {
     /// The terrain as the ground foliage grows on: give it to a foliage placement pass
     /// (`FoliagePlacePass::set_ground`); this pass answers its queries and reports where
     /// the terrain changed under it.
-    pub fn foliage_ground(&self) -> std::sync::Arc<helio_pass_foliage_place::GroundLink> {
+    pub fn foliage_ground(&self) -> std::sync::Arc<helio_foliage_api::GroundLink> {
         self.foliage_ground.clone()
     }
 
     /// Voxel materials shown as the host's scene materials: `map` says which
     /// scene material rows each voxel material's faces use, `source` reads
     /// the frame's material table from the context (see
-    /// `helio_default_passes::voxel_scene_materials`). Devices without
+    /// `super::scene::helio_scene_materials`). Devices without
     /// texture binding arrays keep the appearance table's colours.
     pub fn set_scene_materials(
         &mut self,
@@ -336,10 +336,10 @@ const READS: &[&str] = &[
     "water_shore_params",
     "tile_light_lists",
     "tile_light_counts",
-    helio_pass_gi::GI_FRAME,
-    helio_pass_gi::GI_RAYS,
-    helio_pass_gi::GI_SUN,
-    helio_pass_gi::GI_CLIPMAP,
+    helio_gi_api::GI_FRAME,
+    helio_gi_api::GI_RAYS,
+    helio_gi_api::GI_SUN,
+    helio_gi_api::GI_CLIPMAP,
     ATMOSPHERE_FRAME,
 ];
 /// helio-pass-sky's frame of the atmosphere (its sun's disk).
@@ -354,7 +354,7 @@ const WRITES: &[&str] = &[
     "local_visibility",
     // helio-pass-tsr's STOCHASTIC_MASK.
     "tsr_stochastic",
-    helio_pass_gi::GI_HITS,
+    helio_gi_api::GI_HITS,
     helio_pass_shadow_matrix::SUN_OCCLUSION_MAPS,
     helio_pass_shadow_matrix::SUN_OCCLUSION_PAGES,
     helio_pass_shadow_matrix::SUN_OCCLUSION_FRAME,
@@ -417,7 +417,7 @@ impl RenderPass for ChunkPass {
     }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let started = std::time::Instant::now();
-        self.gi_eye = Some(helio_pass_gi::eye(ctx));
+        self.gi_eye = Some(helio_gi_api::eye(ctx));
         let result = self.prepare_frame(ctx);
         self.cpu_ms[0] = started.elapsed().as_secs_f64() * 1e3;
         result
@@ -712,12 +712,12 @@ impl ChunkPass {
         let binding = |name: &str| ctx.registry.buffer_binding(name).cloned();
         let clipmap = ctx
             .registry
-            .get::<helio_pass_gi::Clipmap>(helio_core::ResourceKey::new(helio_pass_gi::GI_CLIPMAP));
+            .get::<helio_gi_api::Clipmap>(helio_core::ResourceKey::new(helio_gi_api::GI_CLIPMAP));
         let gi = match (
-            binding(helio_pass_gi::GI_FRAME),
-            binding(helio_pass_gi::GI_RAYS),
-            binding(helio_pass_gi::GI_HITS),
-            binding(helio_pass_gi::GI_SUN),
+            binding(helio_gi_api::GI_FRAME),
+            binding(helio_gi_api::GI_RAYS),
+            binding(helio_gi_api::GI_HITS),
+            binding(helio_gi_api::GI_SUN),
             clipmap,
             self.gi_eye,
         ) {
@@ -819,8 +819,8 @@ impl ChunkPass {
             .push_changes(world.take_ground_changes());
         if let Some(question) = self.foliage_ground.take_question() {
             let exchange = (
-                binding(helio_pass_foliage_place::GROUND_QUERIES),
-                binding(helio_pass_foliage_place::GROUND_HITS),
+                binding(helio_foliage_api::GROUND_QUERIES),
+                binding(helio_foliage_api::GROUND_HITS),
                 primary_volume(world, &self.held, &frame).map(|v| &v.volume.planet),
             );
             if let (Some(queries), Some(hits), Some(planet)) = exchange {

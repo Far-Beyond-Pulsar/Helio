@@ -517,6 +517,41 @@ violations 19 → 9; the 9 left are feature/spine edges for the API crates).
   2026-10-01 --unit voxel`, hosts excluded; 40% with examples). If not met, the extension points are wrong;
   fix them before converting more features.
 
+As built (2026-11-02): layer violations 9 → 0.
+- Feature contracts are `crates/api/*` crates (layer `api`: keys, row
+  ABIs, WGSL snippets, stand-ins; no state): `helio-sky-api` (atmosphere
+  frame and sky table, cloud shadow, sun/directional visibility),
+  `helio-gi-api` (probe clipmap, rays/hits/irradiance keys, `gi_common` /
+  `gi_sample`), `helio-foliage-api` (the old `contract` module: GPU records,
+  packing, placement reference, ground protocol, SceneDB rows, shared WGSL;
+  still no wgpu). Deferred lighting, HLFS, fog, water and voxel read these,
+  never `helio-pass-sky` / `-gi` / `-foliage-place`. The pass crates
+  re-export their api, so existing paths keep working.
+- Water names no terrain: `WaterTerrainProvider` is its seam, and the voxel
+  adapter (`VoxelShoreTerrain`, `shore_map_from_voxel_planet`) lives where
+  the two features meet, `helio_default_passes::water_shore`.
+- Voxel split into `helio-voxel-world` (grid, terrain, edits, queries,
+  maps, features and their WGSL mirrors; no GPU) and
+  `helio-pass-voxel-planet` (chunk passes, residency, sun pages, meadow),
+  which re-exports the world so a host names one crate. The `engine`
+  cargo feature is gone (the world crate is the GPU-free build).
+  `helio-voxel-data` (the scene's journal and shared names) is voxel's
+  public face to hosts; no separate `voxel-api` crate yet, because no other
+  feature reads voxel: voxel implements the others' APIs (GI tracer,
+  foliage ground, water's provider), it does not publish one.
+- The voxel scene-material reader moved into the voxel crate
+  (`chunks::scene::helio_scene_materials`).
+- `voxel_flight` and `water_world` moved to `crates/examples` (hosts):
+  `cargo run -p examples --release --bin voxel_flight`. They were 36 of the
+  106 preset partners in the October co-change.
+- Not done: the GI tracer and foliage-ground wiring stay in the preset's
+  code builders (composing features is the preset's job); a voxel node for
+  node graphs waits for presets-as-assets (phase 3 leftover), since nothing
+  builds voxel from a node graph today. The `pulsar.voxel` plugin crate
+  (voxel components, `voxel_backend.rs`, `scene/voxel_*`) is phase 5's
+  first Pulsar step. Measure the exit metric from this phase on:
+  `co_change.py --since <p4 merge> --unit voxel`.
+
 ### Phase 5: remaining features (#1541, #1544 reshaped)
 - Group Tier A/B passes into features: VG (5 crates), GI, sky+clouds, fog,
   water, foliage (place+gbuffer), lens+flare, portals, decals, sprites2d,

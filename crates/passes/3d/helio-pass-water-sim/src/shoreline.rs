@@ -1,10 +1,9 @@
 //! Terrain-derived shoreline fields for the Ultra-Water travel-time model.
 //!
 //! A map is baked from an elevation provider, never inferred from water
-//! volume bounds. Terrain providers can implement [`WaterTerrainProvider`]
-//! or use [`WaterShoreMap::from_voxel_planet`] for Helio's voxel terrain.
-use glam::DVec3;
-use helio_pass_voxel_planet::{Matter, Planet, VolumeTransform};
+//! volume bounds. A terrain feature answers [`WaterTerrainProvider`]; water
+//! names no terrain (Helio's voxel terrain's provider lives in the preset,
+//! `helio_default_passes::water_shore`).
 use rayon::prelude::*;
 
 pub const SHORE_MAP_SIZE: u32 = 512;
@@ -88,58 +87,6 @@ impl WaterShoreMap {
             travel.push(travel_fields[idx]);
         }
         Self::new(center_xz, extent_xz, rest_y, shore, travel)
-    }
-
-    /// Bake from Helio's voxel planet using the canonical ground-column
-    /// query. On sphere-shaped planets the query follows the voxel world's
-    /// radial terrain column under each ocean-plane sample; on voxel planes it
-    /// is the exact vertical column. Procedural terrain and edits are included.
-    pub fn from_voxel_planet(
-        center_xz: [f64; 2],
-        extent_xz: [f32; 2],
-        rest_y: f64,
-        planet: &Planet,
-        transform: VolumeTransform,
-    ) -> Result<Self, &'static str> {
-        struct PlanetTerrain<'a> {
-            planet: &'a Planet,
-            transform: VolumeTransform,
-            rest_y: f64,
-        }
-        impl WaterTerrainProvider for PlanetTerrain<'_> {
-            fn elevation_y(&self, world_x: f64, world_z: f64) -> Option<f64> {
-                let planet = self.planet;
-                let transform = self.transform;
-                let radius = planet.outer_radius();
-                if !planet.grid().is_plane()
-                    && (world_x - transform.position.x).hypot(world_z - transform.position.z)
-                        > radius
-                {
-                    return None;
-                }
-
-                // `surface_point_of` is the voxel world's canonical direct
-                // column query. Iterate its radial projection toward the
-                // requested world-vertical column; for a plane it converges
-                // in one query, and for a sphere only the small projection
-                // residual is corrected. Steep/clipped columns fall back to
-                // an exact terrain raycast.
-                let sample = DVec3::new(world_x, self.rest_y, world_z);
-                let local = transform.to_local(sample);
-                let ground = planet.surface_point_of(local, 0.0, Matter::Ground);
-                Some(transform.to_world(ground).y)
-            }
-        }
-        Self::from_terrain(
-            center_xz,
-            extent_xz,
-            rest_y,
-            &PlanetTerrain {
-                planet,
-                transform,
-                rest_y,
-            },
-        )
     }
 
     /// Validate and construct a complete map from pre-baked fields.

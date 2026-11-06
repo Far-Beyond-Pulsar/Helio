@@ -4,10 +4,10 @@
 //! waits for meanwhile, and how long an edit takes to show.
 
 use glam::DVec3;
-use helio_pass_voxel_planet::feature_recipe::FeatureRecipe;
-use helio_pass_voxel_planet::layers::TerrainLayers;
-use helio_pass_voxel_planet::queries::WorldQueries;
-use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Matter, Planet, PlanetRecipe};
+use helio_voxel_world::feature_recipe::FeatureRecipe;
+use helio_voxel_world::layers::TerrainLayers;
+use helio_voxel_world::queries::WorldQueries;
+use helio_voxel_world::{Brush, BrushOp, BrushShape, Matter, Planet, PlanetRecipe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

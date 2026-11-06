@@ -256,7 +256,7 @@ pub fn reference_candidate(
     // On the stored unorm16 grid, so the ground answered is the ground under the tuft;
     // with blocky types, on the centre of a cube the cell owns.
     let snap = |x: f32| {
-        crate::contract::packing::unpack_unorm16(crate::contract::packing::pack_unorm16(x))
+        helio_foliage_api::packing::unpack_unorm16(helio_foliage_api::packing::pack_unorm16(x))
     };
     let pick = [hash_to_unit(seed), hash_to_unit(seed.rotate_left(11))];
     let cubes = cube_cells(types, band.tile_size);

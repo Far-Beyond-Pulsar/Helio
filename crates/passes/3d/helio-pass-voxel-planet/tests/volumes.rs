@@ -176,7 +176,7 @@ impl Scene {
         );
         if self.gi.is_some() {
             self.world.follow_gi(
-                helio_pass_gi::Clipmap::around(camera.eye, helio_pass_gi::DEFAULT_FINEST_SPACING),
+                helio_gi_api::Clipmap::around(camera.eye, helio_gi_api::DEFAULT_FINEST_SPACING),
                 camera.eye,
                 camera.eye,
             );
@@ -972,8 +972,8 @@ fn gi_rays_cross_into_other_volumes() {
     };
     // The finest level's probes within 8 m of the block, out of every
     // volume's rock; 64 random rays each.
-    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
-    let probes: Vec<u32> = (0..helio_pass_gi::LEVEL_PROBES)
+    let clipmap = helio_gi_api::Clipmap::around(eye, helio_gi_api::DEFAULT_FINEST_SPACING);
+    let probes: Vec<u32> = (0..helio_gi_api::LEVEL_PROBES)
         .filter(|&p| {
             let o = clipmap.position(p);
             o.distance(at.position) < 8.0 && !volumes.solid(o, Matter::All)
@@ -988,7 +988,7 @@ fn gi_rays_cross_into_other_volumes() {
             return v.normalize();
         }
     };
-    let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize)
+    let dirs: Vec<DVec3> = (0..probes.len() * helio_gi_api::RAYS as usize)
         .map(|_| unit())
         .collect();
     let mut scene = Scene::new(gpu, &volumes);
@@ -1010,7 +1010,7 @@ fn gi_rays_cross_into_other_volumes() {
     let near = 0.7 * 0.1 / camera.pixel_angle();
     let (mut compared, mut wrong, mut by_volume) = (0, 0, [0usize; 2]);
     for (k, d) in dirs.iter().enumerate() {
-        let origin = clipmap.position(probes[k / helio_pass_gi::RAYS as usize]);
+        let origin = clipmap.position(probes[k / helio_gi_api::RAYS as usize]);
         let Some(cpu) = volumes.raycast(origin, *d, 30.0, Matter::All) else {
             continue;
         };
@@ -1062,8 +1062,8 @@ fn gi_rays_cross_into_other_volumes() {
 /// tests/chunks.rs's).
 fn gi_rays(gpu: &Gpu, eye: DVec3, probes: &[u32], dirs: &[Vec3], sun: Vec3) -> [wgpu::Buffer; 4] {
     use wgpu::util::DeviceExt;
-    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
-    let frame = helio_pass_gi::GpuFrame {
+    let clipmap = helio_gi_api::Clipmap::around(eye, helio_gi_api::DEFAULT_FINEST_SPACING);
+    let frame = helio_gi_api::GpuFrame {
         levels: clipmap.levels(eye),
         sky: [0.0; 4],
         ground: [0.0; 4],
@@ -1073,7 +1073,7 @@ fn gi_rays(gpu: &Gpu, eye: DVec3, probes: &[u32], dirs: &[Vec3], sun: Vec3) -> [
     };
     let mut rays = Vec::with_capacity(dirs.len() * 8);
     for (k, d) in dirs.iter().enumerate() {
-        let probe = probes[k / helio_pass_gi::RAYS as usize];
+        let probe = probes[k / helio_gi_api::RAYS as usize];
         let o = (clipmap.position(probe) - eye).as_vec3();
         rays.extend_from_slice(&[
             o.x.to_bits(),

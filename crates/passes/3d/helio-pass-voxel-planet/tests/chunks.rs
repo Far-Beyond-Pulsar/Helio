@@ -212,7 +212,7 @@ impl World {
             });
         if self.gi.is_some() {
             self.chunks.follow_gi(
-                helio_pass_gi::Clipmap::around(view.eye, helio_pass_gi::DEFAULT_FINEST_SPACING),
+                helio_gi_api::Clipmap::around(view.eye, helio_gi_api::DEFAULT_FINEST_SPACING),
                 view.eye,
                 view.eye,
             );
@@ -4276,8 +4276,8 @@ fn terrain_shadows_local_lights() {
 /// toward `sun`.
 fn gi_rays(gpu: &Gpu, eye: DVec3, probes: &[u32], dirs: &[Vec3], sun: Vec3) -> [wgpu::Buffer; 4] {
     use wgpu::util::DeviceExt;
-    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
-    let frame = helio_pass_gi::GpuFrame {
+    let clipmap = helio_gi_api::Clipmap::around(eye, helio_gi_api::DEFAULT_FINEST_SPACING);
+    let frame = helio_gi_api::GpuFrame {
         levels: clipmap.levels(eye),
         sky: [0.0; 4],
         ground: [0.0; 4],
@@ -4287,7 +4287,7 @@ fn gi_rays(gpu: &Gpu, eye: DVec3, probes: &[u32], dirs: &[Vec3], sun: Vec3) -> [
     };
     let mut rays = Vec::with_capacity(dirs.len() * 8);
     for (k, d) in dirs.iter().enumerate() {
-        let probe = probes[k / helio_pass_gi::RAYS as usize];
+        let probe = probes[k / helio_gi_api::RAYS as usize];
         let o = (clipmap.position(probe) - eye).as_vec3();
         rays.extend_from_slice(&[
             o.x.to_bits(),
@@ -4374,12 +4374,12 @@ struct GiRayCheck {
 /// rays; their hits' sun against the sun's occlusion maps read back.
 fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCheck {
     let view_proj = view.view_proj(planet);
-    let clipmap = helio_pass_gi::Clipmap::around(eye, helio_pass_gi::DEFAULT_FINEST_SPACING);
+    let clipmap = helio_gi_api::Clipmap::around(eye, helio_gi_api::DEFAULT_FINEST_SPACING);
     let mut probes = Vec::new();
     for z in 8..16 {
         for y in 8..16 {
             for x in 8..16 {
-                probes.push(helio_pass_gi::Clipmap::index(
+                probes.push(helio_gi_api::Clipmap::index(
                     0,
                     clipmap.first[0] + glam::I64Vec3::new(x, y, z),
                 ));
@@ -4394,7 +4394,7 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
             return v.normalize();
         }
     };
-    let dirs: Vec<DVec3> = (0..probes.len() * helio_pass_gi::RAYS as usize)
+    let dirs: Vec<DVec3> = (0..probes.len() * helio_gi_api::RAYS as usize)
         .map(|_| unit())
         .collect();
     let mut world = World::new(gpu, planet);
@@ -4434,7 +4434,7 @@ fn trace_gi_rays(gpu: &Gpu, planet: &Planet, eye: DVec3, view: &View) -> GiRayCh
     };
     let mut c = GiRayCheck::default();
     for (k, d) in dirs.iter().enumerate() {
-        let probe = probes[k / helio_pass_gi::RAYS as usize];
+        let probe = probes[k / helio_gi_api::RAYS as usize];
         let origin = clipmap.position(probe);
         let hit = &hits[k * 4..k * 4 + 4];
         let t = f32::from_bits(hit[0]);
@@ -4807,7 +4807,7 @@ fn sun_occlusion_texels_follow_pixel_footprints() {
 struct Probes {
     starts: Vec<DVec3>,
     ups: Vec<DVec3>,
-    tiles: Vec<helio_pass_foliage_place::AskedTile>,
+    tiles: Vec<helio_foliage_api::AskedTile>,
     queries: wgpu::Buffer,
     hits: wgpu::Buffer,
 }
@@ -4816,7 +4816,7 @@ const PROBE_SIDE: u32 = 16;
 const PROBE_LENGTH: f32 = 768.0;
 
 fn ground_probes(gpu: &Gpu, planet: &Planet, eye: DVec3) -> Probes {
-    use helio_pass_foliage_place::{AskedTile, GpuGroundQuery, GroundGeometry};
+    use helio_foliage_api::{AskedTile, GpuGroundQuery, GroundGeometry};
     use wgpu::util::DeviceExt;
     let ground = helio_pass_voxel_planet::chunks::ground::PlanetGround::default();
     ground.set_grid(*planet.grid());
@@ -4892,7 +4892,7 @@ fn probe(
     planet: &Planet,
     probes: &Probes,
     eye: DVec3,
-) -> Vec<helio_pass_foliage_place::GpuGroundHit> {
+) -> Vec<helio_foliage_api::GpuGroundHit> {
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     let mut recorder = helio_core::CommandRecorder::from_encoder(&mut encoder);
     world.chunks.probe_ground(
@@ -4916,7 +4916,7 @@ fn probe(
 fn probes_match(
     planet: &Planet,
     probes: &Probes,
-    hits: &[helio_pass_foliage_place::GpuGroundHit],
+    hits: &[helio_foliage_api::GpuGroundHit],
     eye: DVec3,
     near: f64,
 ) -> (usize, usize) {
@@ -4926,7 +4926,7 @@ fn probes_match(
         let cpu = planet.raycast(start, -up, f64::from(PROBE_LENGTH));
         let Some(cpu) = cpu else {
             compared += 1;
-            wrong += usize::from(hit.ground != helio_pass_foliage_place::GROUND_NONE);
+            wrong += usize::from(hit.ground != helio_foliage_api::GROUND_NONE);
             continue;
         };
         let at = start - up * cpu.distance;
@@ -4939,7 +4939,7 @@ fn probes_match(
         let ok = if top {
             hit.ground == planet.material(cpu.cell) && (f64::from(gpu) - cpu.distance).abs() < 2e-3
         } else {
-            hit.ground == helio_pass_foliage_place::GROUND_NONE
+            hit.ground == helio_foliage_api::GROUND_NONE
         };
         if !ok {
             wrong += 1;
@@ -4975,7 +4975,7 @@ fn ground_probes_meet_the_drawn_surface() {
     let (compared, wrong) = probes_match(&planet, &probes, &hits, view.eye, near);
     let grounded = hits
         .iter()
-        .filter(|h| h.ground != helio_pass_foliage_place::GROUND_NONE)
+        .filter(|h| h.ground != helio_foliage_api::GROUND_NONE)
         .count();
     eprintln!(
         "compared {compared}, wrong {wrong}, {grounded} of {} on ground",

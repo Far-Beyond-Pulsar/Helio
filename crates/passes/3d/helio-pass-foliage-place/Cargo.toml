@@ -13,6 +13,7 @@ helio-settings = { workspace = true }
 pulsar_reflection = { workspace = true }
 glam = { workspace = true }
 helio-core = { workspace = true }
+helio-foliage-api = { path = "../../../api/helio-foliage-api" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 log = { workspace = true }

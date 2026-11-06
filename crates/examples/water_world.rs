@@ -1,10 +1,10 @@
 //! Ultra-Water integrated with Helio's voxel terrain, meadow foliage, sky and haze.
 //!
 //! Run from the Helio workspace root:
-//! `cargo run -p helio-default-passes --release --example water_world -- coast`
+//! `cargo run -p examples --release --bin water_world -- coast`
 //! A deterministic one-shot capture (after voxel streaming warms up) can be
 //! rendered and closed with:
-//! `cargo run -p helio-default-passes --example water_world -- shoreline --capture-and-exit`
+//! `cargo run -p examples --bin water_world -- shoreline --capture-and-exit`
 //!
 //! Presets: `coast` (wide island-and-ocean view), `shoreline` (low camera at
 //! the breakers), and `underwater` (looking through the
@@ -344,14 +344,16 @@ impl Showcase {
         );
         scene.world.flush_gpu_mirror(&queue);
         if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
-            sim.set_shore_map_from_voxel_planet(
-                [0.0, 0.0],
-                [EXTENT * 2.0, EXTENT * 2.0],
-                REST_Y,
-                &planet,
-                VolumeTransform::default(),
-            )
-            .expect("bake shoreline from the edited voxel terrain");
+            sim.set_shore_map(Some(
+                helio_default_passes::water_shore::shore_map_from_voxel_planet(
+                    [0.0, 0.0],
+                    [EXTENT * 2.0, EXTENT * 2.0],
+                    REST_Y,
+                    &planet,
+                    VolumeTransform::default(),
+                )
+                .expect("bake shoreline from the edited voxel terrain"),
+            ));
             sim.set_ocean_rest_height(REST_Y)
                 .expect("match the ocean volume rest plane");
             // Match `defaultOceanParams()` and the JS Spray defaults exactly.

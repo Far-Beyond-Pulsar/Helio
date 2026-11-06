@@ -12,6 +12,7 @@ gpu = []
 [dependencies]
 pulsar_reflection = { workspace = true }
 helio-core = { workspace = true }
+helio-sky-api = { path = "../../../api/helio-sky-api" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }

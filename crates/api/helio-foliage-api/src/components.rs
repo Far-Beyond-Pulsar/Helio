@@ -159,17 +159,6 @@ impl From<FoliageLayerRow> for GpuFoliageLayer {
         bytemuck::cast(v)
     }
 }
-impl From<crate::GpuWind> for FoliageWindRow {
-    fn from(v: crate::GpuWind) -> Self {
-        bytemuck::cast(v)
-    }
-}
-impl From<FoliageWindRow> for crate::GpuWind {
-    fn from(v: FoliageWindRow) -> Self {
-        bytemuck::cast(v)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

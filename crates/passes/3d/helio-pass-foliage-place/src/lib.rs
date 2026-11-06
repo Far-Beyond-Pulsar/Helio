@@ -62,11 +62,10 @@
 
 use bytemuck::{Pod, Zeroable};
 
-mod contract;
-pub use contract::*;
+pub use helio_foliage_api::*;
 
 pub mod blade;
-pub mod components;
+pub use helio_foliage_api::components;
 mod frame_data;
 mod pass;
 mod reference;
@@ -94,31 +93,6 @@ pub use settings::FoliageSettings;
 pub use uniforms::{FoliageCullUniforms, PlaceUniforms};
 pub use wind::{GpuWind, Wind};
 
-/// Marker opting a shader into [`WIND`]. Must appear in the source.
-pub const WIND_MARKER: &str = "//!use helio_foliage_wind";
-
-/// The three-band foliage wind model and the `Wind` uniform layout, as a
-/// `helio-core` shader snippet (see `helio_core::shader::ShaderSnippet`).
-pub const WIND: &str = include_str!("../shaders/foliage_wind.wgsl");
-
-/// [`helio_core::shader::ShaderSnippet`] for [`WIND`]. Passed explicitly to
-/// `helio_core::shader::resolve_with`/`module_with` by any shader opting in
-/// via [`WIND_MARKER`] — `helio-core` itself never names this snippet.
-pub const WIND_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::wgsl_snippet!(WIND_MARKER, "../shaders/foliage_wind.wgsl");
-
-/// Marker opting a shader into [`COMMON`]. Must appear in the source.
-pub const COMMON_MARKER: &str = "//!use helio_foliage_common";
-
-/// The records placement, the cull and the draw share (type, tile, frame, blade, bands)
-/// and the bands' functions, as a `helio-core` shader snippet. A shader including it
-/// declares `foliage_bands: FoliageBands` (a uniform).
-pub const COMMON: &str = include_str!("../shaders/foliage_common.wgsl");
-
-/// [`helio_core::shader::ShaderSnippet`] for [`COMMON`].
-pub const COMMON_SNIPPET: helio_core::shader::ShaderSnippet =
-    helio_core::wgsl_snippet!(COMMON_MARKER, "../shaders/foliage_common.wgsl");
-
 /// Vertices emitted per instance for each foliage LOD, from the plan's §6.3 ladder:
 /// a 5-segment blade, a 3-segment blade, a card and a clump card.
 ///
@@ -139,10 +113,6 @@ pub const COMMON_SNIPPET: helio_core::shader::ShaderSnippet =
 /// [`crate::FOLIAGE_MAX_TUFT_BLADES`] × 4 vertices and 2 joins); L3 a tuft as a fan of
 /// three blades.
 pub const FOLIAGE_LOD_VERTEX_COUNTS: [u32; 4] = [11, 7, 6 * crate::FOLIAGE_MAX_TUFT_BLADES - 2, 13];
-
-/// Cubes in the tallest blocky blade ([`FoliageKind::Block`]): a stack of the type's
-/// cube (`width_range[0]`) as tall as its height rounds to, at most this many.
-pub const FOLIAGE_STACK_CUBES: u32 = 24;
 
 /// Interactors the foliage draw looks at, at most: the first gathered each frame
 /// (`FoliagePlacePass::interactors`).
@@ -219,14 +189,6 @@ pub const FOLIAGE_COUNTER_COUNT: usize = 8;
 /// over with a manual bounds scale. This is a conservative global default until
 /// `wpo_extent` lands per type in `InstanceCullData` (plan §7.2, phase 4).
 pub const DEFAULT_WPO_EXTENT_METERS: f32 = 0.5;
-
-/// Hard cap on stratified candidates evaluated for one tile.
-///
-/// Bounds the placement shader's inner loop so a mis-authored density cannot turn one
-/// workgroup into a multi-millisecond stall. 16 384 candidates over an 8 m tile is 256
-/// per m², six times the reference density, so hitting this ceiling means the density
-/// authoring is wrong, not that the ceiling is low.
-pub const MAX_CANDIDATES_PER_TILE: u32 = 16_384;
 
 /// Whether this frame has any foliage work at all.
 ///
@@ -375,11 +337,3 @@ mod tests {
 ///
 /// Zero is legal and means hard LOD switching — visible banding, but not a crash.
 pub const FOLIAGE_LOD_FADE_BAND_METERS: f32 = 4.0;
-
-/// Representational ceiling on blades in one tile's arena slab.
-///
-/// Not a budget. A `visible_blades[]` entry packs the owning tile slot in its high 16 bits
-/// and the blade's tile-local index in the low 16, so a slab past 65 536 would alias
-/// blades onto each other with no error anywhere. Raising this means widening that
-/// encoding on both sides of the producer/consumer contract.
-pub const MAX_BLADES_PER_TILE: u32 = 65_536;

@@ -4,9 +4,9 @@
 //! voxels. A report, not a gate:
 //! `cargo test --release --test bake_cost -- --ignored --nocapture`.
 use glam::DVec3;
-use helio_pass_voxel_planet::edit_store::EditStore;
-use helio_pass_voxel_planet::planet::{bake_level, BAKE_RADIUS_HALF};
-use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
+use helio_voxel_world::edit_store::EditStore;
+use helio_voxel_world::planet::{bake_level, BAKE_RADIUS_HALF};
+use helio_voxel_world::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 

@@ -1,6 +1,6 @@
 //! Foliage GPU types, packing helpers and CPU mirrors of the foliage shader math.
 //!
-//! This is the `*-core` crate for the foliage stack: shared POD types live in a crate
+//! The foliage feature's public contract, the `*-core` crate of the foliage stack: shared POD types live in a crate
 //! with no `wgpu` dependency, so the passes that produce foliage data and the passes
 //! that consume it agree on layout without depending on each other, and so the layout
 //! and the maths can be tested on a machine with no GPU at all.
@@ -24,12 +24,15 @@
 //!   foliage stack.
 //! - [`bands`] — the bands of resident tiles that carry foliage out to its range.
 //! - [`ground`] — what foliage grows on.
+//! - [`components`] — the SceneDB rows foliage reads and their buffer contracts.
 //!
 //! # What does not live here
 //!
 //! Anything holding a GPU resource, and anything with per-frame state. Buffers, bind
-//! groups and residency bookkeeping belong to `helio-pass-foliage-place`; the authoring
-//! API belongs to `helio::Scene`.
+//! groups and residency bookkeeping belong to `helio-pass-foliage-place`. The SceneDB rows
+//! ([`components`]) and the shared WGSL ([`COMMON_SNIPPET`], [`WIND_SNIPPET`]) live here
+//! too: what a feature that grows foliage on its ground (a voxel terrain) or draws it
+//! reads, without depending on the foliage passes.
 
 pub mod bands;
 pub mod gpu_types;
@@ -44,6 +47,58 @@ pub use ground::*;
 pub use packing::*;
 pub use placement::*;
 pub use quality::*;
+
+pub mod components;
+pub use components::{
+    FoliageInteractorRow, FoliageLayerRow, FoliageTypeRow, FoliageWindRow, FOLIAGE_INTERACTORS,
+    FOLIAGE_LAYERS, FOLIAGE_TYPES, FOLIAGE_WIND,
+};
+
+/// Marker opting a shader into [`WIND`]. Must appear in the source.
+pub const WIND_MARKER: &str = "//!use helio_foliage_wind";
+
+/// The three-band foliage wind model and the `Wind` uniform layout, as a
+/// `helio-core` shader snippet (see `helio_core::shader::ShaderSnippet`).
+pub const WIND: &str = include_str!("shaders/foliage_wind.wgsl");
+
+/// [`helio_core::shader::ShaderSnippet`] for [`WIND`]. Passed explicitly to
+/// `helio_core::shader::resolve_with`/`module_with` by any shader opting in
+/// via [`WIND_MARKER`] — `helio-core` itself never names this snippet.
+pub const WIND_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(WIND_MARKER, "shaders/foliage_wind.wgsl");
+
+/// Marker opting a shader into [`COMMON`]. Must appear in the source.
+pub const COMMON_MARKER: &str = "//!use helio_foliage_common";
+
+/// The records placement, the cull and the draw share (type, tile, frame, blade, bands)
+/// and the bands' functions, as a `helio-core` shader snippet. A shader including it
+/// declares `foliage_bands: FoliageBands` (a uniform).
+pub const COMMON: &str = include_str!("shaders/foliage_common.wgsl");
+
+/// [`helio_core::shader::ShaderSnippet`] for [`COMMON`].
+pub const COMMON_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(COMMON_MARKER, "shaders/foliage_common.wgsl");
+
+/// Cubes in the tallest blocky blade ([`FoliageKind::Block`]): a stack of the type's
+/// cube (`width_range[0]`) as tall as its height rounds to, at most this many.
+pub const FOLIAGE_STACK_CUBES: u32 = 24;
+
+/// Hard cap on stratified candidates evaluated for one tile.
+///
+/// Bounds the placement shader's inner loop so a mis-authored density cannot turn one
+/// workgroup into a multi-millisecond stall. 16 384 candidates over an 8 m tile is 256
+/// per m², six times the reference density, so hitting this ceiling means the density
+/// authoring is wrong, not that the ceiling is low.
+pub const MAX_CANDIDATES_PER_TILE: u32 = 16_384;
+
+/// Representational ceiling on blades in one tile's arena slab.
+///
+/// Not a budget. A `visible_blades[]` entry packs the owning tile slot in its high 16 bits
+/// and the blade's tile-local index in the low 16, so a slab past 65 536 would alias
+/// blades onto each other with no error anywhere. Raising this means widening that
+/// encoding on both sides of the producer/consumer contract.
+pub const MAX_BLADES_PER_TILE: u32 = 65_536;
+
 
 /// Edge length of one base foliage tile in metres.
 ///

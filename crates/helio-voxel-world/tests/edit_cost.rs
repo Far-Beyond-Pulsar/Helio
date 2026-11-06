@@ -3,7 +3,7 @@
 //! blast (radii). A report, not a gate:
 //! `cargo test --release --test edit_cost -- --ignored --nocapture`.
 use glam::DVec3;
-use helio_pass_voxel_planet::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
+use helio_voxel_world::{Brush, BrushOp, BrushShape, Planet, PlanetRecipe};
 use std::time::Instant;
 
 /// A land direction (surface above sea level) near `face` coordinates.
@@ -68,7 +68,7 @@ fn edit_cost_through_the_game_paths() {
     let cell = planet.grid().locate(ground - up * 0.5).0;
     let t = Instant::now();
     for d in 0..64 {
-        std::hint::black_box(copy.material(helio_pass_voxel_planet::Cell::new(
+        std::hint::black_box(copy.material(helio_voxel_world::Cell::new(
             cell.face,
             cell.i + d,
             cell.j,
@@ -78,7 +78,7 @@ fn edit_cost_through_the_game_paths() {
     let after_clone = ms(t);
     let t = Instant::now();
     for d in 0..64 {
-        std::hint::black_box(copy.material(helio_pass_voxel_planet::Cell::new(
+        std::hint::black_box(copy.material(helio_voxel_world::Cell::new(
             cell.face,
             cell.i + d,
             cell.j,
