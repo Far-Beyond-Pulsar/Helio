@@ -10,6 +10,7 @@ fn raster_and_ray_query_sources_validate_with_shared_gbuffer_contract() {
             &[
                 helio_pass_hiz::HIZ_SNIPPET,
                 helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
+                helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET,
             ],
         );
         let module = naga::front::wgsl::parse_str(&resolved)
@@ -37,7 +38,9 @@ fn half_resolution_contract_reconstructs_full_resolution_inputs() {
         assert!(source.contains("let source_dims = textureDimensions(gbuf_depth)"));
         assert!(source.contains("let source_px = clamp"));
     }
-    assert!(compose.contains("let reflection_dims=textureDimensions(reflection)"));
+    // The half-resolution trace is read through the frame's reconstruction,
+    // as every reader of a specular layer reads it.
+    assert!(compose.contains("indirect_specular_at(reflection,uv)"));
 }
 
 #[test]

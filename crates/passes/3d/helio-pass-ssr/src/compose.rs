@@ -47,10 +47,11 @@ impl SsrCompositePass {
             label: Some("SSR composition textures"),
             entries: &entries,
         });
-        let shader = helio_core::shader::module(
+        let shader = helio_core::shader::module_with(
             device,
             "SSR composition",
             helio_core::include_wgsl!("../shaders/ssr_compose.wgsl"),
+            &[helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SSR composition"),
