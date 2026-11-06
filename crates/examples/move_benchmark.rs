@@ -61,7 +61,7 @@ mod v3_demo_common;
 
 use glam::{Mat4, Quat, Vec3};
 use helio::{Camera, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig};
-use helio_pass_gbuffer::StaticObjectComponent;
+use helio_components::StaticObjectComponent;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use std::sync::Arc;
 use std::time::Instant;
@@ -477,12 +477,12 @@ fn populate_cathedral_large(world: &mut World) -> BenchScene {
 /// Every opaque object casts ray-traced shadows and every light traces them.
 fn enable_ray_shadows(world: &mut World, objects: &[Entity]) {
     let lights: Vec<_> = world
-        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .query::<(&helio_components::LightComponent,)>()
         .map(|(id, _)| id)
         .collect();
     for id in lights {
         let mut component = world
-            .get_mut::<helio_pass_forward_lit::LightComponent>(id)
+            .get_mut::<helio_components::LightComponent>(id)
             .unwrap();
         let mut light: helio_pass_forward_lit::GpuLight = (*component).into();
         light.set_ray_traced_shadows(true);
@@ -494,12 +494,12 @@ fn enable_ray_shadows(world: &mut World, objects: &[Entity]) {
             .unwrap()
             .material_slot;
         let blended = world
-            .query::<(&helio_pass_gbuffer::MaterialComponent,)>()
+            .query::<(&helio_components::MaterialComponent,)>()
             .find(|(entity, _)| entity.index() == material_slot)
             .is_some_and(|(entity, (m,))| {
                 m.flags & helio_mats::FLAG_ALPHA_BLEND != 0
                     && world
-                        .get::<helio_default_passes::ray_tracing::RayTransmission>(entity)
+                        .get::<helio_components::ray_tracing::RayTransmission>(entity)
                         .is_none()
             });
         if !blended {
@@ -527,7 +527,7 @@ fn move_one(world: &mut World, scene: &BenchScene, frame: usize) {
         transform.w_axis.z,
         object.bounds[3],
     ];
-    *object = object.with_transform(transform, bounds);
+    *object = object.with_transform(transform, bounds).into();
 }
 
 /// Every light bobs vertically each frame, written through `World::get_mut`.
@@ -535,7 +535,7 @@ fn move_lights(world: &mut World, lights: &[(Entity, [f32; 3])], frame: usize) {
     let dy = (frame as f32 * 0.2).sin() * 0.5;
     for (i, &(entity, origin)) in lights.iter().enumerate() {
         let mut light = world
-            .get_mut::<helio_pass_forward_lit::LightComponent>(entity)
+            .get_mut::<helio_components::LightComponent>(entity)
             .expect("light row");
         let mut gpu: helio_pass_forward_lit::GpuLight = (*light).into();
         gpu.position_range[1] = origin[1] + dy * if i % 2 == 0 { 1.0 } else { -1.0 };
@@ -565,7 +565,7 @@ fn editor_resync(world: &mut World, scene: &BenchScene, frame: usize) {
         ];
         world.insert(
             entity,
-            StaticObjectComponent::new(
+            StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
                 row.mesh_slot,
                 row.mesh_generation,
                 row.material_slot,
@@ -578,7 +578,7 @@ fn editor_resync(world: &mut World, scene: &BenchScene, frame: usize) {
                 row.material_class,
                 row.graph_hash(),
                 row.flags,
-            ),
+            )),
         );
     }
 }
@@ -612,7 +612,7 @@ struct Bench {
     queue: Arc<wgpu::Queue>,
     scene_db: SceneDb,
     renderer: Renderer,
-    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_components::ray_tracing::SceneDbRayTracing>,
     target: wgpu::Texture,
     view: wgpu::TextureView,
     scene: BenchScene,
@@ -807,7 +807,7 @@ fn build_bench(
         scene_db.world.flush_gpu_mirror(queue);
         let lights: Vec<Entity> = scene_db
             .world
-            .query::<(&helio_pass_forward_lit::LightComponent,)>()
+            .query::<(&helio_components::LightComponent,)>()
             .map(|(entity, _)| entity)
             .collect();
         let total = lights.len();
@@ -821,7 +821,7 @@ fn build_bench(
     if let Some(movability) = args.mesh_movability {
         let meshes: Vec<Entity> = scene_db
             .world
-            .query::<(&helio_pass_gbuffer::MeshComponent,)>()
+            .query::<(&helio_components::MeshComponent,)>()
             .map(|(entity, _)| entity)
             .collect();
         for mesh in meshes {
@@ -858,7 +858,7 @@ fn build_bench(
                 },
             );
         }
-        helio_default_passes::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
+        helio_components::ray_tracing::SceneDbRayTracing::new(device.clone(), queue.clone())
     });
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("move_benchmark target"),
@@ -877,7 +877,7 @@ fn build_bench(
     let view = texture.create_view(&Default::default());
     let lights = scene_db
         .world
-        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .query::<(&helio_components::LightComponent,)>()
         .map(|(entity, (light,))| {
             let gpu: helio_pass_forward_lit::GpuLight = (*light).into();
             (
@@ -1001,7 +1001,7 @@ fn main() {
                     lights: bench
                         .scene_db
                         .world
-                        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+                        .query::<(&helio_components::LightComponent,)>()
                         .count(),
                     mode,
                     workload,

@@ -1,6 +1,6 @@
 //! Shared, embedded CC0 architectural materials for interactive and capture paths.
+use helio_components::MaterialComponent;
 use helio_mats::texture_mips::{mip_chain, TexelKind};
-use helio_pass_gbuffer::MaterialComponent;
 use pulsar_scenedb::{gpu::TextureStore, Entity, World};
 use std::sync::{Arc, RwLock};
 

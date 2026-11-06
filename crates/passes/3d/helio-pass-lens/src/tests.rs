@@ -280,8 +280,8 @@ impl Rig {
     fn record(
         &mut self,
         scene: &Scene,
-        lenses: Option<&[LensComponent]>,
-        elements: Option<&[LensElementComponent]>,
+        lenses: Option<&[LensRow]>,
+        elements: Option<&[LensElementRow]>,
     ) -> Frame {
         let color = self.color_view(scene);
         let depth = self.depth_view(scene);
@@ -346,7 +346,7 @@ impl Rig {
 }
 
 /// The thin-lens circle of confusion in pixels for an `SIZE`-wide image.
-fn expected_coc(lens: &LensComponent, focus: f32, distance: f32) -> f32 {
+fn expected_coc(lens: &LensRow, focus: f32, distance: f32) -> f32 {
     let f = lens.focal_length_mm * 1.0e-3;
     let aperture = f / lens.f_number;
     let distance = if distance.is_finite() {
@@ -358,33 +358,33 @@ fn expected_coc(lens: &LensComponent, focus: f32, distance: f32) -> f32 {
     on_sensor / (lens.sensor_width_mm * 1.0e-3) * SIZE as f32 * (distance - focus).signum()
 }
 
-fn lens() -> LensComponent {
-    LensComponent::new(VIEW)
+fn lens() -> LensRow {
+    LensRow::new(VIEW)
 }
 
 #[test]
 fn component_rows_have_the_wgsl_strides() {
-    assert_eq!(std::mem::size_of::<LensComponent>(), 96);
-    assert_eq!(std::mem::offset_of!(LensComponent, view_id), 0);
-    assert_eq!(std::mem::offset_of!(LensComponent, focal_length_mm), 16);
-    assert_eq!(std::mem::offset_of!(LensComponent, focus_distance_m), 36);
-    assert_eq!(std::mem::offset_of!(LensComponent, element_first), 56);
-    assert_eq!(std::mem::offset_of!(LensComponent, field_curvature), 72);
-    assert_eq!(std::mem::offset_of!(LensComponent, af_radius), 84);
-    assert_eq!(std::mem::size_of::<LensElementComponent>(), 160);
-    assert_eq!(std::mem::offset_of!(LensElementComponent, feather), 16);
-    assert_eq!(std::mem::offset_of!(LensElementComponent, params), 32);
-    assert_eq!(std::mem::offset_of!(LensElementComponent, region), 96);
+    assert_eq!(std::mem::size_of::<LensRow>(), 96);
+    assert_eq!(std::mem::offset_of!(LensRow, view_id), 0);
+    assert_eq!(std::mem::offset_of!(LensRow, focal_length_mm), 16);
+    assert_eq!(std::mem::offset_of!(LensRow, focus_distance_m), 36);
+    assert_eq!(std::mem::offset_of!(LensRow, element_first), 56);
+    assert_eq!(std::mem::offset_of!(LensRow, field_curvature), 72);
+    assert_eq!(std::mem::offset_of!(LensRow, af_radius), 84);
+    assert_eq!(std::mem::size_of::<LensElementRow>(), 160);
+    assert_eq!(std::mem::offset_of!(LensElementRow, feather), 16);
+    assert_eq!(std::mem::offset_of!(LensElementRow, params), 32);
+    assert_eq!(std::mem::offset_of!(LensElementRow, region), 96);
     assert_eq!(std::mem::size_of::<ResolvedLens>(), 88);
     assert_eq!(std::mem::offset_of!(ResolvedLens, aberration_flags), 80);
     assert_eq!(std::mem::offset_of!(ResolvedLens, overscan), 84);
-    assert_eq!(std::mem::offset_of!(LensComponent, overscan), 88);
+    assert_eq!(std::mem::offset_of!(LensRow, overscan), 88);
     assert_eq!(std::mem::offset_of!(ResolvedLens, natural_vignette), 20);
     assert_eq!(std::mem::offset_of!(ResolvedLens, required_overscan), 68);
     // A zero row is inert: never enabled, no element kind.
-    let zero: LensComponent = bytemuck::Zeroable::zeroed();
+    let zero: LensRow = bytemuck::Zeroable::zeroed();
     assert_eq!(zero.enabled, 0);
-    let zero: LensElementComponent = bytemuck::Zeroable::zeroed();
+    let zero: LensElementRow = bytemuck::Zeroable::zeroed();
     assert_eq!(zero.kind, element_kind::NONE);
 }
 
@@ -718,7 +718,7 @@ fn split_diopter_focuses_each_half_and_the_seam_follows_the_aperture() {
     // carrying fine detail. The lens focuses 6 m; a diopter over the left
     // half brings the focus to 2 m there.
     let scene = Scene::new(Scene::checker, |x, _| if x < SIZE / 2 { 2.0 } else { 6.0 });
-    let diopter = LensElementComponent::diopter(
+    let diopter = LensElementRow::diopter(
         2.0,
         LensRegion::HalfPlane {
             angle: std::f32::consts::PI,
@@ -809,7 +809,7 @@ fn a_diopter_region_blurs_each_pixel_by_its_own_depth() {
         _ => 0.8,
     };
     let scene = Scene::new(Scene::checker, depth);
-    let diopter = LensElementComponent::diopter(
+    let diopter = LensElementRow::diopter(
         2.0,
         LensRegion::HalfPlane {
             angle: std::f32::consts::PI,
@@ -871,7 +871,7 @@ fn diopters_stack_across_many_regions() {
     });
     let thirds = [
         // Covers x < 1/6 of the image height right of centre: left and middle.
-        LensElementComponent::diopter(
+        LensElementRow::diopter(
             3.0,
             LensRegion::HalfPlane {
                 angle: std::f32::consts::PI,
@@ -880,7 +880,7 @@ fn diopters_stack_across_many_regions() {
         )
         .with_feather(0.004),
         // Covers x < -1/6: the left third, which also has the first.
-        LensElementComponent::diopter(
+        LensElementRow::diopter(
             1.5,
             LensRegion::HalfPlane {
                 angle: std::f32::consts::PI,
@@ -926,7 +926,7 @@ fn nested_regions_of_any_shape_focus_independently() {
         _ => 9.0,
     });
     let elements = [
-        LensElementComponent::diopter(
+        LensElementRow::diopter(
             3.0,
             LensRegion::Ellipse {
                 center: [0.0; 2],
@@ -935,7 +935,7 @@ fn nested_regions_of_any_shape_focus_independently() {
             },
         )
         .with_feather(0.004),
-        LensElementComponent::diopter(
+        LensElementRow::diopter(
             1.5,
             LensRegion::Polygon(&[[-0.15, -0.15], [0.15, -0.15], [0.15, 0.15], [-0.15, 0.15]]),
         )
@@ -1006,7 +1006,7 @@ fn every_region_kind_covers_what_it_describes() {
         (LensRegion::Mask, (64, 64), (64, 64)),
     ];
     for (i, (region, inside, outside)) in cases.into_iter().enumerate() {
-        let element = LensElementComponent::sweet_spot(10.0, region).with_feather(0.0);
+        let element = LensElementRow::sweet_spot(10.0, region).with_feather(0.0);
         let frame = rig.record(&scene, Some(&[lens]), Some(&[element]));
         let covered = i != 6;
         let at = |p: (u32, u32)| frame.coc(p.0, p.1)[0];
@@ -1108,7 +1108,7 @@ fn autofocus_tracks_the_depth_at_its_point_and_eases() {
 fn seam_darkening_dims_the_diopter_edge() {
     let mut rig = Rig::new();
     let scene = Scene::new(|_, _| [1.0; 3], |x, _| if x < SIZE / 2 { 2.0 } else { 6.0 });
-    let diopter = LensElementComponent::diopter(
+    let diopter = LensElementRow::diopter(
         2.0,
         LensRegion::HalfPlane {
             angle: std::f32::consts::PI,
@@ -1139,7 +1139,7 @@ fn seam_darkening_dims_the_diopter_edge() {
 // radius, and the energy of the whole frame.
 
 /// A lens whose circle of confusion is 28 px across, for a plane at infinity.
-fn bokeh_lens() -> LensComponent {
+fn bokeh_lens() -> LensRow {
     let mut lens = lens();
     lens.focal_length_mm = 100.0;
     lens.f_number = 1.4;
@@ -1210,11 +1210,7 @@ fn edge_width_between(
 /// Widths of the middle of the transition (30-70%) of a vertical (x) and a
 /// horizontal (y) edge, averaged over the whole frame. The middle slope is
 /// the pupil's chord through its centre, which a polygon's tails hide.
-fn core_widths(
-    rig: &mut Rig,
-    lens: LensComponent,
-    elements: &[LensElementComponent],
-) -> (f32, f32) {
+fn core_widths(rig: &mut Rig, lens: LensRow, elements: &[LensElementRow]) -> (f32, f32) {
     let mut width = |vertical: bool| {
         let frame = rig.record(
             &edge_scene(vertical, 64),
@@ -1227,11 +1223,7 @@ fn core_widths(
 }
 
 /// Widths of a vertical (x) and a horizontal (y) edge through the centre.
-fn edge_widths(
-    rig: &mut Rig,
-    lens: LensComponent,
-    elements: &[LensElementComponent],
-) -> (f32, f32) {
+fn edge_widths(rig: &mut Rig, lens: LensRow, elements: &[LensElementRow]) -> (f32, f32) {
     let mut width = |vertical: bool| {
         let frame = rig.record(
             &edge_scene(vertical, 64),
@@ -1277,11 +1269,11 @@ fn blades_make_the_bokeh_polygonal() {
     // Curved blades relax the hexagon back to a circle.
     lens.aperture_blades = 0;
     lens.element_count = 1;
-    let round = LensElementComponent::pupil(LensRegion::FullFrame).with_iris(6, 1.0, 0.0);
+    let round = LensElementRow::pupil(LensRegion::FullFrame).with_iris(6, 1.0, 0.0);
     let (ex, ey) = core_widths(&mut rig, lens, &[round]);
     assert!((ex / ey - 1.0).abs() < 0.05, "curvature 1: {ex} x {ey}");
     // Wide open is round (the f-number is far below the straight limit).
-    let blades = LensElementComponent::pupil(LensRegion::FullFrame)
+    let blades = LensElementRow::pupil(LensRegion::FullFrame)
         .with_iris(6, 0.0, 0.0)
         .with_f_number_rounding(8.0);
     let (wx, wy) = core_widths(&mut rig, lens, &[blades]);
@@ -1298,7 +1290,7 @@ fn anamorphic_squeeze_ovals_the_bokeh() {
     let mut rig = Rig::new();
     let lens = bokeh_lens();
     for squeeze in [1.33, 1.8, 2.0] {
-        let element = LensElementComponent::pupil(LensRegion::FullFrame).with_anamorphic(squeeze);
+        let element = LensElementRow::pupil(LensRegion::FullFrame).with_anamorphic(squeeze);
         let (width, height) = edge_widths(&mut rig, lens, &[element]);
         let ratio = height / width;
         println!("squeeze {squeeze}: {width} x {height}");
@@ -1311,11 +1303,7 @@ fn anamorphic_squeeze_ovals_the_bokeh() {
 
 /// Radial and tangential widths at the middle of the right edge region: x is
 /// radial on the row through the centre, y is tangential.
-fn radial_and_tangential(
-    rig: &mut Rig,
-    lens: LensComponent,
-    elements: &[LensElementComponent],
-) -> (f32, f32) {
+fn radial_and_tangential(rig: &mut Rig, lens: LensRow, elements: &[LensElementRow]) -> (f32, f32) {
     let radial = {
         let frame = rig.record(
             &edge_scene(true, 108),
@@ -1339,7 +1327,7 @@ fn radial_and_tangential(
 fn cats_eye_clips_the_bokeh_radially_off_axis_only() {
     let mut rig = Rig::new();
     let lens = bokeh_lens();
-    let element = LensElementComponent::pupil(LensRegion::FullFrame).with_cats_eye(1.5, 1.0);
+    let element = LensElementRow::pupil(LensRegion::FullFrame).with_cats_eye(1.5, 1.0);
     // On the axis the second circle sits on the first: round.
     let (x, y) = edge_widths(&mut rig, lens, &[element]);
     println!("on axis {x} x {y}");
@@ -1364,7 +1352,7 @@ fn cats_eye_clips_the_bokeh_radially_off_axis_only() {
 fn swirl_stretches_the_bokeh_tangentially_toward_the_edges() {
     let mut rig = Rig::new();
     let lens = bokeh_lens();
-    let element = LensElementComponent::pupil(LensRegion::FullFrame).with_swirl(2.0);
+    let element = LensElementRow::pupil(LensRegion::FullFrame).with_swirl(2.0);
     let (radial, tangential) = radial_and_tangential(&mut rig, lens, &[element]);
     println!("swirl: radial {radial}, tangential {tangential}");
     assert!(
@@ -1411,7 +1399,7 @@ fn spherical_aberration_trades_light_between_rim_and_centre() {
     let far = blob_scene(f32::INFINITY);
     let near = blob_scene(0.5);
     let rim_and_centre = |rig: &mut Rig, scene: &Scene, amount: f32, asymmetry: f32| {
-        let element = LensElementComponent::pupil(LensRegion::FullFrame)
+        let element = LensElementRow::pupil(LensRegion::FullFrame)
             .with_spherical_aberration(amount, asymmetry);
         let frame = rig.record(scene, Some(&[lens]), Some(&[element]));
         assert!(
@@ -1463,12 +1451,12 @@ fn apodization_and_onion_rings_shape_the_profile() {
     let mut rig = Rig::new();
     let lens = bokeh_lens();
     let far = blob_scene(f32::INFINITY);
-    let apodized = LensElementComponent::pupil(LensRegion::FullFrame).with_apodization(0.35);
+    let apodized = LensElementRow::pupil(LensRegion::FullFrame).with_apodization(0.35);
     let frame = rig.record(&far, Some(&[lens]), Some(&[apodized]));
     let flat = rig.record(
         &far,
         Some(&[lens]),
-        Some(&[LensElementComponent::pupil(LensRegion::FullFrame)]),
+        Some(&[LensElementRow::pupil(LensRegion::FullFrame)]),
     );
     let (rim, centre) = (
         ring_mean(&frame, 1, 10.5, 13.0),
@@ -1485,7 +1473,7 @@ fn apodization_and_onion_rings_shape_the_profile() {
     );
 
     // Concentric ripples: the brightness alternates with radius.
-    let onion = LensElementComponent::pupil(LensRegion::FullFrame).with_onion_rings(0.9, 1.0);
+    let onion = LensElementRow::pupil(LensRegion::FullFrame).with_onion_rings(0.9, 1.0);
     let frame = rig.record(&far, Some(&[lens]), Some(&[onion]));
     // cos(2 pi rho) peaks at the centre and the rim and troughs at half the
     // radius (7 px); the blob smears it by its own 4 px.
@@ -1503,9 +1491,9 @@ fn central_obstruction_leaves_a_dark_hole() {
     let mut rig = Rig::new();
     let lens = bokeh_lens();
     let far = blob_scene(f32::INFINITY);
-    let open = LensElementComponent::pupil(LensRegion::FullFrame);
+    let open = LensElementRow::pupil(LensRegion::FullFrame);
     let control = rig.record(&far, Some(&[lens]), Some(&[open]));
-    let donut = LensElementComponent::pupil(LensRegion::FullFrame).with_central_obstruction(0.6);
+    let donut = LensElementRow::pupil(LensRegion::FullFrame).with_central_obstruction(0.6);
     let frame = rig.record(&far, Some(&[lens]), Some(&[donut]));
     let (centre, ring) = (
         ring_mean(&frame, 1, 0.0, 3.0),
@@ -1527,8 +1515,8 @@ fn longitudinal_chromatic_aberration_fringes_by_depth() {
     let lens = bokeh_lens();
     // Red and blue focus farther than green: foregrounds fringe purple,
     // backgrounds green.
-    let ca = LensElementComponent::longitudinal_ca(-0.6, 0.0, -0.6, LensRegion::FullFrame);
-    let fringe = |rig: &mut Rig, depth: f32, band: (f32, f32), element: LensElementComponent| {
+    let ca = LensElementRow::longitudinal_ca(-0.6, 0.0, -0.6, LensRegion::FullFrame);
+    let fringe = |rig: &mut Rig, depth: f32, band: (f32, f32), element: LensElementRow| {
         let frame = rig.record(&blob_scene(depth), Some(&[lens]), Some(&[element]));
         // The outer edge of the larger channels' discs, beyond the smaller
         // ones (the green circle is 14 px in radius, red and blue 8.5 more
@@ -1554,11 +1542,11 @@ fn longitudinal_chromatic_aberration_fringes_by_depth() {
         far[2]
     );
     // No shift, no fringe.
-    let none = LensElementComponent::longitudinal_ca(0.0, 0.0, 0.0, LensRegion::FullFrame);
+    let none = LensElementRow::longitudinal_ca(0.0, 0.0, 0.0, LensRegion::FullFrame);
     let flat = fringe(&mut rig, 0.5, (20.0, 24.0), none);
     assert!(flat.iter().all(|&c| c < 0.02), "neutral: {flat:?}");
     // Region limited: outside it the channels agree.
-    let left = LensElementComponent::longitudinal_ca(
+    let left = LensElementRow::longitudinal_ca(
         -0.6,
         0.0,
         -0.6,
@@ -1592,7 +1580,7 @@ fn a_texture_replaces_the_iris() {
     ));
     let measure = |rig: &mut Rig, layer: u32, amount: f32| {
         let element =
-            LensElementComponent::pupil(LensRegion::FullFrame).with_aperture_texture(layer, amount);
+            LensElementRow::pupil(LensRegion::FullFrame).with_aperture_texture(layer, amount);
         edge_widths(rig, lens, &[element])
     };
     let (x, y) = measure(&mut rig, 0, 1.0);
@@ -1617,7 +1605,7 @@ fn pupil_elements_are_region_limited() {
     let mut rig = Rig::new();
     let lens = bokeh_lens();
     // Anamorphic only in the right of the frame.
-    let right = LensElementComponent::pupil(LensRegion::HalfPlane {
+    let right = LensElementRow::pupil(LensRegion::HalfPlane {
         angle: 0.0,
         offset: 0.1,
     })
@@ -1651,7 +1639,7 @@ fn the_pupil_variants_preserve_energy() {
     lens.f_number = 1.4;
     lens.focus_distance_m = 1.0;
     lens.element_count = 1;
-    let pupil = || LensElementComponent::pupil(LensRegion::FullFrame);
+    let pupil = || LensElementRow::pupil(LensRegion::FullFrame);
     let everything = pupil()
         .with_iris(7, 0.3, 0.2)
         .with_anamorphic(1.5)
@@ -1660,8 +1648,8 @@ fn the_pupil_variants_preserve_energy() {
         .with_spherical_aberration(0.6, 0.5)
         .with_apodization(0.7)
         .with_central_obstruction(0.3);
-    let chromatic = LensElementComponent::longitudinal_ca(-0.4, 0.0, -0.4, LensRegion::FullFrame);
-    let variants: Vec<(&str, u32, LensElementComponent)> = vec![
+    let chromatic = LensElementRow::longitudinal_ca(-0.4, 0.0, -0.4, LensRegion::FullFrame);
+    let variants: Vec<(&str, u32, LensElementRow)> = vec![
         ("circle", 0, pupil()),
         ("hexagon", 6, pupil()),
         ("triangle", 3, pupil().with_iris(3, 0.0, 0.3)),
@@ -1708,7 +1696,7 @@ fn the_pupil_variants_preserve_energy() {
 
 #[test]
 fn pupil_element_builders_fill_the_documented_slots() {
-    let e = LensElementComponent::pupil(LensRegion::FullFrame)
+    let e = LensElementRow::pupil(LensRegion::FullFrame)
         .with_iris(5, 0.25, 0.5)
         .with_f_number_rounding(8.0)
         .with_aperture_texture(3, 0.75)
@@ -1724,9 +1712,9 @@ fn pupil_element_builders_fill_the_documented_slots() {
         e.params,
         [5.0, 0.25, 0.5, 8.0, 3.0, 0.75, 1.8, 0.6, 1.2, 0.4, -0.5, 0.3, 5.0, 0.5, 0.4, 1.0]
     );
-    let inherits = LensElementComponent::pupil(LensRegion::FullFrame);
+    let inherits = LensElementRow::pupil(LensRegion::FullFrame);
     assert!(inherits.params[pupil::BLADES] < 0.0 && inherits.params[pupil::SQUEEZE] == 1.0);
-    let ca = LensElementComponent::longitudinal_ca(-0.1, 0.0, -0.2, LensRegion::FullFrame);
+    let ca = LensElementRow::longitudinal_ca(-0.1, 0.0, -0.2, LensRegion::FullFrame);
     assert_eq!(
         (ca.kind, ca.params[..3].to_vec()),
         (element_kind::LONGITUDINAL_CA, vec![-0.1, 0.0, -0.2])

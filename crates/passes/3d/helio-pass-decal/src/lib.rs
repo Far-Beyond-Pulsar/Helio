@@ -4,7 +4,8 @@ use pulsar_scenedb::gpu::{world_mirror::DEFAULT_AUTO_REGISTER_CAPACITY, BufferKe
 
 pub mod components;
 pub mod gpu_types;
-pub use components::DecalComponent;
+pub use components::DecalRow;
+pub use components::DECALS;
 pub use gpu_types::*;
 
 /// Fixed capacity for the `"decals"` SceneDB buffer, matching
@@ -47,7 +48,7 @@ pub struct DecalPass {
     /// Cached in `prepare()`, read back in `execute()` -- see `prepare()`'s
     /// doc for why this isn't just `ctx.scene.decal_count`.
     decal_count: u32,
-    /// Bound in place of `"decals"` when no `DecalComponent` has ever been
+    /// Bound in place of `"decals"` when no `DecalRow` has ever been
     /// inserted -- SceneDB is the only decal source this pass reads.
     /// `decal_count` is 0 whenever this is bound, so it's never dereferenced.
     fallback_decals: wgpu::Buffer,
@@ -397,7 +398,7 @@ impl RenderPass for DecalPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // SceneDB is the only decal source: `"decals"` is a fixed-capacity
         // buffer (`MAX_DECALS`), resolved fresh from the mirror by key every
-        // frame. 0 when no `DecalComponent` has ever been inserted; there is
+        // frame. 0 when no `DecalRow` has ever been inserted; there is
         // no Helio-owned decal buffer to fall back to. The graph runs the pass
         // only while some row is live (`is_member`).
         let decals = ctx.scene_buffers.get(BufferKey::of("decals"));

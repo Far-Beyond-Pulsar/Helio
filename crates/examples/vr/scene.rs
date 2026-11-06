@@ -33,7 +33,7 @@
 
 use glam::{Mat4, Quat, Vec3};
 use helio::{GpuLight, LightType, MeshUpload, Renderer};
-use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
+use helio_asset_compat::{load_scene_bytes_with_config, LoadConfig};
 use helio_pass_corona::CoronaEmitterDescriptor;
 use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use helio_pass_water_sim::WaterSimPass;
@@ -522,7 +522,7 @@ fn load_container(world: &mut World) -> Option<(Entity, Entity, Vec3, Vec3)> {
         }
     };
 
-    let mat_ids = upload_scene_materials(world, &scene);
+    let mat_ids = helio_components::upload_scene_materials(world, &scene);
     let sm = match scene.sectioned_mesh {
         Some(sm) => sm,
         None => {

@@ -28,7 +28,7 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 mod components;
 pub mod gpu_types;
-pub use components::{CameraPostProcessComponent, PostProcessVolumeComponent};
+pub use components::{CameraPostProcessRow, PostProcessVolumeRow};
 pub use gpu_types::*;
 
 mod volume_blend;
@@ -41,6 +41,8 @@ mod fog_composite;
 pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
 
 mod lut_builder;
+pub use components::CAMERA_POSTPROCESS;
+pub use components::POST_PROCESS_VOLUMES;
 pub use lut_builder::LutBuilder;
 
 #[cfg(test)]

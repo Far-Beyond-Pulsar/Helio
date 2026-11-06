@@ -9,6 +9,7 @@
 //! alpha is 1 and lets them through where it is 0. Needs hardware ray
 //! queries: without them each test returns at once.
 
+use helio_components::LightComponent;
 use std::sync::{Arc, RwLock};
 
 use glam::{DVec3, Mat4, Vec3};
@@ -16,9 +17,9 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     RendererBuilder, RendererConfig,
 };
+use helio_components::ray_tracing::SceneDbRayTracing;
+use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
 use helio_default_passes::build_default_graph_external_with_context;
-use helio_default_passes::ray_tracing::SceneDbRayTracing;
-use helio_pass_gbuffer::{MaterialComponent, MeshComponent, StaticObjectComponent};
 use helio_pass_gi::{Clipmap, GiPass, LEVEL_PROBES, PROBE_WORDS};
 use helio_vg_stream::{content_words, VgRuntime, VgeoBytes, VgeoSource};
 use pulsar_scenedb::{Entity, World};
@@ -37,7 +38,7 @@ fn scene_db(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> pulsar_scen
     MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
     MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
     StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+    helio_components::LightComponent::register_gpu_columns_growable(
         &mut store,
         helio_pass_forward_lit::MAX_LIGHTS,
         device,
@@ -92,13 +93,13 @@ fn box_faces(half: Vec3, n: u32) -> (Vec<Vec3>, Vec<Vec3>, Vec<u32>) {
 
 fn material(world: &mut World, colour: [f32; 3], emissive: f32) -> (Entity, MaterialComponent) {
     let entity = world.spawn();
-    let row = MaterialComponent::new(
+    let row = MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
         [colour[0], colour[1], colour[2], 1.0],
         0.8,
         0.0,
         [colour[0], colour[1], colour[2]],
         emissive,
-    );
+    ));
     world.insert(entity, row);
     (entity, row)
 }
@@ -115,7 +116,7 @@ fn place(
     let vertex_range = MeshComponent::vertices_gpu_handle(store.store(), mesh.index()).unwrap();
     let index_range = MeshComponent::indices_gpu_handle(store.store(), mesh.index()).unwrap();
     let centre = transform.w_axis.truncate();
-    let object = StaticObjectComponent::new(
+    let object = StaticObjectComponent::from(helio_pass_gbuffer::StaticObjectRow::new(
         mesh.index(),
         mesh.generation().wrapping_add(1),
         material.index(),
@@ -128,7 +129,7 @@ fn place(
         row.material_class,
         0,
         helio_pass_object_batch::INSTANCE_FLAG_MOVABLE,
-    );
+    ));
     let entity = world.spawn();
     world.insert(entity, object);
     entity
@@ -270,13 +271,15 @@ fn room(world: &mut World, light: bool) {
         let entity = world.spawn();
         world.insert(
             entity,
-            helio_pass_forward_lit::LightComponent::from(helio_pass_forward_lit::GpuLight {
-                position_range: [0.0, 2.5, -2.5, 12.0],
-                color_intensity: [1.0, 0.9, 0.8, 20.0],
-                shadow_index: u32::MAX,
-                light_type: 1,
-                ..Default::default()
-            }),
+            LightComponent::from(helio_pass_forward_lit::LightRow::from(
+                helio_pass_forward_lit::GpuLight {
+                    position_range: [0.0, 2.5, -2.5, 12.0],
+                    color_intensity: [1.0, 0.9, 0.8, 20.0],
+                    shadow_index: u32::MAX,
+                    light_type: 1,
+                    ..Default::default()
+                },
+            )),
         );
     }
     let white = [0.7; 3];
@@ -500,7 +503,13 @@ impl Harness {
             .register_mips(&self.device, &self.queue, &descriptor, &[&texels])
             .unwrap();
         let entity = self.scene.world.spawn();
-        let mut row = MaterialComponent::new([0.7, 0.7, 0.7, 1.0], 0.8, 0.0, [0.0; 3], 0.0);
+        let mut row = MaterialComponent::from(helio_pass_gbuffer::MaterialRow::new(
+            [0.7, 0.7, 0.7, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
         row.flags |= helio_mats::FLAG_ALPHA_TEST | helio_mats::FLAG_DOUBLE_SIDED;
         row.tex_base_color = slot;
         self.scene.world.insert(entity, row);

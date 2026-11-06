@@ -9,8 +9,8 @@
 //! pass owning it centrally or the host reaching into a specific pass.
 //!
 //! Holds no scene storage of its own: persistent material authoring is a
-//! SceneDB component (`engine_backend::scene::MaterialComponent` /
-//! `helio_pass_gbuffer::MaterialComponent`); this crate only defines the GPU
+//! SceneDB component (`engine_backend::scene::MaterialRow` /
+//! `helio_pass_gbuffer::MaterialRow`); this crate only defines the GPU
 //! row layout and shading/template machinery those components project into.
 
 pub mod material;

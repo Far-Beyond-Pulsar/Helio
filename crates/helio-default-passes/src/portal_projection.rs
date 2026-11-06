@@ -21,7 +21,7 @@
 use std::sync::{Arc, Mutex};
 
 use helio_pass_portal_cull::{
-    components::PortalViewComponent, PortalProjectionFrame, PORTAL_CHAIN_HANDLE_BUFFER,
+    components::PortalViewRow, PortalProjectionFrame, PORTAL_CHAIN_HANDLE_BUFFER,
     PORTAL_CHAIN_PORTAL_POOL_BUFFER,
 };
 
@@ -30,7 +30,7 @@ pub use helio_core::{
 };
 
 /// One portal view row (`GpuPortalView`).
-pub const PORTAL_VIEW_ROW_BYTES: u64 = std::mem::size_of::<PortalViewComponent>() as u64;
+pub const PORTAL_VIEW_ROW_BYTES: u64 = std::mem::size_of::<PortalViewRow>() as u64;
 /// One chain handle: `offset` and `count` into the payload pool, `u32` each.
 pub const PORTAL_CHAIN_HANDLE_ROW_BYTES: u64 = 8;
 /// One chain's content-from-host matrix (`mat4x4<f32>`).
@@ -47,7 +47,7 @@ pub const PORTAL_CHAIN_UNMAP_KEY: BufferKey = BufferKey::of("portal_chain_unmap"
 struct Rows {
     /// Moves whenever the rows change.
     generation: u64,
-    views: Vec<PortalViewComponent>,
+    views: Vec<PortalViewRow>,
     /// `[offset, count]` per chain.
     handles: Vec<[u32; 2]>,
     /// Every chain's portal view indices, back to back.

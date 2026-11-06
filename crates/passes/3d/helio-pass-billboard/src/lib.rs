@@ -10,13 +10,13 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 use pulsar_scenedb::gpu::BufferKey;
 
 pub mod components;
-pub use components::{BillboardComponent, BillboardSceneBinding, SceneGpuBinding, SceneGpuRecord};
+pub use components::{BillboardRow, BILLBOARD_INSTANCES};
 
 const MAX_BILLBOARDS: u32 = 65536;
 
 /// Per-billboard instance data uploaded to the GPU.
 /// Compatibility name for the pass's SceneDB-owned instance record.
-pub type BillboardInstance = BillboardComponent;
+pub type BillboardInstance = BillboardRow;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -61,10 +61,10 @@ impl BillboardPass {
     /// - `camera_buf`    — camera uniform (must match `Camera` struct in billboard.wgsl)
     /// - `target_format` — colour attachment format (e.g. `Rgba16Float`)
     ///
-    /// The pass resolves `BillboardComponent`'s generated `"billboard_instances"`
+    /// The pass resolves `BillboardRow`'s generated `"billboard_instances"`
     /// GPU buffer by key every frame (`ctx.scene_buffers`, see `prepare()`);
     /// there is no constructor argument or setter for a SceneDB handle — a
-    /// frontend authors billboards purely by inserting `BillboardComponent`
+    /// frontend authors billboards purely by inserting `BillboardRow`
     /// rows into its `World`.
     pub fn new(
         device: &wgpu::Device,
@@ -473,9 +473,9 @@ impl RenderPass for BillboardPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Resolve `BillboardComponent`'s `"billboard_instances"` buffer by
+        // Resolve `BillboardRow`'s `"billboard_instances"` buffer by
         // key, generically, every frame — no renderer method, no stored
-        // SceneDB handle. `None` until the first `BillboardComponent` is
+        // SceneDB handle. `None` until the first `BillboardRow` is
         // ever inserted anywhere in the frontend's World.
         match ctx.scene_buffers.get(BufferKey::of("billboard_instances")) {
             Some(handle) => {

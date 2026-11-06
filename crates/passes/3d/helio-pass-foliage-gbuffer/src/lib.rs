@@ -461,7 +461,7 @@ pub struct FoliageGBufferPass {
     /// time ([`lod_draws`]): wide enough that tufts change one by one, narrow enough
     /// that the doubled cull output inside it stays small.
     pub lod_fade_band: f32,
-    /// Global multiplier on how far interactors (`FoliageInteractorComponent` rows) press
+    /// Global multiplier on how far interactors (`FoliageInteractorRow` rows) press
     /// foliage over.
     pub interaction_strength: f32,
 }

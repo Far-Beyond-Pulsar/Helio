@@ -40,7 +40,7 @@ struct State {
     queue: Arc<wgpu::Queue>,
     renderer: Renderer,
     scene_db: SceneDb,
-    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_components::ray_tracing::SceneDbRayTracing>,
     keys: HashSet<KeyCode>,
     last: Instant,
     angle: f32,
@@ -110,7 +110,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
         let acceleration = if rt {
             crate::hlfs_capture::enable_ray_shadows(&mut scene_db.world);
-            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(
+            Some(helio_components::ray_tracing::SceneDbRayTracing::new(
                 device.clone(),
                 queue.clone(),
             ))
@@ -211,7 +211,7 @@ impl ApplicationHandler for App {
                 let volume_bounds: Vec<[glam::DVec3; 2]> = s
                     .scene_db
                     .world
-                    .query::<&helio_pass_postprocess::PostProcessVolumeComponent>()
+                    .query::<&helio_components::PostProcessVolumeComponent>()
                     .filter_map(|(_, volume)| {
                         if volume.blend_weight <= 0.0 || volume.unbound != 0 {
                             return None;

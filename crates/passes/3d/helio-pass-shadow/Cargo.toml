@@ -14,5 +14,6 @@ bytemuck  = { workspace = true, features = ["derive"] }
 log       = { workspace = true }
 
 [dev-dependencies]
+helio-components = { path = "../../../helio-components" }
 pollster = { workspace = true }
 glam = { workspace = true }

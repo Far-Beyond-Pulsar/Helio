@@ -11,13 +11,13 @@ use crate::ray_map::{applied_overscan, required_overscan, RayMap, APPLIED_OVERSC
 
 /// A 35 mm lens on the square frame with an equidistant fisheye projection
 /// over the whole frame: a map that looks past the frame, by a modest amount.
-fn fisheye() -> (LensComponent, [LensElementComponent; 1]) {
+fn fisheye() -> (LensRow, [LensElementRow; 1]) {
     let mut lens = lens();
     lens.focal_length_mm = 35.0;
     lens.element_count = 1;
     (
         lens,
-        [LensElementComponent::projection(
+        [LensElementRow::projection(
             ProjectionModel::Equidistant,
             LensRegion::FullFrame,
         )],
@@ -44,7 +44,7 @@ fn scene(overscan: f32) -> Scene {
     )
 }
 
-fn with_overscan(mut lens: LensComponent, overscan: f32) -> LensComponent {
+fn with_overscan(mut lens: LensRow, overscan: f32) -> LensRow {
     lens.overscan = overscan;
     lens
 }
@@ -82,7 +82,7 @@ fn a_lens_inside_the_frame_applies_no_overscan() {
     // Elements that never look past the frame (a vignette, a filter) too.
     let mut filtered = lens();
     filtered.element_count = 1;
-    let nd = [LensElementComponent::nd_filter(2.0, LensRegion::FullFrame)];
+    let nd = [LensElementRow::nd_filter(2.0, LensRegion::FullFrame)];
     assert_eq!(applied_overscan(&filtered, &nd, 1.0, &[]), 1.0);
     // A lens that is off asks for none, whatever its stack.
     let (mut off, stack) = fisheye();
@@ -275,7 +275,7 @@ fn element_regions_are_in_the_frame_not_in_the_wider_image() {
     // image twice the frame, 0.4 frame heights out - outside.
     let mut lens = lens();
     lens.element_count = 1;
-    let diopter = [LensElementComponent::diopter(
+    let diopter = [LensElementRow::diopter(
         0.5,
         LensRegion::Ellipse {
             center: [0.0, 0.0],

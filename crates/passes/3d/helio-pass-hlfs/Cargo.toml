@@ -15,6 +15,7 @@ helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-pass-shadow-matrix = { workspace = true }
 
 [dev-dependencies]
+helio-components = { path = "../../../helio-components" }
 pollster = { workspace = true }
 naga = { version = "30", features = ["wgsl-in"] }
 image = { workspace = true }

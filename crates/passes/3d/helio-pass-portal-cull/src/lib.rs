@@ -71,6 +71,13 @@ pub use projection::{
     ProjectionError, RuntimePortalKey, IDENTITY_COORDINATE_SPACE_SLOT,
 };
 mod contract;
+pub use components::PortalChain;
+pub use components::PortalProjectionCountsRow;
+pub use components::PortalRow;
+pub use components::PortalViewRow;
+pub use components::PORTALS;
+pub use components::PORTAL_PROJECTION_COUNTS;
+pub use components::PORTAL_VIEWS;
 pub use contract::{
     GpuPortalView, MAX_PORTAL_CHAINS, PORTAL_CHAIN_HANDLE_BUFFER, PORTAL_CHAIN_PORTAL_POOL_BUFFER,
 };

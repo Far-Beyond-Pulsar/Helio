@@ -3,7 +3,7 @@
 //! The resolver owns authored/runtime topology. This module owns the derived
 //! frame representation consumed by the existing SceneDB portal buffers. A
 //! view row represents one resolved source/target projection, rather than
-//! mutating the authored `PortalComponent` row. That distinction matters when
+//! mutating the authored `PortalRow` row. That distinction matters when
 //! one indexed sublevel is instanced more than once: the same authored portal
 //! can then legitimately produce several projection rows.
 
@@ -14,9 +14,7 @@ use std::fmt;
 use glam::Mat4;
 use pulsar_scenedb::Entity;
 
-use crate::components::{
-    PortalChainComponent, PortalProjectionCountsComponent, PortalViewComponent,
-};
+use crate::components::{PortalChain, PortalProjectionCountsRow, PortalViewRow};
 use crate::resolver::{
     PortalOccurrence, PortalProjection, ResolutionError, ResolvedPortalChain, SubLevelResolver,
 };
@@ -199,9 +197,9 @@ pub struct PortalProjectionFrame {
     /// Full coordinate-space table. Slot zero is always identity.
     pub coordinate_spaces: Vec<Mat4>,
     /// Dense view rows. Their indices are the IDs stored in chain rows.
-    pub portal_views: Vec<PortalViewComponent>,
+    pub portal_views: Vec<PortalViewRow>,
     /// Dense chain rows. Each `portals[]` entry indexes `portal_views`.
-    pub portal_chains: Vec<PortalChainComponent>,
+    pub portal_chains: Vec<PortalChain>,
     /// Stable dense IDs for all resolved runtime occurrences.
     pub occurrence_indices: BTreeMap<RuntimePortalKey, u32>,
     /// Stable dense IDs for source/target projection rows.
@@ -210,7 +208,7 @@ pub struct PortalProjectionFrame {
     /// source has multiple cross-sublevel target placements.
     pub view_indices_by_occurrence: BTreeMap<RuntimePortalKey, Vec<u32>>,
     /// Explicit active counts for the SceneDB-facing derived count row.
-    pub counts: PortalProjectionCountsComponent,
+    pub counts: PortalProjectionCountsRow,
 }
 
 impl PortalProjectionFrame {
@@ -222,62 +220,6 @@ impl PortalProjectionFrame {
 
     pub fn portal_view_index(&self, key: &PortalProjectionKey) -> Option<u32> {
         self.projection_indices.get(key).copied()
-    }
-
-    /// Publish the derived rows through the existing SceneDB component seam.
-    ///
-    /// The portal GPU ABI is entity-indexed. Callers therefore reserve a
-    /// contiguous projection entity range whose entity indices match the
-    /// dense row IDs, and keep those entities separate from authored portal
-    /// entities. This method intentionally does not spawn or repurpose those
-    /// entities, which leaves lifetime/slot policy with the host application.
-    pub fn publish_to_world(
-        &self,
-        world: &mut pulsar_scenedb::World,
-        view_entities: &[Entity],
-        chain_entities: &[Entity],
-        counts_entity: Entity,
-    ) -> Result<(), ProjectionError> {
-        if view_entities.len() != self.portal_views.len() {
-            return Err(ProjectionError::SceneRowCount {
-                kind: "portal view",
-                expected: self.portal_views.len(),
-                actual: view_entities.len(),
-            });
-        }
-        if chain_entities.len() != self.portal_chains.len() {
-            return Err(ProjectionError::SceneRowCount {
-                kind: "portal chain",
-                expected: self.portal_chains.len(),
-                actual: chain_entities.len(),
-            });
-        }
-        for (dense_index, entity) in view_entities.iter().enumerate() {
-            if entity.index() as usize != dense_index {
-                return Err(ProjectionError::NonDenseSceneRow {
-                    kind: "portal view",
-                    dense_index,
-                    entity_index: entity.index(),
-                });
-            }
-        }
-        for (dense_index, entity) in chain_entities.iter().enumerate() {
-            if entity.index() as usize != dense_index {
-                return Err(ProjectionError::NonDenseSceneRow {
-                    kind: "portal chain",
-                    dense_index,
-                    entity_index: entity.index(),
-                });
-            }
-        }
-        for (entity, row) in view_entities.iter().zip(&self.portal_views) {
-            world.insert(*entity, row.clone());
-        }
-        for (entity, row) in chain_entities.iter().zip(&self.portal_chains) {
-            world.insert(*entity, row.clone());
-        }
-        world.insert(counts_entity, self.counts);
-        Ok(())
     }
 }
 
@@ -503,7 +445,7 @@ impl PortalProjectionBridge {
             highest_slot = highest_slot.max(coordinate_space);
             let mut view = projection.to_portal_view(coordinate_space);
             if !direct_projection_keys.contains(&PortalProjectionKey::from_projection(projection)) {
-                view._pad = PortalViewComponent::FLAG_MASK_HIDDEN;
+                view._pad = PortalViewRow::FLAG_MASK_HIDDEN;
             }
             portal_views.push(view);
             view_indices_by_occurrence
@@ -533,7 +475,7 @@ impl PortalProjectionBridge {
                         .expect("chain projection was included in projection rows")
                 })
                 .collect();
-            portal_chains.push(PortalChainComponent { portals });
+            portal_chains.push(PortalChain { portals });
         }
 
         let occurrence_indices = all_occurrences
@@ -541,7 +483,7 @@ impl PortalProjectionBridge {
             .enumerate()
             .map(|(index, key)| (key.clone(), index as u32))
             .collect();
-        let counts = PortalProjectionCountsComponent {
+        let counts = PortalProjectionCountsRow {
             portal_view_count: portal_views.len() as u32,
             portal_chain_count: portal_chains.len() as u32,
             coordinate_space_count: highest_slot + 1,
@@ -602,9 +544,9 @@ fn chain_sort_key(chain: &ResolvedPortalChain) -> Vec<PortalProjectionKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::components::PortalComponent;
+    use crate::components::PortalRow;
     use crate::resolver::SubLevelContents;
-    use helio_pass_gbuffer::SubLevelActorComponent;
+    use helio_pass_gbuffer::SubLevelActorRow;
 
     #[test]
     fn dense_indexing_and_identity_slot_are_deterministic() {
@@ -619,11 +561,11 @@ mod tests {
                 [
                     (
                         a_entity,
-                        PortalComponent::new(Some(b_entity), Mat4::IDENTITY, [1.0, 1.0]),
+                        PortalRow::new(Some(b_entity), Mat4::IDENTITY, [1.0, 1.0]),
                     ),
                     (
                         b_entity,
-                        PortalComponent::new(Some(a_entity), Mat4::IDENTITY, [1.0, 1.0]),
+                        PortalRow::new(Some(a_entity), Mat4::IDENTITY, [1.0, 1.0]),
                     ),
                 ],
             ),
@@ -658,7 +600,7 @@ mod tests {
                 [
                     (
                         a,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(b),
                             Mat4::from_translation(glam::vec3(2.0, 0.0, 0.0)),
                             [1.0, 1.0],
@@ -666,7 +608,7 @@ mod tests {
                     ),
                     (
                         b,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(a),
                             Mat4::from_translation(glam::vec3(-2.0, 0.0, 0.0)),
                             [1.0, 1.0],
@@ -720,7 +662,7 @@ mod tests {
                 [
                     (
                         a,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(b),
                             Mat4::from_translation(glam::vec3(2.0, 0.0, 0.0)),
                             [1.0, 1.0],
@@ -728,7 +670,7 @@ mod tests {
                     ),
                     (
                         b,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(a),
                             Mat4::from_translation(glam::vec3(-2.0, 0.0, 0.0)),
                             [1.0, 1.0],
@@ -772,12 +714,12 @@ mod tests {
         let mut world = pulsar_scenedb::World::new();
         let source = world.spawn();
         let target = world.spawn();
-        let mut target_component = PortalComponent::new(
+        let mut target_component = PortalRow::new(
             Some(source),
             Mat4::from_translation(glam::vec3(-2.0, 0.0, 0.0)),
             [1.0, 1.0],
         );
-        target_component.flags &= !PortalComponent::FLAG_ENABLED;
+        target_component.flags &= !PortalRow::FLAG_ENABLED;
 
         let mut resolver = SubLevelResolver::new();
         resolver.insert_sublevel(
@@ -787,7 +729,7 @@ mod tests {
                 [
                     (
                         source,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(target),
                             Mat4::from_translation(glam::vec3(2.0, 0.0, 0.0)),
                             [1.0, 1.0],
@@ -805,7 +747,7 @@ mod tests {
         assert!(frame
             .portal_views
             .iter()
-            .all(|view| view._pad != PortalViewComponent::FLAG_MASK_HIDDEN));
+            .all(|view| view._pad != PortalViewRow::FLAG_MASK_HIDDEN));
         assert!(frame.portal_views.iter().any(|view| view._pad == 0));
     }
 
@@ -821,7 +763,7 @@ mod tests {
                 [],
                 [(
                     source,
-                    PortalComponent::new(Some(target), Mat4::IDENTITY, [1.0, 1.0]),
+                    PortalRow::new(Some(target), Mat4::IDENTITY, [1.0, 1.0]),
                 )],
             ),
         );
@@ -831,7 +773,7 @@ mod tests {
                 [],
                 [(
                     target,
-                    PortalComponent::new(
+                    PortalRow::new(
                         Some(source),
                         Mat4::from_translation(glam::vec3(3.0, 0.0, 0.0)),
                         [1.0, 1.0],
@@ -860,10 +802,7 @@ mod tests {
             SubLevelContents::new(
                 [(
                     actor_entity,
-                    SubLevelActorComponent::new(
-                        1,
-                        Mat4::from_translation(glam::vec3(10.0, 0.0, 0.0)),
-                    ),
+                    SubLevelActorRow::new(1, Mat4::from_translation(glam::vec3(10.0, 0.0, 0.0))),
                 )],
                 [],
             ),
@@ -873,10 +812,10 @@ mod tests {
             SubLevelContents::new(
                 [],
                 [
-                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (a, PortalRow::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
                     (
                         b,
-                        PortalComponent::new(
+                        PortalRow::new(
                             Some(a),
                             Mat4::from_translation(glam::vec3(0.0, 0.0, 2.0)),
                             [1.0, 1.0],
@@ -907,8 +846,8 @@ mod tests {
             SubLevelContents::new(
                 [],
                 [
-                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
-                    (b, PortalComponent::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
+                    (a, PortalRow::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (b, PortalRow::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
                 ],
             ),
         );
@@ -937,8 +876,8 @@ mod tests {
             SubLevelContents::new(
                 [],
                 [
-                    (a, PortalComponent::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
-                    (b, PortalComponent::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
+                    (a, PortalRow::new(Some(b), Mat4::IDENTITY, [1.0, 1.0])),
+                    (b, PortalRow::new(Some(a), Mat4::IDENTITY, [1.0, 1.0])),
                 ],
             ),
         );

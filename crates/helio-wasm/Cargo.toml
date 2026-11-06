@@ -8,6 +8,7 @@ description = "Cross-platform WASM wrapper — turns any helio demo into a brows
 crate-type = ["rlib"]
 
 [dependencies]
+helio-components = { path = "../helio-components" }
 helio = { workspace = true }
 helio-default-passes = { path = "../helio-default-passes" }
 helio-pass-gbuffer = { workspace = true }

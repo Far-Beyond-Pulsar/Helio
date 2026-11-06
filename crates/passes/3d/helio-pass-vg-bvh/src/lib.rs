@@ -36,7 +36,7 @@
 //! * [`keys::INSTANCES`] = `"vg_instances"`: `array<GpuVgInstance>`; a row is in
 //!   the tree iff `flags & INST_ENABLED` and its `object_row` is a live
 //!   `static_objects` row with finite bounds.
-//! * `"static_objects"`: `array<StaticObjectComponent>`.
+//! * `"static_objects"`: `array<StaticObjectRow>`.
 //! * `"scene_objects_structure"` (optional): rebuild vs refit discriminator.
 //!
 //! Outputs, published to the graph registry as buffers (declared writes of this
@@ -846,7 +846,7 @@ impl VgBvhPass {
 
     /// Runs one frame outside a render graph, blocking until the GPU is done:
     /// for tests. `instances` is an `array<GpuVgInstance>`, `objects` an
-    /// `array<StaticObjectComponent>`.
+    /// `array<StaticObjectRow>`.
     pub fn run_for_testing(
         &mut self,
         device: &wgpu::Device,
@@ -958,7 +958,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<GpuBvhHeader>(), 128);
         assert_eq!(std::mem::size_of::<BuildCfgGpu>(), 16);
         assert_eq!(
-            std::mem::size_of::<helio_pass_gbuffer::StaticObjectComponent>(),
+            std::mem::size_of::<helio_pass_gbuffer::StaticObjectRow>(),
             252
         );
         assert_eq!(header_offsets::DISPATCH_LEAVES, 16 * 4);

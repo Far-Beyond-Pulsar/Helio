@@ -37,7 +37,8 @@ use pulsar_scenedb::gpu::BufferKey;
 
 pub mod components;
 pub mod gpu_types;
-pub use components::CoronaEmitterComponent;
+pub use components::CoronaEmitterRow;
+pub use components::CORONA_EMITTERS;
 pub use gpu_types::*;
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -110,7 +111,7 @@ pub struct CoronaPass {
     uniform_buf: wgpu::Buffer, // CoronaUniforms (32 bytes, UNIFORM | COPY_DST)
     particle_buf: wgpu::Buffer,
     /// Fallback buffer, bound only until `"corona_emitters"` exists (before
-    /// any `CoronaEmitterComponent` has ever been inserted) — never written
+    /// any `CoronaEmitterRow` has ever been inserted) — never written
     /// to otherwise; SceneDB's own buffer is bound directly once it exists
     /// (see `execute()`), read_write, so the compute shader's own per-frame
     /// `spawn_cursor` advance persists in place across frames with no CPU

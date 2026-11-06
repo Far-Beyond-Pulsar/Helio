@@ -45,23 +45,15 @@ fn mirror(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> GpuMirrorHand
             max_cells_metadata: 0,
         },
     );
-    helio_pass_sky::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
-    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(
+    helio_components::AtmosphereComponent::register_gpu_columns_growable(&mut gpu_store, 4, device);
+    helio_components::MeshComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
+    helio_components::MaterialComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
+    helio_components::StaticObjectComponent::register_gpu_columns_growable(
         &mut gpu_store,
         16,
         device,
     );
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        16,
-        device,
-    );
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        16,
-        device,
-    );
+    helio_components::LightComponent::register_gpu_columns_growable(&mut gpu_store, 16, device);
     GpuMirrorHandle::new(Arc::new(gpu_store), Arc::clone(queue))
 }
 

@@ -80,6 +80,9 @@ mod v3_demo_common;
 
 use glam::{Mat4, Vec3};
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
+use helio_components::{
+    GlobalFogComponent, LensComponent, LocalFogVolumeComponent, StaticObjectComponent,
+};
 use pulsar_scenedb::{SceneDb, World};
 use std::io::Write;
 use std::sync::Arc;
@@ -317,17 +320,18 @@ fn fog_hall(world: &mut World, aspect: f32) -> Camera {
             SHADOW_BASES[0],
         ),
     );
-    let mut haze = LocalFogVolumeComponent::new(
-        [-HALF_X - 2.0, 0.0, -HALF_Z - 2.0],
-        [HALF_X + 2.0, ROOF_Y + 1.0, HALF_Z + 2.0],
-        GlobalFogComponent {
-            extinction: 0.04,
-            albedo: [0.62, 0.70, 0.85],
-            anisotropy: 0.35,
-            height_falloff: 0.25,
-            ..Default::default()
-        },
-    );
+    let mut haze =
+        LocalFogVolumeComponent::from(helio_pass_volumetric_fog::LocalFogVolumeRow::new(
+            [-HALF_X - 2.0, 0.0, -HALF_Z - 2.0],
+            [HALF_X + 2.0, ROOF_Y + 1.0, HALF_Z + 2.0],
+            helio_pass_volumetric_fog::GlobalFogRow {
+                extinction: 0.04,
+                albedo: [0.62, 0.70, 0.85],
+                anisotropy: 0.35,
+                height_falloff: 0.25,
+                ..Default::default()
+            },
+        ));
     haze.edge_fade = 1.5;
     let entity = world.spawn();
     world.insert(entity, haze);
@@ -416,11 +420,11 @@ fn apply_movability(world: &mut World, mode: &str) {
 /// `cast_shadows: true`; `u32::MAX` means no shadow).
 fn cast_shadows_from_every_light(world: &mut World) {
     let entities: Vec<_> = world
-        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .query::<(&helio_components::LightComponent,)>()
         .map(|(entity, _)| entity)
         .collect();
     for entity in entities {
-        if let Some(light) = world.get::<helio_pass_forward_lit::LightComponent>(entity) {
+        if let Some(light) = world.get::<helio_components::LightComponent>(entity) {
             let mut gpu: helio_pass_forward_lit::GpuLight = (*light).into();
             gpu.shadow_index = 0;
             update_light(world, entity, gpu);
@@ -431,7 +435,7 @@ fn cast_shadows_from_every_light(world: &mut World) {
 /// An editor-style icon over every point light, as `BillboardComponent` rows.
 fn spawn_light_billboards(world: &mut World) {
     let positions: Vec<[f32; 4]> = world
-        .query::<(&helio_pass_forward_lit::LightComponent,)>()
+        .query::<(&helio_components::LightComponent,)>()
         .map(|(_, (light,))| {
             let gpu: helio_pass_forward_lit::GpuLight = (*light).into();
             gpu.position_range
@@ -442,7 +446,7 @@ fn spawn_light_billboards(world: &mut World) {
         let entity = world.spawn();
         world.insert(
             entity,
-            helio_pass_billboard::BillboardComponent {
+            helio_components::BillboardComponent {
                 world_pos: [p[0], p[1], p[2], 0.0],
                 scale_flags: [0.6, 0.6, 0.0, 0.0],
                 color: [1.0, 0.9, 0.6, 1.0],
@@ -516,27 +520,27 @@ fn run(
     let (pulsar_columns, billboards, water) = (args.pulsar_columns, args.billboards, args.water);
     let mut scene_db: SceneDb = new_scene_db_with_gpu_mirror_and(device, queue, |store| {
         if water && !pulsar_columns {
-            helio_pass_water_sim::WaterVolumeComponent::register_gpu_columns_growable(
+            helio_components::WaterVolumeComponent::register_gpu_columns_growable(
                 store, 64, device,
             );
-            helio_pass_water_sim::WaterHitboxComponent::register_gpu_columns_growable(
+            helio_components::WaterHitboxComponent::register_gpu_columns_growable(
                 store, 256, device,
             );
         }
         if billboards && !pulsar_columns {
-            helio_pass_billboard::BillboardComponent::register_gpu_columns_growable(
+            helio_components::BillboardComponent::register_gpu_columns_growable(
                 store, 1024, device,
             );
         }
         if pulsar_columns {
-            helio_pass_billboard::BillboardComponent::register_gpu_columns_growable(
+            helio_components::BillboardComponent::register_gpu_columns_growable(
                 store, 1024, device,
             );
-            helio_pass_decal::DecalComponent::register_gpu_columns_growable(store, 256, device);
-            helio_pass_water_sim::WaterVolumeComponent::register_gpu_columns_growable(
+            helio_components::DecalComponent::register_gpu_columns_growable(store, 256, device);
+            helio_components::WaterVolumeComponent::register_gpu_columns_growable(
                 store, 64, device,
             );
-            helio_pass_water_sim::WaterHitboxComponent::register_gpu_columns_growable(
+            helio_components::WaterHitboxComponent::register_gpu_columns_growable(
                 store, 256, device,
             );
         }
@@ -570,11 +574,14 @@ fn run(
         );
     }
     if args.global_fog {
-        spawn_global_fog(&mut scene_db.world, GlobalFogComponent::default());
+        spawn_global_fog(
+            &mut scene_db.world,
+            GlobalFogComponent::from(helio_pass_volumetric_fog::GlobalFogRow::default()),
+        );
     }
     if args.lens {
         // Focused a few metres out so near and far both blur.
-        let mut lens = helio_pass_lens::LensComponent::new(0);
+        let mut lens = LensComponent::from(helio_pass_lens::LensRow::new(0));
         lens.focus_distance_m = 6.0;
         set_camera_lens(&mut scene_db.world, lens);
     }

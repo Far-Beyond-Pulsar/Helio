@@ -1,3 +1,4 @@
+use helio_components::LightComponent;
 use std::sync::Arc;
 
 use glam::Vec3;
@@ -136,9 +137,10 @@ async fn run_default_graph(
                 light_type: 2,
                 ..Default::default()
             };
-            scene_db
-                .world
-                .insert(entity, helio_pass_forward_lit::LightComponent::from(light));
+            scene_db.world.insert(
+                entity,
+                LightComponent::from(helio_pass_forward_lit::LightRow::from(light)),
+            );
         }
     }
     let config = RendererConfig::new(32, 32, wgpu::TextureFormat::Rgba8Unorm);
@@ -266,12 +268,10 @@ fn scene_db_with_gpu_mirror(
             max_cells_metadata: 0,
         },
     );
-    helio_pass_gbuffer::MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
-    helio_pass_gbuffer::MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
-    helio_pass_gbuffer::StaticObjectComponent::register_gpu_columns_growable(
-        &mut store, 64, device,
-    );
-    helio_pass_forward_lit::LightComponent::register_gpu_columns_growable(
+    helio_components::MeshComponent::register_gpu_columns_growable(&mut store, 64, device);
+    helio_components::MaterialComponent::register_gpu_columns_growable(&mut store, 64, device);
+    helio_components::StaticObjectComponent::register_gpu_columns_growable(&mut store, 64, device);
+    helio_components::LightComponent::register_gpu_columns_growable(
         &mut store,
         helio_pass_forward_lit::MAX_LIGHTS,
         device,

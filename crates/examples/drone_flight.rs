@@ -125,7 +125,7 @@ struct AppState {
     debug_overlay_enabled: bool,
 
     scene_db: SceneDb,
-    acceleration: Option<helio_default_passes::ray_tracing::SceneDbRayTracing>,
+    acceleration: Option<helio_components::ray_tracing::SceneDbRayTracing>,
 
     // Scene state
     chandelier_light_ids: Vec<Entity>,
@@ -208,7 +208,7 @@ impl ApplicationHandler for App {
                 .find_pass_mut::<helio_pass_hlfs::HlfsPass>()
                 .expect("HLFS pass")
                 .set_config(&device, config);
-            Some(helio_default_passes::ray_tracing::SceneDbRayTracing::new(
+            Some(helio_components::ray_tracing::SceneDbRayTracing::new(
                 device.clone(),
                 queue.clone(),
             ))

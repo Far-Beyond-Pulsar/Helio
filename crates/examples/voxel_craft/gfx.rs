@@ -13,8 +13,10 @@ use helio::{
     Camera, HelioGraphicsConfig, HelioGraphicsContext, HelioXrInput, Renderer, RendererBuilder,
     RendererConfig,
 };
+use helio_components::AtmosphereComponent;
+use helio_components::FoliageInteractorComponent;
+use helio_components::WorldRows;
 use helio_default_passes::{build_default_graph_external_with_voxel_passes, VoxelPassFactory};
-use helio_pass_foliage_place::components::FoliageInteractorComponent;
 use helio_pass_voxel_planet::chunks::pass::ChunkPass;
 use helio_pass_voxel_planet::chunks::ResidencyConfig;
 use helio_pass_voxel_planet::engine::{PlanetFrame, SharedPlanetFrame};
@@ -354,15 +356,21 @@ impl Gfx {
             .with_wind([1.0, 0.35], 4.5, 0.8);
         for row in meadow.types {
             let entity = scene.world.spawn();
-            scene.world.insert(entity, row);
+            scene.world.insert_row(entity, row);
         }
         let wind = scene.world.spawn();
-        scene.world.insert(wind, meadow.wind);
+        scene.world.insert_row(wind, meadow.wind);
         // The player's feet push it aside, and leave a track that rises behind them.
         let feet = scene.world.spawn();
         scene.world.insert(
             feet,
-            FoliageInteractorComponent::new(DVec3::ZERO, 0.7, 1.0, Vec3::ZERO, 1.2),
+            FoliageInteractorComponent::from(helio_pass_foliage_place::FoliageInteractorRow::new(
+                DVec3::ZERO,
+                0.7,
+                1.0,
+                Vec3::ZERO,
+                1.2,
+            )),
         );
         let sun_light = spawn_light(
             &mut scene.world,
@@ -382,12 +390,13 @@ impl Gfx {
             wind: [6.0, 0.0, 2.5],
             ..helio_pass_sky::CloudLayer::cumulus()
         };
-        let sky = helio_pass_sky::AtmosphereComponent::earth()
-            .around_planet([0.0; 3], planet.grid().radius());
+        let sky = AtmosphereComponent::from(
+            helio_pass_sky::AtmosphereRow::earth().around_planet([0.0; 3], planet.grid().radius()),
+        );
         let sky = if std::env::var_os("VOXEL_CRAFT_NO_CLOUDS").is_some() {
             sky
         } else {
-            sky.with_clouds(clouds)
+            sky.with_clouds(clouds).into()
         };
         scene.world.insert(air, sky);
         // A light ground haze, thinning with altitude over the planet, the
@@ -396,7 +405,7 @@ impl Gfx {
         let haze = scene.world.spawn();
         scene.world.insert(
             haze,
-            helio_pass_volumetric_fog::GlobalFogComponent {
+            helio_components::GlobalFogComponent {
                 mode: 1,
                 extinction: 0.001,
                 height_falloff: 0.01,

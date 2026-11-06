@@ -1199,7 +1199,7 @@ impl AppState {
         let mesh = spawn_mesh(&mut self.scene_db.world, upload);
         let mirror = scene_db_handle(&self.scene_db);
         let vertices =
-            helio_pass_gbuffer::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
+            helio_components::MeshComponent::vertices_gpu_handle(mirror.store(), mesh.index())
                 .expect("uploaded mesh vertex range");
         (mesh, vertices.offset, vertices.count)
     }
@@ -1404,7 +1404,7 @@ impl AppState {
                                 let Some(mut row) = self
                                     .scene_db
                                     .world
-                                    .get_mut::<helio_pass_gbuffer::MaterialComponent>(
+                                    .get_mut::<helio_components::MaterialComponent>(
                                     self.materials[&material],
                                 ) else {
                                     continue;

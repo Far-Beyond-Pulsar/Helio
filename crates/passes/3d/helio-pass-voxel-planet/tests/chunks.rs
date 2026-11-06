@@ -5251,7 +5251,12 @@ fn desert_steps() -> (Planet, DVec3, DVec3, DVec3) {
 /// the CPU's rays from points a few thousandths of a cell around that agree
 /// (a ray along an edge meets either side of it). The suns with wrong hits,
 /// and how many.
-fn sun_rays_against_cpu(gpu: &Gpu, planet: &Planet, view: &View, suns: &[(&str, DVec3)]) -> Vec<(String, usize)> {
+fn sun_rays_against_cpu(
+    gpu: &Gpu,
+    planet: &Planet,
+    view: &View,
+    suns: &[(&str, DVec3)],
+) -> Vec<(String, usize)> {
     use rayon::prelude::*;
     let grid = planet.grid();
     let up = grid.up(view.eye);
@@ -5326,7 +5331,10 @@ fn sun_rays_against_cpu(gpu: &Gpu, planet: &Planet, view: &View, suns: &[(&str, 
             wrong.len()
         );
         for &&(x, y, hit, cpu, _) in wrong.iter().take(12) {
-            eprintln!("  ({x}, {y}): level {} cell {:?} entered {:?} at {:.3} m; cpu lit {cpu}", hit.level, hit.cell, hit.entered, hit.distance);
+            eprintln!(
+                "  ({x}, {y}): level {} cell {:?} entered {:?} at {:.3} m; cpu lit {cpu}",
+                hit.level, hit.cell, hit.entered, hit.distance
+            );
         }
         assert!(checked.len() > 10_000, "{} hits checked", checked.len());
         if !wrong.is_empty() {
@@ -5345,7 +5353,11 @@ fn sun_rays_from_steps_match_cpu_rays() {
     let Some(gpu) = gpu() else { return };
     let (planet, eye, row_i, row_j) = desert_steps();
     let up = planet.grid().up(eye);
-    let view = View::new(eye, (row_i * 0.8 + row_j * 0.6 - up * 0.6).normalize().as_vec3(), [640, 360]);
+    let view = View::new(
+        eye,
+        (row_i * 0.8 + row_j * 0.6 - up * 0.6).normalize().as_vec3(),
+        [640, 360],
+    );
     let off = 0.3f64.to_radians();
     let suns = [
         ("along i", row_i),
@@ -5368,8 +5380,13 @@ fn sun_rays_from_walls_on_chunk_sides_match_cpu_rays() {
     let (mut planet, eye, row_i, row_j) = desert_steps();
     let (cell, _) = planet.grid().locate(eye);
     let face = cell.face;
-    let (i0, j0) = (f64::from((cell.i >> 6) * 64 + 64), f64::from((cell.j >> 6) * 64 + 64));
-    let ground = |planet: &Planet, i: f64, j: f64| planet.surface_point(planet.grid().direction(face, i, j), 0.0);
+    let (i0, j0) = (
+        f64::from((cell.i >> 6) * 64 + 64),
+        f64::from((cell.j >> 6) * 64 + 64),
+    );
+    let ground = |planet: &Planet, i: f64, j: f64| {
+        planet.surface_point(planet.grid().direction(face, i, j), 0.0)
+    };
     let corner = ground(&planet, i0, j0);
     let up = planet.grid().up(corner);
     // Cube brushes are squares of the face's cells: one 0.3 m in radius
@@ -5401,8 +5418,19 @@ fn sun_rays_from_walls_on_chunk_sides_match_cpu_rays() {
     let forward = (corner + row_i * 0.6 - eye).normalize().as_vec3();
     let near = (planet.air_clearance(eye) * 0.25).clamp(0.05, 50_000.0) as f32;
     // The hits themselves first: the CPU's cells.
-    matches_exactly(gpu, &planet, View { near, ..View::new(eye, forward, [640, 360]) }, 20_000);
-    let view = View { near, ..View::new(eye, forward, [640, 360]) };
+    matches_exactly(
+        gpu,
+        &planet,
+        View {
+            near,
+            ..View::new(eye, forward, [640, 360])
+        },
+        20_000,
+    );
+    let view = View {
+        near,
+        ..View::new(eye, forward, [640, 360])
+    };
     let off = 0.3f64.to_radians();
     let suns = [
         ("along i", row_i),
@@ -5455,7 +5483,9 @@ fn smooth_surfaces_are_lit_not_moved() {
     let moved = blocky.iter().zip(&smooth).filter(|(a, b)| a != b).count();
     assert_eq!(moved, 0, "smoothing moved {moved} hits");
     assert!(
-        smooth_sun.iter().all(|v| v.is_finite() && (-1e-3..=1.001).contains(v)),
+        smooth_sun
+            .iter()
+            .all(|v| v.is_finite() && (-1e-3..=1.001).contains(v)),
         "smooth sun visibility is not a visibility"
     );
     let relit = blocky_sun

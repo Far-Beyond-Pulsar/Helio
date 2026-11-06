@@ -81,7 +81,14 @@ impl Strokes {
 
     /// One frame of the strokes; `settled`: the view and the world are;
     /// `world_ms`: the world's part of this frame.
-    pub fn step(&mut self, player: &mut Player, world: &mut World, settled: bool, world_ms: f64, quit: &mut bool) {
+    pub fn step(
+        &mut self,
+        player: &mut Player,
+        world: &mut World,
+        settled: bool,
+        world_ms: f64,
+        quit: &mut bool,
+    ) {
         let now = Instant::now();
         let frame_ms = self.last.map(|l| (now - l).as_secs_f64() * 1e3);
         self.last = Some(now);
@@ -92,7 +99,11 @@ impl Strokes {
         let (ground, right, up) = *self.target.get_or_insert_with(|| {
             let frame = player.frame();
             let planet = world.planet();
-            let ground = planet.surface_point_of(player.position + frame.forward * 12.0, 0.0, Matter::Ground);
+            let ground = planet.surface_point_of(
+                player.position + frame.forward * 12.0,
+                0.0,
+                Matter::Ground,
+            );
             (ground, frame.right, frame.up)
         });
         world.focus_on(STROKE_FOCUS, ground, STROKE_FOCUS_M);
@@ -145,8 +156,17 @@ impl Strokes {
         }
         let stat = |v: &mut Vec<f64>| {
             v.sort_by(f64::total_cmp);
-            let at = |q: f64| v.get(((v.len() as f64 - 1.0) * q).round() as usize).copied().unwrap_or(0.0);
-            format!("p50 {:.1} p95 {:.1} max {:.1} ms", at(0.5), at(0.95), at(1.0))
+            let at = |q: f64| {
+                v.get(((v.len() as f64 - 1.0) * q).round() as usize)
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            format!(
+                "p50 {:.1} p95 {:.1} max {:.1} ms",
+                at(0.5),
+                at(0.95),
+                at(1.0)
+            )
         };
         log::info!(
             "STROKE {} r {} m, {} stamps: frames {}; settle {} frames {}; world {}; longest stamp call {:.1} ms",
@@ -168,7 +188,10 @@ impl Strokes {
         self.at += 1;
         // The next stroke on fresh ground: a quarter turn.
         let (_, right, up) = self.target.expect("set above");
-        let ground = world.planet().surface_point_of(player.position + right * 12.0, 0.0, Matter::Ground);
+        let ground =
+            world
+                .planet()
+                .surface_point_of(player.position + right * 12.0, 0.0, Matter::Ground);
         self.target = Some((ground, right.cross(up), up));
     }
 }

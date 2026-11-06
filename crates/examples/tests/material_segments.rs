@@ -12,7 +12,7 @@ mod v3_demo_common;
 
 use glam::{Mat4, Vec3};
 use helio::{Camera, RendererBuilder, RendererConfig};
-use helio_pass_gbuffer::StaticObjectComponent;
+use helio_components::StaticObjectComponent;
 use pulsar_scenedb::{Entity, SceneDb};
 use std::sync::Arc;
 use v3_demo_common::*;

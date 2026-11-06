@@ -99,7 +99,7 @@ const FOG_ENABLED: usize = std::mem::offset_of!(crate::GpuPostProcessUniforms, f
 /// An enabled camera row whose settings enable bloom. The resolver also
 /// matches `view_id`; ignoring it here only errs toward "maybe".
 fn camera_row_enables_bloom(row: &[u8]) -> bool {
-    use crate::CameraPostProcessComponent as C;
+    use crate::CameraPostProcessRow as C;
     let enabled = read_u32(row, std::mem::offset_of!(C, enabled));
     let bloom = read_u32(row, std::mem::offset_of!(C, settings) + BLOOM_ENABLED);
     match (enabled, bloom) {
@@ -131,7 +131,7 @@ fn volume_row_enables_bloom(row: &[u8]) -> bool {
 /// An enabled camera row whose exposure mode is not manual (0). The resolver
 /// also matches `view_id`; ignoring it here only errs toward "maybe".
 fn camera_row_enables_auto_exposure(row: &[u8]) -> bool {
-    use crate::CameraPostProcessComponent as C;
+    use crate::CameraPostProcessRow as C;
     let enabled = read_u32(row, std::mem::offset_of!(C, enabled));
     let mode = read_u32(row, std::mem::offset_of!(C, settings) + EXPOSURE_MODE);
     match (enabled, mode) {
@@ -162,7 +162,7 @@ fn volume_row_enables_auto_exposure(row: &[u8]) -> bool {
 
 /// An enabled camera row whose fog block is enabled.
 fn camera_row_enables_fog(row: &[u8]) -> bool {
-    use crate::CameraPostProcessComponent as C;
+    use crate::CameraPostProcessRow as C;
     let enabled = read_u32(row, std::mem::offset_of!(C, enabled));
     let fog = read_u32(row, std::mem::offset_of!(C, settings) + FOG_ENABLED);
     match (enabled, fog) {
@@ -268,7 +268,7 @@ impl PostProcessVolumeBlendPass {
             ),
             fallback_cameras: buffer(
                 "PostProcess Empty Cameras",
-                std::mem::size_of::<crate::CameraPostProcessComponent>() as u64,
+                std::mem::size_of::<crate::CameraPostProcessRow>() as u64,
                 wgpu::BufferUsages::STORAGE,
             ),
             bind_group: None,
@@ -431,14 +431,14 @@ impl RenderPass for PostProcessVolumeBlendPass {
 #[cfg(test)]
 mod activity_tests {
     use super::*;
-    use crate::{CameraPostProcessComponent, GpuPostProcessVolume, PostProcessSettings};
+    use crate::{CameraPostProcessRow, GpuPostProcessVolume, PostProcessSettings};
 
     #[test]
     fn bloom_camera_rows() {
         let row = |bloom, enabled| {
             let mut settings = PostProcessSettings::default();
             settings.bloom_enabled = bloom;
-            let mut row = CameraPostProcessComponent::new(0, &settings);
+            let mut row = CameraPostProcessRow::new(0, &settings);
             row.enabled = enabled;
             row
         };
@@ -451,7 +451,7 @@ mod activity_tests {
             "disabled rows are not blended"
         );
         assert!(
-            !camera_row_enables_bloom(&[0u8; std::mem::size_of::<CameraPostProcessComponent>()]),
+            !camera_row_enables_bloom(&[0u8; std::mem::size_of::<CameraPostProcessRow>()]),
             "empty row"
         );
         assert!(
@@ -501,7 +501,7 @@ mod activity_tests {
             if auto {
                 settings.exposure_mode = crate::ExposureMode::Auto;
             }
-            let mut row = CameraPostProcessComponent::new(0, &settings);
+            let mut row = CameraPostProcessRow::new(0, &settings);
             row.enabled = enabled;
             row
         };
@@ -559,7 +559,7 @@ mod activity_tests {
             settings
         };
         let camera = |fog, enabled| {
-            let mut row = CameraPostProcessComponent::new(0, &settings(fog));
+            let mut row = CameraPostProcessRow::new(0, &settings(fog));
             row.enabled = enabled;
             row
         };

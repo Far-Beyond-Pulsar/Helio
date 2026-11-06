@@ -493,8 +493,8 @@ pub use scene_derivation::{
     run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationOutput,
 };
 pub use scene_input::{
-    BufferHandle, BufferKey, FlushedRows, SceneBufferProjection, SceneInput, CAMERA_BUFFER_KEY,
-    ENTITY_GENERATIONS_KEY,
+    BufferContract, BufferHandle, BufferKey, ContractError, FlushedRows, PoolContract,
+    SceneBufferProjection, SceneInput, CAMERA_BUFFER_KEY, ENTITY_GENERATIONS_KEY,
 };
 pub use scene_liveness::SceneBufferLiveness;
 pub use shader::{populate_bind_group_entries, CachedBindGroup, ReflectedShader};

@@ -1,6 +1,6 @@
 //! Voxel materials drawn with the host's scene materials.
 //!
-//! A host that owns Helio's material table (scene `MaterialComponent` rows
+//! A host that owns Helio's material table (scene `MaterialRow` rows
 //! and the descriptor-indexed texture table) maps each voxel material id to
 //! scene material rows, one for the top, side and bottom faces. The publish
 //! stage then textures the terrain with those materials instead of the

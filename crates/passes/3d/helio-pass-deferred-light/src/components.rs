@@ -1,6 +1,6 @@
 //! SceneDB-owned reflection capture records.
 //!
-//! `ReflectionCaptureComponent` is field-for-field identical to
+//! `ReflectionCaptureRow` is field-for-field identical to
 //! `crate::GpuReflectionCapture`'s ABI: one placed capture volume (sphere
 //! or oriented box), its parallax transform, and which cube-array layer its
 //! baked (or not-yet-baked) cubemap lives in.
@@ -14,42 +14,42 @@
 //! nested inside a large one to win). Iterating this SceneDB buffer in raw
 //! entity-index order does not guarantee that ordering -- unlike `lights`/
 //! `decals`/etc, whose zero-row default is inert regardless of iteration
-//! order, `ReflectionCaptureComponent` rows are semantically order-sensitive
+//! order, `ReflectionCaptureRow` rows are semantically order-sensitive
 //! when captures overlap. A single capture, or non-overlapping captures,
 //! blend identically either way; only deliberately-nested capture volumes
 //! may pick a different (still plausible, not incorrect-looking) winner
 //! than before. Sorting this buffer by influence volume is the same class
 //! of cross-entity GPU-sort work already specified (not yet implemented)
 //! for batched object instances -- tracked, not silently dropped.
-use pulsar_scenedb_derive::SceneStore;
 
-#[derive(SceneStore, bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
+#[derive(bytemuck::Pod, bytemuck::Zeroable, Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
-#[gpu(layout = packed, buffer = "reflection_captures")]
-pub struct ReflectionCaptureComponent {
-    #[gpu]
+pub struct ReflectionCaptureRow {
     pub position_radius: [f32; 4],
-    #[gpu]
     pub extents_transition: [f32; 4],
-    #[gpu]
     pub world_to_local: [[f32; 4]; 4],
-    #[gpu]
     pub cubemap_index: i32,
-    #[gpu]
     pub shape: u32,
-    #[gpu]
     pub mobility: u32,
-    #[gpu]
     pub brightness: f32,
 }
 
-impl From<crate::GpuReflectionCapture> for ReflectionCaptureComponent {
+// SAFETY: a `#[repr(C)]` bytemuck `Pod` row: no padding bytes, any bit
+// pattern valid. Lets an engine's SceneDB component embed it.
+unsafe impl pulsar_scenedb::Pod for ReflectionCaptureRow {}
+
+/// The buffer the renderer reads [`ReflectionCaptureRow`]s from. Engines produce it
+/// (a SceneDB component stored under this key, or a scene derivation).
+pub const REFLECTION_CAPTURES: helio_core::BufferContract<ReflectionCaptureRow> =
+    helio_core::BufferContract::new("reflection_captures");
+
+impl From<crate::GpuReflectionCapture> for ReflectionCaptureRow {
     fn from(v: crate::GpuReflectionCapture) -> Self {
         bytemuck::cast(v)
     }
 }
-impl From<ReflectionCaptureComponent> for crate::GpuReflectionCapture {
-    fn from(v: ReflectionCaptureComponent) -> Self {
+impl From<ReflectionCaptureRow> for crate::GpuReflectionCapture {
+    fn from(v: ReflectionCaptureRow) -> Self {
         bytemuck::cast(v)
     }
 }
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn layout_matches_gpu_abi() {
         assert_eq!(
-            std::mem::size_of::<ReflectionCaptureComponent>(),
+            std::mem::size_of::<ReflectionCaptureRow>(),
             std::mem::size_of::<crate::GpuReflectionCapture>()
         );
     }
@@ -75,21 +75,5 @@ mod tests {
 
 #[cfg(test)]
 mod lifecycle_tests {
-    use super::ReflectionCaptureComponent;
-    #[test]
-    fn scene_row_lifecycle_is_entity_owned() {
-        let mut world = pulsar_scenedb::World::new();
-        let entity = world.spawn();
-        let value: ReflectionCaptureComponent = bytemuck::Zeroable::zeroed();
-        world.insert(entity, value);
-        assert_eq!(
-            world.get::<ReflectionCaptureComponent>(entity),
-            Some(&value)
-        );
-        assert_eq!(
-            world.remove::<ReflectionCaptureComponent>(entity),
-            Some(value)
-        );
-        assert!(world.get::<ReflectionCaptureComponent>(entity).is_none());
-    }
+    use super::ReflectionCaptureRow;
 }

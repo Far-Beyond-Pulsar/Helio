@@ -4,7 +4,7 @@
 mod common;
 
 use common::*;
-use helio_pass_gbuffer::StaticObjectComponent;
+use helio_pass_gbuffer::StaticObjectRow;
 use helio_pass_vg_bvh::reference::{build, header_of, refit, validate, RefTree};
 use helio_pass_vg_bvh::{BvhConfig, BvhMode, GpuBvhHeader, GpuBvhNode, VgBvhPass};
 use helio_vg_format::GpuVgInstance;
@@ -113,7 +113,7 @@ fn assert_matches(
     gpu: &Gpu,
     reference: &RefTree,
     instances: &[GpuVgInstance],
-    objects: &[StaticObjectComponent],
+    objects: &[StaticObjectRow],
 ) {
     validate(&gpu.nodes, &gpu.items, &gpu.header, instances, objects)
         .unwrap_or_else(|e| panic!("{label}: GPU tree invalid: {e}"));
@@ -170,7 +170,7 @@ fn scenario(
     queue: &wgpu::Queue,
     label: &str,
     instances: &[GpuVgInstance],
-    objects: &mut Vec<StaticObjectComponent>,
+    objects: &mut Vec<StaticObjectRow>,
     cfg: BvhConfig,
 ) {
     let inst_buf = upload(device, "instances", instances);
@@ -323,7 +323,7 @@ fn scenario_empty(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     instances: &[GpuVgInstance],
-    objects: &mut Vec<StaticObjectComponent>,
+    objects: &mut Vec<StaticObjectRow>,
 ) {
     let inst_buf = upload(device, "instances", instances);
     let obj_buf = upload(device, "objects", objects);

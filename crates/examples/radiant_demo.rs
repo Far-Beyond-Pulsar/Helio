@@ -13,12 +13,12 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     GpuMaterial, Renderer, RendererBuilder, RendererConfig,
 };
+use helio_components::MaterialComponent;
 use helio_default_passes::build_default_graph_external_with_context;
 use helio_mats::{
     MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
     MATERIAL_CLASS_SUBSURFACE,
 };
-use helio_pass_gbuffer::MaterialComponent;
 use pulsar_scenedb::{Entity, SceneDb};
 use v3_demo_common::{
     directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,

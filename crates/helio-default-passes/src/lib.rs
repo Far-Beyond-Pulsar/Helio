@@ -7,10 +7,8 @@ pub mod graphs;
 pub mod hierarchy_resolve;
 pub mod pipelines;
 pub mod portal_projection;
-pub mod ray_proxies;
-pub mod ray_tracing;
 pub mod scene_join;
-mod texture_means;
+pub mod texture_means;
 pub mod virtual_geometry;
 pub use virtual_geometry::{
     virtual_geometry_supported, VgInputsPass, VgStreamBeginPass, VgStreamEndPass,
@@ -311,7 +309,7 @@ fn add_common_early_passes(
 
     // Must run before every pass below — they all read `object_batch`
     // (instances/draw_calls/indirect/shadow partitions) published by this
-    // pass from SceneDB's `StaticObjectComponent` rows. Ordering among
+    // pass from SceneDB's `StaticObjectRow` rows. Ordering among
     // `add_pass` calls doesn't matter to the graph's own scheduler (it
     // topologically sorts on declared reads/writes), but this stays first
     // for readability, matching its role as the scene's sole GPU-driven
@@ -319,7 +317,7 @@ fn add_common_early_passes(
     graph.add_pass(Box::new(ObjectBatchPass::new(device)));
     // Atmosphere LUTs and the resolved frame (sun, planet, sky irradiance)
     // that lighting and the composite read; idle without an
-    // `AtmosphereComponent` row.
+    // `AtmosphereRow` row.
     graph.add_pass(Box::new(AtmospherePass::new(device)));
 
     let hiz_pass = HiZBuildPass::new(device, queue, w, h);
@@ -2289,7 +2287,7 @@ fn build_forward_graph_internal(
 
 /// Reads the frame's scene materials (Helio's material rows and descriptor-
 /// indexed texture table) for `ChunkPass::set_scene_materials`, so voxel
-/// terrain is textured by the same `MaterialComponent`s as meshes.
+/// terrain is textured by the same `MaterialRow`s as meshes.
 pub fn voxel_scene_materials() -> helio_pass_voxel_planet::chunks::scene::SceneMaterialSource {
     use helio_pass_voxel_planet::chunks::scene::SceneMaterialInputs;
     Box::new(|ctx| {

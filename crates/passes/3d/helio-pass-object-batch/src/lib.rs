@@ -20,7 +20,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use helio_pass_gbuffer::StaticObjectComponent;
+use helio_pass_gbuffer::StaticObjectRow;
 use pulsar_scenedb::gpu::BufferKey;
 
 pub mod gpu_types;
@@ -1477,7 +1477,7 @@ impl ObjectBatchPass {
             .scene_buffers
             .get(BufferKey::of("static_objects"))
             .map_or(0, |h| {
-                (h.buffer.size() / std::mem::size_of::<StaticObjectComponent>() as u64) as u32
+                (h.buffer.size() / std::mem::size_of::<StaticObjectRow>() as u64) as u32
             });
         let mut cmds = CommandRecorder::from_encoder(encoder);
         if !self.transform_only {
@@ -1598,7 +1598,7 @@ impl RenderPass for ObjectBatchPass {
         let static_objects_handle = ctx.scene_buffers.get(BufferKey::of("static_objects"));
         let capacity = static_objects_handle
             .as_ref()
-            .map(|h| (h.buffer.size() / std::mem::size_of::<StaticObjectComponent>() as u64) as u32)
+            .map(|h| (h.buffer.size() / std::mem::size_of::<StaticObjectRow>() as u64) as u32)
             .unwrap_or(0);
 
         // Growth (a `&mut self` borrow) must fully finish before we take any
@@ -1751,9 +1751,7 @@ impl RenderPass for ObjectBatchPass {
         let capacity = {
             let handle = ctx.scene_buffers.get(BufferKey::of("static_objects"));
             handle
-                .map(|h| {
-                    (h.buffer.size() / std::mem::size_of::<StaticObjectComponent>() as u64) as u32
-                })
+                .map(|h| (h.buffer.size() / std::mem::size_of::<StaticObjectRow>() as u64) as u32)
                 .unwrap_or(0)
         };
         if self.transform_only {
@@ -1767,7 +1765,7 @@ impl RenderPass for ObjectBatchPass {
 
 // Compile-time layout sanity: keeps `object_batch.wgsl`'s `StaticObjectRow`
 // and this crate's assumed size in lock-step with the real
-// `StaticObjectComponent` -- a drift here fails `cargo test`, not a draw.
+// `StaticObjectRow` -- a drift here fails `cargo test`, not a draw.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1777,7 +1775,7 @@ mod tests {
         // 4×u32 (16) + transform(64) + prev_transform(64) + normal_mat(48)
         // + bounds(16) + 11×u32/i32/u32 (44) = 252 bytes -- see `object_batch
         // .wgsl`'s `StaticObjectRow` doc.
-        assert_eq!(std::mem::size_of::<StaticObjectComponent>(), 252);
+        assert_eq!(std::mem::size_of::<StaticObjectRow>(), 252);
     }
 
     #[test]

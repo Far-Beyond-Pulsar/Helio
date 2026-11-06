@@ -49,25 +49,20 @@ fn install(rig: &mut Rig, bakes: &[&LensBake]) {
     rig.prescriptions = Some(PrescriptionBank::new(&rig.device, bakes));
 }
 
-fn full_frame_prescription() -> [LensElementComponent; 1] {
-    [LensElementComponent::prescription(0, LensRegion::FullFrame)]
+fn full_frame_prescription() -> [LensElementRow; 1] {
+    [LensElementRow::prescription(0, LensRegion::FullFrame)]
 }
 
 /// A lens of `n` elements with the f-number `f_number`, focused on the 3 m
 /// plane. Its focal length is overridden by a full-frame prescription.
-fn lens_with(n: usize, f_number: f32) -> LensComponent {
+fn lens_with(n: usize, f_number: f32) -> LensRow {
     let mut lens = lens();
     lens.element_count = n as u32;
     lens.f_number = f_number;
     lens
 }
 
-fn record_with(
-    rig: &mut Rig,
-    scene: &Scene,
-    lens: LensComponent,
-    elements: &[LensElementComponent],
-) -> Frame {
+fn record_with(rig: &mut Rig, scene: &Scene, lens: LensRow, elements: &[LensElementRow]) -> Frame {
     rig.record(
         scene,
         Some(&[lens]),
@@ -275,10 +270,7 @@ fn an_ideal_thin_lens_prescription_is_the_identity_with_cos4_falloff() {
 
     let geometry = Geometry::new(bake, &rig);
     let parametric = {
-        let natural = [LensElementComponent::natural_vignette(
-            1.0,
-            LensRegion::FullFrame,
-        )];
+        let natural = [LensElementRow::natural_vignette(1.0, LensRegion::FullFrame)];
         record_with(&mut rig, &flat_white(), lens_with(1, 2.0), &natural)
     };
     let prescribed_white = record_with(&mut rig, &flat_white(), lens_with(1, 2.0), &element);
@@ -316,8 +308,8 @@ fn an_ideal_thin_lens_prescription_is_the_identity_with_cos4_falloff() {
 /// small and f16 keeps sub-hundredth precision).
 fn measured_scene_position(
     rig: &mut Rig,
-    lens: LensComponent,
-    elements: &[LensElementComponent],
+    lens: LensRow,
+    elements: &[LensElementRow],
     at: (u32, u32),
 ) -> [[f32; 2]; 3] {
     const OFFSET: f32 = 8.0;
@@ -355,8 +347,7 @@ fn double_gauss_places_points_and_splits_colours_as_baked() {
         "a real lens has a point spread"
     );
     // The point spread is left out below: it moves a point's centroid a little.
-    let element =
-        [LensElementComponent::prescription(0, LensRegion::FullFrame).with_psf_amount(0.0)];
+    let element = [LensElementRow::prescription(0, LensRegion::FullFrame).with_psf_amount(0.0)];
     let _ = record_with(&mut rig, &flat_white(), lens, &element);
     assert_eq!(rig.resolved().aberration_flags, 0);
     let geometry = Geometry::new(bake, &rig);
@@ -468,34 +459,31 @@ fn the_cpu_overscan_of_prescriptions_is_the_gpus() {
     };
     // Whole-frame lenses, one after the other; a lens over an ellipse with a
     // parametric distortion under it; and a prescription replacing a projection.
-    let stacks: Vec<(f32, Vec<LensElementComponent>)> = vec![
+    let stacks: Vec<(f32, Vec<LensElementRow>)> = vec![
         (
             2.0,
-            vec![LensElementComponent::prescription(0, LensRegion::FullFrame)],
+            vec![LensElementRow::prescription(0, LensRegion::FullFrame)],
         ),
         (
             5.0,
-            vec![LensElementComponent::prescription(1, LensRegion::FullFrame)],
+            vec![LensElementRow::prescription(1, LensRegion::FullFrame)],
         ),
         (
             2.0,
-            vec![LensElementComponent::prescription(2, LensRegion::FullFrame)],
+            vec![LensElementRow::prescription(2, LensRegion::FullFrame)],
         ),
         (
             2.0,
             vec![
-                LensElementComponent::division(-0.3, 0.0, LensRegion::FullFrame),
-                LensElementComponent::prescription(2, region),
+                LensElementRow::division(-0.3, 0.0, LensRegion::FullFrame),
+                LensElementRow::prescription(2, region),
             ],
         ),
         (
             2.0,
             vec![
-                LensElementComponent::projection(
-                    ProjectionModel::Equidistant,
-                    LensRegion::FullFrame,
-                ),
-                LensElementComponent::prescription(2, LensRegion::FullFrame),
+                LensElementRow::projection(ProjectionModel::Equidistant, LensRegion::FullFrame),
+                LensElementRow::prescription(2, LensRegion::FullFrame),
             ],
         ),
     ];
@@ -521,7 +509,7 @@ fn the_cpu_overscan_of_prescriptions_is_the_gpus() {
         );
     }
     // Without the bank the prescription is inert, as on the GPU.
-    let stack = [LensElementComponent::prescription(2, LensRegion::FullFrame)];
+    let stack = [LensElementRow::prescription(2, LensRegion::FullFrame)];
     assert_eq!(
         crate::ray_map::required_overscan(&lens_with(1, 2.0), &stack, 1.0),
         1.0
@@ -554,7 +542,7 @@ fn a_full_frame_prescription_sets_the_focal_length_and_the_widest_aperture() {
     assert_eq!(rig.resolved().f_number, 5.6);
 
     // A prescription over part of the frame leaves the view's optics alone.
-    let half = [LensElementComponent::prescription(
+    let half = [LensElementRow::prescription(
         0,
         LensRegion::HalfPlane {
             angle: 0.0,
@@ -657,8 +645,8 @@ fn normalised_edge_width(
 /// infinitely far edge blurs by tens of pixels.
 fn bokeh_widths(
     rig: &mut Rig,
-    lens: LensComponent,
-    elements: &[LensElementComponent],
+    lens: LensRow,
+    elements: &[LensElementRow],
 ) -> ((f32, f32), (f32, f32)) {
     let flat = record_with(
         rig,
@@ -732,15 +720,15 @@ fn double_gauss_bokeh_is_a_cats_eye_off_axis_only() {
 fn a_prescription_is_applied_once_not_twice() {
     let mut rig = Rig::new();
     install(&mut rig, &[double_gauss()]);
-    let rx = LensElementComponent::prescription(0, LensRegion::FullFrame);
-    let natural = LensElementComponent::natural_vignette(1.0, LensRegion::FullFrame);
-    let optical = LensElementComponent::optical_vignette(1.0, 1.0, 0.0, LensRegion::FullFrame);
-    let distortion = LensElementComponent::brown_conrady(
+    let rx = LensElementRow::prescription(0, LensRegion::FullFrame);
+    let natural = LensElementRow::natural_vignette(1.0, LensRegion::FullFrame);
+    let optical = LensElementRow::optical_vignette(1.0, 1.0, 0.0, LensRegion::FullFrame);
+    let distortion = LensElementRow::brown_conrady(
         [-0.2, 0.05, 0.0, 0.0, 0.0, 0.0],
         [0.0; 2],
         LensRegion::FullFrame,
     );
-    let ca = LensElementComponent::lateral_ca(0.05, 0.0, LensRegion::FullFrame);
+    let ca = LensElementRow::lateral_ca(0.05, 0.0, LensRegion::FullFrame);
     let scene = Scene::new(
         |x, y| {
             [
@@ -775,7 +763,7 @@ fn a_prescription_is_applied_once_not_twice() {
 
     // Over half the frame the prescription replaces the natural falloff
     // there and the parametric one stays on the other half.
-    let left = LensElementComponent::prescription(
+    let left = LensElementRow::prescription(
         0,
         LensRegion::HalfPlane {
             angle: std::f32::consts::PI,
@@ -953,7 +941,7 @@ fn the_baked_point_spread_blurs_along_and_across_the_radius() {
     );
 
     // PSF_AMOUNT 0 turns the stage off without touching the map.
-    let off = [LensElementComponent::prescription(0, LensRegion::FullFrame).with_psf_amount(0.0)];
+    let off = [LensElementRow::prescription(0, LensRegion::FullFrame).with_psf_amount(0.0)];
     let frame = record_with(&mut rig, &scene, lens_with(1, 2.0), &off);
     assert_eq!(rig.resolved().aberration_flags, 0);
     assert_eq!(
@@ -1003,10 +991,10 @@ fn the_parametric_point_spreads_give_way_to_the_baked_one() {
     let bake = thin_lens_with_spot(0.7, 0.35, 0.0, 1.0);
     install(&mut rig, &[&bake]);
     let scene = spot_scene();
-    let rx = LensElementComponent::prescription(0, LensRegion::FullFrame);
-    let astig = LensElementComponent::astigmatism(0.02, 0.5, LensRegion::FullFrame);
-    let soft = LensElementComponent::corner_softness(0.02, 0.0, LensRegion::FullFrame);
-    let coma = LensElementComponent::coma(0.5, 0.05, LensRegion::FullFrame);
+    let rx = LensElementRow::prescription(0, LensRegion::FullFrame);
+    let astig = LensElementRow::astigmatism(0.02, 0.5, LensRegion::FullFrame);
+    let soft = LensElementRow::corner_softness(0.02, 0.0, LensRegion::FullFrame);
+    let coma = LensElementRow::coma(0.5, 0.05, LensRegion::FullFrame);
     let alone = record_with(&mut rig, &scene, lens_with(1, 2.0), &[rx]);
     let stacked = record_with(
         &mut rig,
@@ -1162,7 +1150,7 @@ fn a_bank_nobody_uses_and_inert_user_elements_change_nothing() {
     );
     assert_eq!(rig.resolved(), base_resolved);
     // An element for a layer the bank lacks is inert.
-    let missing = [LensElementComponent::prescription(7, LensRegion::FullFrame)];
+    let missing = [LensElementRow::prescription(7, LensRegion::FullFrame)];
     let frame = record_with(&mut rig, &scene, lens_with(1, 2.0), &missing);
     assert_eq!(frame.output, base.output);
     assert_eq!(rig.resolved().map_flags, 0);
@@ -1171,7 +1159,7 @@ fn a_bank_nobody_uses_and_inert_user_elements_change_nothing() {
         &mut rig,
         &scene,
         lens_with(1, 2.0),
-        &[LensElementComponent::prescription(0, LensRegion::FullFrame)],
+        &[LensElementRow::prescription(0, LensRegion::FullFrame)],
     );
     assert_eq!(
         frame.output, base.output,
@@ -1180,12 +1168,12 @@ fn a_bank_nobody_uses_and_inert_user_elements_change_nothing() {
 
     // USER elements in a lens built without a snippet are ignored entirely.
     let user = [
-        LensElementComponent::user(
+        LensElementRow::user(
             user::MAP | user::TRANSMISSION | user::FOCUS | user::SPECTRAL,
             [1.0; 16],
             LensRegion::FullFrame,
         ),
-        LensElementComponent::user(user::MAP, [0.0; 16], LensRegion::FullFrame),
+        LensElementRow::user(user::MAP, [0.0; 16], LensRegion::FullFrame),
     ];
     let frame = record_with(&mut rig, &scene, lens_with(2, 2.0), &user);
     assert_eq!(
@@ -1218,7 +1206,7 @@ fn a_user_ray_map_that_flips_u_mirrors_the_image() {
     );
     let color = rig.color_view(&scene);
     let input = rig.read_texture(&color);
-    let element = [LensElementComponent::user(
+    let element = [LensElementRow::user(
         user::MAP,
         [0.0; 16],
         LensRegion::FullFrame,
@@ -1244,7 +1232,7 @@ fn a_user_ray_map_that_flips_u_mirrors_the_image() {
         }
     }
     // A hook the element does not select does not run.
-    let off = [LensElementComponent::user(
+    let off = [LensElementRow::user(
         user::TRANSMISSION,
         [0.0; 16],
         LensRegion::FullFrame,
@@ -1255,7 +1243,7 @@ fn a_user_ray_map_that_flips_u_mirrors_the_image() {
         "the default transmission hook is the identity"
     );
     // A region limits the flip to it, the rest is the image.
-    let half = [LensElementComponent::user(
+    let half = [LensElementRow::user(
         user::MAP,
         [0.0; 16],
         LensRegion::HalfPlane {
@@ -1291,7 +1279,7 @@ fn user_transmission_and_focus_hooks_run_and_missing_hooks_are_the_identity() {
     let mut rig = Rig::with_user(Some(TINT));
     let mut params = [0.0; 16];
     params[0] = 0.5;
-    let element = [LensElementComponent::user(
+    let element = [LensElementRow::user(
         user::TRANSMISSION,
         params,
         LensRegion::FullFrame,
@@ -1308,7 +1296,7 @@ fn user_transmission_and_focus_hooks_run_and_missing_hooks_are_the_identity() {
     }
     // The snippet defines no ray map: selecting the hook leaves the image.
     let scene = Scene::new(Scene::checker, |_, _| 3.0);
-    let map = [LensElementComponent::user(
+    let map = [LensElementRow::user(
         user::MAP,
         [0.0; 16],
         LensRegion::FullFrame,
@@ -1320,7 +1308,7 @@ fn user_transmission_and_focus_hooks_run_and_missing_hooks_are_the_identity() {
     // The focus hook adds dioptres: the 3 m plane is no longer in focus.
     let mut focus_params = [0.0; 16];
     focus_params[1] = 1.5;
-    let focus = [LensElementComponent::user(
+    let focus = [LensElementRow::user(
         user::FOCUS,
         focus_params,
         LensRegion::FullFrame,
