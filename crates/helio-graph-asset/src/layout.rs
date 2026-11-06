@@ -21,8 +21,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::asset::{GraphAsset, GraphComment};
 use crate::core_nodes::{ON_FRAME_START, OUTPUT};
-use crate::pins::PinKind;
-use crate::registry::{NodePins, NodeRegistry};
+use helio_feature_api::PinKind;
+use helio_feature_api::{NodePins, NodeRegistry};
 
 /// Prefix of the ids of the comments this module creates. It replaces its own
 /// on every run and leaves the author's alone.
@@ -57,7 +57,7 @@ fn snap(value: f32) -> f32 {
     (value / GRID).ceil() * GRID
 }
 
-fn label_len(pin: &crate::pins::PinDesc) -> usize {
+fn label_len(pin: &helio_feature_api::PinDesc) -> usize {
     if pin.ty.kind == PinKind::Flow {
         0
     } else if pin.history {
@@ -572,8 +572,8 @@ fn lane_comment(
 mod tests {
     use super::*;
     use crate::asset::{Connection, NodeInstance, PinRef};
-    use crate::pins::{PinDesc, PinType};
-    use crate::registry::NodeDescriptor;
+    use helio_feature_api::{PinDesc, PinType};
+    use helio_feature_api::NodeDescriptor;
 
     fn node(id: &str, kind: &str) -> NodeInstance {
         NodeInstance {
@@ -592,7 +592,7 @@ mod tests {
     }
 
     fn registry() -> NodeRegistry {
-        let mut registry = NodeRegistry::with_core();
+        let mut registry = crate::core_registry();
         for (kind, category) in [("t.a", "Passes: Alpha"), ("t.b", "Passes: Beta")] {
             registry.register(
                 NodeDescriptor::new(kind, kind, category, "", |_| Ok(())).with_pins(

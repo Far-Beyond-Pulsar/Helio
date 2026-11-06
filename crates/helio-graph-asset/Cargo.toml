@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 helio = { path = "../helio" }
 helio-core = { workspace = true }
+helio-feature-api = { path = "../helio-feature-api" }
 wgpu = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }

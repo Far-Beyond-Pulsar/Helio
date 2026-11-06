@@ -331,8 +331,8 @@ merged and retired. The rewrite runs on new branches, one per phase:
 |---|---|---|
 | 0 | `rewrite/p0-guard-rails` | Helio, Pulsar-Native |
 | 1 | `rewrite/p1-buffer-contracts` | Helio, Pulsar-Native (SceneDB only if the projection type changes) |
-| 2 | `rewrite/p2-core-split` | Helio, Pulsar-Native |
-| 3 | `rewrite/p3-feature-api` | Helio, Pulsar-Native (lands with plugin-api-v2's render section) |
+| 2 | `rewrite/p2-feature-api` | Helio, Pulsar-Native |
+| 3 | `rewrite/p3-spine` | Helio, Pulsar-Native (lands with plugin-api-v2's render section) |
 | 4 | `rewrite/p4-voxel` | Helio, Pulsar-Native |
 | 5 | `rewrite/p5-<feature>` (one per feature group: `p5-vg`, `p5-water`, `p5-sky`…) | Helio, Pulsar-Native |
 | 6 | `rewrite/p6-repo-split` | new Helio-Voxel / Helio-VG repos, Helio, Pulsar-Native |
@@ -352,7 +352,7 @@ Rules:
 - A phase lands only when its "done when" holds, the layer check's
   allow-list shrank, and the preset frames/bursts match.
 - `plugin-api-v2-phase1` is merged into Pulsar `main` before
-  `rewrite/p3-feature-api` is cut, so `p.render().feature(..)` builds on it.
+  `rewrite/p3-spine` is cut, so `p.render().feature(..)` builds on it.
 
 ### Phase 0: hygiene and guard rails (small, do first)
 - Layer manifest `architecture/layers.toml`: every crate → layer (features
@@ -439,15 +439,34 @@ As built (2026-11-02):
   baseline (8 fog device-limit, clouds cost, foliage on voxels, voxel graph
   settle), voxel_craft A/B frames and run time match the baseline.
 
-### Phase 2: split helio-core into `helio-gpu` + `helio-graph` (#1538 reshaped)
-- `helio-graph` is the statics-free crate #1538 calls `helio-pass-api`.
-- Slim `RenderPass` to graph-only hooks; editor/debug/jitter/ray-tracing/
-  bundle/transparent hooks move to `Feature`/`FeatureInstance` or spine
-  extension points. Shader hot reload stays host-side behind a trait.
-- Typed frame blackboard (`FrameKey<T>`) replaces string keys + `find_pass`
-  for pass-to-pass handles (Hi-Z sampler, portal buffers).
+### Phase 2: `helio-feature-api` (reordered, 2026-11-02)
+The core split (old phase 2) is deferred: it would re-path 1,929
+`helio_core::` uses in 276 files, and its payoff (a statics-free crate a
+DLL plugin links) only matters once plugins stop being linked statically.
+The coupling we feel lives one level up, in how features get into the
+graph, so the feature API comes first.
 
-### Phase 3: `helio-feature-api`, spine, thin renderer (#1539 reshaped)
+As built:
+- `helio-feature-api` (new layer `feature_api`, depends on helio-core only):
+  the node types moved from helio-graph-asset (`NodeDescriptor`,
+  `NodeRegistry`, pins, params) and `Feature` / `FeatureRegistrar` /
+  `FeatureSet`. A feature registers node types and the buffer contracts its
+  passes read (`consumes`).
+- `BuildEnv` knows no renderer: frame facts (`FrameDesc`: sizes, surface
+  format, XR) plus typed **settings** the graph's builder supplies
+  (`insert_setting` / `require::<T>()`). The renderer's config, debug-draw
+  state and scene handle are settings now (`helio_graph_asset::build_env`);
+  a feature reads its own settings type.
+- helio-default-passes registers through `default_features()`: one feature
+  per stage (scene prep, geometry, lighting, overlays, post, output, host
+  inputs, perf markers). `graphs::registry_for(&FeatureSet)` is what an
+  engine extends; `base_registry()` is the default set.
+- Still to do in later phases: per-feature settings replacing
+  `RendererConfig` fields, extension points, feature handles replacing
+  `find_pass` downcasts, node registration moving into each feature's crate
+  (voxel first, phase 4).
+
+### Phase 3: spine, extension points, thin renderer (#1539 reshaped)
 - Feature trait, registrar, extension-point traits, settings per feature
   (helio-settings stays the schema source).
 - Spine = today's core deferred set (gbuffer, deferred-light, forward-lit,
