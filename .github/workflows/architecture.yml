@@ -1,0 +1,25 @@
+name: Architecture
+
+# Layer gate and co-change report (docs/architecture/layered-rewrite.md §6).
+# No build: `cargo metadata --no-deps` and git history only.
+
+on:
+  push:
+    branches: [ "main", "rewrite/**" ]
+  pull_request:
+
+jobs:
+  layers:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.11"
+    - name: Layer check
+      run: python scripts/architecture/check_layers.py
+    - name: Co-change report (this branch vs main)
+      if: github.event_name == 'pull_request'
+      run: python scripts/architecture/co_change.py "origin/${{ github.base_ref }}..HEAD"

@@ -1,0 +1,142 @@
+# Layer of every workspace crate. Target architecture and rules:
+# docs/architecture/layered-rewrite.md §3. Checked by
+# scripts/architecture/check_layers.py (normal and build dependencies; dev
+# dependencies are a crate's own tests and are not checked).
+#
+# A crate may depend on the layers listed in `may_use` of its own layer.
+# Feature crates may also depend on crates of their own `group` (one feature
+# is often several crates); never on another group's crates.
+#
+# Today's violations are recorded in architecture/layer-violations.txt. That
+# list may only shrink: a new violation fails the check, a fixed one must be
+# removed from the list (`--update`).
+
+[layers.leaf]
+about = "No dependency on any other workspace crate."
+may_use = []
+
+[layers.core]
+about = "gpu + graph (helio-core today; splits into helio-gpu and helio-graph in phase 2)."
+may_use = ["leaf"]
+
+[layers.scene]
+about = "Buffer contracts and the scene-input projection; materials ABI. No components."
+may_use = ["core", "leaf"]
+
+[layers.spine]
+about = "Core deferred pipeline and its extension points."
+may_use = ["spine", "scene", "core", "leaf"]
+
+[layers.feature]
+about = "One rendering feature per group. Same group, spine and below; never another group."
+may_use = ["spine", "scene", "core", "leaf"]
+
+[layers.renderer]
+about = "The Renderer facade. Knows no feature."
+may_use = ["renderer", "spine", "scene", "core", "leaf"]
+
+[layers.preset]
+about = "Graph assets, node registries, feature lists."
+may_use = ["preset", "renderer", "feature", "spine", "scene", "core", "leaf"]
+
+[layers.host]
+about = "Examples, demos, importers, tools: anything goes."
+may_use = ["host", "preset", "renderer", "feature", "spine", "scene", "core", "leaf"]
+
+[crates]
+# leaf
+helio-settings = { layer = "leaf" }
+helio-bake-types = { layer = "leaf" }
+scenedb-inspector-agent = { layer = "leaf" }
+helio-passes = { layer = "leaf" }          # manifest-only container for the passes/ glob
+helio-workspace = { layer = "host" }       # workspace root package (web bin)
+
+# core
+helio-core = { layer = "core" }
+
+# scene
+helio-mats = { layer = "scene" }
+
+# spine
+helio-pass-gbuffer = { layer = "spine" }
+helio-pass-deferred-light = { layer = "spine" }
+helio-pass-forward-lit = { layer = "spine" }
+helio-pass-object-batch = { layer = "spine" }
+helio-pass-light-cull = { layer = "spine" }
+helio-pass-shadow = { layer = "spine" }
+helio-pass-shadow-matrix = { layer = "spine" }
+helio-pass-shadow-cull = { layer = "spine" }
+helio-pass-shadow-dirty = { layer = "spine" }
+helio-pass-hiz = { layer = "spine" }
+helio-pass-occlusion-cull = { layer = "spine" }
+helio-pass-indirect-dispatch = { layer = "spine" }
+helio-pass-transparent = { layer = "spine" }
+helio-pass-tsr = { layer = "spine" }
+helio-pass-postprocess = { layer = "spine" }
+
+# features
+helio-pass-sky = { layer = "feature", group = "sky" }
+helio-pass-gi = { layer = "feature", group = "gi" }
+helio-pass-volumetric-fog = { layer = "feature", group = "fog" }
+helio-pass-water-sim = { layer = "feature", group = "water" }
+helio-pass-foliage-place = { layer = "feature", group = "foliage" }
+helio-pass-foliage-gbuffer = { layer = "feature", group = "foliage" }
+helio-pass-voxel-planet = { layer = "feature", group = "voxel" }
+helio-voxel-data = { layer = "feature", group = "voxel" }
+helio-pass-vg-bvh = { layer = "feature", group = "vg" }
+helio-pass-vg-cull = { layer = "feature", group = "vg" }
+helio-pass-vg-dense = { layer = "feature", group = "vg" }
+helio-pass-vg-raster = { layer = "feature", group = "vg" }
+helio-pass-vg-shade = { layer = "feature", group = "vg" }
+helio-vg-format = { layer = "feature", group = "vg" }
+helio-vg-build = { layer = "feature", group = "vg" }
+helio-vg-stream = { layer = "feature", group = "vg" }
+helio-pass-lens = { layer = "feature", group = "lens" }
+helio-pass-flare = { layer = "feature", group = "lens" }
+helio-lens-optics = { layer = "feature", group = "lens" }
+helio-pass-portal-cull = { layer = "feature", group = "portals" }
+helio-pass-portal-instances = { layer = "feature", group = "portals" }
+helio-pass-decal = { layer = "feature", group = "decals" }
+helio-pass-billboard = { layer = "feature", group = "billboards" }
+helio-pass-corona = { layer = "feature", group = "corona" }
+helio-pass-sprite-batch = { layer = "feature", group = "sprites2d" }
+helio-pass-sprite-cull = { layer = "feature", group = "sprites2d" }
+helio-pass-sprite-simulate = { layer = "feature", group = "sprites2d" }
+helio-pass-radiance-cascades-2d = { layer = "feature", group = "sprites2d" }
+helio-pass-ssr = { layer = "feature", group = "reflections" }
+helio-pass-planar-reflection = { layer = "feature", group = "reflections" }
+helio-pass-hlfs = { layer = "feature", group = "hlfs" }
+helio-pass-fxaa = { layer = "feature", group = "post-aa" }
+helio-pass-debug-overlay = { layer = "feature", group = "debug" }
+helio-pass-perf-overlay = { layer = "feature", group = "debug" }
+helio-pass-buffer-view = { layer = "feature", group = "debug" }
+helio-pass-simple-cube = { layer = "feature", group = "debug" }
+helio-pass-sdf = { layer = "feature", group = "sdf" }
+helio-bake = { layer = "feature", group = "bake" }
+
+# renderer
+helio = { layer = "renderer" }
+helio-xr = { layer = "renderer" }
+
+# presets
+helio-default-passes = { layer = "preset" }
+helio-graph-asset = { layer = "preset" }
+
+# hosts
+examples = { layer = "host" }
+helio-asset-compat = { layer = "host" }
+helio-controls = { layer = "host" }
+helio-wasm = { layer = "host" }
+helio-web-demos = { layer = "host" }
+helio-android-demos = { layer = "host" }
+helio-snapshot = { layer = "host" }
+
+[budgets]
+# `#[derive(SceneStore)]` structs in Helio sources. Components belong to the
+# plugins that register them, not to Helio (layered-rewrite.md §3); this
+# number may only go down, and reaches 0 at the end of phase 1.
+scene_store_derives = 31
+
+[renamed]
+# Old crate names in git history -> today's crate, for the co-change report.
+helio-default-graphs = "helio-default-passes"

@@ -1,8 +1,0 @@
-[package]
-name = "helio-pass-water-caustics"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-helio-core = { workspace = true }
-wgpu = { workspace = true }

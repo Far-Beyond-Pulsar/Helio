@@ -78,10 +78,6 @@ mod tests {
         let sources = [
             ("gbuffer", include_str!("../shaders/gbuffer.wgsl")),
             (
-                "depth prepass",
-                include_str!("../../helio-pass-depth-prepass/shaders/depth_prepass.wgsl"),
-            ),
-            (
                 "forward lit",
                 include_str!("../../helio-pass-forward-lit/shaders/forward_lit.wgsl"),
             ),

@@ -34,7 +34,6 @@ fn depth_cutouts_validate_for_native_and_expanded_texture_bindings() {
     let material = include_str!("../shaders/depth_material.wgsl");
     for geometry in [
         include_str!("../../helio-pass-shadow/shaders/shadow.wgsl"),
-        include_str!("../../helio-pass-depth-prepass/shaders/depth_prepass.wgsl"),
     ] {
         let native = format!("{material}\n{geometry}");
         for source in [
