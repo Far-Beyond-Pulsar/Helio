@@ -6,6 +6,8 @@ description = "Helio world-space diffuse global illumination: a probe clipmap tr
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-mesh-api = { workspace = true }
+helio-frame-api = { path = "../../../helio-frame-api" }
 helio-core = { workspace = true }
 helio-feature-api = { path = "../../../helio-feature-api" }
 helio-sky-api = { path = "../../../api/helio-sky-api" }

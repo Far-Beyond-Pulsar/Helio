@@ -1,8 +1,6 @@
 use glam::{Mat4, Vec3};
-use helio::{
-    GpuLight, LightType, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig,
-    SceneDbHandle,
-};
+use helio::{GpuLight, LightType, Renderer, RendererBuilder, RendererConfig, SceneDbHandle};
+use helio_mesh_api::{MeshUpload, PackedVertex};
 use helio_components::{
     AtmosphereComponent, CoronaEmitterComponent, DecalComponent, MaterialComponent,
     PostProcessVolumeComponent, ReflectionCaptureComponent,
@@ -737,7 +735,7 @@ pub fn spawn_post_process_volume(
     let entity = world.spawn();
     world.insert(
         entity,
-        PostProcessVolumeComponent::from(helio_pass_postprocess::PostProcessVolumeRow::from(
+        PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
             descriptor.to_gpu(),
         )),
     );
@@ -1162,7 +1160,7 @@ pub fn set_camera_postprocess(
     let entity = existing.unwrap_or_else(|| world.spawn());
     world.insert(
         entity,
-        CameraPostProcessComponent::from(helio_pass_postprocess::CameraPostProcessRow::new(
+        CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
             view_id, settings,
         )),
     );

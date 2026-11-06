@@ -278,7 +278,7 @@ impl ApplicationHandler for App {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
-        renderer.set_ies_texture_view(ies_view);
+        renderer.set_feature(helio_pass_deferred_light::IesProfiles(ies_view));
 
         self.state = Some(AppState {
             window,

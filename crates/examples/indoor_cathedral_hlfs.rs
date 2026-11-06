@@ -220,7 +220,10 @@ impl ApplicationHandler for App {
 
         let config = RendererConfig::new(size.width, size.height, format)
             .with_tsr_quality(helio_pass_tsr::TsrQuality::Native)
-            .with_shadow_quality(helio::ShadowQuality::High)
+            .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::High,
+                ..Default::default()
+            })
             .with_ssr(true)
             .with_environment_reflections(true);
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
@@ -297,7 +300,10 @@ impl ApplicationHandler for App {
         } else {
             None
         };
-        renderer.set_ambient([0.10, 0.09, 0.085], 1.0);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.10, 0.09, 0.085],
+            intensity: 1.0,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         let warmup_texture = device.create_texture(&wgpu::TextureDescriptor {

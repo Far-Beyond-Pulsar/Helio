@@ -220,7 +220,7 @@ fn leaf_opacity_casts_identical_cutout_shadows_from_both_sides() {
             ([-1., 1., 0.5], [0., 0.]),
         ]
         .into_iter()
-        .map(|(position, tex_coords0)| helio_core::PackedVertex {
+        .map(|(position, tex_coords0)| helio_mesh_api::PackedVertex {
             position,
             tex_coords0,
             ..Default::default()

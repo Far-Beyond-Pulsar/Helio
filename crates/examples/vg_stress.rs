@@ -732,7 +732,10 @@ impl ApplicationHandler for App {
             )
         };
         renderer.set_material_sampler(&material_sampler());
-        renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [1.0, 0.95, 0.85],
+            intensity: 0.05,
+        });
         renderer.set_clear_color([0.018, 0.022, 0.035, 1.0]);
         let mut debug_views = renderer.available_debug_views();
         debug_views.push(helio_core::DebugViewDescriptor {
@@ -1194,7 +1197,7 @@ impl AppState {
     }
 
     /// Upload one classic mesh; returns its entity and interned vertex range.
-    fn upload_mesh(&mut self, upload: helio::MeshUpload) -> (Entity, u32, u32) {
+    fn upload_mesh(&mut self, upload: helio_mesh_api::MeshUpload) -> (Entity, u32, u32) {
         let mesh = spawn_mesh(&mut self.scene_db.world, upload);
         let mirror = scene_db_handle(&self.scene_db);
         let vertices =

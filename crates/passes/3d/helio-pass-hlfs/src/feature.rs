@@ -23,10 +23,10 @@ impl Feature for HlfsFeature {
                 let queue = build.env.queue;
                 let quality = build
                     .env
-                    .setting::<helio_spine::SpineSettings>()
-                    .cloned()
+                    .setting::<helio_pass_shadow_matrix::ShadowSettings>()
+                    .copied()
                     .unwrap_or_default()
-                    .shadow_quality;
+                    .quality;
                 let mut pass =
                     HlfsPass::new(build.env.device, queue, iw, ih, build.env.scene_format());
                 pass.set_shadow_quality(quality, queue);

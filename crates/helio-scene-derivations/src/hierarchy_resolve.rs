@@ -51,7 +51,7 @@ pub use helio_core::{
     SceneDerivationContext, SceneDerivationOutput,
 };
 
-use crate::scene_join::{join_source, TRANSFORM_ROW_BYTES};
+use helio_scene_join::{join_source, TRANSFORM_ROW_BYTES};
 
 /// An object's parent: its entity index plus one, `0` for none (`u32`).
 pub const PARENT_ROW_BYTES: u64 = 4;
@@ -60,14 +60,14 @@ pub const FRAME_ROW_BYTES: u64 = 4;
 /// Published with the moved list: `[x, y, z]` workgroup counts sized for it.
 /// Its `content_generation` equals the placement buffer's, so a join can tell
 /// the list belongs to the rows it is reading.
-pub const HIERARCHY_MOVED_ARGS_KEY: BufferKey = BufferKey::of("hierarchy_moved_args");
+pub use helio_scene_join::HIERARCHY_MOVED_ARGS_KEY;
 /// Each object composed only up to its nearest rigid frame (48-byte transform
 /// rows, like the world rows). Equal to the world rows for objects in no frame.
-pub const LOCAL_PLACEMENT_KEY: BufferKey = BufferKey::of("Transform::placement");
+pub use helio_scene_join::LOCAL_PLACEMENT_KEY;
 /// Each object's space: the slot of its nearest rigid frame ancestor, `0` for
 /// the world (`u32` rows). Its `content_generation` moves only when a parent
 /// link or frame changed (or after a full resolve), never for a plain move.
-pub const OBJECT_SPACE_KEY: BufferKey = BufferKey::of("object_space");
+pub use helio_scene_join::OBJECT_SPACE_KEY;
 const WORKGROUP: u32 = 64;
 
 /// Where the frontend's rows live.

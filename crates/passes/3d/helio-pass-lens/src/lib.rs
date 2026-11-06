@@ -5,6 +5,8 @@
 //! `lens_color` / `lens_resolved` graph contract.
 
 pub mod feature;
+pub mod scene_rows;
+
 pub use feature::LensFeature;
 
 use helio_core::graph::ResourceBuilder;

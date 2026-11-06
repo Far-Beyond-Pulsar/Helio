@@ -48,6 +48,8 @@ ies_demo            = []
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
+helio-mesh-api = { workspace = true }
+helio-pass-post-volumes = { workspace = true }
 helio-components = { path = "../helio-components" }
 helio-wasm          = { path = "../helio-wasm" }
 helio               = { workspace = true }

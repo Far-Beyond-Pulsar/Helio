@@ -1,11 +1,14 @@
-//! The lens as a feature: the node that images the resolved scene through the
-//! camera's lens elements.
+//! The camera lens as a feature: its elements (water drops, iris shapes,
+//! user lenses) over the resolved scene colour, at the frame's resolved
+//! slot. It reads the colour chain's current colour and advances it to
+//! [`crate::LENS_COLOR`].
 
-use helio_feature_api::{pass_node, Feature, FeatureRegistrar, ParamDesc, PinType};
+use helio_feature_api::{pass_node, Feature, FeatureRegistrar};
+use helio_frame_api::{color, FrameNode, Slot};
 
-use crate::{LensPass, LensUser};
+use crate::{LensPass, LensUser, LENS_COLOR};
 
-/// Lens elements ([`crate`]).
+/// The camera lens ([`crate`]).
 pub struct LensFeature;
 
 impl Feature for LensFeature {
@@ -22,26 +25,17 @@ impl Feature for LensFeature {
                 "Lens elements: water drops, iris shapes and user lenses.",
                 |build| {
                     let (iw, ih) = build.env.internal_size();
-                    let input = match build.text("color_input").as_str() {
-                        "tsr_color" => "tsr_color",
-                        "fogged_hdr" => "fogged_hdr",
-                        _ => "fxaa_color",
-                    };
+                    let input = color::current(build.env);
                     let user = build.env.setting::<LensUser>().map(|user| user.0);
                     let pass = LensPass::new_with_user(build.env.device, iw, ih, user)
                         .with_color_input(input)
                         .with_bundled_resources();
                     build.graph.add_pass(Box::new(pass));
+                    color::advance(build.env, LENS_COLOR);
                     Ok(())
                 },
             )
-            .with_param(ParamDesc::choice(
-                "color_input",
-                "Colour input",
-                &["fxaa_color", "tsr_color", "fogged_hdr"],
-                "fxaa_color",
-            ))
-            .with_alternative_inputs(&["tsr_color", "fxaa_color", "fogged_hdr"], PinType::TEXTURE),
+            .in_slot(Slot::Resolved, 0),
         );
     }
 }

@@ -35,10 +35,8 @@ use helio_wasm::{HelioWasmApp, InputState, KeyCode, MouseButton};
 // ── Shared helpers (inlined from helio-web-demos common) ──────────────────────
 
 use glam::{Mat4, Vec3};
-use helio::{
-    GpuLight, GpuMaterial, LightType, MaterialId, MeshId, MeshUpload, ObjectDescriptor,
-    PackedVertex,
-};
+use helio::{GpuLight, GpuMaterial, LightType, MaterialId, MeshId, ObjectDescriptor};
+use helio_mesh_api::{MeshUpload, PackedVertex};
 
 fn make_material(
     base_color: [f32; 4],
@@ -263,7 +261,10 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         renderer.set_editor_mode(true);
         renderer.set_clear_color([0.03, 0.05, 0.10, 1.0]);
-        renderer.set_ambient([0.18, 0.22, 0.32], 0.35);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.18, 0.22, 0.32],
+            intensity: 0.35,
+        });
 
         let mut picker = ScenePicker::new();
 

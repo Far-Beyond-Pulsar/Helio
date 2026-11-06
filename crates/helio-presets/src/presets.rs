@@ -1,11 +1,14 @@
 //! Helio's shipped pipelines, as node graphs.
 //!
-//! A preset is a graph of the pass nodes in [`crate::features`], made for
-//! the renderer config it is built with: the config picks the anti-aliasing
-//! (TSR when `tsr_quality` is set), screen-space and planar reflections,
-//! portals and foliage, and the TSR node's settings. The nodes features
-//! register for a [`Slot`] go at that slot, so a feature (GI, the clouds, an
-//! engine's) joins every preset without a preset naming it. Every build,
+//! A preset is a graph of the spine's passes and the frame's slots and draw
+//! phases (`helio_frame_api`), made for the renderer config it is built
+//! with: the config picks the anti-aliasing (TSR when `tsr_quality` is set)
+//! and the TSR node's settings; the lighting model is the preset's. Every
+//! other node joins where its feature placed it (a slot, or a phase's
+//! drawers and the compute before them), so a feature (meshes, GI, the
+//! clouds, portals, foliage, fog, the lens, an engine's object kinds) joins
+//! every preset without a preset naming it, and builds nothing when its own
+//! settings turn it off. Every build,
 //! resizes and shader reloads included, makes the graph again from the
 //! renderer's current config.
 //!
@@ -21,13 +24,17 @@ use std::sync::{Arc, OnceLock};
 
 use helio::{IntoGraph, PassBuildContext, RendererConfig};
 use helio_core::RenderGraph;
+use helio_feature_api::ExtensionPoint;
+use helio_frame_api::color::ReactiveMask;
+use helio_frame_api::lighting::SpecularLayers;
+use helio_frame_api::{Phase, PhaseList, Slot, HOST_INPUTS};
 use helio_graph_asset::{
     core_nodes, Connection, GraphAsset, GraphAssetPipeline, NodeInstance, NodeRegistry, Params,
-    PinRef, Slot,
+    PinRef,
 };
 use serde_json::Value;
 
-use crate::features::{host_kind, kind, SceneColorFormat, HOST_INPUTS};
+use crate::features::{kind, SceneColorFormat};
 
 /// One of Helio's shipped pipelines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -92,7 +99,37 @@ impl Preset {
         }
     }
 
-    /// The preset's nodes for `config`, in execution order.
+    /// The draw phases the preset runs, in frame order.
+    pub fn phases(self) -> Vec<Phase> {
+        match self {
+            Preset::Simple => Vec::new(),
+            Preset::Forward => vec![
+                Phase::ShadowCasters,
+                Phase::Forward,
+                Phase::Overlay,
+                Phase::Transparent,
+            ],
+            _ => vec![
+                Phase::ShadowCasters,
+                Phase::GBuffer,
+                Phase::Overlay,
+                Phase::Transparent,
+            ],
+        }
+    }
+
+    /// How the preset's lighting takes the indirect-specular layers.
+    fn specular_layers(self) -> SpecularLayers {
+        match self {
+            Preset::Forward | Preset::Simple => SpecularLayers::None,
+            _ if self.hlfs() => SpecularLayers::CompositedAfter,
+            _ => SpecularLayers::Read,
+        }
+    }
+
+    /// The preset's nodes for `config`, in execution order: the spine's
+    /// passes it names, and the frame's slots and draw phases, each expanded
+    /// to the nodes the registry holds there.
     pub fn nodes(self, registry: &NodeRegistry, config: &RendererConfig) -> Vec<NodeInstance> {
         let mut nodes = Nodes {
             registry,
@@ -102,30 +139,17 @@ impl Preset {
             nodes.pass("simple_cube");
             return nodes.list;
         }
-        let portals = config.enable_portals;
-        let reflections = helio_core::REFLECTIONS_SUPPORTED;
-        let foliage = config
-            .features
-            .get_or_default::<helio_pass_foliage_place::FoliageSettings>()
-            .enabled;
         let aa = self.aa(config);
 
-        // Scene prep: batches, the sky's tables, shadows, culling.
-        for name in [
-            "object_batch",
-            "atmosphere",
-            "shadow_matrix",
-            "shadow_dirty",
-            "shadow",
-            "background",
-            "indirect_dispatch",
-            "hiz",
-            "occlusion_cull",
-        ] {
+        // Scene prep: batches, per-frame tables, the lights' shadow views and
+        // their casters, culling.
+        nodes.pass("object_batch");
+        nodes.slot(Slot::Prepare);
+        nodes.pass("shadow_matrix");
+        nodes.pass("shadow_dirty");
+        nodes.phase(Phase::ShadowCasters);
+        for name in ["background", "indirect_dispatch", "hiz", "occlusion_cull"] {
             nodes.pass(name);
-        }
-        if portals {
-            nodes.pass("portal_cull");
         }
         if !self.hlfs() {
             nodes.pass("light_cull");
@@ -133,64 +157,22 @@ impl Preset {
 
         // Geometry and lighting.
         if self == Preset::Forward {
-            nodes.with("forward_lit", [("render_all_opaque", Value::from(true))]);
+            nodes.phase(Phase::Forward);
             nodes.pass("cloud_trace");
         } else {
-            // Placement is a compute pass: before the G-buffer, never between
-            // it and the foliage draw, whose render passes fuse.
-            if foliage {
-                nodes.pass("foliage_place");
-            }
-            nodes.pass("gbuffer");
-            if portals {
-                nodes.pass("portal_mask");
-                nodes.pass("portal_instance");
-            }
-            if foliage {
-                nodes.pass("foliage_gbuffer");
-            }
-            nodes.pass("virtual_geometry");
+            nodes.phase(Phase::GBuffer);
             nodes.slot(Slot::Geometry);
-            nodes.pass("decal");
-            if self.hlfs() {
-                nodes.slot(Slot::LightingInputs);
-                nodes.pass("hlfs");
-                if config.enable_ssr && reflections {
-                    nodes.pass("ssr");
-                    nodes.pass("ssr_composite");
-                }
-            } else {
-                if config.enable_ssr && reflections {
-                    nodes.pass("ssr");
-                }
-                if config.enable_planar_reflections && reflections {
-                    nodes.pass("planar_reflection");
-                }
-                nodes.slot(Slot::LightingInputs);
-                nodes.pass("deferred_light");
-            }
-            nodes.slot(Slot::Lighting);
+            nodes.slot(Slot::LightingInputs);
+            nodes.pass(if self.hlfs() { "hlfs" } else { "deferred_light" });
         }
+        nodes.slot(Slot::Lighting);
 
-        // Over the lit scene: the sky, then what is not seen through the air.
-        nodes.pass("atmosphere_composite");
-        nodes.pass("corona");
-        if portals {
-            nodes.pass("portal_editor_overlay");
-        }
-        nodes.pass("water_sim");
-        // The editor's grid and bounds, then the light sprites in front of them
-        // (billboards test the scene depth but do not write it).
-        nodes.pass("debug_draw_scene");
-        nodes.pass("billboard");
-
-        // The scene-linear chain: media, transparency, AA, lens, tone map.
-        nodes.pass("post_process_volume_blend");
-        nodes.pass("volumetric_fog");
-        nodes.pass("fog_composite");
-        let reactive = self.hlfs() && aa == Aa::Tsr;
-        nodes.with("transparent", [("reactive_mask", Value::from(reactive))]);
-        let resolved = match aa {
+        // Over the lit scene, then the scene-linear chain: media,
+        // transparency, anti-aliasing, the resolved colour, the tone map.
+        nodes.phase(Phase::Overlay);
+        nodes.slot(Slot::Media);
+        nodes.phase(Phase::Transparent);
+        match aa {
             Aa::Tsr => {
                 // Features that rotate samples over pixels ask TSR for its
                 // stochastic mask themselves (`helio_pass_tsr::StochasticSamples`).
@@ -201,23 +183,15 @@ impl Preset {
                         ("transparency_reactivity", Value::from(self.hlfs())),
                     ],
                 );
-                "tsr_color"
             }
-            Aa::Fxaa => {
-                nodes.pass("fxaa");
-                "fxaa_color"
-            }
-            Aa::None => "fogged_hdr",
-        };
-        nodes.with("lens", [("color_input", Value::from(resolved))]);
-        nodes.pass("lens_flare");
-        nodes.with("post_process", [("color_input", Value::from("lens_color"))]);
+            Aa::Fxaa => nodes.pass("fxaa"),
+            Aa::None => {}
+        }
+        nodes.slot(Slot::Resolved);
+        nodes.pass("post_process");
 
         // Over the final image.
-        nodes.pass("buffer_view");
-        nodes.pass("sprite_overlay");
-        nodes.pass("perf_overlay");
-        nodes.pass("debug_draw");
+        nodes.slot(Slot::Display);
         nodes.slot(Slot::Output);
         nodes.list
     }
@@ -243,10 +217,9 @@ impl Preset {
             from = id;
         }
         if self != Preset::Simple {
-            for name in HOST_INPUTS {
-                asset
-                    .nodes
-                    .push(node(&format!("host_{name}"), &host_kind(name)));
+            for descriptor in registry.placed(HOST_INPUTS) {
+                let id = descriptor.kind.replace('.', "_");
+                asset.nodes.push(node(&id, &descriptor.kind));
             }
         }
         asset
@@ -263,6 +236,11 @@ impl Preset {
                 if self.hlfs() {
                     let format = helio_pass_hlfs::HlfsPass::preferred_output_format(env.device);
                     env.insert_setting(SceneColorFormat(format));
+                }
+                env.insert_setting(PhaseList(self.phases()));
+                env.insert_setting(self.specular_layers());
+                if self.hlfs() && self.aa(&config) == Aa::Tsr {
+                    env.insert_setting(ReactiveMask);
                 }
                 self.asset(registry, &config)
             }),
@@ -402,15 +380,41 @@ impl Nodes<'_> {
         self.list.push(instance);
     }
 
-    /// The nodes registered for `slot`, by order then kind; a node's id is its
+    /// The nodes placed at `point`, by order then kind; a node's id is its
     /// kind without the `helio.pass.` prefix.
-    fn slot(&mut self, slot: Slot) {
-        for descriptor in self.registry.slotted(slot) {
+    fn at(&mut self, point: ExtensionPoint) {
+        for descriptor in self.registry.placed(point) {
             let id = descriptor
                 .kind
                 .trim_start_matches("helio.pass.")
                 .replace('.', "_");
             self.list.push(node(&id, &descriptor.kind));
         }
+    }
+
+    fn slot(&mut self, slot: Slot) {
+        self.at(slot.point());
+    }
+
+    /// A draw phase: the compute it needs first, the drawer that opens it,
+    /// then its other drawers.
+    ///
+    /// # Panics
+    ///
+    /// When a phase whose attachments nobody else clears has drawers but not
+    /// exactly one opener: its frame would show stale pixels, or clear twice.
+    fn phase(&mut self, phase: Phase) {
+        let openers = self.registry.placed(phase.open()).len();
+        let drawers = self.registry.placed(phase.draw()).len();
+        if phase.needs_opener() && drawers > 0 {
+            assert!(
+                openers == 1,
+                "phase `{}` has {drawers} drawers and {openers} openers; it needs exactly one",
+                phase.name()
+            );
+        }
+        self.at(phase.before());
+        self.at(phase.open());
+        self.at(phase.draw());
     }
 }

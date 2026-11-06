@@ -60,7 +60,8 @@ mod hlfs_capture;
 mod v3_demo_common;
 
 use glam::{Mat4, Quat, Vec3};
-use helio::{Camera, MeshUpload, PackedVertex, Renderer, RendererBuilder, RendererConfig};
+use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
+use helio_mesh_api::{MeshUpload, PackedVertex};
 use helio_components::StaticObjectComponent;
 use pulsar_scenedb::{Entity, SceneDb, World};
 use std::sync::Arc;
@@ -835,7 +836,10 @@ fn build_bench(
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let config = RendererConfig::new(WIDTH, HEIGHT, format)
         .with_render_scale(1.0)
-        .with_shadow_quality(helio::ShadowQuality::High);
+        .with_feature(helio_pass_shadow_matrix::ShadowSettings {
+                quality: helio::ShadowQuality::High,
+                ..Default::default()
+            });
     let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
         .with_external_device()
         .with_editor_mode(args.editor)
@@ -846,7 +850,10 @@ fn build_bench(
             other => panic!("unknown graph {other}; use hlfs or default"),
         })
         .build(device.clone(), queue.clone(), WIDTH, HEIGHT, format);
-    renderer.set_ambient([0.08, 0.08, 0.09], 1.0);
+    renderer.set_feature_live(helio::AmbientLight {
+            color: [0.08, 0.08, 0.09],
+            intensity: 1.0,
+        });
     renderer.set_frame_delta_override(Some(1.0 / 60.0));
     let acceleration = (mode == Mode::RayTraced).then(|| {
         if let Some(pass) = renderer.find_pass_mut::<helio_pass_hlfs::HlfsPass>() {

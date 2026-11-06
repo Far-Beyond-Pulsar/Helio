@@ -125,7 +125,7 @@ impl HelioWasmApp for Demo {
                 for mesh in &scene.meshes {
                     let mesh_id = crate::common::spawn_mesh(
                         world,
-                        helio::MeshUpload {
+                        helio_mesh_api::MeshUpload {
                             vertices: mesh.vertices.clone(),
                             indices: mesh.indices.clone(),
                         },
@@ -171,7 +171,10 @@ impl HelioWasmApp for Demo {
                 point_light(p.to_array(), [1.0, 0.85, 0.60], 4.0, 18.0),
             );
         }
-        renderer.set_ambient([0.4, 0.42, 0.48], 0.12);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.4, 0.42, 0.48],
+            intensity: 0.12,
+        });
 
         Self {
             cam_pos: Vec3::new(0.0, 6.0, 20.0),

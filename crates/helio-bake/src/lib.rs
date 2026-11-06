@@ -80,7 +80,7 @@ pub struct BakeRequest {
 /// helio_components::bake(&mut renderer, scene, BakeConfig::fast("my_scene"));
 /// ```
 pub fn mesh_upload_to_bake(
-    upload: &helio_core::MeshUpload,
+    upload: &helio_mesh_api::MeshUpload,
     transform: glam::Mat4,
     mesh_slot: Option<u32>,
 ) -> BakeMesh {

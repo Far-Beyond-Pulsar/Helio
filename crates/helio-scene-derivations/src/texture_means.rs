@@ -1,5 +1,5 @@
 //! The mean colour of textures, for shading ray hits without sampling them
-//! (`helio_core::RayInstance::base_color` is a material's factor times its
+//! (`helio_mesh_api::RayInstance::base_color` is a material's factor times its
 //! base colour texture's mean). Measured on the GPU: a compute pass loads
 //! the texture's coarsest mip (decoded to linear by the format) and
 //! averages it, and the means are read back asynchronously. A texture's

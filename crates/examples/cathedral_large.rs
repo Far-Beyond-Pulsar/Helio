@@ -4,7 +4,7 @@
 use crate::architectural_mesh::Mesh;
 use crate::v3_demo_common::{make_material, spawn_material, spawn_mesh, spawn_object};
 use glam::{Mat4, Vec3};
-use helio::MeshUpload;
+use helio_mesh_api::MeshUpload;
 use pulsar_scenedb::World;
 
 const HALF_LENGTH: f32 = 72.0;

@@ -8,7 +8,6 @@ use std::time::Instant;
 use web_time::Instant;
 
 use helio_core::{PipelineFormatSet, RenderGraph};
-use helio_mats::radiant::RadiantTemplateRegistry;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
@@ -189,14 +188,21 @@ impl Renderer {
             &[255, 255, 255, 255],
         );
         let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let fallback_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Default Material Sampler"),
-            ..Default::default()
-        });
+        let sampler_setting = config.features.get::<helio_mats::MaterialSampler>().cloned();
+        let fallback_sampler = device.create_sampler(
+            &sampler_setting
+                .as_ref()
+                .map(|setting| setting.0.clone())
+                .unwrap_or(wgpu::SamplerDescriptor {
+                    label: Some("Default Material Sampler"),
+                    ..Default::default()
+                }),
+        );
         let material_bindings = super::renderer_impl::MaterialBindingResources {
             _fallback_texture: fallback_texture,
             fallback_view,
             fallback_sampler,
+            sampler_setting,
             texture_count: material_binding.max_textures,
             version: 0,
             scene_views: vec![None; material_binding.max_textures],
@@ -230,8 +236,6 @@ impl Renderer {
             scene_derivations: Vec::new(),
             world_origin: glam::DVec3::ZERO,
             debug_camera_buffer,
-            ambient_color: [0.05, 0.05, 0.08],
-            ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
             graph_config: config.clone(),
             coordinate_spaces: Vec::new(),
@@ -242,8 +246,6 @@ impl Renderer {
             debug_state,
             last_render_time: Instant::now(),
             delta_time: 0.0,
-            color_grading_lut_view: None,
-            ies_texture_view: None,
             cull_stats_staging,
             material_bindings,
             cull_stats_readback_state: CullStatsReadbackState::Idle,
@@ -272,12 +274,6 @@ impl Renderer {
             shader_reload: Default::default(),
             scene_db,
             tsr_quality: config.tsr_quality,
-            template_registry: std::sync::Arc::new(std::sync::RwLock::new(
-                RadiantTemplateRegistry::new(),
-            )),
-            transparent_template_registry: std::sync::Arc::new(std::sync::RwLock::new(
-                RadiantTemplateRegistry::new(),
-            )),
             render_mode: config.render_mode,
             enable_xr: config.enable_xr,
             #[cfg(not(target_arch = "wasm32"))]

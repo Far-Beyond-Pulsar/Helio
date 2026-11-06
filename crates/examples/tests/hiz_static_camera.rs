@@ -58,7 +58,10 @@ impl Harness {
         ))
         .build(device.clone(), queue.clone(), SIZE, SIZE, format);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
-        renderer.set_ambient([0.0; 3], 0.0);
+        renderer.set_feature_live(helio::AmbientLight {
+        color: [0.0; 3],
+        intensity: 0.0,
+    });
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {

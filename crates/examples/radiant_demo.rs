@@ -99,7 +99,12 @@ impl ApplicationHandler for App {
         let mut config = RendererConfig::new(size.width, size.height, surface_format);
         config.enable_ssr = true;
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
+        // The materials' template registries: registered into below, read by
+        // the G-buffer drawer (shared handles, so registration order does not
+        // matter).
+        let templates = helio_mats::MaterialTemplates::default();
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
+            .with_feature(templates.clone())
             .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
@@ -108,8 +113,10 @@ impl ApplicationHandler for App {
         // ── Register iridescent template (Tier 3) ───────────────────────────
 
         let iridescent_wgsl = include_str!("shaders/radiant_iridescent.wgsl");
-        let iridescent_class = renderer
-            .template_registry_mut()
+        let iridescent_class = templates
+            .opaque
+            .write()
+            .unwrap()
             .register_str("iridescent", iridescent_wgsl.to_string());
         log::info!(
             "[RADIANT] Iridescent template registered as class {}",
@@ -119,16 +126,20 @@ impl ApplicationHandler for App {
         // ── Register opal template ───────────────────────────────────────────
 
         let opal_wgsl = include_str!("../helio-mats/templates/opal.wgsl");
-        let opal_class = renderer
-            .template_registry_mut()
+        let opal_class = templates
+            .opaque
+            .write()
+            .unwrap()
             .register_partial_str("opal", opal_wgsl.to_string());
         log::info!("[RADIANT] Opal template registered as class {}", opal_class);
 
         // ── Register glass template ─────────────────────────────────────────
 
         let glass_wgsl = include_str!("../helio-mats/templates/glass.wgsl");
-        let glass_class = renderer
-            .template_registry_mut()
+        let glass_class = templates
+            .opaque
+            .write()
+            .unwrap()
             .register_partial_str("glass", glass_wgsl.to_string());
         log::info!(
             "[RADIANT] Glass (gbuffer) template registered as class {}",
@@ -138,11 +149,15 @@ impl ApplicationHandler for App {
         // Register transparent version at the gbuffer glass class ID so the
         // transparent pass finds the glass shader instead of falling back to default.
         let glass_transparent_wgsl = include_str!("../helio-mats/templates/glass_transparent.wgsl");
-        let glass_transparent_src = renderer
-            .transparent_template_registry_mut()
+        let glass_transparent_src = templates
+            .transparent
+            .write()
+            .unwrap()
             .compose_transparent_override(glass_transparent_wgsl);
-        renderer
-            .transparent_template_registry_mut()
+        templates
+            .transparent
+            .write()
+            .unwrap()
             .register_str_at(glass_class, "glass_transparent", glass_transparent_src);
         log::info!(
             "[RADIANT] Glass (transparent) template registered as class {}",
@@ -152,8 +167,10 @@ impl ApplicationHandler for App {
         // ── Register water template ─────────────────────────────────────────
 
         let water_wgsl = include_str!("../helio-mats/templates/water.wgsl");
-        let water_class = renderer
-            .template_registry_mut()
+        let water_class = templates
+            .opaque
+            .write()
+            .unwrap()
             .register_partial_str("water", water_wgsl.to_string());
         log::info!(
             "[RADIANT] Water (gbuffer) template registered as class {}",
@@ -163,8 +180,10 @@ impl ApplicationHandler for App {
         // Also register a transparent water template so the transparent pass
         // renders it with real alpha blending instead of the fixed overlay.
         let water_transparent_wgsl = include_str!("../helio-mats/templates/water_transparent.wgsl");
-        let water_transparent_class = renderer
-            .transparent_template_registry_mut()
+        let water_transparent_class = templates
+            .transparent
+            .write()
+            .unwrap()
             .register_transparent_partial_str(
                 "water_transparent",
                 water_transparent_wgsl.to_string(),
@@ -458,7 +477,10 @@ impl ApplicationHandler for App {
         // ── Sky: nearly black — reflections visible only from lights ──────────
 
         spawn_sky(&mut scene_db.world, [0.02, 0.02, 0.04]);
-        renderer.set_ambient([0.01, 0.01, 0.02], 0.03);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.01, 0.01, 0.02],
+            intensity: 0.03,
+        });
 
         // ── Legend ───────────────────────────────────────────────────────────
 

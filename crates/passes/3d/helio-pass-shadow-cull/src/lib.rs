@@ -294,7 +294,7 @@ impl RenderPass for ShadowCullPass {
         let Some(shadow_data) = ctx
             .registry
             .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                helio_core::resource_keys::shadow_matrices(),
+                helio_pass_shadow_matrix::shadow_matrices(),
             )
         else {
             return Ok(());

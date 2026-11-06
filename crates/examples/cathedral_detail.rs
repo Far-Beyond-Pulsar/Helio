@@ -2,7 +2,7 @@
 //! coloured panes are single surfaces so alpha blending does not double tint.
 use crate::v3_demo_common::{make_material, spawn_material, spawn_mesh, spawn_object};
 use glam::{Mat4, Vec3};
-use helio::MeshUpload;
+use helio_mesh_api::MeshUpload;
 use pulsar_scenedb::World;
 
 use crate::architectural_mesh::Mesh;

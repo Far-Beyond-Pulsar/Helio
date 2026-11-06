@@ -114,7 +114,7 @@ macro_rules! same_layout {
 #[derive(SceneStore, Clone, Debug)]
 pub struct MeshComponent {
     #[gpu(buffer = "builtin_mesh_vertex", mirror = Once)]
-    pub vertices: Vec<helio_core::PackedVertex>,
+    pub vertices: Vec<helio_mesh_api::PackedVertex>,
     #[gpu(buffer = "builtin_mesh_index", mirror = Once)]
     pub indices: Vec<u32>,
 }
@@ -230,7 +230,8 @@ pub fn publish_portal_projection(
 /// generation) are skipped.
 #[cfg(feature = "bake")]
 pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> helio_bake::SceneGeometry {
-    use helio::{GpuLight, LightType, MeshUpload};
+    use helio::{GpuLight, LightType};
+use helio_mesh_api::{MeshUpload};
     use helio_bake::{LightSource, LightSourceKind};
 
     let meshes: std::collections::HashMap<u32, (u32, &MeshComponent)> = world
@@ -301,7 +302,8 @@ pub fn bake_scene_from_world(world: &pulsar_scenedb::World) -> helio_bake::Scene
 #[cfg(all(test, feature = "bake"))]
 mod bake_scene_tests {
     use super::*;
-    use helio::{GpuLight, LightType, PackedVertex};
+    use helio::{GpuLight, LightType};
+use helio_mesh_api::{PackedVertex};
     use helio_bake::LightSourceKind;
     use helio_pass_forward_lit::LightRow;
     use helio_pass_gbuffer::StaticObjectRow;

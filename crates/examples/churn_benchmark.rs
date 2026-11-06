@@ -168,7 +168,10 @@ impl ApplicationHandler for App {
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;
-        renderer.set_ambient([0.04, 0.04, 0.05], 1.0);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.04, 0.04, 0.05],
+            intensity: 1.0,
+        });
 
         let mat_floor = spawn_material(
             &mut scene_db.world,

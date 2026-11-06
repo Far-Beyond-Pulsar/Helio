@@ -287,7 +287,7 @@ impl RenderPass for VgShadePass {
             .registry
             .get::<VgDenseFrameData<'_>>(ResourceKey::new(KEY_DENSE));
         let Some(material_textures) = ctx.registry.get::<helio_mats::MaterialTextureBindings<'_>>(
-            helio_core::resource_keys::material_textures(),
+            helio_mats::material_textures(),
         ) else {
             return Ok(());
         };

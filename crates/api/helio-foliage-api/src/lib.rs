@@ -170,3 +170,9 @@ mod tests {
         );
     }
 }
+
+/// The level's wind rows (`GlobalWindSourceRow`): the foliage wind row (12
+/// words), marked global. Foliage and water read them in their scene rows.
+pub const WIND_SOURCE_ROW_BYTES: u64 = 12 * 4;
+/// The wind row's `_pad[0]`: 1 in a global wind's row.
+pub const GLOBAL_WIND_MARK_WORD: u32 = 10;

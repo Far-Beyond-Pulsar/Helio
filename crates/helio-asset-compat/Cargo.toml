@@ -6,6 +6,7 @@ workspace = "../../"
 description = "SolidRS integration layer for Helio renderer - asset loading and conversion"
 
 [dependencies]
+helio-mesh-api = { workspace = true }
 # Helio renderer facade
 helio = { workspace = true }
 helio-mats = { path = "../helio-mats" }

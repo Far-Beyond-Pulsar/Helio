@@ -3,7 +3,8 @@
 //! Mirrors the `v3_demo_common` module used by the native examples.
 
 use glam::{Mat4, Vec3};
-use helio::{GpuLight, LightType, MeshUpload, PackedVertex};
+use helio::{GpuLight, LightType};
+use helio_mesh_api::{MeshUpload, PackedVertex};
 use helio_components::{LightComponent, MaterialComponent, StaticObjectComponent};
 use pulsar_scenedb::{Entity, World};
 

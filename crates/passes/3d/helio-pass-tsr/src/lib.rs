@@ -167,6 +167,10 @@ pub const STOCHASTIC_MASK: &str = "tsr_stochastic";
 /// Read only when [`TsrPass::with_motion_vectors`] is set.
 pub const MOTION_VECTORS: &str = "gbuffer_velocity";
 
+/// The anti-aliased scene-linear colour TSR writes (the colour chain's next
+/// colour after it).
+pub const TSR_COLOR: &str = "tsr_color";
+
 // ── GPU uniform ───────────────────────────────────────────────────────────────
 
 #[repr(C)]

@@ -69,6 +69,7 @@ fn hybrid_pipeline_accepts_shared_camera_and_normal_contract() {
             &device,
             &camera,
             wgpu::TextureFormat::Rgba16Float,
+            "indirect_specular_0",
         );
         assert!(
             errors.pop().await.is_none(),

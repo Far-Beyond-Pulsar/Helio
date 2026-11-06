@@ -9,7 +9,7 @@ exist count as their own unit.
 The rewrite's phase-4 exit metric was the `voxel` row: commits touching voxel
 that also touched another unit < 10% (docs/architecture/layered-rewrite.md).
 Voxel's crates left this repository at phase 5 step 6.6 (they are the
-pulsar.voxel plugin's, in Pulsar's plugins/voxel/); their history here counts
+pulsar.voxel plugin's, in Pulsar's plugins/vendor/voxel/); their history here counts
 under their old crate names.
 
 Usage: python scripts/architecture/co_change.py [--since 2026-10-01] [REV_RANGE]

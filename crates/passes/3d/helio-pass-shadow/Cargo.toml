@@ -6,8 +6,12 @@ description = "Helio render pass: helio-pass-shadow"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-mesh-api = { workspace = true }
+helio-frame-api = { path = "../../../helio-frame-api" }
+helio-feature-api = { path = "../../../helio-feature-api" }
 helio-core  = { workspace = true }
 helio-pass-shadow-matrix = { workspace = true }
+helio-pass-shadow-dirty = { path = "../helio-pass-shadow-dirty" }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }

@@ -206,8 +206,12 @@ async fn run_default_graph(
                 .find_pass::<helio_pass_shadow::ShadowPass>()
                 .unwrap()
                 .last_update_work();
-            assert!(updates <= config.shadow_budget.updates_per_frame);
-            assert!(texels <= config.shadow_budget.update_texels_per_frame);
+            let budget = config
+                .features
+                .get_or_default::<helio_pass_shadow_matrix::ShadowSettings>()
+                .budget;
+            assert!(updates <= budget.updates_per_frame);
+            assert!(texels <= budget.update_texels_per_frame);
         }
     }
 

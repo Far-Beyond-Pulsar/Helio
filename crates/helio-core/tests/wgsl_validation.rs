@@ -270,7 +270,7 @@ fn every_wgsl_shader_parses_and_validates() {
 /// them.
 #[test]
 fn composed_shaders_parse_and_validate() {
-    let mut sources = helio_scene_derivations::scene_join::validation_sources();
+    let mut sources = helio_scene_derivations::validation_sources();
     sources.push((
         "volumetric_fog.wgsl".into(),
         helio_pass_volumetric_fog::shader_source(),

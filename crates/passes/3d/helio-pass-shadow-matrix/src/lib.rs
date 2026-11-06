@@ -426,7 +426,7 @@ impl RenderPass for ShadowMatrixPass {
         let residency =
             unsafe { std::mem::transmute::<&ResidencyTable, &'a ResidencyTable>(&self.residency) };
         frame.write(
-            helio_core::resource_keys::shadow_matrices(),
+            crate::shadow_matrices(),
             ShadowMatricesFrameData {
                 shadow_matrices: matrices,
                 desired_matrices: Some(desired),
@@ -659,3 +659,13 @@ impl RenderPass for ShadowMatrixPass {
 }
 #[cfg(test)]
 mod tests;
+
+/// Graph key of the shadow views' matrices this crate's pass publishes
+/// (`ShadowMatricesFrameData`).
+pub const SHADOW_MATRICES: &str = "shadow_matrices";
+
+/// [`SHADOW_MATRICES`] as a typed key.
+#[inline]
+pub const fn shadow_matrices<T>() -> helio_core::ResourceKey<T> {
+    helio_core::ResourceKey::new(SHADOW_MATRICES)
+}

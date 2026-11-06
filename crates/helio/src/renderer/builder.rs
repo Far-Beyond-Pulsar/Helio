@@ -57,7 +57,7 @@ pub type SceneDbHandle = GpuMirrorHandle;
 /// let mut renderer = RendererBuilder::new(config, scene_db)
 ///     .with_external_device()
 ///     .with_editor_mode(true)
-///     .with_ambient([0.0, 0.0, 0.0], 0.0)
+///     .with_feature(helio::AmbientLight { color: [0.0; 3], intensity: 0.0 })
 ///     .with_pass_build_context(Box::new(
 ///         helio_presets::deferred,
 ///     ))
@@ -78,8 +78,6 @@ pub struct RendererBuilder {
     pass_graph_fn: Option<PassGraphBuilderFn>,
     editor_mode: bool,
     scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
-    ambient_color: [f32; 3],
-    ambient_intensity: f32,
     clear_color: [f32; 4],
     owns_device: bool,
     scene_db: SceneDbHandle,
@@ -100,8 +98,6 @@ impl RendererBuilder {
             pass_graph_fn: None,
             editor_mode: false,
             scene_derivations: Vec::new(),
-            ambient_color: [0.05, 0.05, 0.08],
-            ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
             owns_device: true,
             scene_db,
@@ -173,10 +169,10 @@ impl RendererBuilder {
         self
     }
 
-    /// Override the ambient light colour and intensity.
-    pub fn with_ambient(mut self, color: [f32; 3], intensity: f32) -> Self {
-        self.ambient_color = color;
-        self.ambient_intensity = intensity;
+    /// Sets a feature's settings in the renderer config (see
+    /// [`RendererConfig::with_feature`]).
+    pub fn with_feature<T: std::any::Any + Send + Sync>(mut self, setting: T) -> Self {
+        self.config.features.insert(setting);
         self
     }
 
@@ -280,7 +276,6 @@ impl RendererBuilder {
         renderer.owns_device = self.owns_device;
         renderer.set_editor_mode(self.editor_mode);
         renderer.scene_derivations = self.scene_derivations;
-        renderer.set_ambient(self.ambient_color, self.ambient_intensity);
         renderer.set_clear_color(self.clear_color);
 
         renderer

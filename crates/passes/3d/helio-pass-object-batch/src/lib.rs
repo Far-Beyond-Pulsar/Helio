@@ -18,6 +18,8 @@
 //! established for SceneDB's `Transform` buffer) is a separate integration
 //! step, tracked apart from this crate.
 
+pub mod scene_join;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_pass_gbuffer::StaticObjectRow;
@@ -28,12 +30,12 @@ mod readback;
 pub use gpu_types::*;
 
 const WG: u32 = 256;
-/// The scene join's structure marker (`helio_scene_derivations::scene_join::
+/// The scene join's structure marker (`crate::scene_join::
 /// OBJECTS_STRUCTURE_KEY`): moves only when objects are added, removed or
 /// change what they are, not when they move.
 const STRUCTURE_KEY: &str = "scene_objects_structure";
 /// The scene join's list of the object slots a frame that only moved objects
-/// rewrote (`helio_scene_derivations::scene_join::OBJECTS_MOVED_KEY`).
+/// rewrote (`crate::scene_join::OBJECTS_MOVED_KEY`).
 const MOVED_KEY: &str = "scene_objects_moved";
 /// Scene buffer of per-`static_objects`-row flags: a non-zero row is drawn by
 /// another renderer (virtual geometry), so the main view's frustum cull skips

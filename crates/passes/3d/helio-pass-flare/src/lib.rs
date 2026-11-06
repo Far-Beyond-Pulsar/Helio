@@ -897,7 +897,7 @@ impl RenderPass for LensFlarePass {
             shadow_matrices: ctx
                 .registry
                 .get::<helio_pass_shadow_matrix::ShadowMatricesFrameData<'_>>(
-                    helio_core::resource_keys::shadow_matrices(),
+                    helio_pass_shadow_matrix::shadow_matrices(),
                 )
                 .map(|s| s.shadow_matrices),
             shadow_atlas: ctx

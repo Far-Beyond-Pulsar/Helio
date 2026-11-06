@@ -212,7 +212,10 @@ impl HelioWasmApp for Demo {
         };
         demo.build_scene(&mut scene_db.world);
 
-        renderer.set_ambient([0.75, 0.7, 0.6], 0.04);
+        renderer.set_feature_live(helio::AmbientLight {
+            color: [0.75, 0.7, 0.6],
+            intensity: 0.04,
+        });
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
         demo
     }

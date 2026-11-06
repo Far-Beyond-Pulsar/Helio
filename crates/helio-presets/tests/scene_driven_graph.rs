@@ -64,7 +64,7 @@ fn floor(world: &mut pulsar_scenedb::World) {
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     for (a, b) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-        vertices.push(helio::PackedVertex::from_components(
+        vertices.push(helio_mesh_api::PackedVertex::from_components(
             [a * half.x, half.y, b * half.z],
             [0.0, 1.0, 0.0],
             [0.0; 2],

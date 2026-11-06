@@ -2,6 +2,7 @@
 //!use pbr_eval
 //!use atmosphere
 //!use atmosphere_sky_table
+//!use view_remap
 
 //! Deferred lighting pass.
 //!
@@ -82,26 +83,6 @@ struct LightMatrix { mat: mat4x4<f32>,
     atlas: vec4f,
     policy: vec4u, }
 
-// Water volume descriptor (simplified, matches libhelio::GpuWaterVolume layout)
-struct GpuWaterVolume {
-    bounds_min: vec4<f32>,
-    bounds_max: vec4<f32>,
-    wave_params: vec4<f32>,
-    wave_direction: vec4<f32>,
-    water_color: vec4<f32>,
-    extinction: vec4<f32>,
-    reflection_refraction: vec4<f32>,
-    caustics_params: vec4<f32>,  // x=enabled, y=intensity, z=scale, w=speed
-    fog_params: vec4<f32>,
-    _pad0: vec4<f32>,
-    _pad1: vec4<f32>,
-    _pad2: vec4<f32>,
-    _pad3: vec4<f32>,
-    _pad4: vec4<f32>,
-    _pad5: vec4<f32>,
-    world_phase: vec4<f32>,  // xy = the frame's world origin XZ mod 270 m
-}
-
 /// Per-cascade shadow configuration (16 bytes, matches libhelio::CascadeConfig)
 struct CascadeConfig {
     split_distance:   f32,  // Far plane distance (meters)
@@ -145,23 +126,14 @@ struct ShadowCasterCounts {
 // The sky over each surface (`AtmosphereFrame` docs, `SKY_TABLE_*`).
 @group(0) @binding(10) var<uniform> atmosphere_sky_table: array<vec4<f32>, 2304>;
 
-// Per portal chain, the matrix taking a point of the host world back into the
-// world of the content that chain shows (`portal_chain_unmap`). A portal pixel
-// is drawn at a transformed copy of its content, so it is lit where the content
-// really is: with that world's lights, sun and sky, not the host's. A uniform
-// for the same reason as the atmosphere: the fragment stage is at its
-// storage-buffer limit.
-@group(0) @binding(11) var<uniform> portal_unmap: array<mat4x4<f32>, 256>;
-
-// The chain a portal pixel belongs to, or -1. The portal G-buffer pass tags its
-// pixels (-1, -3 - chain); (-1, -2) is the stored voxel tag and (-2, -2) the VG
-// sentinel.
-fn portal_chain_of(lightmap_uv: vec2<f32>) -> i32 {
-    if lightmap_uv.x > -1.5 && lightmap_uv.x < -0.5 && lightmap_uv.y < -2.5 {
-        return min(i32(round(-3.0 - lightmap_uv.y)), 255);
-    }
-    return -1;
-}
+// The frame's view remaps (`helio_frame_api::lighting::VIEW_REMAPS`): per
+// chain, the matrix taking a point of the host world into the world the
+// chain's pixels show (`view_remap_of` tags them). Such a pixel is drawn at a
+// transformed copy of its content, so it is lit where the content really is:
+// with that world's lights, sun and sky, not the host's. A uniform for the
+// same reason as the atmosphere: the fragment stage is at its storage-buffer
+// limit.
+@group(0) @binding(11) var<uniform> view_remaps: array<mat4x4<f32>, 256>;
 
 fn complexity_color(value: f32) -> vec3<f32> {
     let t = clamp(value, 0.0, 1.0);
@@ -279,17 +251,17 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 @group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
 @group(2) @binding(6) var env_sampler:    sampler;
 @group(2) @binding(7) var shadow_depth_sampler: sampler;  // Non-comparison sampler for PCSS blocker search
-@group(2) @binding(8) var water_caustics: texture_2d<f32>;  // Caustics texture from WaterCausticsPass
-@group(2) @binding(23) var water_caustics_deep: texture_2d<f32>;
-@group(2) @binding(9) var caustics_sampler: sampler;  // Sampler for caustics
-@group(2) @binding(10) var<storage, read> water_volumes: array<GpuWaterVolume>;  // Water volumes
+// Radiance media add at each pixel (`helio_frame_api::lighting::TRANSMISSION`:
+// light water focuses, say), added to the indirect term. 1x1 black without.
+@group(2) @binding(8) var transmission: texture_2d<f32>;
 // Baked lightmap atlas (Rgba16Float, pre-baked indirect illumination for Static geometry)
 @group(2) @binding(12) var baked_lightmap: texture_2d<f32>;
 @group(2) @binding(13) var baked_lightmap_sampler: sampler;
-// SSR accum texture (Rgba16Float, half resolution) — screen-space reflections
-@group(2) @binding(14) var ssr_tex: texture_2d<f32>;
-// Planar reflection texture (Rgba16Float, full resolution)
-@group(2) @binding(16) var planar_tex: texture_2d<f32>;
+// The frame's indirect-specular layers (`helio_frame_api::lighting::
+// INDIRECT_SPECULAR_LAYERS`), composited over the environment in order: rgb
+// the reflected radiance before Fresnel, a its coverage. 1x1 black without.
+@group(2) @binding(14) var specular_layer_0: texture_2d<f32>;
+@group(2) @binding(16) var specular_layer_1: texture_2d<f32>;
 @group(2) @binding(17) var planar_sampler: sampler;
 // IES light profile textures (R8Unorm, 256×256 per slice, C type angular distribution)
 @group(2) @binding(18) var ies_textures: texture_2d_array<f32>;
@@ -299,9 +271,6 @@ fn load_shadow_occluder_depth(pixel: vec2<i32>, layer: u32) -> f32 {
 // Zero is unfiltered. See helio-pass-shadow.
 @group(2) @binding(20) var shadow_transmittance: texture_2d_array<f32>;
 @group(2) @binding(21) var transmittance_sampler: sampler;
-// f64-reduced to the 12 m FFT tile on the CPU; the legacy volume phase uses
-// a different period and cannot be reused here.
-@group(2) @binding(22) var<uniform> water_caustics_phase: vec4<f32>;
 
 // Reflection captures, uploaded sorted by influence volume, largest first.
 // The blend below runs front-to-back and saturates, so ordering is what lets a
@@ -325,9 +294,9 @@ const CAPTURE_SHAPE_BOX:    u32 = 1u;
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
 const MAX_LIGHTS_PER_TILE: u32 = 64u;
-// A portal pixel walks the scene's lights instead of its tile's list (the list
+// A remapped pixel walks the scene's lights instead of its tile's list (the list
 // is of the host world's view); only its footprint pays.
-const PORTAL_MAX_LIGHTS: u32 = 256u;
+const REMAPPED_MAX_LIGHTS: u32 = 256u;
 @group(3) @binding(0) var<storage, read> tile_light_lists:  array<u32>;
 @group(3) @binding(1) var<storage, read> tile_light_counts: array<u32>;
 // The voxel terrain's shadows of local lights (its denoiser's): three words
@@ -1169,14 +1138,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let world_h     = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
     let world_pos_host = world_h.xyz / world_h.w;
 
-    // A portal pixel is shaded where its content really is: back through the chain.
-    let portal_chain = portal_chain_of(lightmap_uv);
-    let in_portal    = portal_chain >= 0;
+    // A remapped pixel is shaded where its content really is: back through the chain.
+    let remap_chain = view_remap_of(lightmap_uv);
+    let remapped    = remap_chain >= 0;
     var world_pos = world_pos_host;
     var N         = N_host;
     var eye       = cameras[0].position_near.xyz;
-    if in_portal {
-        let unmap = portal_unmap[portal_chain];
+    if remapped {
+        let unmap = view_remaps[remap_chain];
         world_pos = (unmap * vec4<f32>(world_pos_host, 1.0)).xyz;
         N         = normalize((unmap * vec4<f32>(N_host, 0.0)).xyz);
         eye       = (unmap * vec4<f32>(eye, 1.0)).xyz;
@@ -1270,13 +1239,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
         let tile_idx = tile_y * globals.num_tiles_x + tile_x;
         var light_pass_count = tile_light_counts[tile_idx];
-        if in_portal { light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS); }
+        if remapped { light_pass_count = min(globals.light_count, REMAPPED_MAX_LIGHTS); }
 
         var affecting_lights = 0.0;
         var shadow_work = 0.0;
         for (var i = 0u; i < light_pass_count; i++) {
             var light_idx = i;
-            if !in_portal { light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]; }
+            if !remapped { light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i]; }
             let light = lights[light_idx];
             if light.light_type != 0u {
                 let to_light = light.position_range.xyz - world_pos;
@@ -1289,7 +1258,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             // affect every surface. Spot-cone attenuation still costs work and
             // therefore does not darken pixels outside the cone.
             affecting_lights += 1.0;
-            if light.shadow_index != 0xffffffffu && !is_vg && !in_portal { shadow_work += 1.0; }
+            if light.shadow_index != 0xffffffffu && !is_vg && !remapped { shadow_work += 1.0; }
         }
 
         if globals.debug_mode == 50u {
@@ -1350,13 +1319,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
         let tile_idx = tile_y * globals.num_tiles_x + tile_x;
         var light_pass_count = tile_light_counts[tile_idx];
-        if in_portal {
-            light_pass_count = min(globals.light_count, PORTAL_MAX_LIGHTS);
+        if remapped {
+            light_pass_count = min(globals.light_count, REMAPPED_MAX_LIGHTS);
         }
         let local_words = 3u * (u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x));
         for (var i = 0u; i < light_pass_count; i++) {
             var light_idx = i;
-            if !in_portal {
+            if !remapped {
                 light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
             }
             let light = lights[light_idx];
@@ -1391,17 +1360,17 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             // only to throw the result away every time.
             var sf = 1.0;
             var transmit = vec3<f32>(1.0);
-            if !is_vg && !in_portal {
+            if !is_vg && !remapped {
                 sf = shadow_factor(light_idx, world_pos, N_lit, in.clip_pos.xy, globals.frame);
                 if sf > 0.0 {
                     transmit = light_transmittance(light_idx, world_pos, N_lit);
                 }
             }
             // The terrain's shadow of a local light (`local_visibility`).
-            if !in_portal && light.light_type != 0u && i < 32u {
+            if !remapped && light.light_type != 0u && i < 32u {
                 sf *= terrain_light_visibility(local_words, i);
             }
-            if !in_portal && light.light_type == 0u && dot(sun_seen.yzw, sun_seen.yzw) > 0.5 {
+            if !remapped && light.light_type == 0u && dot(sun_seen.yzw, sun_seen.yzw) > 0.5 {
                 let light_direction = -normalize(light.direction_outer.xyz);
                 if dot(normalize(sun_seen.yzw), light_direction) > 0.99999 {
                     sf *= clamp(sun_seen.x, 0.0, 1.0);
@@ -1471,12 +1440,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         hemi             = mix(ground_color, sky_color, hemi_t) * albedo;
     }
     // Where the GI probes hold the point, their irradiance replaces the
-    // sky's: bounce light, and no sky where the world hides it (a portal
+    // sky's: bounce light, and no sky where the world hides it (a remapped
     // pixel's probes are the host's: it keeps the sky).
     let gi_word = u32(in.clip_pos.y) * u32(screen_size.x) + u32(in.clip_pos.x);
     var gi_weight = 0.0;
     var gi = vec3<f32>(0.0);
-    if !in_portal && arrayLength(&gi_irradiance) > 1u && gi_word < arrayLength(&gi_irradiance) {
+    if !remapped && arrayLength(&gi_irradiance) > 1u && gi_word < arrayLength(&gi_irradiance) {
         let g = gi_irradiance[gi_word];
         let ba = unpack2x16float(g.y);
         gi = vec3<f32>(unpack2x16float(g.x), ba.x);
@@ -1539,13 +1508,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     }
     color        += emissive;               // emissive from G-buffer
     color        += sss_transmission;       // SSS rim glow
-    // Water caustics are added by fs_reflection (additive, like reflections).
+    // Transmission is added by fs_reflection (additive, like reflections).
 
     // Tonemapping & bloom handled by PostProcessPass — write raw HDR linear.
     return vec4<f32>(color, alpha);
 }
 
-// Reflection composition (and the additive water caustics) is deliberately
+// Reflection composition (and the added transmission) is deliberately
 // isolated from base lighting so neither fragment entry point exceeds the
 // WebGPU baseline of 16 sampled textures.
 // The normal path is additively blended over fs_main; SSR debug modes use the
@@ -1556,7 +1525,7 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     let depth = textureLoad(gbuf_depth, pix, 0);
     if helio_is_sky(depth) { discard; }
 
-    let ssr_hit = textureLoad(ssr_tex, pix, 0);
+    let ssr_hit = textureLoad(specular_layer_0, pix, 0);
     if globals.debug_mode == 30u {
         return vec4<f32>(vec3<f32>(ssr_hit.a), 1.0);
     }
@@ -1610,14 +1579,14 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
     let world_h = cameras[0].view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
     let world_pos_host = world_h.xyz / world_h.w;
 
-    // A portal pixel reflects its content's world, seen from where the eye is in it.
-    let portal_chain = portal_chain_of(lightmap_uv);
-    let in_portal = portal_chain >= 0;
+    // A remapped pixel reflects its content's world, seen from where the eye is in it.
+    let remap_chain = view_remap_of(lightmap_uv);
+    let remapped = remap_chain >= 0;
     var world_pos = world_pos_host;
     var N = N_host;
     var eye = cameras[0].position_near.xyz;
-    if in_portal {
-        let unmap = portal_unmap[portal_chain];
+    if remapped {
+        let unmap = view_remaps[remap_chain];
         world_pos = (unmap * vec4<f32>(world_pos_host, 1.0)).xyz;
         N = normalize((unmap * vec4<f32>(N_host, 0.0)).xyz);
         eye = (unmap * vec4<f32>(eye, 1.0)).xyz;
@@ -1635,53 +1604,22 @@ fn fs_reflection(in: VSOut) -> @location(0) vec4<f32> {
         spec_ind = env_sample * (F0 * env_brdf.x + env_brdf.y);
     }
 
-    // Screen-space hits are of the host's view; a portal pixel has none of its own.
-    if !in_portal && globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
+    // Screen-space hits are of the host's view; a remapped pixel has none of its own.
+    if !remapped && globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
         spec_ind = mix(spec_ind, ssr_hit.rgb * F_ibl, ssr_hit.a);
     }
 
-    let planar_hit = textureLoad(planar_tex, pix, 0);
-    if !in_portal && globals.enable_reflections != 0u && planar_hit.a > 0.0 {
+    let planar_hit = textureLoad(specular_layer_1, pix, 0);
+    if !remapped && globals.enable_reflections != 0u && planar_hit.a > 0.0 {
         spec_ind = mix(spec_ind, planar_hit.rgb * F_ibl, planar_hit.a);
     }
 
     let contribution = select(spec_ind * ao_combined, spec_ind, has_lightmap);
-    return vec4<f32>(contribution + water_caustics_light(world_pos), 0.0);
-}
-
-/// Add the same periodic three-depth caustics field used by the water surface.
-/// The dedicated phase uniform is reduced from the f64 world origin to this
-/// 12 m tile, independently of the legacy 270 m volume-relative simulation.
-fn water_caustics_light(world_pos: vec3<f32>) -> vec3<f32> {
-    if arrayLength(&water_volumes) == 0u {
-        return vec3<f32>(0.0);
+    var added = vec3<f32>(0.0);
+    if all(vec2<u32>(pix) < textureDimensions(transmission)) {
+        added = textureLoad(transmission, pix, 0).rgb;
     }
-    let vol = water_volumes[0];
-    let depth = vol.bounds_max.w - world_pos.y;
-    if depth <= 0.0 || vol.caustics_params.x <= 0.5 {
-        return vec3<f32>(0.0);
-    }
-    let uv = fract((world_pos.xz + water_caustics_phase.xy) / 12.0);
-    let footprint = max(length(dpdx(world_pos.xz)), length(dpdy(world_pos.xz)));
-    let near_lod = clamp(log2(max(footprint * 512.0 / 12.0, 1.0)), 0.0, 9.0);
-    let deep_lod = clamp(log2(max(footprint * 256.0 / 12.0, 1.0)), 0.0, 8.0);
-    var caustic: f32;
-    if depth <= 4.0 {
-        let shallow = textureSampleLevel(water_caustics, caustics_sampler,
-            uv, near_lod).r;
-        let mid = textureSampleLevel(water_caustics_deep, caustics_sampler,
-            uv, deep_lod).r;
-        caustic = mix(shallow, mid, smoothstep(1.5, 4.0, clamp(depth, 1.5, 4.0)));
-    } else {
-        let mid = textureSampleLevel(water_caustics_deep, caustics_sampler,
-            uv, deep_lod).r;
-        let deep = textureSampleLevel(water_caustics_deep, caustics_sampler,
-            uv, deep_lod).g;
-        caustic = mix(mid, deep, smoothstep(4.0, 10.0, clamp(depth, 4.0, 10.0)));
-    }
-    let attenuation = exp(-max(depth - 1.5, 0.0) * 0.12);
-    return vec3<f32>(0.7, 0.9, 1.0) * max(caustic - 1.0, 0.0)
-         * vol.caustics_params.y * attenuation;
+    return vec4<f32>(contribution + added, 0.0);
 }
 
 // Logical face metadata maps all filtering into a guarded physical tile.

@@ -51,7 +51,7 @@
 //! ```
 
 pub mod feature;
-pub use feature::PortalCullFeature;
+pub use feature::{portals_enabled, PortalCullFeature, PortalSettings};
 
 use std::sync::Arc;
 

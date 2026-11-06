@@ -2,8 +2,13 @@
 //! read-only depth, and Radiant template support.
 //!
 //! Templates are composed with `transparent_base.wgsl` (shared in the `helio`
-//! crate) and registered via `renderer.transparent_template_registry_mut()`.
+//! crate). The materials' transparent registry
+//! (`helio_mats::MaterialTemplates::transparent`) does not reach this pass
+//! yet: it draws with its built-in templates.
 //! The default template (class 0) reads SceneDB material tint, alpha and PBR properties.
+
+pub mod feature;
+pub use feature::TransparentDrawers;
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

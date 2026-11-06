@@ -51,7 +51,8 @@ pub const GI_RAYS: &str = "gi_rays";
 pub const GI_HITS: &str = "gi_hits";
 pub const GI_SUN: &str = "gi_sun";
 pub const GI_LIGHT: &str = "gi_light";
-pub const GI_IRRADIANCE: &str = "gi_irradiance";
+/// The probes' irradiance at each pixel: the frame's indirect diffuse.
+pub const GI_IRRADIANCE: &str = helio_frame_api::lighting::INDIRECT_DIFFUSE;
 /// The frame's [`Clipmap`] (a registry value).
 pub const GI_CLIPMAP: &str = "gi_clipmap";
 /// Debug mode of the probes' view (`GiResolvePass`; deferred lighting shows

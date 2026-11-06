@@ -244,7 +244,7 @@ impl ApplicationHandler for App {
             .expect("Helio renderer");
         let surface = graphics.surface;
         renderer.set_editor_mode(true);
-        renderer.set_material_sampler(&wgpu::SamplerDescriptor {
+        renderer.set_feature_live(helio_mats::MaterialSampler(wgpu::SamplerDescriptor {
             label: Some("Brick repeat trilinear sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
             address_mode_v: wgpu::AddressMode::Repeat,
@@ -253,7 +253,7 @@ impl ApplicationHandler for App {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             anisotropy_clamp: 8,
             ..Default::default()
-        });
+        }));
 
         let palette = [
             [0.91, 0.18, 0.18, 1.0],

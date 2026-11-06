@@ -6,6 +6,9 @@ description = "Helio render pass: tiled light culling (Forward+ style)"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-scene-join = { workspace = true }
+helio-frame-api = { path = "../../../helio-frame-api" }
+log = { workspace = true }
 helio-core  = { workspace = true }
 wgpu      = { workspace = true }
 bytemuck  = { workspace = true, features = ["derive"] }
