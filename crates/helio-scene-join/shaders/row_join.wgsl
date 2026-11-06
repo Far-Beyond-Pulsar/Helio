@@ -431,10 +431,10 @@ fn write_row(row: u32, slot: u32) {
         write_sun(output);
     }
     if (u.flags & SURFACE) != 0u {
+        // The phase only: the row's own z/w (water's bounded flag) stay as
+        // its source wrote them.
         rows_out[output + WATER_PHASE_WORD] = bitcast<u32>(u.water_phase.x);
         rows_out[output + WATER_PHASE_WORD + 1u] = bitcast<u32>(u.water_phase.y);
-        rows_out[output + WATER_PHASE_WORD + 2u] = 0u;
-        rows_out[output + WATER_PHASE_WORD + 3u] = 0u;
     }
     if (u.flags & SPRITE) != 0u {
         write_sprite_placement(row, output);
