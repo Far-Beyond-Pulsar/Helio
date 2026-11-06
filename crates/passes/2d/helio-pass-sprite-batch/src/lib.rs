@@ -36,11 +36,14 @@
 //! orthographic camera, so the 3D camera does not move it, and it records
 //! no draw while the scene holds no sprite.
 //!
-//! This pass has no dependency on `helio` / `helio-default-passes` — it only
+//! This pass has no dependency on `helio` / `helio-presets` — it only
 //! needs `helio-core` (for the [`RenderPass`] trait and graph plumbing) and
 //! `helio-core` (for [`ResourceRegistry`](helio_core::ResourceRegistry)), matching
 //! every other pass crate. It never touches `PassContext::scene`, so it is
 //! usable inside a `RenderGraph` that carries no 3D scene data at all.
+
+pub mod feature;
+pub use feature::SpriteFeature;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result};

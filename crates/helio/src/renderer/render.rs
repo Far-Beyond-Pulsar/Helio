@@ -517,6 +517,7 @@ impl Renderer {
                 self.frame_count,
                 self.world_origin,
             );
+            scene_input.set_payloads(self.scene_payloads.clone());
             helio_core::cpu_scope!("Helio: scene derivations");
             scene_input.run_derivations(&mut self.scene_derivations);
             scene_input

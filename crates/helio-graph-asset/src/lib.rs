@@ -8,7 +8,7 @@
 //! other pipeline.
 //!
 //! This crate knows no pass. Registries are filled by the crates that own the
-//! passes (`helio-default-passes` registers Helio's), plus the core resource
+//! passes (`helio-presets` registers Helio's), plus the core resource
 //! nodes in [`core_nodes`].
 
 mod asset;
@@ -26,15 +26,15 @@ pub use asset::{
     Params, PinRef, SectionPort,
     EXTENSION, FORMAT_VERSION, SECTION_ENTRY, SECTION_EXIT, SECTION_PREFIX,
 };
-pub use compile::{compile, Fallback, GraphAssetPipeline};
+pub use compile::{compile, Fallback, GraphAssetPipeline, MakeAsset};
 pub use layout::{auto_layout, LANE_PREFIX};
 pub use helio_feature_api::{PinDesc, PinKind, PinShape, PinType};
 pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
 pub use compile::build_env;
 // A graph document is made of node types: they are part of this crate's API.
 pub use helio_feature_api::{
-    BuildEnv, BuildFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry,
-    ParamDesc, ParamType, PinTable, PinsFn,
+    BuildEnv, BuildFn, FinishFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins,
+    NodeRegistry, ParamDesc, ParamType, PinTable, PinsFn, PrepareFn, SceneColorFormat, Slot,
 };
 
 /// A registry holding the core nodes ([`core_nodes`]): resources, scene

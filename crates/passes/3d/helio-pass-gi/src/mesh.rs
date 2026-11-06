@@ -73,15 +73,20 @@ pub struct GiMeshTracePass {
     no_proxies: wgpu::Buffer,
 }
 
+/// Whether `device` can trace the probes' rays against meshes (hardware ray
+/// queries and a TLAS).
+pub fn mesh_rays_supported(device: &wgpu::Device) -> bool {
+    device
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        && device.limits().max_tlas_instance_count > 0
+}
+
 impl GiMeshTracePass {
     /// The tracer, on a device with hardware ray queries (none without:
     /// the probes then see only the other tracers' geometry).
     pub fn new(device: &wgpu::Device) -> Option<Self> {
-        if !device
-            .features()
-            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
-            || device.limits().max_tlas_instance_count == 0
-        {
+        if !mesh_rays_supported(device) {
             return None;
         }
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

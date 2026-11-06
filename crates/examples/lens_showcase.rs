@@ -344,18 +344,14 @@ fn build_scene(
     format: wgpu::TextureFormat,
     graphics: Option<&mut HelioGraphicsContext<'_>>,
 ) -> (pulsar_scenedb::SceneDb, Renderer) {
-    let config = RendererConfig::new(width, height, format);
+    let mut config = RendererConfig::new(width, height, format);
+    config
+        .features
+        .insert(helio_pass_lens::LensUser(LENS_USER_HOOK));
     let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
     let graph_scene_db = scene_db_handle(&scene_db);
-    let builder = RendererBuilder::new(config, graph_scene_db.clone()).with_pass_build_context(
-        Box::new(|ctx| {
-            helio_default_passes::build_default_graph_with_lens_user_with_context(
-                ctx,
-                LENS_USER_HOOK,
-                None,
-            )
-        }),
-    );
+    let builder = RendererBuilder::new(config, graph_scene_db.clone())
+        .with_pass_build_context(Box::new(helio_presets::deferred));
     let mut renderer = if let Some(graphics) = graphics {
         builder
             .build_with_graphics_context(graphics)

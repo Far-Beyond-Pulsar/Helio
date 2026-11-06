@@ -50,6 +50,9 @@
 //! ));
 //! ```
 
+pub mod feature;
+pub use feature::PortalCullFeature;
+
 use std::sync::Arc;
 
 mod segments;

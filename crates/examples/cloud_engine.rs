@@ -20,7 +20,6 @@ use microfont::{stamp_text, FHEIGHT};
 mod v3_demo_common;
 use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
 use helio_controls::{FlyCamera, FlyCameraConfig, WinitFlyInput};
-use helio_default_passes::build_default_graph_external_with_context;
 use v3_demo_common::{
     cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, scene_db_handle,
     spawn_light, spawn_material, spawn_mesh, spawn_object_with_movability,
@@ -1028,7 +1027,7 @@ impl App {
         // through the authored moon textures as an unwanted white rim.
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut scene_renderer = RendererBuilder::new(scene_config.clone(), graph_scene_db.clone())
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build(
                 device.clone(),
                 queue.clone(),

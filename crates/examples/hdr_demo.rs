@@ -16,7 +16,6 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
     HdrOutputMode, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_default_graph_external_with_context;
 use v3_demo_common::{
     cube_mesh, directional_light, make_material, new_scene_db_with_gpu_mirror, plane_mesh,
     point_light, scene_db_handle, spawn_light, spawn_material, spawn_mesh, spawn_object,
@@ -110,7 +109,7 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

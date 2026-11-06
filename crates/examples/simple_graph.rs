@@ -18,7 +18,6 @@ use helio::{
     required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_simple_graph_with_context;
 
 mod v3_demo_common;
 use v3_demo_common::new_scene_db_with_gpu_mirror;
@@ -174,7 +173,7 @@ impl ApplicationHandler for App {
         // GPU mirror is still required to build one.
         let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let renderer = RendererBuilder::new(config, v3_demo_common::scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(build_simple_graph_with_context))
+            .with_pass_build_context(Box::new(helio_presets::simple))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

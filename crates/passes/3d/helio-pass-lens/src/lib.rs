@@ -4,6 +4,9 @@
 //! scene-linear radiance. See README.md for the optical model and the
 //! `lens_color` / `lens_resolved` graph contract.
 
+pub mod feature;
+pub use feature::LensFeature;
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
     CommandRecorder, PassContext, PrepareContext, RenderPass, ResourceKey, Result as HelioResult,
@@ -429,6 +432,12 @@ pub struct LensPass {
     bundled: Option<Bundled>,
     bindings: Option<(BindingKey, Vec<wgpu::BindGroup>)>,
 }
+
+/// A host's WGSL for [`element_kind::USER`] elements (see
+/// [`LensPass::new_with_user`]), as a feature setting: a graph's lens node
+/// builds with it.
+#[derive(Clone, Copy, Debug)]
+pub struct LensUser(pub &'static str);
 
 impl LensPass {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {

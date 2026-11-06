@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+helio-feature-api = { path = "../../../helio-feature-api" }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 helio-core = { workspace = true }

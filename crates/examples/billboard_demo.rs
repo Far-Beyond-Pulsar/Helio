@@ -4,7 +4,7 @@
 //! As of this writing, nothing in the Pulsar-Native engine (`engine_backend`/
 //! `helio-component`) ever inserts a `BillboardComponent` row anywhere, and no
 //! other Helio example did either — `BillboardPass` is wired into the default
-//! graph (`helio-default-passes::add_late_passes`, built-in spotlight
+//! graph (`helio-presets::add_late_passes`, built-in spotlight
 //! texture) but had literally zero test coverage. This example spawns
 //! `BillboardComponent` rows directly (the same "insert the SceneDB record,
 //! SceneDB owns the deferred GPU upload" pattern already used for
@@ -24,7 +24,6 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::BillboardComponent;
-use helio_default_passes::build_default_graph_external_with_context;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     box_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
@@ -150,7 +149,7 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let graph_scene_db = scene_db_handle(&scene_db);
         let mut renderer = RendererBuilder::new(config, graph_scene_db.clone())
-            .with_pass_build_context(Box::new(build_default_graph_external_with_context))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

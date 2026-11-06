@@ -34,6 +34,9 @@
 //! The graph's texture pool is 2D-only, so the three 3D textures are owned here
 //! and handed to later passes via [`RenderPass::publish`].
 
+pub mod feature;
+pub use feature::FogFeature;
+
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 

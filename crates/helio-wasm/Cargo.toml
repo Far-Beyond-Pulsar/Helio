@@ -10,7 +10,7 @@ crate-type = ["rlib"]
 [dependencies]
 helio-components = { path = "../helio-components" }
 helio = { workspace = true }
-helio-default-passes = { path = "../helio-default-passes" }
+helio-presets = { path = "../helio-presets" }
 helio-pass-gbuffer = { workspace = true }
 helio-pass-forward-lit = { workspace = true }
 helio-pass-portal-cull = { workspace = true }

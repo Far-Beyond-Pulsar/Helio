@@ -561,9 +561,310 @@ As built (2026-11-02): layer violations 9 → 0.
   the central registration.
 - `helio-default-passes` disappears.
 
+As built, step 1 (2026-11-02): features place their own nodes.
+- Feature API: `Slot` (extension points of preset graphs: `Geometry`,
+  after the spine's G-buffer; `LightingInputs`, before deferred lighting)
+  with `NodeDescriptor::in_slot(slot, order)`, and **finishers**
+  (`FeatureRegistrar::finish`): steps run once every node is built, where
+  features that meet are joined.
+- The deferred preset is passes by name plus slots; `deferred_graph_asset`
+  expands each slot to what the registry holds there.
+- `GiFeature` (helio-pass-gi): update and mesh rays at `Geometry`, resolve
+  at `LightingInputs`; `GiSettings` (probe spacing, `terrain_traced`)
+  replaces `RendererConfig::gi_probe_spacing`.
+- `SkyFeature` (helio-pass-sky): the atmosphere tables, and the clouds'
+  trace at `LightingInputs`, which the node graph lacked.
+- `VoxelFeature` (helio-pass-voxel-planet): the chunk terrain at `Geometry`
+  from a host's `VoxelTerrain` setting (its pass makers). It offers its
+  ground through `helio_foliage_api::OfferedGrounds`, and a foliage
+  finisher grows placement on it. `helio_default_passes::with_voxel_terrain`
+  sets the terrain and GI's `terrain_traced` together.
+- `graph_parity` compares the whole pass list now (GI and clouds were
+  filtered out), and with voxel terrain: same passes and declarations as
+  the legacy factory, foliage on the terrain's ground.
+- Next: hosts build from node graphs (voxel_craft, voxel_flight, Pulsar's
+  scene renderer through `with_voxel_terrain`); forward, HLFS, FXAA and
+  simple presets as graphs; then the `build_*_graph*` functions and
+  `VoxelPassFactory` go.
+
+As built, step 2 (2026-11-02): every shipped pipeline is a node graph.
+- `helio_default_passes::presets::Preset` (`Deferred`, `DeferredFxaa`,
+  `Hlfs`, `HlfsFxaa`, `Forward`, `Simple`) makes its graph asset from the
+  renderer config on each build (resize and shader reload included): the
+  config picks TSR or FXAA, SSR, planar reflections, portals, foliage and
+  the TSR node's params. Slots gained `Lighting` (after the lit colour) and
+  `Output` (after the final image).
+- `GraphAssetPipeline::made` builds such an asset (no fallback: a preset
+  that does not build is a bug and panics with its diagnostics); fixed
+  assets keep their fallback, now `presets::deferred`. The compiler keeps
+  graphs single-layer under XR, as the code builders did.
+- New nodes: `hlfs`, `ssr_composite`, `virtual_geometry` (carries the
+  geometry phase's perf marker), `simple_cube`; `transparent` and `tsr`
+  gained the HLFS reactive-mask params. The scene-linear format is a
+  setting (`SceneColorFormat`, default `FOGGED_HDR_FORMAT`); HLFS presets
+  set their lighting's preferred format.
+- Host WGSL is a setting: `helio_pass_postprocess::UserEffects`,
+  `helio_pass_lens::LensUser`.
+- Every host moved: ~70 examples to `presets::*`, voxel_craft,
+  voxel_flight, water_world and the voxel tests to `with_voxel_terrain` +
+  `Preset::Deferred`, Pulsar's scene renderer puts its voxel backends'
+  `VoxelTerrain` in the config, so terrain joins whichever pipeline a level
+  runs (HLFS and FXAA presets included; Forward has no G-buffer).
+- Deleted: the 27 `build_*_graph*` functions, `GraphPassFactory`,
+  `VoxelPassFactory` and their helpers (lib.rs 2319 → ~260 lines).
+- Checked before deleting: every preset against its builder for default,
+  TSR, voxel+TSR, reflections, and portals/foliage-off configs: pass lists,
+  reads, writes and write formats. Deferred and Forward and Simple were
+  identical. Intended differences: HLFS clears `pre_aa` in its lighting
+  format (the builder cleared it in the display format, then HLFS wrote
+  another), and the clouds' trace now runs before HLFS lighting (its
+  slot); `DeferredFxaa` now runs FXAA and draws transparency (the builder
+  had neither unless TSR was on). `DeclaredResource` records write formats
+  so tests see format differences.
+- `graph_parity` now tests the presets: the template builds the deferred
+  preset's graph, presets follow the config, HLFS keeps one format, voxel
+  terrain joins every G-buffer preset.
+
+As built, steps 3 and 4 (2026-11-02): every pass node lives with its pass;
+`helio-default-passes` is gone.
+- `helio-spine` (layer spine) is the spine as a feature: scene prep,
+  shadows, culling, light binning, G-buffer, forward and deferred lighting,
+  transparency, TSR, the tone map, the host-input nodes and the background
+  pass. Its nodes read `SpineSettings` (shadow budget and quality,
+  background colour, debug mode, environment reflections), never
+  `RendererConfig`.
+- Every feature crate has a `feature.rs` registering its nodes: decals,
+  SSR (+ composite), planar reflections, HLFS, foliage (both nodes and the
+  ground finisher), VG (new crate `helio-pass-vg`: the chain's glue moved
+  out of the presets), portal cull, portal draws, billboards, corona, water,
+  volumetric fog, FXAA, lens, flare, sprites, buffer view, perf overlay
+  (with the phase markers), simple cube; the sky adds its composite.
+- Feature API: preparers (`FeatureRegistrar::prepare`, run before any node
+  builds), `SceneColorFormat` + `BuildEnv::scene_format`, the `pass_node`
+  and `missing` helpers.
+- `helio-presets` (layer preset) is what remains of the presets: `Preset`,
+  `features::default_features` (the feature list), the renderer's own
+  nodes (debug draw) and the config bridge (a preparer mapping
+  `RendererConfig` into `SpineSettings` and the perf overlay's mode),
+  `graphs`, `pipelines`, the swap policy, `with_voxel_terrain`,
+  `with_virtual_geometry`, `config_with_host_settings`, `water_shore`.
+- `helio-scene-derivations` (layer preset) holds the scene derivations:
+  scene join, hierarchy resolve, environment join, portal projection,
+  texture means, and their shaders. The environment join still knows many
+  features' rows; splitting it per feature is a follow-up.
+- Every preset's pass list for five configs is identical before and after
+  both steps (but for the background pass's type path). Hosts and Pulsar
+  name `helio_presets` / `helio_scene_derivations`.
+
+**Rule (user, 2026-11-02): components are the API, plugins own object
+kinds.**
+- Every object kind is a plugin that owns its SceneDB component (data and
+  methods), the Helio feature that renders it (its passes), its file format
+  and its editor UI.
+- Component methods are the only way to act on a component. They are
+  exposed to scripting, and the editor goes through the same methods as
+  scripts: no editor-only side channels.
+- The feature's passes consume only the rows and payloads the component
+  publishes.
+- No object-specific knowledge in Helio, the presets, `engine_backend`'s
+  renderer or other surrounding crates; no bespoke registries, traits,
+  mailboxes or renderer methods for one kind of object.
+- This holds for every kind, not just voxel. Meshes and virtual geometry
+  become a meshes plugin (mesh component + mesh/VG passes); Helio knows
+  no mesh or VG and has no API for them. Same for water, foliage, decals,
+  lights, sky, portals, sprites.
+- What stays in Helio is what no object kind owns: the graph, the
+  feature API, scene-input contracts, the renderer facade, and the spine's
+  frame structure (G-buffer, lighting, post) with its extension points.
+
+As built, step 5 (2026-11-02): the presets name no feature pair.
+- Features declare what they need of the others in their own preparers:
+  the voxel feature, while it has terrain, inserts
+  `helio_gi_api::TerrainTracer` (GI then updates without a TLAS and spaces
+  probes for open ground) and `helio_pass_tsr::StochasticSamples` (TSR
+  reads the stochastic mask). `GiSettings::terrain_traced`,
+  `with_voxel_terrain` and the presets' voxel check are gone; a host adds a
+  feature setting with the generic `RendererConfig::with_feature`.
+- Water's terrain seam is `helio-water-api::WaterTerrainProvider`; the
+  voxel adapter is `helio_pass_voxel_planet::VoxelShoreTerrain`, and the
+  host bakes with `WaterShoreMap::from_terrain`. `helio_presets::water_shore`
+  is gone.
+
+Next, step 6: voxel through its component (replaces the earlier
+"`pulsar.voxel` plugin crate" item, which would have moved today's bespoke
+renderer API into a plugin unchanged). Today, per a survey of Pulsar:
+two CPU worlds per terrain (the component's `WORLDS` cache and the render
+backend's `CachedPlanet`); sculpting writes the journal from the renderer
+(`apply_voxel_brush_commit`), bypassing the component's `append_edits`, so
+no block events fire and the component's world goes stale; ground, lift,
+clip-range, pick and kept-chunk queries go through `VoxelRenderBackend`,
+`HelioRenderer` mailboxes and Arc channels; Helio's pass gets its world
+from host-made `VoxelTerrain` closures. Target and order:
+1. **Edits through the component.** A brush is a component method
+   (`VoxelTerrainComponent::apply_brush`, through `append_edits`): events
+   fire, the component's world stays current. The renderer only finds the
+   hit.
+2. **One world per terrain, owned by the component's runtime.** The
+   component builds and caches its `Arc<Planet>` (async, as the backend
+   does now, kept chunks included); the backend's copy and `WORLDS` go.
+3. **Queries are component methods.** Ground (up, altitude), lift out of
+   ground, clip range, focus, CPU ray hits: `VoxelTerrainComponent`
+   methods over its world. `VoxelGround`, `voxel_ground`,
+   `voxel_altitude`, `lift_out_of_ground` leave the renderer; the game's
+   free camera calls the component.
+4. **Rendering reads what the component publishes.** The component
+   publishes a volume row (entity, transform, voxel size, revision,
+   appearance, smoothing) and its world as a SceneDB asset payload keyed by
+   the entity; the voxel feature's pass reads rows and payloads from
+   SceneDB. `VoxelTerrain`/`ChunkPassMaker`, `SharedPlanetFrame`,
+   `VoxelRenderBackend`, `VoxelBackendRegistry` and the `find_pass_mut`
+   appearance calls go.
+5. **GPU answers come back as rows.** Drawn-surface picks and kept-chunk
+   exports are published by the pass into SceneDB rows the component reads
+   (`VoxelTerrainComponent::kept_chunks`, a pick method); the
+   `VoxelChunkSaves` condvar mailbox and `SharedPicks` go.
+6. The `pulsar.voxel` plugin (still required; steps 1-5 only make its
+   boundary right): it owns the voxel components and their runtime, the
+   voxel feature and its passes (`helio-pass-voxel-planet`,
+   `helio-voxel-world`, `helio-voxel-data` move with it), the voxel file
+   formats (journal, kept chunks, presets) and the editor's sculpt tool and
+   terrain panel, which act only through component methods. It registers
+   the components and `VoxelFeature`; Helio, `helio_component` and
+   `engine_backend` keep no voxel code.
+
+As built, steps 6.2 to 6.5 (2026-11-02): the voxel terrain reaches the
+renderer, the cameras and the editor only through its component.
+- **One world per terrain** (Pulsar `voxel_runtime`): each enabled terrain
+  instance has a `VoxelTerrainRuntime`, a SceneDB component beside it that
+  is never saved (a copy of the scene, play in editor, builds its own). Its
+  world builds on the runtime's own worker thread: a journal that only grew
+  extends a copy of the world shown (each new edit's yield counted, so block
+  events fire for every edit, the editor's strokes included, from the
+  build), an undo undoes in a copy, anything else rebuilds with the save's
+  kept chunks. Readers see the last world built; a description that does
+  not build keeps it and says why. The backend's world, its `WorldBuilder`
+  and the process-global `WORLDS` cache are gone.
+- **Scene subsystems are SceneDB's**: `VoxelWorlds` is a SceneDB
+  `Subsystem` (it keeps journals on their ground, skies on their terrain,
+  drives the runtimes and stamps sculpt samples). Plugins register scene
+  subsystems (`pulsar_world_registry::SceneSubsystemRegistration`); hosts
+  install them into every scene they step (`install_scene_subsystems`) and
+  `SceneDb::step` runs them. `VoxelWorldSync` left engine_backend.
+- **Edits**: `append_edits` checks edits against the grid (no world needed),
+  appends them and shows them to the brick queries at once; the runtime's
+  build applies them. `record_strokes` is gone: the sculpt tool, scripts and
+  gameplay make the same call. Queries read the world shown (a terrain just
+  added answers once its first world lands; `is_world_ready`).
+- **Queries are component methods**: `ground_altitude`, `ground_up_x/_y/_z`,
+  `ground_lift`, `clip_near`, `clip_far` (world methods, script-callable).
+  Hosts know no terrain: `engine_backend::camera_ground::GroundQueries`
+  calls these methods by name on any component that has them, the way
+  scripts call them (`pulsar_world_registry::components_with_method`); the
+  editor camera, the game's free camera and the clip planes use it.
+  `VoxelGround`, `voxel_ground`, `voxel_altitude`, `lift_out_of_ground` and
+  the backend's camera hooks are gone.
+- **Rendering reads what the component publishes**: Helio's scene input
+  gained CPU payloads, `PayloadContract<T>` (key and type; the CPU half of a
+  buffer contract) and `ScenePayloads`, read by passes from
+  `ctx.scene_buffers.payload(..)` and handed over by hosts
+  (`Renderer::set_scene_payloads`). Plugins register publishers
+  (`pulsar_world_registry::ScenePayloadRegistration`: key, a function of the
+  scene, problems to show, whether the content wants temporal resolve, and
+  whether it is still settling); engine_backend forwards them by key. The
+  voxel runtime publishes `VOXEL_FRAME` (`PlanetFrame`: its volumes with
+  their world, kept chunks, appearance, smoothing and requests, and the
+  scene's sun). `ChunkPass::new(ResidencyConfig)` reads it; the feature is
+  enabled by the feature setting `VoxelSettings`. Deleted: `VoxelTerrain`,
+  `ChunkPassMaker`, `SharedPlanetFrame`, `VoxelRenderBackend`,
+  `VoxelBackendRegistry`, `PlanetVoxelBackend`, `voxel_frame.rs` and the
+  `find_pass_mut` appearance calls (a look change keeps the pass asking for
+  frames until temporal history settles). Two generic pass hooks replace
+  the hosts' downcasts: `RenderPass::needs_frame` and
+  `RenderPass::diagnostics` (`Renderer::needs_frame`/`diagnostics`).
+- **GPU answers come back to the component**: a volume's requests are
+  data in its payload (`VolumeRequests`: picks as world-space rays from a
+  camera's eye, a save's keep request id) and the pass answers into the
+  runtime's inbox (`VolumeAnswers`). A pick is answered by the pass whose
+  camera is at the ray's origin (it projects the ray to its pixel), so split
+  viewports never answer each other's picks. Saves ask the terrain's runtime
+  (`TerrainWorld::kept_chunks`) off the render thread. Deleted:
+  `SharedPicks`, `Picks`, `KeptExport`, `SharedKeptExport`,
+  `VoxelChunkSaves`, the mailbox field, and the renderer's
+  `VoxelBrushRequest`/`VoxelBrushTool`/`VoxelBrushCommit`/brush handling.
+- **Sculpting is a component method**: `voxel_sculpt::sculpt` (script:
+  `sculpt_stroke`) takes a stroke sample (ray, brush, start); near the last
+  stamp it stamps at once over the brick queries, else it asks the drawn
+  world for a pick and the scene step stamps when it is answered (or walks
+  the exact terrain after 150 ms). The editor's sculpt tool hands the
+  renderer a generic `ToolRay` (a closure the render thread calls with the
+  frame camera's pointer ray and the scene), which calls `sculpt`.
+
+As built, step 6.6 (2026-11-02): voxel is the `pulsar.voxel` plugin; Helio,
+its presets, `helio_component` and `engine_backend` keep no voxel code, and
+the Helio repo keeps no voxel crate.
+- **The plugin's crates** are Pulsar's `plugins/voxel/`, one per role
+  (plugin-migration.md section 3):
+  - `api` (`helio-voxel-data`): the contracts the others share: the edit
+    journal, brushes, kept chunks, shared names.
+  - `world` (`helio-voxel-world`): the GPU-free world system (grid,
+    generators, edits, queries, planet maps, features) and its WGSL mirror.
+  - `feature` (`helio-pass-voxel-planet`): the Helio feature
+    (`VoxelFeature`: chunk passes, residency, sun pages, drawers, GI tracer,
+    foliage ground, water terrain), its shaders and GPU tests
+    (`tests/presets.rs` is graph_parity's voxel case; `tests/wgsl.rs`
+    validates its shaders).
+  - `component` (`voxel_component`): the components and their methods,
+    runtime, sync, sculpting, world queries, ready-made worlds, the
+    registrations below, the voxel tests and the editor harness.
+  - `editor` (`voxel_plugin`): the plugin's metadata and the generator and
+    layer-stack inspector editors.
+  - `examples` (`helio-voxel-examples`): voxel_craft, voxel_flight and
+    water_world, with the scene helpers voxel_craft used in `common.rs`.
+  They build in Pulsar's workspace and reach Helio through its workspace
+  dependencies into the Helio submodule. Why there: the plugin owns its
+  kind's code (plugin-migration.md), so the world, the feature and their
+  hosts live with the component, not in a Helio-Voxel folder or repo; GPU
+  tests and hosts that need no editor are crates of the plugin like any
+  other. Helio's crates cannot depend on them (they are outside Helio's
+  workspace).
+- **Engines add features**: `default_features` has no voxel;
+  `Preset::with_features(&FeatureSet)` / `with_registry(Arc<NodeRegistry>)`
+  make a `PresetGraph`, `graphs::registry_with(extra)` the node registry,
+  and `pipelines::register_builtin_pipelines(registry, extra)` builds every
+  shipped pipeline over them (`FeatureSet::extended`). The voxel settings
+  group is `helio_pass_voxel_planet::settings::VOXEL_RESIDENCY`;
+  `helio_settings::GROUPS` is the renderer's alone.
+- **Layer gate**: Helio's workspace has no voxel crate, so the gate has no
+  voxel entry and no sealed groups (a kind's crates leave the repository
+  instead).
+- **Pulsar** (`plugins/voxel/component` and `plugins/voxel/editor`, id
+  `pulsar.voxel`): the components, runtime, sync, sculpting, world queries,
+  generator and stack editors, and ready-made worlds (`presets`) moved in
+  from `helio_component` and `engine_backend`; the sky and haze a
+  world's air derives are the plugin's (`sync::sky_for_air`,
+  `haze_for_air`). Generic seams it registers with: `engine_backend`'s
+  `RenderFeatureRegistration` (features + config; the scene renderer, the
+  pipeline registry and the render-graph node registry build over them),
+  `pulsar_settings`' `SettingsGroupRegistration` (project settings and the
+  graph-settings cache cover every registered group),
+  `helio_component::GroundMaterialNames` (foliage's `grows_on` is a
+  `GroundMaterialList`; the plugin names the terrain's materials). The
+  editor (`ui_core`) links `voxel_plugin`; the game (`pulsar_game`) and
+  `scene_inventory` link `voxel_component`.
+- Not moved: the sculpt tool and terrain panel stay in `ui_level_editor`
+  and act through the plugin's methods; moving them needs generic tool
+  state, undo entries and commands in the level editor first.
+
+Later steps apply the same pattern to every other kind (meshes + VG,
+water, foliage, decals, lights, sky, portals, sprites), one plugin per
+kind, each removing that kind from Helio, the presets, the scene
+derivations and `engine_backend`.
+
 ### Phase 6: repo split
-- Move Helio-Voxel (then VG) out once its API crate has gone ~2 weeks
-  without a breaking change. Pulsar pins tags.
+- Superseded for voxel (2026-11-02): its crates already left the Helio
+  repo for the `pulsar.voxel` plugin (`plugins/voxel/` in Pulsar, step
+  6.6); every kind follows it (`plugin-migration.md`). What remains is
+  Pulsar pinning Helio core by tag.
 
 ### Mapping to Pulsar #1532
 
@@ -602,8 +903,8 @@ As built (2026-11-02): layer violations 9 → 0.
 
 ## 7. Open decisions
 
-1. **Voxel world home**: Helio-Voxel repo (recommended: it is GPU-heavy
-   engine tech, usable without the editor) or Pulsar.
+1. **Voxel world home**: decided (2026-11-02): Pulsar's `plugins/voxel/`,
+   as every kind's crates (`plugin-migration.md`).
 2. **Which features stay in the Helio repo** vs their own repos. Recommended:
    split only voxel and VG at first; the rest stay in Helio under
    `features/`, with the same layer rules.

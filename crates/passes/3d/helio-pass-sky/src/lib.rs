@@ -14,9 +14,11 @@
 
 pub mod atmosphere;
 pub mod clouds;
+mod feature;
 pub use atmosphere::ATMOSPHERES;
 pub use atmosphere::{
     AtmosphereCompositePass, AtmospherePass, AtmosphereRow, CloudLayer, CloudRepresentation,
     PlanetWeather,
 };
 pub use clouds::CloudTracePass;
+pub use feature::SkyFeature;

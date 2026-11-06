@@ -16,6 +16,9 @@
 //! lighting target. This keeps the expensive RT query budget proportional to
 //! reflection detail rather than display pixels.
 
+pub mod feature;
+pub use feature::SsrFeature;
+
 mod compose;
 pub use compose::SsrCompositePass;
 

@@ -13,7 +13,6 @@ use helio::{
     RendererBuilder, RendererConfig,
 };
 use helio_components::LightComponent;
-use helio_default_passes::build_default_graph_with_context;
 use pulsar_scenedb::SceneDb;
 use v3_demo_common::{
     cube_mesh, make_material, new_scene_db_with_gpu_mirror, plane_mesh, point_light,
@@ -130,7 +129,7 @@ impl ApplicationHandler for App {
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_editor_mode(true)
-            .with_pass_build_context(Box::new(build_default_graph_with_context))
+            .with_pass_build_context(Box::new(helio_presets::deferred))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;

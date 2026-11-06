@@ -28,8 +28,10 @@ use helio_sky_api::{
 };
 use std::collections::VecDeque;
 
+mod feature;
 mod mesh;
-pub use mesh::GiMeshTracePass;
+pub use feature::{GiFeature, GiSettings};
+pub use mesh::{mesh_rays_supported, GiMeshTracePass};
 
 pub use helio_gi_api::{
     eye, Clipmap, GpuFrame, GpuLevel, DEFAULT_FINEST_SPACING, FRAME_BYTES, GI_CLIPMAP,

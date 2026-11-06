@@ -123,6 +123,72 @@ impl std::fmt::Display for ContractError {
 
 impl std::error::Error for ContractError {}
 
+/// CPU data the renderer reads, by key: the CPU half of a
+/// [`BufferContract`], for what is not a GPU row (a voxel world, its pick
+/// requests). Whoever owns the data (an engine's component) publishes an
+/// `Arc<T>` under the key each frame; the feature that declared the
+/// contract reads it. The type is the reader's, so a publisher of another
+/// type is not seen.
+pub struct PayloadContract<T: 'static> {
+    key: &'static str,
+    _payload: PhantomData<fn() -> T>,
+}
+
+impl<T: std::any::Any + Send + Sync> PayloadContract<T> {
+    pub const fn new(key: &'static str) -> Self {
+        Self {
+            key,
+            _payload: PhantomData,
+        }
+    }
+
+    pub const fn key(&self) -> &'static str {
+        self.key
+    }
+}
+
+/// A frame's payloads ([`PayloadContract`]): what the host published, by
+/// key. Cheap to clone (shared values).
+#[derive(Clone, Default)]
+pub struct ScenePayloads {
+    entries: Vec<(&'static str, Arc<dyn std::any::Any + Send + Sync>)>,
+}
+
+impl ScenePayloads {
+    /// Publish `value` under `key`, replacing what was there: for hosts
+    /// that publish by key without naming the reader's type.
+    pub fn insert_any(&mut self, key: &'static str, value: Arc<dyn std::any::Any + Send + Sync>) {
+        match self.entries.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, existing)) => *existing = value,
+            None => self.entries.push((key, value)),
+        }
+    }
+
+    /// Publish `value` under `contract`.
+    pub fn insert<T: std::any::Any + Send + Sync>(
+        &mut self,
+        contract: &PayloadContract<T>,
+        value: Arc<T>,
+    ) {
+        self.insert_any(contract.key, value);
+    }
+
+    /// The payload published under `contract`, if it is of its type.
+    pub fn get<T: std::any::Any + Send + Sync>(
+        &self,
+        contract: &PayloadContract<T>,
+    ) -> Option<Arc<T>> {
+        self.entries
+            .iter()
+            .find(|(k, _)| *k == contract.key)
+            .and_then(|(_, value)| value.clone().downcast::<T>().ok())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
 const fn str_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
@@ -138,14 +204,16 @@ const fn str_eq(a: &str, b: &str) -> bool {
     true
 }
 
-/// Type-agnostic, read-only GPU buffers supplied by the frontend SceneDB.
-/// Buffer contents are interpreted by the pass that declared the key; core
-/// never needs to know the component type or layout.
+/// Type-agnostic, read-only GPU buffers supplied by the frontend SceneDB,
+/// and the CPU payloads it published ([`PayloadContract`]). Contents are
+/// interpreted by the pass that declared the key; core never needs to know
+/// the component type or layout.
 #[derive(Clone, Default)]
 pub struct SceneBufferProjection {
     entries: Vec<(BufferKey, BufferHandle)>,
     /// The rows each dirty-tracked buffer received in its last mirror flush.
     flushed: Vec<(BufferKey, FlushedRows)>,
+    payloads: ScenePayloads,
 }
 
 impl SceneBufferProjection {
@@ -155,6 +223,7 @@ impl SceneBufferProjection {
         Self {
             entries: entries.into_iter().collect(),
             flushed: Vec::new(),
+            payloads: ScenePayloads::default(),
         }
     }
 
@@ -172,7 +241,24 @@ impl SceneBufferProjection {
                 }
             }
         }
-        Self { entries, flushed }
+        Self {
+            entries,
+            flushed,
+            payloads: ScenePayloads::default(),
+        }
+    }
+
+    /// The payload published under `contract` this frame.
+    pub fn payload<T: std::any::Any + Send + Sync>(
+        &self,
+        contract: &PayloadContract<T>,
+    ) -> Option<Arc<T>> {
+        self.payloads.get(contract)
+    }
+
+    /// This frame's payloads, replacing the previous ones.
+    pub fn set_payloads(&mut self, payloads: ScenePayloads) {
+        self.payloads = payloads;
     }
 
     /// The rows `key`'s buffer received in its last mirror flush, when SceneDB

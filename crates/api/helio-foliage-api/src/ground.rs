@@ -404,3 +404,9 @@ mod tests {
         assert!(link.take_changes().is_empty());
     }
 }
+
+/// Grounds the passes that answer them (a terrain) offer foliage placement
+/// while a graph is built: build state the graph's nodes share. Placement
+/// grows on the first; with none it keeps its built-in ground.
+#[derive(Default)]
+pub struct OfferedGrounds(pub Vec<std::sync::Arc<GroundLink>>);

@@ -168,7 +168,7 @@ impl ApplicationHandler for App {
         let mut renderer = RendererBuilder::new(config, scene_db_handle(&scene_db))
             .with_external_device()
             .with_pass_build_context(Box::new(
-                helio_default_passes::build_default_graph_external_with_context,
+                helio_presets::deferred,
             ))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
@@ -429,7 +429,7 @@ impl ApplicationHandler for App {
             near_entity,
         )
         .expect("portal projection rows");
-        helio_default_passes::portals::set_projection_frame(&mut renderer, &projection);
+        helio_scene_derivations::portals::set_projection_frame(&mut renderer, &projection);
 
         renderer.set_ambient([0.85, 0.9, 1.0], 0.05);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);

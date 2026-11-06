@@ -12,6 +12,9 @@
 //! - **Scene Normals** (`NORMALS_VIEW`): world-space normal as RGB
 //!   (R = +X, G = +Y, B = +Z).
 
+pub mod feature;
+pub use feature::BufferViewFeature;
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{DebugViewDescriptor, PassContext, RenderPass, Result as HelioResult};
 

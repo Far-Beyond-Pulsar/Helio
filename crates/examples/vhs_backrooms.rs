@@ -31,7 +31,6 @@ use helio::{
     Camera, HelioAction, HelioCommandBridge, HelioGraphicsConfig, HelioGraphicsContext,
     HelioXrInput, Renderer, RendererBuilder, RendererConfig,
 };
-use helio_default_passes::build_default_graph_with_user_effects_with_context;
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
 use pulsar_scenedb::{Entity, SceneDb, World};
@@ -1027,18 +1026,19 @@ impl ApplicationHandler for App {
         let device = graphics.device.clone();
         let queue = graphics.queue.clone();
         let surface_format = graphics.surface_config.format;
-        let config = RendererConfig::new(size.width, size.height, surface_format)
+        let mut config = RendererConfig::new(size.width, size.height, surface_format)
             .with_shadow_quality(helio::ShadowQuality::Ultra)
             .with_render_scale(1.0);
+        config
+            .features
+            .insert(helio_pass_postprocess::UserEffects(VHS_SHADER_SNIPPET));
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
 
         let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let builder = RendererBuilder::new(config.clone(), scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(|ctx| {
-                build_default_graph_with_user_effects_with_context(ctx, VHS_SHADER_SNIPPET)
-            }));
+            .with_pass_build_context(Box::new(helio_presets::deferred));
         let (mut renderer, xr_input) = graphics.build_renderer(builder, config).expect("renderer");
         let xr_active = graphics.is_xr();
         if xr_active {

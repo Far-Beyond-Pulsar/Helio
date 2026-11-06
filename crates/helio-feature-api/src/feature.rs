@@ -48,6 +48,18 @@ impl FeatureRegistrar<'_> {
         self.registry.register(descriptor);
     }
 
+    /// Adds a step run before any node of a graph is built (see
+    /// [`crate::PrepareFn`]).
+    pub fn prepare(&mut self, prepare: crate::PrepareFn) {
+        self.registry.add_preparer(prepare);
+    }
+
+    /// Adds a step run once every node of a graph is built (see
+    /// [`crate::FinishFn`]).
+    pub fn finish(&mut self, finish: crate::FinishFn) {
+        self.registry.add_finisher(finish);
+    }
+
     /// Sets what adds a performance marker after nodes built
     /// `with_marker_after`.
     pub fn marker(&mut self, marker: MarkerFn) {
@@ -85,6 +97,15 @@ impl FeatureSet {
     pub fn add(&mut self, feature: Arc<dyn Feature>) {
         self.features.retain(|f| f.id() != feature.id());
         self.features.push(feature);
+    }
+
+    /// This set with `other`'s features after its own (an engine's features
+    /// added to a preset's list).
+    pub fn extended(mut self, other: &FeatureSet) -> Self {
+        for feature in &other.features {
+            self.add(feature.clone());
+        }
+        self
     }
 
     pub fn ids(&self) -> Vec<&'static str> {
@@ -161,5 +182,29 @@ mod tests {
         let mut registry = NodeRegistry::new();
         set.register_into(&mut registry);
         assert!(registry.get("first").is_none() && registry.get("second").is_some());
+    }
+
+    #[test]
+    fn slotted_nodes_list_by_order_then_kind_and_finishers_keep_their_order() {
+        let node = |kind: &str| NodeDescriptor::new(kind, kind, "Test", "", |_| Ok(()));
+        let mut registry = NodeRegistry::new();
+        registry.register(node("late").in_slot(crate::Slot::Geometry, 20));
+        registry.register(node("b").in_slot(crate::Slot::Geometry, 0));
+        registry.register(node("a").in_slot(crate::Slot::Geometry, 0));
+        registry.register(node("lighting").in_slot(crate::Slot::LightingInputs, 0));
+        registry.register(node("named"));
+        let kinds = |slot| {
+            registry
+                .slotted(slot)
+                .iter()
+                .map(|d| d.kind.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(kinds(crate::Slot::Geometry), ["a", "b", "late"]);
+        assert_eq!(kinds(crate::Slot::LightingInputs), ["lighting"]);
+
+        registry.add_finisher(std::sync::Arc::new(|_, _| Ok(())));
+        registry.add_finisher(std::sync::Arc::new(|_, _| Err("second".into())));
+        assert_eq!(registry.finishers().len(), 2);
     }
 }

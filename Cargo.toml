@@ -18,7 +18,7 @@ members = [
     "crates/passes/2d/*",
     "crates/passes/3d/*",
     "crates/api/*",
-    "crates_other/*"
+    "crates_other/*",
 ]
 exclude = [
     "vendor/nebula",
@@ -86,7 +86,8 @@ pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", 
 # never its own direct git pin -- same reasoning as pulsar_scenedb's fleet
 # of stale per-crate pins fixed in the same session.
 pulsar_reflection = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Reflection", rev = "091eae569b4dce9de7def958e8a77ff620b07047" }
-helio-default-passes = { path = "crates/helio-default-passes"}
+helio-presets = { path = "crates/helio-presets" }
+helio-scene-derivations = { path = "crates/helio-scene-derivations" }
 helio-components = { path = "crates/helio-components" }
 wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
@@ -103,7 +104,6 @@ helio-pass-corona = { path = "crates/passes/3d/helio-pass-corona" }
 helio-pass-flare = { path = "crates/passes/3d/helio-pass-flare" }
 helio-pass-decal = { path = "crates/passes/3d/helio-pass-decal" }
 helio-pass-sdf = { path = "crates/passes/3d/helio-pass-sdf" }
-helio-voxel-data = { path = "crates/helio-voxel-data" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "crates/passes/3d/helio-pass-buffer-view" }
 helio-pass-lens = { path = "crates/passes/3d/helio-pass-lens" }

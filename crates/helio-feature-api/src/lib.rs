@@ -14,7 +14,8 @@ mod settings;
 pub use feature::{ContractUse, Feature, FeatureRegistrar, FeatureSet};
 pub use pins::{PinDesc, PinKind, PinShape, PinType};
 pub use registry::{
-    BuildEnv, BuildFn, FrameDesc, MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry,
-    ParamDesc, ParamType, Params, PinTable, PinsFn,
+    missing, pass_kind, pass_node, BuildEnv, BuildFn, FinishFn, FrameDesc, MarkerFn, NodeBuild,
+    NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType, Params, PinTable, PinsFn,
+    PrepareFn, SceneColorFormat, Slot, DEFAULT_SCENE_FORMAT,
 };
 pub use settings::FeatureSettings;
