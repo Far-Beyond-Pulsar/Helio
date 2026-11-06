@@ -17,11 +17,11 @@
 //!    field doc in `helio_pass_gbuffer::components`). Live rows compute this
 //!    migration's packed sort key and atomically compact directly into
 //!    `keys_a`/`indices_a` -- the same buffers the sort's bit-0 pass reads
-//!    (same technique as `helio-pass-sprite-cull`'s `cs_cull`: a single
+//!    (same technique as the sprites plugin's sprite cull's `cs_cull`: a single
 //!    global atomic counter, order doesn't matter yet).
 //! 2. `cs_prepare` — turns the gather's live count into `frame_uniform`
 //!    (`num_blocks`) and `dispatch_args` (indirect dispatch size for every
-//!    later stage) — same technique as `helio-pass-sprite-cull`'s
+//!    later stage) — same technique as the sprites plugin's sprite cull's
 //!    `sprite_sort.wgsl::cs_prepare`.
 //! 3. `helio_core::radix_sort` — a stable LSD radix sort of `(key, index)`
 //!    pairs, 4-bit digits, eight passes; ends in `keys_a`/`indices_a`.
@@ -142,7 +142,7 @@ struct StaticObjectRow {
 @group(0) @binding(3) var<storage, read_write> gathered_indices: array<u32>;
 /// `[_, live_count, _, _]` as a `DrawIndexedIndirectArgs`-shaped buffer so
 /// `cs_gather`'s atomic bump doubles as this frame's authoritative live
-/// count with no separate readback -- mirrors `helio-pass-sprite-cull`'s
+/// count with no separate readback -- mirrors the sprites plugin's sprite cull's
 /// `indirect_args[1]` reuse exactly.
 @group(0) @binding(4) var<storage, read_write> gather_count: array<atomic<u32>>;
 

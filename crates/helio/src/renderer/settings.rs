@@ -99,7 +99,6 @@ impl RendererConfig {
             _ => HdrOutputMode::Ldr,
         };
         self.background_color = settings.color("background_color");
-        self.enable_portals = settings.bool("portals");
         self.perf_overlay_mode = match settings.text("perf_overlay") {
             "pass_overdraw" => PerfOverlayMode::PassOverdraw,
             "shader_complexity" => PerfOverlayMode::ShaderComplexity,

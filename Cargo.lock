@@ -1080,28 +1080,20 @@ dependencies = [
  "helio-mats",
  "helio-mesh-api",
  "helio-pass-billboard",
- "helio-pass-corona",
  "helio-pass-debug-overlay",
- "helio-pass-decal",
  "helio-pass-deferred-light",
  "helio-pass-foliage-place",
  "helio-pass-forward-lit",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hlfs",
- "helio-pass-lens",
  "helio-pass-light-cull",
  "helio-pass-object-batch",
  "helio-pass-perf-overlay",
- "helio-pass-portal-cull",
  "helio-pass-post-volumes",
  "helio-pass-postprocess",
- "helio-pass-radiance-cascades-2d",
  "helio-pass-shadow-matrix",
  "helio-pass-sky",
- "helio-pass-sprite-batch",
- "helio-pass-sprite-cull",
- "helio-pass-sprite-simulate",
  "helio-pass-transparent",
  "helio-pass-tsr",
  "helio-pass-vg-bvh",
@@ -1672,19 +1664,14 @@ dependencies = [
  "helio-mats",
  "helio-mesh-api",
  "helio-pass-billboard",
- "helio-pass-corona",
- "helio-pass-decal",
  "helio-pass-deferred-light",
  "helio-pass-foliage-place",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
- "helio-pass-lens",
  "helio-pass-object-batch",
- "helio-pass-portal-cull",
  "helio-pass-post-volumes",
  "helio-pass-postprocess",
  "helio-pass-sky",
- "helio-pass-sprite-batch",
  "helio-pass-volumetric-fog",
  "helio-pass-water-sim",
  "helio-scene-derivations",
@@ -1785,15 +1772,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-lens-optics"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "helio-mats"
 version = "0.1.0"
 dependencies = [
@@ -1838,45 +1816,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-corona"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-pass-gbuffer",
- "helio-scene-join",
- "pulsar_reflection",
- "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-debug-overlay"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-decal"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-mats",
- "helio-scene-join",
- "log",
- "naga",
- "pollster 0.4.0",
- "pulsar_reflection",
- "pulsar_scenedb",
  "wgpu",
 ]
 
@@ -1892,22 +1836,6 @@ dependencies = [
  "helio-pass-shadow-matrix",
  "pulsar_reflection",
  "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-flare"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-pass-lens",
- "helio-pass-postprocess",
- "helio-pass-shadow-matrix",
- "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -2059,23 +1987,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-lens"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-lens-optics",
- "helio-scene-join",
- "pollster 0.4.0",
- "pulsar_reflection",
- "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-light-cull"
 version = "0.1.0"
 dependencies = [
@@ -2145,39 +2056,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-portal-cull"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-pass-gbuffer",
- "log",
- "pulsar_reflection",
- "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-portal-instances"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-mats",
- "helio-pass-gbuffer",
- "helio-pass-portal-cull",
- "log",
- "naga",
- "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-post-volumes"
 version = "0.1.0"
 dependencies = [
@@ -2202,18 +2080,6 @@ dependencies = [
  "pollster 0.4.0",
  "pulsar_reflection",
  "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-radiance-cascades-2d"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "log",
- "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -2308,47 +2174,6 @@ dependencies = [
  "pulsar_reflection",
  "pulsar_scenedb",
  "serde_json",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-sprite-batch"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.5",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "helio-mats",
- "helio-pass-sprite-cull",
- "helio-scene-join",
- "log",
- "pulsar_reflection",
- "pulsar_scenedb",
- "serde_json",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-sprite-cull"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "log",
- "pollster 0.4.0",
- "pulsar_scenedb",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-sprite-simulate"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "log",
  "wgpu",
 ]
 
@@ -2573,11 +2398,8 @@ dependencies = [
  "helio-mesh-api",
  "helio-pass-billboard",
  "helio-pass-buffer-view",
- "helio-pass-corona",
  "helio-pass-debug-overlay",
- "helio-pass-decal",
  "helio-pass-deferred-light",
- "helio-pass-flare",
  "helio-pass-foliage-gbuffer",
  "helio-pass-foliage-place",
  "helio-pass-forward-lit",
@@ -2587,14 +2409,11 @@ dependencies = [
  "helio-pass-hiz",
  "helio-pass-hlfs",
  "helio-pass-indirect-dispatch",
- "helio-pass-lens",
  "helio-pass-light-cull",
  "helio-pass-object-batch",
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
- "helio-pass-portal-cull",
- "helio-pass-portal-instances",
  "helio-pass-post-volumes",
  "helio-pass-postprocess",
  "helio-pass-shadow",
@@ -2602,8 +2421,6 @@ dependencies = [
  "helio-pass-shadow-matrix",
  "helio-pass-simple-cube",
  "helio-pass-sky",
- "helio-pass-sprite-batch",
- "helio-pass-sprite-cull",
  "helio-pass-ssr",
  "helio-pass-transparent",
  "helio-pass-tsr",
@@ -2638,13 +2455,10 @@ dependencies = [
  "helio-frame-api",
  "helio-mats",
  "helio-mesh-api",
- "helio-pass-decal",
  "helio-pass-foliage-place",
  "helio-pass-gbuffer",
  "helio-pass-light-cull",
  "helio-pass-object-batch",
- "helio-pass-portal-cull",
- "helio-pass-portal-instances",
  "helio-pass-water-sim",
  "helio-scene-join",
  "log",
@@ -2767,7 +2581,6 @@ dependencies = [
  "helio-components",
  "helio-pass-forward-lit",
  "helio-pass-gbuffer",
- "helio-pass-portal-cull",
  "helio-pass-sky",
  "helio-presets",
  "js-sys",

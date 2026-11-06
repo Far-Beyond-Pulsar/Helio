@@ -4,7 +4,8 @@
 //! A host input is a data-only node of kind `host.<name>` placed at the
 //! [`HOST_INPUTS`] point: it declares the external input so the passes that
 //! read it get a Scene pin for it. A preset adds every host input registered,
-//! so a feature that reads one (billboards, corona emitters) brings it along.
+//! so a feature that reads one (billboards, a particle system's emitters)
+//! brings it along.
 
 use helio_feature_api::{ExtensionPoint, NodeDescriptor};
 

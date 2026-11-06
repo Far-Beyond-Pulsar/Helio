@@ -72,7 +72,8 @@ impl DrawSlots {
 mod tests {
     /// Every GPU-driven vertex shader takes its slot from the vertex buffer,
     /// not `@builtin(instance_index)`, which ignores `first_instance` in
-    /// DX12 indirect draws.
+    /// DX12 indirect draws. Drawers outside this repo check their own
+    /// shaders against [`super::DRAW_SLOT_LOCATION`].
     #[test]
     fn gpu_driven_vertex_shaders_read_the_slot_attribute() {
         let sources = [
@@ -90,16 +91,8 @@ mod tests {
                 include_str!("../../helio-pass-shadow/shaders/shadow_transmittance.wgsl"),
             ),
             (
-                "portal instances",
-                include_str!("../../helio-pass-portal-instances/shaders/gbuffer_portal.wgsl"),
-            ),
-            (
                 "transparent",
                 include_str!("../../../../helio-mats/templates/transparent_base.wgsl"),
-            ),
-            (
-                "corona",
-                include_str!("../../helio-pass-corona/shaders/corona_render.wgsl"),
             ),
         ];
         let attribute = format!("@location({})", super::DRAW_SLOT_LOCATION);

@@ -119,20 +119,6 @@ pub struct MeshComponent {
     pub indices: Vec<u32>,
 }
 
-/// One derived portal chain ([`helio_pass_portal_cull::PortalChain`]),
-/// stored in the portal-chain pool the portal passes bind.
-///
-/// The chain is deliberately a variable-length SceneDB field. SceneDB mirrors
-/// `portals` through one growable `u32` payload pool and one growable
-/// `VarLenHandle` table; the renderer binds both buffers and uses the handle's
-/// `count` as the runtime recursion depth. This is the single representation
-/// for every depth, rather than a family of fixed `[u32; N]` component types.
-#[derive(SceneStore, Clone, Debug, PartialEq)]
-pub struct PortalChainComponent {
-    #[gpu(buffer = "PortalChainComponent::portals")]
-    pub portals: Vec<u32>,
-}
-
 /// Spawn a SceneDB material row for every material in a loaded
 /// [`helio_asset_compat::ConvertedScene`], returning one [`pulsar_scenedb::Entity`] per
 /// `scene.materials[i]`, in the same order.
@@ -165,59 +151,6 @@ pub fn upload_scene_materials(
             entity
         })
         .collect()
-}
-
-impl From<helio_pass_portal_cull::PortalChain> for PortalChainComponent {
-    fn from(chain: helio_pass_portal_cull::PortalChain) -> Self {
-        Self {
-            portals: chain.portals,
-        }
-    }
-}
-
-/// Publish a portal projection's derived rows into `world`.
-///
-/// The portal GPU ABI is entity-indexed. Callers reserve a contiguous
-/// projection entity range whose entity indices match the dense row IDs, and
-/// keep those entities separate from authored portal entities. This does not
-/// spawn or repurpose entities: their lifetime stays with the host.
-pub fn publish_portal_projection(
-    world: &mut World,
-    frame: &helio_pass_portal_cull::PortalProjectionFrame,
-    view_entities: &[Entity],
-    chain_entities: &[Entity],
-    counts_entity: Entity,
-) -> Result<(), helio_pass_portal_cull::ProjectionError> {
-    use helio_pass_portal_cull::ProjectionError;
-    for (kind, expected, entities) in [
-        ("portal view", frame.portal_views.len(), view_entities),
-        ("portal chain", frame.portal_chains.len(), chain_entities),
-    ] {
-        if entities.len() != expected {
-            return Err(ProjectionError::SceneRowCount {
-                kind,
-                expected,
-                actual: entities.len(),
-            });
-        }
-        for (dense_index, entity) in entities.iter().enumerate() {
-            if entity.index() as usize != dense_index {
-                return Err(ProjectionError::NonDenseSceneRow {
-                    kind,
-                    dense_index,
-                    entity_index: entity.index(),
-                });
-            }
-        }
-    }
-    for (entity, row) in view_entities.iter().zip(&frame.portal_views) {
-        world.insert_row(*entity, *row);
-    }
-    for (entity, chain) in chain_entities.iter().zip(&frame.portal_chains) {
-        world.insert(*entity, PortalChainComponent::from(chain.clone()));
-    }
-    world.insert_row(counts_entity, frame.counts);
-    Ok(())
 }
 
 /// Project a SceneDB world into the [`helio_bake::SceneGeometry`] a bake reads

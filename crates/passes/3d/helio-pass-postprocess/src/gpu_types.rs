@@ -182,7 +182,7 @@ pub struct GpuPostProcessUniforms {
 
     // Lens flare: appended 96-byte block (24 words); shared with the optics
     // pass. Camera optics (f-number, focal length, sensor, iris) are not here:
-    // they belong to the camera's `LensRow` (helio-pass-lens).
+    // they belong to the camera's `LensRow` (the lens plugin's `helio-pass-lens`).
     pub lens_enabled: u32,          // 432
     pub lens_quality: u32,          // 436
     pub lens_profile: u32,          // 440
@@ -195,7 +195,7 @@ pub struct GpuPostProcessUniforms {
     pub lens_glare_intensity: f32,  // 468
     pub lens_streak_intensity: f32, // 472
     pub lens_dispersion: f32,       // 476
-    /// Reserved: natural cos^4 falloff is the lens's (`helio-pass-lens`).
+    /// Reserved: natural cos^4 falloff is the lens plugin's (`helio-pass-lens`).
     pub reserved_lens_vignette: f32, // 480
     pub lens_starburst_intensity: f32, // 484
     pub lens_starburst_length: f32, // 488

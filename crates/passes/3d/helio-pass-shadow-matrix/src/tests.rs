@@ -25,7 +25,6 @@ fn production_shadow_shaders_validate() {
         "helio-pass-shadow-dirty/shaders/shadow_dirty.wgsl",
         "helio-pass-deferred-light/shaders/deferred_lighting.wgsl",
         "helio-pass-volumetric-fog/shaders/volumetric_fog.wgsl",
-        "helio-pass-flare/shaders/lens_response.wgsl",
     ] {
         let mut source = std::fs::read_to_string(root.join(path))
             .unwrap()

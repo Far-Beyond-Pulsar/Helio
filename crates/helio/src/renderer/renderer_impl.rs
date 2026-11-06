@@ -110,19 +110,15 @@ pub struct Renderer {
     /// graph has the same passes and pass settings (Helio#254/#255).
     ///
     /// Opaque to the renderer: it never interprets pass-specific fields
-    /// (shadow atlas, SSR, foliage, portals, TSR, reflections), it only
+    /// (shadow atlas, SSR, foliage, TSR, reflections), it only
     /// stores what the graph was built with. The size, scale, surface format,
     /// debug mode, render mode and XR flag have live fields of their own;
     /// [`Renderer::renderer_config`] overlays those onto this.
     pub(crate) graph_config: RendererConfig,
-    /// Coordinate-space transforms supplied by the frontend for portal and
-    /// sublevel instances. Kept on Renderer so graph rebuilds cannot reset
-    /// the G-buffer's table back to identity.
+    /// Coordinate-space transforms supplied by the frontend (rigid frames,
+    /// placed sublevels, what its features project). Kept on Renderer so
+    /// graph rebuilds cannot reset the G-buffer's table back to identity.
     pub(crate) coordinate_spaces: Vec<glam::Mat4>,
-    /// Active dense portal projection counts supplied by the resolver bridge.
-    /// Growable SceneDB buffers are capacity-sized, so passes must not infer
-    /// active rows from their allocation size.
-    pub(crate) portal_projection_counts: Option<(u32, u32)>,
     /// Whether the current renderer output is an XR eye view.
     pub(crate) xr_mode: bool,
     /// TSR quality preset, preserved across graph rebuilds.
@@ -633,7 +629,7 @@ impl Renderer {
     /// Set the coordinate-space table through the generic graph input seam
     /// (the non-identity tail: slot 0 is the world and implicit). The host owns
     /// the one table: every producer of spaces (rigid frames, sublevel
-    /// placements, portal projections) takes its slots from the host's
+    /// placements, a feature's projections) takes its slots from the host's
     /// [`helio_core::CoordinateSpaceAllocator`], and the host hands the result
     /// here. The owning pass uploads its GPU table during prepare.
     pub fn set_coordinate_spaces(&mut self, spaces: &[glam::Mat4]) {
@@ -642,19 +638,9 @@ impl Renderer {
         self.apply_coordinate_spaces();
     }
 
-    /// The live portal view and chain counts of a projection whose spaces the
-    /// host placed in the table itself.
-    pub fn set_portal_projection_counts(&mut self, portal_views: u32, portal_chains: u32) {
-        self.portal_projection_counts = Some((portal_views, portal_chains));
-        self.apply_coordinate_spaces();
-    }
-
     pub(crate) fn apply_coordinate_spaces(&mut self) {
         let inputs = RenderFrameInputs {
             coordinate_spaces: &self.coordinate_spaces,
-            projection_counts: self
-                .portal_projection_counts
-                .map(|(view_count, chain_count)| [view_count, chain_count]),
             xr_mode: self.xr_mode,
         };
         self.graph.set_frame_inputs(&inputs);

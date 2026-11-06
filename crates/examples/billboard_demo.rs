@@ -8,7 +8,7 @@
 //! texture) but had literally zero test coverage. This example spawns
 //! `BillboardComponent` rows directly (the same "insert the SceneDB record,
 //! SceneDB owns the deferred GPU upload" pattern already used for
-//! `DecalComponent`/`WaterVolumeComponent` in `v3_demo_common.rs`) to answer:
+//! `WaterVolumeComponent` in `v3_demo_common.rs`) to answer:
 //! does the pass itself work at all?
 //!
 //! Controls:
@@ -42,7 +42,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Spawns a billboard directly as a SceneDB `BillboardComponent` row --
-/// mirrors `v3_demo_common`'s `spawn_decal`/`spawn_water_hitbox` idiom
+/// mirrors `v3_demo_common`'s `spawn_water_hitbox` idiom
 /// (`world.spawn()` + `world.insert(entity, component)`), which no helper
 /// exists for yet since no example has used billboards before this one.
 ///

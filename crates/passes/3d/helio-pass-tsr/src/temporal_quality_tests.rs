@@ -289,7 +289,7 @@ impl helio_core::SceneInput for Input {
 
 /// Fixtures create their own devices; several waiting on the GPU at once
 /// deadlock now and then on NVIDIA Vulkan (4 of the quality tests hung in 2 of
-/// 6 parallel runs), so tests run one at a time, as helio-pass-flare's do. A
+/// 6 parallel runs), so tests run one at a time, as the lens plugin's flare tests do. A
 /// test may hold several fixtures: the first takes the lock for its thread.
 static GPU_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

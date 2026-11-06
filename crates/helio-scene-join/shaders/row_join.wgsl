@@ -74,13 +74,14 @@ const WATER_PHASE_WORD: u32 = 60u;
 const WATER_WIND_PER_SPEED: f32 = 0.5;
 // `scene_lights` rows (`helio_pass_forward_lit::GpuLight`): 32 words.
 const LIGHT_ROW_WORDS: u32 = 32u;
-// `helio_pass_corona::GpuCoronaEmitter`: `particle_offset`, `particle_count`
+// A pooled row (the particles plugin's `GpuCoronaEmitter`): `particle_offset`,
+// `particle_count`
 // (the requested range in the source row) and `spawn_cursor`, which the
 // pass reads as the emitter's identity.
 const EMITTER_OFFSET_WORD: u32 = 45u;
 const EMITTER_COUNT_WORD: u32 = 46u;
 const EMITTER_IDENTITY_WORD: u32 = 47u;
-// `helio_pass_corona::CORONA_RANGE_ALIGNMENT`.
+// The pool's range alignment (the particles plugin's `CORONA_RANGE_ALIGNMENT`).
 const EMITTER_RANGE_ALIGNMENT: u32 = 256u;
 // `helio_pass_sky::atmosphere::placement::CENTER`.
 const PLACEMENT_CENTER: u32 = 1u;
@@ -358,7 +359,7 @@ fn write_hitbox(row: u32, output: u32) {
     rows_out[output + 18u] = bitcast<u32>(f32(row + 1u));
 }
 
-/// A 2D sprite (`helio_pass_sprite_batch::SpriteComponent`): at its owner's
+/// A 2D sprite (the sprites plugin's `SpriteComponent`): at its owner's
 /// X and Y, turned by its roll (rotation about Z) and its size scaled by
 /// its X and Y scale. The owner's Z and other rotations do not apply.
 fn write_sprite_placement(row: u32, output: u32) {

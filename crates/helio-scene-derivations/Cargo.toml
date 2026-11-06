@@ -3,7 +3,7 @@ name = "helio-scene-derivations"
 version = "0.1.0"
 edition = "2021"
 workspace = "../../"
-description = "Scene derivations Helio's hosts run between the SceneDB snapshot and the graph: the mesh and light joins, hierarchy resolve, the environment join, portal projection, texture means."
+description = "Scene derivations Helio's hosts run between the SceneDB snapshot and the graph: the mesh and light joins, hierarchy resolve, texture means."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -20,12 +20,9 @@ bytemuck = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
 pollster = { workspace = true }
-helio-pass-portal-cull = { path = "../passes/3d/helio-pass-portal-cull" }
-helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
 
 [dev-dependencies]
 helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
-helio-pass-decal = { path = "../passes/3d/helio-pass-decal" }
 helio-pass-foliage-place = { path = "../passes/3d/helio-pass-foliage-place" }
 helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-components = { path = "../helio-components" }
