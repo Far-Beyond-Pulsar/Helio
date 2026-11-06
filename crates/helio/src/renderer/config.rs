@@ -261,8 +261,8 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
         // Every other limit here is taken straight from the adapter, and on a GPU
         // reporting more than 4 GiB of addressable buffer that spread is a hard panic
         // before a single frame is drawn. Helio allocates nothing near this ceiling — the
-        // largest single buffer in the engine is the foliage blade arena at a few hundred
-        // MiB — so lowering it costs nothing real.
+        // largest single buffers are a few hundred MiB — so lowering it costs nothing
+        // real.
         max_buffer_size: adapter_limits.max_buffer_size.min(u32::MAX as u64),
         ..adapter_limits
     }
@@ -298,7 +298,7 @@ pub struct RendererConfig {
     /// the reflection contribution.
     pub enable_ssr: bool,
     /// Settings of the features the renderer runs, one value per feature's
-    /// settings type (`helio_pass_foliage_place::FoliageSettings`, …). The
+    /// settings type (`helio_pass_ssr::SsrSettings`, …). The
     /// renderer knows none of them; graph builds hand them to the features'
     /// nodes. Edit with `config.features.edit::<FooSettings>()`.
     pub features: helio_feature_api::FeatureSettings,

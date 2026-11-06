@@ -1,10 +1,7 @@
 use glam::{Mat4, Vec3};
 use helio::{GpuLight, LightType, Renderer, RendererBuilder, RendererConfig, SceneDbHandle};
 use helio_mesh_api::{MeshUpload, PackedVertex};
-use helio_components::{
-    AtmosphereComponent, MaterialComponent, PostProcessVolumeComponent,
-    ReflectionCaptureComponent,
-};
+use helio_components::{AtmosphereComponent, MaterialComponent, ReflectionCaptureComponent};
 use pulsar_scenedb::{Entity, World};
 use std::sync::Arc;
 
@@ -61,26 +58,6 @@ pub fn new_scene_db_with_gpu_mirror_and(
     helio_components::LightComponent::register_gpu_columns_growable(
         &mut gpu_store,
         helio_pass_forward_lit::MAX_LIGHTS,
-        device,
-    );
-    helio_components::CameraPostProcessComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
-    );
-    helio_components::GlobalFogComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
-    );
-    helio_components::LocalFogVolumeComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
-        device,
-    );
-    helio_components::VolumetricFogSettingsComponent::register_gpu_columns_growable(
-        &mut gpu_store,
-        4096,
         device,
     );
     register_extra(&mut gpu_store);
@@ -479,246 +456,6 @@ pub fn spawn_sky(world: &mut World, tint: [f32; 3]) -> Entity {
     entity
 }
 
-/// CPU-friendly description of a water volume's static appearance, packed
-/// into the raw `[f32; 4]` slots `helio_components::WaterVolumeComponent`
-/// stores GPU-side. Field-to-slot mapping mirrors the `WaterVolume` struct
-/// documented in that pass's WGSL shaders (`surface.wgsl`, `caustics.wgsl`,
-/// `underwater_fog.wgsl`, `hitbox.frag.wgsl`) -- this is the removed
-/// `helio::WaterVolumeDescriptor`/`.to_gpu()` pair reconstructed from the
-/// shader-documented layout, since neither survived the SceneDB migration.
-///
-/// The descriptor leaves the row's `sim_dynamics`/`wind_params` zero, so
-/// the heightfield simulation drives these volumes with the pass-wide
-/// dynamics set at runtime through
-/// `helio_pass_water_sim::WaterSimPass::set_wind`/`set_sim_dynamics`/
-/// `set_wave_scale`/`set_wave_speed` (a row with its own spring simulates
-/// with its own instead).
-#[derive(Clone, Copy, Debug)]
-pub struct WaterVolumeDescriptor {
-    pub bounds_min: [f32; 3],
-    pub bounds_max: [f32; 3],
-    pub surface_height: f32,
-    pub wave_amplitude: f32,
-    pub wave_frequency: f32,
-    pub wave_speed: f32,
-    pub wave_direction: [f32; 2],
-    pub wave_steepness: f32,
-    pub water_color: [f32; 3],
-    pub extinction: [f32; 3],
-    pub foam_threshold: f32,
-    pub foam_amount: f32,
-    pub reflection_strength: f32,
-    pub refraction_strength: f32,
-    pub fresnel_power: f32,
-    pub caustics_enabled: bool,
-    pub caustics_intensity: f32,
-    pub caustics_scale: f32,
-    pub caustics_speed: f32,
-    pub fog_density: f32,
-    pub god_rays_intensity: f32,
-    pub ssr_enabled: bool,
-    pub ssr_steps: u32,
-    pub ssr_step_size: f32,
-    pub ssr_thickness: f32,
-    /// Index of refraction; 1.333 for water.
-    pub ior: f32,
-    /// Base (minimum) Fresnel reflectance at normal incidence; water's real
-    /// F0 is ~0.02. `surface.wgsl`'s `sim_params.z`.
-    pub fresnel_min: f32,
-    /// `surface.wgsl`'s `sim_params.w` -- declared there as "density" but not
-    /// yet read by any shader in this pass; carried through for forward
-    /// compatibility.
-    pub density: f32,
-    /// Sun direction used by the underwater fog/caustics shading (points
-    /// *from* the sun, same convention as every other light direction in
-    /// this file). `shader`'s `sun_direction.xyz`.
-    pub sun_direction: [f32; 3],
-    /// `surface.wgsl`'s `shadow_params.x` ("rim"); not yet read by any
-    /// shader in this pass, carried through for forward compatibility.
-    pub shadow_rim: f32,
-    /// `shadow_params.y`; not yet read by any shader in this pass.
-    pub shadow_hitbox: f32,
-    /// `shadow_params.z`; not yet read by any shader in this pass.
-    pub shadow_ao: f32,
-}
-
-impl Default for WaterVolumeDescriptor {
-    fn default() -> Self {
-        Self {
-            bounds_min: [-1.0, -1.0, -1.0],
-            bounds_max: [1.0, 1.0, 1.0],
-            surface_height: 0.0,
-            wave_amplitude: 0.1,
-            wave_frequency: 1.0,
-            wave_speed: 1.0,
-            wave_direction: [1.0, 0.0],
-            wave_steepness: 0.3,
-            water_color: [0.02, 0.08, 0.12],
-            extinction: [0.15, 0.08, 0.04],
-            foam_threshold: 0.5,
-            foam_amount: 0.5,
-            reflection_strength: 0.6,
-            refraction_strength: 1.0,
-            fresnel_power: 5.0,
-            caustics_enabled: false,
-            caustics_intensity: 1.0,
-            caustics_scale: 4.0,
-            caustics_speed: 0.5,
-            fog_density: 0.0,
-            god_rays_intensity: 0.0,
-            ssr_enabled: false,
-            ssr_steps: 32,
-            ssr_step_size: 0.05,
-            ssr_thickness: 0.02,
-            ior: 1.333,
-            fresnel_min: 0.02,
-            density: 0.0,
-            sun_direction: [0.0, -1.0, 0.0],
-            shadow_rim: 0.0,
-            shadow_hitbox: 0.0,
-            shadow_ao: 0.0,
-        }
-    }
-}
-
-impl WaterVolumeDescriptor {
-    pub fn to_component(&self) -> helio_components::WaterVolumeComponent {
-        helio_components::WaterVolumeComponent {
-            bounds_min: [
-                self.bounds_min[0],
-                self.bounds_min[1],
-                self.bounds_min[2],
-                0.0,
-            ],
-            bounds_max: [
-                self.bounds_max[0],
-                self.bounds_max[1],
-                self.bounds_max[2],
-                self.surface_height,
-            ],
-            wave_params: [
-                self.wave_amplitude,
-                self.wave_frequency,
-                self.wave_speed,
-                self.wave_steepness,
-            ],
-            wave_direction: [self.wave_direction[0], self.wave_direction[1], 0.0, 0.0],
-            water_color: [
-                self.water_color[0],
-                self.water_color[1],
-                self.water_color[2],
-                self.foam_threshold,
-            ],
-            extinction: [
-                self.extinction[0],
-                self.extinction[1],
-                self.extinction[2],
-                self.foam_amount,
-            ],
-            reflection_refraction: [
-                self.reflection_strength,
-                self.refraction_strength,
-                self.fresnel_power,
-                0.0,
-            ],
-            caustics_params: [
-                if self.caustics_enabled { 1.0 } else { 0.0 },
-                self.caustics_intensity,
-                self.caustics_scale,
-                self.caustics_speed,
-            ],
-            fog_params: [self.fog_density, self.god_rays_intensity, 0.0, 0.0],
-            sim_params: [
-                self.ior,
-                self.caustics_intensity,
-                self.fresnel_min,
-                self.density,
-            ],
-            shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
-            sun_direction: [
-                self.sun_direction[0],
-                self.sun_direction[1],
-                self.sun_direction[2],
-                0.0,
-            ],
-            ssr_params: [
-                if self.ssr_enabled { 1.0 } else { 0.0 },
-                self.ssr_steps as f32,
-                self.ssr_step_size,
-                self.ssr_thickness,
-            ],
-            sim_dynamics: [0.0; 4],
-            wind_params: [0.0; 4],
-            _pad6: [0.0; 4],
-        }
-    }
-}
-
-/// Spawn a water volume row from its CPU-side descriptor.
-pub fn spawn_water_volume(world: &mut World, descriptor: WaterVolumeDescriptor) -> Entity {
-    let entity = world.spawn();
-    world.insert(entity, descriptor.to_component());
-    entity
-}
-
-/// CPU-friendly description of one AABB water-displacement hitbox; packs into
-/// `helio_components::WaterHitboxComponent` per `hitbox.frag.wgsl`'s
-/// `GpuWaterHitbox` layout. Coordinates are world space; the simulation
-/// maps the box into each water volume it overlaps.
-#[derive(Clone, Copy, Debug)]
-pub struct WaterHitboxDescriptor {
-    pub old_min: [f32; 3],
-    pub old_max: [f32; 3],
-    pub new_min: [f32; 3],
-    pub new_max: [f32; 3],
-    pub edge_softness: f32,
-    pub strength: f32,
-}
-
-impl WaterHitboxDescriptor {
-    pub fn to_component(&self) -> helio_components::WaterHitboxComponent {
-        helio_components::WaterHitboxComponent {
-            old_min: [self.old_min[0], self.old_min[1], self.old_min[2], 0.0],
-            old_max: [self.old_max[0], self.old_max[1], self.old_max[2], 0.0],
-            new_min: [self.new_min[0], self.new_min[1], self.new_min[2], 0.0],
-            new_max: [self.new_max[0], self.new_max[1], self.new_max[2], 0.0],
-            params: [self.edge_softness, self.strength, 0.0, 0.0],
-        }
-    }
-}
-
-/// Spawn a water hitbox row from its CPU-side descriptor.
-pub fn spawn_water_hitbox(world: &mut World, descriptor: WaterHitboxDescriptor) -> Entity {
-    let entity = world.spawn();
-    world.insert(entity, descriptor.to_component());
-    entity
-}
-
-/// Replace a previously spawned water hitbox's bounds (e.g. each frame, as
-/// the object displacing the water moves).
-pub fn update_water_hitbox(world: &mut World, entity: Entity, descriptor: WaterHitboxDescriptor) {
-    if let Some(mut existing) = world.get_mut::<helio_components::WaterHitboxComponent>(entity) {
-        *existing = descriptor.to_component();
-    }
-}
-
-/// Spawn a post-process volume record from the CPU-side descriptor
-/// (`PostProcessVolumeDescriptor::to_gpu()` feeds the same
-/// `helio_components::PostProcessVolumeComponent` the pass reads).
-pub fn spawn_post_process_volume(
-    world: &mut World,
-    descriptor: helio_pass_postprocess::PostProcessVolumeDescriptor,
-) -> Entity {
-    let entity = world.spawn();
-    world.insert(
-        entity,
-        PostProcessVolumeComponent::from(helio_pass_post_volumes::PostProcessVolumeRow::from(
-            descriptor.to_gpu(),
-        )),
-    );
-    entity
-}
-
 /// Spawn an oriented-box reflection-capture influence volume, replacing the
 /// removed `Scene::insert_reflection_capture(ReflectionCaptureDescriptor::
 /// boxed(..))` API. `transform`'s translation/rotation places the box (scale
@@ -1061,38 +798,25 @@ pub fn update_point_light(
     );
 }
 
-/// Author one persistent camera-settings row per view. Interactive examples call
-/// this after editing their controls, before flushing the world's GPU mirror.
-pub fn set_camera_postprocess(
-    world: &mut World,
-    view_id: u32,
+/// Publish the host's post settings: the tone map's baseline
+/// (`helio_pass_postprocess::POST_BASELINE`). It persists until replaced, so
+/// interactive examples call this again after editing their controls.
+pub fn set_post_baseline(
+    renderer: &mut Renderer,
     settings: &helio_pass_postprocess::PostProcessSettings,
 ) {
-    use helio_components::CameraPostProcessComponent;
-    let existing = world
-        .query::<&CameraPostProcessComponent>()
-        .find(|(_, row)| row.view_id == view_id)
-        .map(|(entity, _)| entity);
-    let entity = existing.unwrap_or_else(|| world.spawn());
-    world.insert(
-        entity,
-        CameraPostProcessComponent::from(helio_pass_post_volumes::CameraPostProcessRow::new(
-            view_id, settings,
-        )),
+    renderer.set_scene_payload(
+        &helio_pass_postprocess::POST_BASELINE,
+        Arc::new(settings.clone()),
     );
 }
 
-// ── Participating media and light shafts (component API) ─────────────────────
+// ── Light shafts ─────────────────────────────────────────────────────────────
 //
-// Fog is world data: global and local media are SceneDB components owned by
-// the volumetric fog pass, in physical units (one world unit = one metre,
-// extinction in m^-1). Shafts are not a separate effect: they are the shadowed
-// part of lit medium, so a light only forms them when it (a) participates in
-// the medium and (b) has a shadow map to be occluded by.
-
-pub use helio_components::{
-    GlobalFogComponent, LocalFogVolumeComponent, VolumetricFogSettingsComponent,
-};
+// Shafts are not a separate effect: they are the shadowed part of lit medium,
+// so a light only forms them when it (a) participates in the medium and (b) has
+// a shadow map to be occluded by. The media themselves (fog) left Helio with
+// their plugin (Pulsar `plugins/vendor/fog`).
 
 /// Shadow-map base layers for demo lights. The GPU shadow-matrix pass writes a
 /// caster's layers at `[base, base + 6)` (a directional light uses 4 cascades,
@@ -1114,47 +838,6 @@ pub fn volumetric_light(mut light: GpuLight, shadow_base: u32) -> GpuLight {
     light.god_rays_exposure = 1.0;
     light.god_rays_decay = 1.0;
     light
-}
-
-/// A medium filling the whole world (haze, atmosphere, a smoky interior).
-pub fn spawn_global_fog(world: &mut World, medium: GlobalFogComponent) -> Entity {
-    let entity = world.spawn();
-    world.insert(entity, medium);
-    entity
-}
-
-/// A medium confined to a world AABB, visible from outside it, with an inward
-/// edge fade in metres.
-pub fn spawn_local_fog(
-    world: &mut World,
-    bounds_min: [f32; 3],
-    bounds_max: [f32; 3],
-    medium: GlobalFogComponent,
-    edge_fade: f32,
-) -> Entity {
-    let mut volume = LocalFogVolumeComponent::from(
-        helio_pass_volumetric_fog::LocalFogVolumeRow::new(bounds_min, bounds_max, medium.row()),
-    );
-    volume.edge_fade = edge_fade;
-    let entity = world.spawn();
-    world.insert(entity, volume);
-    entity
-}
-
-/// Volumetric render settings for every view: quality 0 economical, 1 high,
-/// and the integration range in metres (keep it tight around the media).
-pub fn set_volumetric_quality(world: &mut World, quality: u32, max_distance: f32) -> Entity {
-    let entity = world.spawn();
-    world.insert(
-        entity,
-        VolumetricFogSettingsComponent {
-            quality,
-            max_distance,
-            light_max_distance: max_distance,
-            ..Default::default()
-        },
-    );
-    entity
 }
 
 // ── Headless capture (`--probe` modes) ──────────────────────────────────────

@@ -1,6 +1,6 @@
 //! The shipped pipelines as node graphs: the editor's laid-out template builds
 //! the deferred preset's graph, each preset follows the renderer config (the
-//! anti-aliasing, reflections, foliage), and HLFS lights in one
+//! anti-aliasing, reflections), and HLFS lights in one
 //! format end to end. (An engine's features joining the presets is tested
 //! where they live: the voxel terrain's in its plugin's feature crate.)
 //!
@@ -248,7 +248,6 @@ fn presets_follow_the_config() {
     let graph = Preset::Deferred.build(fixtures.context());
     assert!(has::<helio_pass_fxaa::FxaaPass>(&graph));
     assert!(!has::<helio_pass_tsr::TsrPass>(&graph));
-    assert!(has::<helio_pass_foliage_place::FoliagePlacePass>(&graph));
     assert!(!has::<helio_pass_ssr::SsrPass>(&graph));
 
     fixtures.config = base.clone().with_tsr_quality(helio::TsrQuality::Quality);
@@ -262,17 +261,11 @@ fn presets_follow_the_config() {
 
     fixtures.config = base.clone();
     fixtures.config.enable_ssr = true;
-    fixtures
-        .config
-        .features
-        .edit::<helio_pass_foliage_place::FoliageSettings>()
-        .enabled = false;
     let graph = Preset::Deferred.build(fixtures.context());
     assert_eq!(
         has::<helio_pass_ssr::SsrPass>(&graph),
         helio_core::REFLECTIONS_SUPPORTED
     );
-    assert!(!has::<helio_pass_foliage_place::FoliagePlacePass>(&graph));
 
     fixtures.config = base;
     let graph = Preset::Forward.build(fixtures.context());

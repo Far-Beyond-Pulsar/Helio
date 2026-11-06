@@ -164,23 +164,6 @@ name = "rapier_salva"
 path = "rapier_salva.rs"
 
 [[bin]]
-name = "indoor_cathedral_water"
-path = "indoor_cathedral_water.rs"
-
-[[bin]]
-name = "oil_rig_night"
-path = "oil_rig_night.rs"
-
-
-[[bin]]
-name = "indoor_cathedral_pp_volumes"
-path = "indoor_cathedral_pp_volumes.rs"
-
-[[bin]]
-name = "volumetric_fog_demo"
-path = "volumetric_fog_demo.rs"
-
-[[bin]]
 name = "vhs_backrooms"
 path = "vhs_backrooms.rs"
 
@@ -234,7 +217,6 @@ path = "vr/main.rs"
 
 [dependencies]
 helio-mesh-api = { workspace = true }
-helio-pass-post-volumes = { workspace = true }
 helio-components = { path = "../helio-components", features = ["bake"] }
 helio = { workspace = true }
 helio-bake = { path = "../helio-bake" }
@@ -257,16 +239,13 @@ helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-transparent = { path = "../passes/3d/helio-pass-transparent" }
-helio-pass-volumetric-fog = { path = "../passes/3d/helio-pass-volumetric-fog" }
 helio-pass-gbuffer = { path = "../passes/3d/helio-pass-gbuffer" }
 helio-pass-forward-lit = { path = "../passes/3d/helio-pass-forward-lit" }
 helio-pass-sky = { path = "../passes/3d/helio-pass-sky" }
-helio-pass-foliage-place = { workspace = true }
 helio-presets = { path = "../helio-presets" }
 helio-scene-derivations = { path = "../helio-scene-derivations" }
 helio-controls = { workspace = true, features = ["winit"] }
 microfont = { workspace = true }
-helio-pass-water-sim = { path = "../passes/3d/helio-pass-water-sim" }
 helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
 helio-pass-light-cull = { path = "../passes/3d/helio-pass-light-cull" }
 pulsar_scenedb = { workspace = true }
@@ -294,10 +273,6 @@ flate2 = { version = "1", optional = true }
 sha2 = { version = "0.10", optional = true }
 
 [[bin]]
-name = "foliage_demo"
-path = "foliage_demo.rs"
-
-[[bin]]
 name = "cloud_engine"
 path = "cloud_engine.rs"
 
@@ -306,7 +281,7 @@ name = "cloud_engine_curve"
 path = "cloud_engine_curve.rs"
 
 [[bin]]
-name = "cathedral_volumetric_fog_demo"
+name = "monumental_arch_hlfs"
 path = "monumental_arch_hlfs.rs"
 
 [[bin]]

@@ -42,14 +42,14 @@ ship_flight         = []
 simple_graph        = []
 outdoor_rocks       = []
 editor_demo         = []
-hdr_demo            = []
+hdr_demo            = ["dep:helio-pass-postprocess"]
 color_grading_demo  = ["dep:helio-pass-postprocess"]
 ies_demo            = []
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
 helio-mesh-api = { workspace = true }
-helio-pass-post-volumes = { workspace = true }
+bytemuck = { workspace = true }
 helio-components = { path = "../helio-components" }
 helio-wasm          = { path = "../helio-wasm" }
 helio               = { workspace = true }

@@ -100,18 +100,18 @@ same path, like physics).
 | `pulsar.lights` | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | light part of the scene join, `GpuLight`/`SCENE_LIGHTS` in forward-lit, facade light setters |
 | `pulsar.sky` | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility` | helio-sky-api readers name `sky` contracts only |
 | `pulsar.gi` | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | — |
-| `pulsar.fog` | GlobalFog, LocalFogVolume | volumetric fog and its composite | fog composite out of the spine's postprocess crate |
-| `pulsar.post` | PostProcessVolume, CameraPostProcess | volume blend, publishes post settings | PP volume contracts out of the spine |
+| `pulsar.fog` | GlobalFog, LocalFogVolume | volumetric fog and its composite | done (batch 2): `plugins/vendor/fog/` (`fog_component`, `feature` = helio-pass-volumetric-fog, `fog_plugin`, `fog-examples`); publishes the frame's participating media |
+| `pulsar.post` | PostProcessVolume, CameraPostProcess | volume blend, publishes post settings | done (batch 2): `plugins/vendor/post/` (`post_component`, `feature` = helio-pass-post-volumes, `post_plugin`, `post-examples`); blends over the host's `POST_BASELINE` |
 | `pulsar.lens` | CameraLens | lens, flare (reads `light_list` via lights api) | done (batch 1): `plugins/vendor/lens/` (`lens_component`, `feature/{lens,flare,optics}`, `lens_plugin`, `lens-examples`); the view overscan through `ViewOverscanRegistration` |
-| `pulsar.water` | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | water reads in deferred light |
-| `pulsar.foliage` | Foliage, Wind | placement, drawers | — |
+| `pulsar.water` | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | done (batch 2): `plugins/vendor/water/` (`water_component`, `api` = helio-water-api, `feature` = helio-pass-water-sim, `water_plugin`, `water-examples`) |
+| `pulsar.foliage` | Foliage, Wind | placement, drawers | done (batch 2): `plugins/vendor/foliage/` (`foliage_component`, `api` = helio-foliage-api, `feature/{place,gbuffer}`, `foliage_plugin`, `foliage-examples`) |
 | `pulsar.voxel` | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Pulsar `plugins/vendor/voxel/` with `component` (voxel_component), `api` (helio-voxel-data), `world` (helio-voxel-world), `feature` (helio-pass-voxel-planet, a G-buffer drawer since Phase A), `editor` (voxel_plugin), `examples` (helio-voxel-examples: voxel_craft, voxel_flight, water_world); the Helio repo has no voxel crate. Left: the sculpt tool and terrain panel in `ui_level_editor`, waiting on plugin-provided tool state, undo, commands and save hooks |
 | `pulsar.decals` | Decal | decal drawer (after GBuffer) | done (batch 1): `plugins/vendor/decals/` |
 | `pulsar.particles` | ParticleEmitter | corona | done (batch 1): `plugins/vendor/particles/` (the `corona_emitters` host input is the feature's since Phase A) |
 | `pulsar.sprites` | Sprite | sprite cull/batch/simulate, 2D radiance cascades | done (batch 1): `plugins/vendor/sprites/` |
 | `pulsar.portals` | Portal (SubLevelDisplay stays in the engine: it places level instances, which rigid frames use too) | portal cull, draws, projection derivation, view remaps | done (batch 1): `plugins/vendor/portals/`; counts as the `PORTAL_COUNTS` payload, pairing and projection as a space producer |
 | `pulsar.splines` | Spline | debug-line drawing through the facade's debug draw | done (batch 1): `plugins/vendor/splines/` (component and editor crates; lines through `EditorLinesRegistration`) |
-| `pulsar.physics` | (exists: physics_plugin + pulsar_physics) | water hitbox rows through water's api | — |
+| `pulsar.physics` | (exists: physics_plugin + pulsar_physics) | water hitbox rows through water's api | done (batch 2): `pulsar_physics` derives them under `helio_water_api::WATER_HITBOX_SOURCES_BUFFER` |
 
 Hard cases, and their answer:
 1. **The spine drew meshes** (G-buffer, shadows, object batch, culling,
@@ -407,9 +407,9 @@ Order:
    the lens's only reader and moves with it), portals (portal cull,
    portal instances, the portal projection derivation and its facade
    seam).
-2. **Media and placement**: fog and post volumes (fog's tests read the
-   post volumes' rows: move them together, or fog first), water (reads
-   foliage-api's wind rows), foliage (after water).
+2. **Media and placement** (done, batch 2): fog and post volumes (fog's
+   tests read the post volumes' rows: move them together, or fog first),
+   water (reads foliage-api's wind rows), foliage (after water).
 3. **gi, then sky.** gi-api's one reader, hlfs, switches to the frame's
    `INDIRECT_DIFFUSE` key (the same buffer) so gi-api leaves with gi. The
    sky goes after gi, fog and water, which read `helio-sky-api`'s cloud
@@ -567,6 +567,133 @@ plugins; the Helio repo has none of their crates.
     integration tests); the layer gate is clean. `engine_backend`'s
     `gpu::tests::readbacks_and_uploads_reuse_their_buffers` (upload pool
     and readback ring, untouched here) failed once.
+
+As built, batch 2 (2026-11-03, branch `rewrite/p8-media-plugins` in both
+repos): fog, post-process volumes, water and foliage are Pulsar plugins; the
+Helio repo has none of their crates (helio-pass-volumetric-fog,
+helio-pass-post-volumes, helio-pass-water-sim, helio-water-api,
+helio-foliage-api, helio-pass-foliage-place, helio-pass-foliage-gbuffer).
+- **Layout** as batch 1: `plugins/vendor/{fog,post,water,foliage}/` with
+  `component` (`<kind>_component`), `feature` (the moved crates, unchanged
+  names; foliage `feature/{place,gbuffer}`), `editor` (`<kind>_plugin`) and
+  `examples` (`<kind>-examples`). Water and foliage keep their api crates
+  (`water/api` = helio-water-api, `foliage/api` = helio-foliage-api): other
+  plugins read them (voxel reads both, water reads foliage's wind rows,
+  physics reads water's hitbox rows). Fog's component crate uses the post
+  plugin's `FogMode` (the post settings' fog block and a medium share it);
+  the voxel component spawns and syncs the fog, post and foliage plugins'
+  components (its presets, the planet haze).
+- **Generic frame seams** (Helio, `helio-frame-api`; no Helio crate names
+  fog any more):
+  - `color::advance_aliasing` / `color::alias`: a node may publish an earlier
+    image's view as its output (the fog composite when no fog is possible);
+    readers of the current colour read the alias too so the pool keeps it.
+    FXAA, TSR, the tone map, transparency, and the lens and flare (Pulsar)
+    replaced their `"fogged_hdr"` checks with it.
+  - `media::publish` / `media::current`: a media feature publishes its
+    integrated medium by its own resource names (grid: rgb in-scatter, a
+    transmittance, log slices from 0.5 m to the far distance in the
+    parameters' second vec4's `y`); transparency composites each fragment
+    through whatever was published, a stand-in otherwise. Resource names
+    did not change (`fog_accum`, `fog_parameters`, `fogged_hdr` are the fog
+    plugin's), which is why the pass lists stay byte-identical.
+  - `lighting::DIRECTIONAL_LIGHT`: the lights' join publishes one row (the
+    direction toward its directional light, `w` 1; the first enabled
+    directional light with intensity, as the old scan picked); the row
+    join's `SUN` placement copies it (`RowJoinKeys::directional_light`
+    replaced `lights`). Water's sun is that contract, not a light-row scan.
+  - `helio_pass_postprocess::POST_BASELINE` (a payload): the host's post
+    settings, the tone map's stand-in when nothing publishes `POST_SETTINGS`
+    and the base the post-volume blend uses as its defaults. It replaced the
+    editor's `find_pass_mut::<PostProcessVolumeBlendPass>().set_defaults`
+    (Pulsar publishes it as a view payload) and Helio examples' camera
+    post-process rows (`color_grading_demo`, `hdr_demo`, the wasm demos).
+  - The fog pass skips orthographic views itself (`proj[15] == 1`), which
+    replaced the editor renderer's `apply_view_fog`.
+- **Helio**: presets' default features, swap policy and
+  `config_with_host_settings` drop the kinds; foliage's host settings left
+  `helio-settings`' renderer group for the feature's own group
+  (`helio_pass_foliage_place::FOLIAGE`, keys `foliage.enabled`, `quality`,
+  `range`, `tufts_per_m2`, `blades_per_tuft`; projects' old
+  `rendering.foliage*` values fall back to the defaults, as the portals
+  toggle did in batch 1); `helio-components` drops the kinds' row
+  components: each feature crate carries them as `host_rows` behind a
+  `host-rows` cargo feature (foliage's in its api crate, where the rows are
+  defined), which only standalone hosts and tests enable; helio-core's
+  shader test and helio-scene-derivations' water/foliage join test moved.
+- **Pulsar engine seams** (inventory registrations; the engine names none
+  of these kinds):
+  - `level_rules::LevelSingletonRegistration`: a plugin's component a level
+    holds at most one of (the foliage plugin's global wind); the rules
+    (add, copy, enable, load repair) treat it as the sky.
+  - `AnimatedContentRegistration` for water and for foliage in a wind (one
+    registration per component the answer reads).
+  - `HelioRenderer::debug_pass::<T>()` (read-only diagnostics) replaced
+    `debug_water_sim_texture`.
+  - `environment_join` keeps the atmospheres and runs every plugin's join;
+    `ensure_gpu_mirror` still registers physics' water hitbox columns
+    (physics is the engine's), whose layout and buffer are water's api's.
+- **Component methods**: these kinds have no editor operation besides
+  property edits, which go through their reflected properties' accessors
+  (the same setters scripts call); the World Settings fog, post-process,
+  water and wind panels and the terrain panel's foliage stay in
+  `ui_level_editor` and act through the plugins' component crates.
+- **Examples and tests moved**: volumetric_fog_demo (fog);
+  indoor_cathedral_pp_volumes (post); indoor_cathedral_water, oil_rig_night
+  (water); foliage_demo (foliage). Helio examples that used the kinds in
+  passing dropped the use (the cathedral incense fog, resolution_bench's
+  `--global-fog`/`--pp-fog`/`--water`, the VR gallery's water bay and fog
+  volume, vg_stress's haze and temple volume, graph_cost's `content`
+  scene); `cathedral_volumetric_fog_demo` is `monumental_arch_hlfs` now.
+  engine_backend's environment join test kept its atmosphere case; its fog
+  and post, water, and foliage cases moved to the plugins' component crates.
+- Left, with why:
+  - `row_join.wgsl` still holds water's placements (`SUN`, `WIND`, the world
+    phase at water's row offsets) beside the particles' `POOL_RANGE`: the
+    step after this is each kind bringing its placement as a snippet.
+  - The post settings contract (`GpuPostProcessUniforms`) keeps its fog
+    block, which only the fog plugin reads: splitting it changes the ABI
+    and every post-volume row, and belongs with the post plugin's next step.
+  - `FocusedTimingGroup::VolumetricFog` (helio-core's diagnostic timing
+    view) still classifies `VolumetricFogPass` by name, as it does HLFS and
+    SSR; it adds no work and no API to act on fog.
+  - `helio::renderer::settings` tests `default_settings_are_the_default_config`
+    and `every_choice_maps` fail on p7 too: `with_settings` inserts the
+    `ShadowSettings` feature value (Phase A4).
+- **Verified** (against p7 builds of Helio `06198ade` / Pulsar `b0d82a4f2`):
+  - Pulsar's `plugin_pass_lists` (now also asserting VolumetricFogPass,
+    FogComposite, PostProcessVolumeBlendPass, WaterSim, WaterTransmission,
+    FoliagePlace and FoliageGBuffer in the engine's deferred preset) dumps a
+    snapshot byte-identical to p7's (3792 lines).
+  - voxel_craft (alternating p7/p8 runs, 4 poses x 16-frame bursts, twice):
+    the `[RenderGraph]` dump is identical (30 scheduled, 23 dormant, same
+    passes, reads and writes; only the build time differs); settled-frame
+    differences p7-p8 (mean |d| 0.04-0.65 levels, pose means within 0.17)
+    sit within p7-p7 and p8-p8 noise (0.07-0.69, within 0.15); flicker
+    statistics are equal.
+  - volumetric_fog_demo `--probe` (fog with the post plugin) is bit-identical
+    to p7. indoor_cathedral (Helio): p7-p8 mean |d| 0.04-0.24 against p7-p7
+    0.23. indoor_cathedral_water: p7-p8 0.16-0.39 against p7-p7 1.02 (its
+    candles flicker on wall-clock time). water_world shoreline: frames
+    differ by the waves' wall-clock phase in every pair (p7-p7 4.7, p8-p8
+    6.9, p7-p8 5.7-8.4) with equal means (88.6-89.0).
+  - Layer gate 0; `cargo check --workspace --all-targets` clean in both
+    repos.
+  - Tests from Pulsar pass: the plugins' component and editor crates (their
+    row, registration and join tests, the joins' GPU tests moved from
+    engine_backend), the moved feature crates' unit and GPU tests,
+    engine_backend's lib, environment join and bloom toggle tests,
+    helio_component, pulsar_physics, the lens and flare, and the voxel
+    feature's presets and clouds. Fog's GPU tests needed the adapter's limits
+    (their inject stage binds nine storage buffers; they failed the same way
+    in the Helio repo). Not passing, each unchanged by this batch:
+    water's `gpu_caustics` (it builds its own pipeline layout without the
+    slice uniform the caustics shader binds since before p7), the voxel
+    `foliage_grows_on_the_voxel_ground` (known since Phase A; it hung once
+    here) and the voxel `chunk_pass_builds_settles_and_resizes_in_the_deferred_graph`
+    ("a settled still view asked for frame 0"; it fails the same way on
+    p7). Run in parallel, voxel_pass_graph's GPU-heavy cases also lost the
+    device; single-threaded they pass.
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,

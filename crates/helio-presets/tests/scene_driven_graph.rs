@@ -1,4 +1,4 @@
-//! The default graph follows the scene: in a mesh room with no water or
+//! The default graph follows the scene: in a mesh room with no
 //! billboards and no debug mode, those passes are dormant (no prepare, no
 //! execute, no content resources). Each joins when its content appears: a
 //! debug line, a debug view, a billboard row in a column the host registered
@@ -15,7 +15,6 @@ use helio_components::{MaterialComponent, MeshComponent, StaticObjectComponent};
 
 /// Passes that need scene content or a debug mode the room does not have.
 const CONTENT_PASSES: &[&str] = &[
-    "WaterSim",
     "Billboard",
     "BufferView",
     "DebugDraw",
@@ -119,11 +118,7 @@ fn passes_join_with_their_content_and_resize_keeps_them() {
     let errors = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let mut scene = scene_db(&device, &queue);
     floor(&mut scene.world);
-    let mut config = RendererConfig::new(64, 48, wgpu::TextureFormat::Rgba8UnormSrgb);
-    config
-        .features
-        .edit::<helio_pass_foliage_place::FoliageSettings>()
-        .enabled = false;
+    let config = RendererConfig::new(64, 48, wgpu::TextureFormat::Rgba8UnormSrgb);
     let mut renderer =
         RendererBuilder::new(config.clone(), scene.world.gpu_mirror().cloned().unwrap())
             .with_pass_build_context(Box::new(helio_presets::deferred))

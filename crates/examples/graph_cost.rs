@@ -1,11 +1,13 @@
 //! What the default graph costs a scene: CPU per frame, GPU memory and
 //! resize time, headless.
 //!
-//! `graph_cost <out dir> [room|content] [width height]`
+//! `graph_cost <out dir> [room] [width height]`
 //!
 //! - `room`: `indoor_room`'s scene (a furnished room, three point lights).
-//! - `content`: the room plus a water volume (particles and decals are
-//!   plugins' kinds now; their own examples measure them).
+//!
+//! The `content` scene (the room plus water, particles and decals) is gone:
+//! those kinds left Helio with their plugins (Pulsar `plugins/vendor/<kind>`),
+//! whose own examples measure them.
 //!
 //! Renders 120 frames to settle, times `Renderer::render` over 300 more
 //! (waiting for the GPU between frames, outside the timing), writes every
@@ -23,7 +25,7 @@ use helio::{required_wgpu_features, required_wgpu_limits, Camera, RendererConfig
 use v3_demo_common::{
     box_mesh, build_default_renderer, flush_scene_db, make_material, new_scene_db_with_gpu_mirror,
     plane_mesh, point_light, spawn_light, spawn_material, spawn_mesh,
-    spawn_object, spawn_water_volume, WaterVolumeDescriptor,
+    spawn_object,
 };
 
 fn room(world: &mut pulsar_scenedb::World) {
@@ -86,19 +88,6 @@ fn room(world: &mut pulsar_scenedb::World) {
     );
 }
 
-/// Water in the room.
-fn content(world: &mut pulsar_scenedb::World) {
-    spawn_water_volume(
-        world,
-        WaterVolumeDescriptor {
-            bounds_min: [-3.0, 0.0, -3.0],
-            bounds_max: [3.0, 0.4, 3.0],
-            surface_height: 0.4,
-            ..Default::default()
-        },
-    );
-}
-
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     sorted[((sorted.len() - 1) as f64 * p).round() as usize]
 }
@@ -131,9 +120,6 @@ fn main() {
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
     let mut scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
     room(&mut scene_db.world);
-    if scene_name == "content" {
-        content(&mut scene_db.world);
-    }
     let config = RendererConfig::new(width, height, format);
     let mut renderer = build_default_renderer(&scene_db, device.clone(), queue.clone(), config);
     renderer.set_feature_live(helio::AmbientLight {

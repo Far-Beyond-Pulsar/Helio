@@ -49,14 +49,29 @@ struct TransparentGlobals {
     _pad2: u32,
 }
 
+/// `names` as a `'static` slice, one per distinct list (a graph's passes
+/// declare `'static` lists; this pass's depend on what it was built over).
+fn static_names(names: &[&'static str]) -> &'static [&'static str] {
+    static LISTS: OnceLock<std::sync::Mutex<Vec<&'static [&'static str]>>> = OnceLock::new();
+    let mut lists = LISTS.get_or_init(Default::default).lock().unwrap();
+    if let Some(list) = lists.iter().find(|list| **list == names) {
+        return list;
+    }
+    let list: &'static [&'static str] = Box::leak(names.to_vec().into_boxed_slice());
+    lists.push(list);
+    list
+}
+
 pub struct TransparentPass {
-    fogged_target: bool,
-    fog_layout: wgpu::BindGroupLayout,
-    fog_group: Option<wgpu::BindGroup>,
-    fog_key: Option<(wgpu::TextureView, wgpu::Buffer)>,
-    fog_fallback: wgpu::TextureView,
-    fog_fallback_parameters: wgpu::Buffer,
-    fog_sampler: wgpu::Sampler,
+    /// The frame's integrated medium (`helio_frame_api::media`), when a
+    /// media feature published one.
+    media: Option<helio_frame_api::media::MediaResources>,
+    medium_layout: wgpu::BindGroupLayout,
+    medium_group: Option<wgpu::BindGroup>,
+    medium_key: Option<(wgpu::TextureView, wgpu::Buffer)>,
+    medium_fallback: wgpu::TextureView,
+    medium_fallback_parameters: wgpu::Buffer,
+    medium_sampler: wgpu::Sampler,
     pipelines: HashMap<RadiantShaderKey, wgpu::RenderPipeline>,
     shader_cache: RadiantShaderCache,
     /// This pass's own class-0 override (the transparent base — never
@@ -87,7 +102,10 @@ pub struct TransparentPass {
     )>,
     globals_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
-    pre_aa_target: bool,
+    /// The scene colour image this pass draws over (`None`: the target the
+    /// graph hands it), and the image that one may be a view of.
+    color_target: Option<&'static str>,
+    color_alias: Option<&'static str>,
     reactive_mask: bool,
     timing_query: Option<wgpu::QuerySet>,
     draw_slots: helio_pass_gbuffer::DrawSlots,
@@ -229,7 +247,7 @@ impl TransparentPass {
             ],
         });
 
-        let fog_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let medium_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Transparent medium BGL"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -260,7 +278,7 @@ impl TransparentPass {
                 },
             ],
         });
-        let fog_fallback = device
+        let medium_fallback = device
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("Transparent neutral medium"),
                 size: wgpu::Extent3d {
@@ -276,13 +294,13 @@ impl TransparentPass {
                 view_formats: &[],
             })
             .create_view(&Default::default());
-        let fog_fallback_parameters = device.create_buffer(&wgpu::BufferDescriptor {
+        let medium_fallback_parameters = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Transparent neutral medium parameters"),
             size: 64,
             usage: wgpu::BufferUsages::UNIFORM,
             mapped_at_creation: false,
         });
-        let fog_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        let medium_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Transparent medium sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
@@ -290,7 +308,7 @@ impl TransparentPass {
         });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Transparent PL"),
-            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&fog_layout)],
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&medium_layout)],
             immediate_size: 0,
         });
 
@@ -323,13 +341,13 @@ impl TransparentPass {
         };
 
         Self {
-            fogged_target: false,
-            fog_layout,
-            fog_group: None,
-            fog_key: None,
-            fog_fallback,
-            fog_fallback_parameters,
-            fog_sampler,
+            media: None,
+            medium_layout,
+            medium_group: None,
+            medium_key: None,
+            medium_fallback,
+            medium_fallback_parameters,
+            medium_sampler,
             pipelines: HashMap::new(),
             shader_cache: RadiantShaderCache::new(),
             local_class0,
@@ -344,7 +362,8 @@ impl TransparentPass {
             bind_group_1_key: None,
             globals_buf,
             surface_format,
-            pre_aa_target: false,
+            color_target: None,
+            color_alias: None,
             reactive_mask: false,
             timing_query: None,
             draw_slots: Default::default(),
@@ -353,15 +372,23 @@ impl TransparentPass {
 
     /// Blend into the graph's linear lighting target before tonemapping.
     /// `surface_format` supplied to `new` must match that lighting target.
-    pub fn with_pre_aa_target(mut self) -> Self {
-        self.pre_aa_target = true;
+    pub fn with_pre_aa_target(self) -> Self {
+        self.with_color_target(helio_frame_api::color::SCENE_COLOR, None)
+    }
+
+    /// Blend into the scene colour image `target` (the colour chain's
+    /// current), which may be a view of `alias`
+    /// (`helio_frame_api::color::alias`).
+    pub fn with_color_target(mut self, target: &'static str, alias: Option<&'static str>) -> Self {
+        self.color_target = Some(target);
+        self.color_alias = alias;
         self
     }
 
-    /// Composite each fragment at its own depth over already fogged opaque HDR.
-    pub fn with_fogged_target(mut self) -> Self {
-        self.pre_aa_target = true;
-        self.fogged_target = true;
+    /// Composite each fragment through `media` at its own depth (over a
+    /// scene colour the media were already composited into).
+    pub fn with_media(mut self, media: Option<helio_frame_api::media::MediaResources>) -> Self {
+        self.media = media;
         self
     }
 
@@ -407,54 +434,24 @@ impl RenderPass for TransparentPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        if self.fogged_target {
-            return &[
-                "fogged_hdr",
-                "fog_accum",
-                "fog_parameters",
-                "depth",
-                "cluster_light_grid",
-                "object_batch",
-                "culled_batch",
-            ];
+        // The scene colour drawn over and the medium are named when the pass
+        // is built, so declared once per distinct list.
+        let mut reads = Vec::with_capacity(7);
+        reads.extend(self.color_target);
+        if let Some(media) = self.media {
+            reads.extend([media.grid, media.parameters]);
         }
-        if self.pre_aa_target {
-            return &[
-                "pre_aa",
-                "depth",
-                "cluster_light_grid",
-                "object_batch",
-                "culled_batch",
-            ];
-        }
-        &[
-            "depth",
-            "cluster_light_grid",
-            "object_batch",
-            "culled_batch",
-        ]
+        reads.extend(["depth", "cluster_light_grid", "object_batch", "culled_batch"]);
+        static_names(&reads)
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        if self.fogged_target {
-            return if self.reactive_mask {
-                &["fogged_hdr", "transparency_reactivity"]
-            } else {
-                &["fogged_hdr"]
-            };
-        }
+        let mut writes = Vec::with_capacity(2);
+        writes.extend(self.color_target);
         if self.reactive_mask {
-            return if self.pre_aa_target {
-                &["pre_aa", "transparency_reactivity"]
-            } else {
-                &["transparency_reactivity"]
-            };
+            writes.push("transparency_reactivity");
         }
-        if self.pre_aa_target {
-            &["pre_aa"]
-        } else {
-            &[]
-        }
+        static_names(&writes)
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -465,21 +462,16 @@ impl RenderPass for TransparentPass {
                 helio_core::graph::ResourceSize::MatchSurface,
             );
         }
-        if self.pre_aa_target {
-            builder.read(if self.fogged_target {
-                "fogged_hdr"
-            } else {
-                "pre_aa"
-            });
+        if let Some(target) = self.color_target {
+            builder.read(target);
         }
-        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
-        // possible), so this pass may draw into pre_aa; keep it alive.
-        if self.pre_aa_target && self.fogged_target {
-            builder.read("pre_aa");
+        // The scene colour may be a view of an earlier image; keep it alive.
+        if let (Some(_), Some(alias)) = (self.color_target, self.color_alias) {
+            builder.read(alias);
         }
-        if self.fogged_target {
-            builder.read("fog_accum");
-            builder.read("fog_parameters");
+        if let Some(media) = self.media {
+            builder.read(media.grid);
+            builder.read(media.parameters);
         }
         builder.read("depth");
         builder.read("cluster_light_grid");
@@ -528,15 +520,9 @@ impl RenderPass for TransparentPass {
         resources: &'a helio_core::ResourceRegistry<'a>,
         storage: &'a mut helio_core::RenderFrameStorage,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let pre_aa = if self.pre_aa_target {
-            resources.get(helio_core::ResourceKey::new(if self.fogged_target {
-                "fogged_hdr"
-            } else {
-                "pre_aa"
-            }))
-        } else {
-            None
-        };
+        let pre_aa = self
+            .color_target
+            .and_then(|target| resources.get(helio_core::ResourceKey::new(target)));
         let target = pre_aa.unwrap_or(target);
         let mut attachments = vec![Some(wgpu::RenderPassColorAttachment {
             view: target,
@@ -750,37 +736,43 @@ impl RenderPass for TransparentPass {
             self.bind_group_key = Some(bg0_key);
         }
 
-        // Fog data belongs to its producer; retain only borrowed GPU handles in
-        // this derived binding cache. Missing producers use a zero-range bypass.
-        let fog_view = ctx
-            .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("fog_accum"))
-            .unwrap_or(&self.fog_fallback);
-        let fog_parameters = ctx
-            .registry
-            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("fog_parameters"))
-            .unwrap_or(&self.fog_fallback_parameters);
-        let fog_key = (fog_view.clone(), fog_parameters.clone());
-        if self.fog_key.as_ref() != Some(&fog_key) {
-            self.fog_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        // The medium belongs to its producer; retain only borrowed GPU handles
+        // in this derived binding cache. Without one, a zero-range bypass.
+        let medium_view = self
+            .media
+            .and_then(|media| {
+                ctx.registry
+                    .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(media.grid))
+            })
+            .unwrap_or(&self.medium_fallback);
+        let medium_parameters = self
+            .media
+            .and_then(|media| {
+                ctx.registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(media.parameters))
+            })
+            .unwrap_or(&self.medium_fallback_parameters);
+        let medium_key = (medium_view.clone(), medium_parameters.clone());
+        if self.medium_key.as_ref() != Some(&medium_key) {
+            self.medium_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Transparent medium"),
-                layout: &self.fog_layout,
+                layout: &self.medium_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(fog_view),
+                        resource: wgpu::BindingResource::TextureView(medium_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.fog_sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.medium_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: fog_parameters.as_entire_binding(),
+                        resource: medium_parameters.as_entire_binding(),
                     },
                 ],
             }));
-            self.fog_key = Some(fog_key);
+            self.medium_key = Some(medium_key);
         }
         let slots = self
             .draw_slots
@@ -795,7 +787,7 @@ impl RenderPass for TransparentPass {
         let mut rp = ctx.render_cmds().unwrap();
         rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         rp.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
-        rp.set_bind_group(2, self.fog_group.as_ref().unwrap(), &[]);
+        rp.set_bind_group(2, self.medium_group.as_ref().unwrap(), &[]);
         rp.set_vertex_buffer(0, vertices.slice(..));
         rp.set_vertex_buffer(1, slots.slice(..));
         rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);

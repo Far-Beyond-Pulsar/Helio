@@ -30,8 +30,6 @@ use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_debug_overlay::DebugOverlayPass;
 use helio_pass_deferred_light::DeferredLightPass;
-use helio_pass_foliage_gbuffer::FoliageGBufferPass;
-use helio_pass_foliage_place::FoliagePlacePass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_gi::{GiMeshTracePass, GiPass, GiResolvePass};
 use helio_pass_hiz::HiZBuildPass;
@@ -44,7 +42,6 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
-use helio_pass_post_volumes::PostProcessVolumeBlendPass;
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
@@ -52,8 +49,6 @@ use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_sky::{AtmosphereCompositePass, AtmospherePass, CloudTracePass};
 use helio_pass_ssr::SsrPass;
 use helio_pass_tsr::TsrPass;
-use helio_pass_volumetric_fog::{FogCompositePass, VolumetricFogPass};
-use helio_pass_water_sim::{WaterSimPass, WaterTransmissionPass};
 use helio_spine::BackgroundPass;
 
 /// Which of this crate's passes shader hot reload may swap on their own
@@ -67,8 +62,6 @@ use helio_spine::BackgroundPass;
 /// * shadows: `ShadowMatrixPass` + `ShadowDirtyPass` (dirty-flag buffer),
 ///   `ShadowDirtyPass` + `ShadowPass` (face dirty and geometry count buffers)
 /// * `HiZBuildPass` + `OcclusionCullPass` (Hi-Z sampler)
-/// * `FoliagePlacePass` + `FoliageGBufferPass` (blade arena, tile table,
-///   visible blades, indirect buffer)
 /// * every perf-overlay pass (one shared `PerfOverlayShared`)
 ///
 /// Everything else listed as independent takes only renderer-owned handles
@@ -103,13 +96,8 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<DeferredLightPass>()
         .independent::<HlfsPass>()
         .independent::<BillboardPass>()
-        .independent::<WaterSimPass>()
-        .independent::<WaterTransmissionPass>()
         .independent::<helio::DebugDrawPass>()
         .independent::<DebugOverlayPass>()
-        .independent::<PostProcessVolumeBlendPass>()
-        .independent::<VolumetricFogPass>()
-        .independent::<FogCompositePass>()
         .independent::<TsrPass>()
         .independent::<FxaaPass>()
         .independent::<PostProcessPass>()
@@ -119,7 +107,6 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
             name::<ShadowPass>(),
         ])
         .group_types(&[name::<HiZBuildPass>(), name::<OcclusionCullPass>()])
-        .group_types(&[name::<FoliagePlacePass>(), name::<FoliageGBufferPass>()])
         .group_types(&[
             name::<PerfOverlayAnalyzerPass>(),
             name::<PerfOverlayCostAnalyzerPass>(),
@@ -142,19 +129,14 @@ pub(crate) fn convert_perf_mode(
 }
 
 /// A renderer config with a host's [`helio::helio_settings::RENDERER`]
-/// values: the renderer's own, and the default features' settings
-/// (foliage). Engines build their config with this rather than
+/// values: the renderer's own, and the default features' settings (GI).
+/// Engines build their config with this rather than
 /// `RendererConfig::with_settings`, which knows no feature.
 pub fn config_with_host_settings(
     config: RendererConfig,
     settings: &helio::helio_settings::Resolved,
 ) -> RendererConfig {
     let mut config = config.with_settings(settings);
-    let foliage = config
-        .features
-        .get_or_default::<helio_pass_foliage_place::FoliageSettings>()
-        .with_host_settings(settings);
-    config.features.insert(foliage);
     config
         .features
         .edit::<helio_pass_gi::GiSettings>()

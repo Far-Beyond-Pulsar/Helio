@@ -371,6 +371,7 @@ pub struct TsrPass {
     active_xr_right: bool,
     xr_mode: bool,
     color_input: &'static str,
+    color_alias: Option<&'static str>,
     intermediate_output: bool,
     timing_query: Option<wgpu::QuerySet>,
     // ── Resolve ───────────────────────────────────────────────────────────────
@@ -446,6 +447,13 @@ impl TsrPass {
         if let Some(right) = &mut self.xr_right {
             right.color_input = key;
         }
+        self
+    }
+
+    /// The image the colour input may be a view of
+    /// (`helio_frame_api::color::alias`), read too so it stays alive.
+    pub fn with_color_alias(mut self, alias: Option<&'static str>) -> Self {
+        self.color_alias = alias;
         self
     }
     /// Publish the HDR resolve for post-processing without a redundant surface blit.
@@ -728,6 +736,7 @@ impl TsrPass {
             active_xr_right: false,
             xr_mode: false,
             color_input: "pre_aa",
+            color_alias: None,
             intermediate_output: false,
             timing_query: None,
             pipeline,
@@ -1233,10 +1242,10 @@ impl RenderPass for TsrPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
-        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
-        // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == "fogged_hdr" {
-            builder.read("pre_aa");
+        // The input may be a view of an earlier image
+        // (`helio_frame_api::color::alias`); keep the pool from reusing it.
+        if let Some(alias) = self.color_alias {
+            builder.read(alias);
         }
         if self.transparency_reactivity {
             builder.read("transparency_reactivity");
@@ -1303,6 +1312,7 @@ impl RenderPass for TsrPass {
                     self.quality,
                 );
                 right.color_input = self.color_input;
+                right.color_alias = self.color_alias;
                 right.intermediate_output = self.intermediate_output;
                 right.transparency_reactivity = self.transparency_reactivity;
                 right.stochastic_mask = self.stochastic_mask;

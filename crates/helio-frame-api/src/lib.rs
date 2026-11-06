@@ -7,6 +7,8 @@
 //!   never a feature's nodes.
 //! - [`gbuffer`]: the G-buffer layout every GBuffer drawer writes.
 //! - [`color`]: the scene colour chain post features read and advance.
+//! - [`media`]: the participating medium integrated along view rays, for
+//!   what composites at its own depth.
 //! - [`lighting`]: the inputs a lighting model reads, as generic contracts
 //!   with stand-ins: indirect diffuse and specular, the sun's visibility,
 //!   transmission, the sky, the light list, view remaps.
@@ -19,6 +21,7 @@ pub mod color;
 pub mod gbuffer;
 mod host;
 pub mod lighting;
+pub mod media;
 mod phase;
 
 pub use host::{host_input, host_kind, HOST_INPUTS};

@@ -11,6 +11,7 @@
 //! | [`TRANSMISSION`] | rgba16f, internal res | water caustics | nothing added |
 //! | [`sky`] | atmosphere frame + sky table | the atmosphere | no atmosphere |
 //! | [`LIGHT_LIST`] | SceneDB rows | lights | no lights |
+//! | [`DIRECTIONAL_LIGHT`] | SceneDB row, direction toward it | lights | none |
 //! | [`VIEW_REMAPS`] | SceneDB `mat4` per chain + G-buffer tag | portals | no remap |
 //!
 //! A lighting model (deferred, forward, HLFS) binds every contract it uses,
@@ -82,6 +83,11 @@ pub const TRANSMISSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16
 /// The scene's lights: SceneDB rows (`GpuLight`), whatever kinds of light
 /// the lights publish.
 pub const LIGHT_LIST: &str = "scene_lights";
+
+/// The lights' directional light (the sun of what reads one: water, media):
+/// one SceneDB row, a `vec4<f32>`, the unit direction toward the light and
+/// 1, published with the light list. Zero, or absent: no directional light.
+pub const DIRECTIONAL_LIGHT: &str = "directional_light";
 
 /// View remaps: per chain, the matrix taking a point of the host world into
 /// the world the pixels of that chain show (portals). SceneDB buffer of 256

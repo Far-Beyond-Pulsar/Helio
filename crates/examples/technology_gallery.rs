@@ -1,4 +1,6 @@
 //! Dense local-light laboratory for glossy surfaces and reflection validation.
+//! Its light camera fog left Helio with the fog plugin (Pulsar
+//! `plugins/vendor/fog`); this scene no longer has any.
 use crate::{architectural_mesh::Mesh, v3_demo_common::*};
 use glam::{Mat4, Vec3};
 use helio::{Camera};
@@ -19,11 +21,6 @@ pub fn camera(t: f32, aspect: f32) -> Camera {
 }
 
 pub fn populate(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    let mut settings = helio_pass_postprocess::PostProcessSettings::default();
-    settings.fog_enabled = std::env::var_os("HLFS_NO_FOG").is_none();
-    settings.fog_density = 0.0005;
-    settings.fog_max_distance = 120.0;
-    set_camera_postprocess(world, 0, &settings);
     let mut meshes: Vec<Mesh> = (0..8).map(|_| Mesh::default()).collect();
     // Dark polished floor, architectural shell, and segmented ceiling.
     meshes[0].block([0.0, -0.15, 0.0], [24.0, 0.15, 34.0]);

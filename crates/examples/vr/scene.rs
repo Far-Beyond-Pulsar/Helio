@@ -2,9 +2,11 @@
 //!
 //! The corridor runs down −Z from the stage origin, divided into bays. Each bay
 //! demonstrates one thing the renderer does — so walking its length is a tour
-//! of the engine: PBR materials, spot lights, volumetric fog,
-//! water simulation, emissive/HDR colour,
-//! and post-process colour grading.
+//! of the engine: PBR materials, spot lights, lens flare and light shafts,
+//! emissive/HDR colour.
+//! Fog, water and post-process volumes left Helio with their plugins (Pulsar
+//! `plugins/vendor/fog`, `plugins/vendor/water`, `plugins/vendor/post`): bay 2
+//! has no fog volume, bay 3's pool no water and bay 7 no grading volume.
 //!
 //! # Why it is built the way it is
 //!
@@ -35,14 +37,11 @@ use glam::{Mat4, Quat, Vec3};
 use helio::{GpuLight, LightType, Renderer};
 use helio_mesh_api::{MeshUpload};
 use helio_asset_compat::{load_scene_bytes_with_config, LoadConfig};
-use helio_pass_postprocess::{PostProcessSettings, PostProcessVolumeDescriptor};
-use helio_pass_water_sim::WaterSimPass;
 use pulsar_scenedb::{Entity, World};
 
 use crate::v3_demo_common::{
     box_mesh, cube_mesh, make_material, point_light, spawn_light, spawn_material, spawn_mesh,
-    spawn_object, spawn_post_process_volume, spawn_sky, spawn_water_volume, sphere_mesh,
-    spot_light, update_light, update_object_transform, WaterVolumeDescriptor,
+    spawn_object, spawn_sky, sphere_mesh, spot_light, update_light, update_object_transform,
 };
 
 /// Interior half-width of the corridor, in metres.
@@ -69,9 +68,8 @@ pub struct Animated {
     /// Cubes attached to the player's left and right controllers. `None`
     /// only if the corresponding `spawn_object` call failed.
     pub hand_cubes: [Option<Entity>; 2],
-    /// Water-bay orb: (object, rest position, pool x/z centre). It dips into the pool
-    /// and splashes (`WaterSimPass::add_drop`) on every impact.
-    pub water_orb: Option<(Entity, Vec3, [f32; 2])>,
+    /// Pool-bay orb: (object, rest position). It dips into the pool.
+    pub pool_orb: Option<(Entity, Vec3)>,
     /// Hue-cycling accent lights (emissive / light-count bay).
     pub colour_lights: Vec<(Entity, Vec3, [f32; 3], f32)>,
 }
@@ -252,9 +250,8 @@ fn bay_spotlights(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
     }
 }
 
-/// Bay 2 — a bright flare light (ghost lens flare) plus a fog volume lit by a
-/// god-ray overhead light, so the corridor fills with visible volumetric shafts.
-fn bay_flare_fog(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
+/// Bay 2 — a bright flare light (ghost lens flare) plus a god-ray overhead light.
+fn bay_flare(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
     spawn_light(
         world,
         GpuLight {
@@ -280,26 +277,6 @@ fn bay_flare_fog(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
     shaft.god_rays_enabled = 1;
     spawn_light(world, shaft);
 
-    spawn_post_process_volume(
-        world,
-        PostProcessVolumeDescriptor {
-            bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
-            bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
-            priority: 10.0,
-            blend_radius: 1.5,
-            blend_weight: 1.0,
-            unbound: false,
-            settings: PostProcessSettings {
-                fog_enabled: true,
-                fog_density: 0.08,
-                fog_color: [0.7, 0.76, 0.92],
-                fog_scattering_anisotropy: 0.6,
-                ..PostProcessSettings::default()
-            },
-            ..Default::default()
-        },
-    );
-
     place(
         world,
         meshes.cube,
@@ -309,16 +286,8 @@ fn bay_flare_fog(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats) {
     );
 }
 
-/// Bay 3 — water simulation: a raised pool with a sphere that bobs in and out
-/// of the surface, splashing `WaterSimPass` ripples on every dip.
-fn bay_water(
-    world: &mut World,
-    renderer: &mut Renderer,
-    z: f32,
-    meshes: &Meshes,
-    mats: &Mats,
-    anim: &mut Animated,
-) {
+/// Bay 3 — a raised pool with a sphere that bobs in and out of it.
+fn bay_pool(world: &mut World, z: f32, meshes: &Meshes, mats: &Mats, anim: &mut Animated) {
     let pool_centre = Vec3::new(-1.5, 0.45, z);
     let pool_half = Vec3::new(0.95, 0.45, 3.4);
     let pool_mesh = insert_box_mesh(world, pool_half);
@@ -330,60 +299,6 @@ fn bay_water(
         pool_half.length(),
     );
 
-    // The water surface sits exactly on the pedestal top (y = 0.9).
-    // Wind/wave-scale dynamics are pass-owned runtime state, applied below
-    // via `WaterSimPass` (see `WaterVolumeDescriptor`'s own doc for why).
-    spawn_water_volume(
-        world,
-        WaterVolumeDescriptor {
-            bounds_min: [
-                pool_centre.x - pool_half.x + 0.05,
-                0.9,
-                pool_centre.z - pool_half.z + 0.05,
-            ],
-            bounds_max: [
-                pool_centre.x + pool_half.x - 0.05,
-                1.8,
-                pool_centre.z + pool_half.z - 0.05,
-            ],
-            surface_height: 0.0,
-            wave_amplitude: 0.15,
-            wave_frequency: 0.5,
-            wave_speed: 6.0,
-            wave_direction: [0.6, 0.3],
-            wave_steepness: 0.5,
-            water_color: [0.03, 0.25, 0.4],
-            extinction: [0.2, 0.08, 0.05],
-            foam_threshold: 0.5,
-            foam_amount: 0.6,
-            reflection_strength: 0.9,
-            refraction_strength: 1.0,
-            fresnel_power: 5.0,
-            caustics_enabled: true,
-            caustics_intensity: 1.5,
-            caustics_scale: 6.0,
-            caustics_speed: 0.0,
-            fog_density: 0.0,
-            god_rays_intensity: 0.3,
-            ssr_enabled: true,
-            ssr_steps: 32,
-            ssr_step_size: 0.05,
-            ssr_thickness: 0.02,
-            ior: 1.333,
-            fresnel_min: 0.1,
-            density: 0.03,
-            shadow_rim: 1.0,
-            shadow_hitbox: 0.0,
-            shadow_ao: 1.0,
-            sun_direction: [0.0, 1.0, 0.0],
-        },
-    );
-    if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
-        sim.set_wind([0.6, 0.4], 1.5);
-        sim.set_wave_scale(0.4);
-        sim.set_sim_dynamics(1.2, 0.98);
-    }
-
     let orb_rest = pool_centre + Vec3::new(0.0, 0.55, 0.0);
     if let Ok(id) = spawn_object(
         world,
@@ -392,7 +307,7 @@ fn bay_water(
         Mat4::from_translation(orb_rest),
         0.3,
     ) {
-        anim.water_orb = Some((id, orb_rest, [pool_centre.x, pool_centre.z]));
+        anim.pool_orb = Some((id, orb_rest));
     }
 }
 
@@ -570,37 +485,8 @@ fn bay_emissive_colour(
     );
 }
 
-/// Bay 7 — post-process colour grading: a warm vignette + saturation + bloom
-/// volume over the whole bay, anchored on a blindingly bright emissive sun.
-fn bay_colour_grade(world: &mut World, z: f32, meshes: &Meshes) {
-    spawn_post_process_volume(
-        world,
-        PostProcessVolumeDescriptor {
-            bounds_min: [-HALL_HALF_WIDTH, 0.0, z - BAY_LENGTH * 0.5],
-            bounds_max: [HALL_HALF_WIDTH, HALL_HEIGHT, z + BAY_LENGTH * 0.5],
-            priority: 10.0,
-            blend_radius: 2.0,
-            blend_weight: 1.0,
-            unbound: false,
-            settings: PostProcessSettings {
-                vignette_intensity: 0.5,
-                vignette_smoothness: 2.0,
-                vignette_roundness: 1.2,
-                vignette_color: [1.0, 0.6, 0.2],
-                vignette_enabled: true,
-                color_saturation: [1.2, 1.05, 0.85],
-                color_contrast: [1.05, 1.05, 1.05],
-                bloom_intensity: 0.7,
-                bloom_threshold: 1.2,
-                bloom_knee: 0.5,
-                bloom_enabled: true,
-                bloom_tint: [1.0, 0.9, 0.7],
-                ..PostProcessSettings::default()
-            },
-            ..Default::default()
-        },
-    );
-
+/// Bay 7 — a blindingly bright emissive sun.
+fn bay_bright_sun(world: &mut World, z: f32, meshes: &Meshes) {
     let sun_mat = spawn_material(
         world,
         make_material([1.0, 0.9, 0.7, 1.0], 0.2, 0.0, [50.0, 45.0, 35.0], 50.0),
@@ -614,7 +500,7 @@ fn bay_colour_grade(world: &mut World, z: f32, meshes: &Meshes) {
 
 // ── Build ─────────────────────────────────────────────────────────────────────
 
-pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
+pub fn build(world: &mut World) -> Animated {
     // ── Materials ────────────────────────────────────────────────────────────
     // Deliberately spread across the roughness/metallic space: a showcase that is all
     // mid-roughness dielectric demonstrates almost nothing about the BRDF. The mirror and
@@ -836,7 +722,7 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
         bobbers: Vec::new(),
         pulse_lights: Vec::new(),
         hand_cubes,
-        water_orb: None,
+        pool_orb: None,
         colour_lights: Vec::new(),
     };
 
@@ -845,12 +731,12 @@ pub fn build(world: &mut World, renderer: &mut Renderer) -> Animated {
         match bay {
             0 => bay_materials(world, z, &meshes, &mats, &mut anim),
             1 => bay_spotlights(world, z, &meshes, &mats),
-            2 => bay_flare_fog(world, z, &meshes, &mats),
-            3 => bay_water(world, renderer, z, &meshes, &mats, &mut anim),
+            2 => bay_flare(world, z, &meshes, &mats),
+            3 => bay_pool(world, z, &meshes, &mats, &mut anim),
             4 => bay_plinth(world, z, &meshes, &mats),
             5 => bay_instancing(world, z, &mats),
             6 => bay_emissive_colour(world, z, &meshes, &mats, &mut anim),
-            7 => bay_colour_grade(world, z, &meshes),
+            7 => bay_bright_sun(world, z, &meshes),
             _ => unreachable!(),
         }
     }
@@ -925,8 +811,8 @@ pub fn animate(world: &mut World, renderer: &mut Renderer, animated: &mut Animat
         );
     }
 
-    // Water orb: bob up and down, splashing ripples when it pierces the surface.
-    if let Some((id, rest, pool_xz)) = &mut animated.water_orb {
+    // Pool orb: bob up and down, dipping into the pool.
+    if let Some((id, rest)) = &mut animated.pool_orb {
         let y = rest.y + (time * 1.4).sin() * 0.35;
         let _ = update_object_transform(
             world,
@@ -934,11 +820,6 @@ pub fn animate(world: &mut World, renderer: &mut Renderer, animated: &mut Animat
             *id,
             Mat4::from_translation(Vec3::new(rest.x, y, rest.z)),
         );
-        if y < 0.9 {
-            if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
-                sim.add_drop(pool_xz[0], pool_xz[1], 0.5, 0.9);
-            }
-        }
     }
 
     // Hue-cycle the emissive-bay lights, like the light-benchmark's colour sweep.

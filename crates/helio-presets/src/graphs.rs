@@ -28,7 +28,7 @@ use helio_frame_api::HOST_INPUTS;
 use crate::features;
 
 /// The config the editor's template and the pin probe use: the renderer's
-/// defaults (FXAA and foliage on, no screen-space or planar reflections).
+/// defaults (FXAA on, no screen-space or planar reflections).
 pub fn template_config() -> helio::RendererConfig {
     helio::RendererConfig::new(1920, 1080, wgpu::TextureFormat::Rgba8UnormSrgb)
 }

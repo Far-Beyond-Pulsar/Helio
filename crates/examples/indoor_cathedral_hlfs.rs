@@ -5,10 +5,11 @@
 //! Panes use alpha blending and cast coloured shadows: the raster path through
 //! the shadow transmittance layer, RT through thin-sheet RGB transmission.
 //! Refraction and caustics are not simulated.
-//! Both sizes default to one shadowed daylight sun plus interior lights, with an
-//! incense medium filling the nave so the sun forms coloured shafts through the
-//! windows (`HLFS_NO_FOG`, `HLFS_FOG_DENSITY`, `HLFS_FOG_MODE`, `HLFS_SUN` adjust it). Set
+//! Both sizes default to one shadowed daylight sun plus interior lights
+//! (`HLFS_SUN` adjusts it). Set
 //! `HLFS_LEGACY_CATHEDRAL_LIGHTS=1` for the multi-window transmission stress setup.
+//! Fog left Helio with its plugin (Pulsar `plugins/vendor/fog`); the nave no
+//! longer has its incense medium.
 //!
 //! HLFS uses hierarchical light culling, visibility-guided sampling and
 //! temporal/spatial filtering with a bounded shadow budget per shading pixel.
@@ -693,7 +694,6 @@ impl AppState {
 }
 
 fn populate_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    configure_cathedral_fog(world, false);
     spawn_indoor_cathedral_sky(world);
     cathedral_detail::populate(world);
     populate_cathedral_lights(world, false)
@@ -719,62 +719,6 @@ fn haze_light(mut light: helio::GpuLight) -> helio::GpuLight {
     light
 }
 
-/// Incense haze filling the interior: a local medium bounded by the walls,
-/// lit by the sun through the stained glass. Physical fog only scatters light
-/// that reaches it, so the shafts take the panes' colours and outlines.
-/// `HLFS_NO_FOG=1` removes it; `HLFS_FOG_DENSITY=<m⁻¹>` overrides extinction.
-fn configure_cathedral_fog(world: &mut World, large: bool) {
-    if std::env::var_os("HLFS_NO_FOG").is_some() {
-        return;
-    }
-    let (half_x, height, half_z, extinction, range) = if large {
-        (22.0, 46.0, 71.5, 0.018, 170.0)
-    } else {
-        (10.7, 21.0, 27.8, 0.03, 70.0)
-    };
-    let extinction = std::env::var("HLFS_FOG_DENSITY")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(extinction);
-    v3_demo_common::spawn_local_fog(
-        world,
-        [-half_x, 0.0, -half_z],
-        [half_x, height, half_z],
-        v3_demo_common::GlobalFogComponent {
-            // Drifting smoke under a height envelope: incense, not a flat haze.
-            mode: std::env::var("HLFS_FOG_MODE")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(2),
-            extinction,
-            albedo: [0.92, 0.90, 0.86],
-            // Forward-peaked, as smoke is: shafts brighten looking toward the sun.
-            anisotropy: 0.6,
-            // Denser low down, thinning toward the vault.
-            height: 0.0,
-            height_falloff: if large { 0.03 } else { 0.06 },
-            ..Default::default()
-        },
-        1.0,
-    );
-    let settings = v3_demo_common::set_volumetric_quality(world, 1, range);
-    if let Some(blend) = std::env::var("HLFS_FOG_BLEND")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    {
-        world.insert(
-            settings,
-            v3_demo_common::VolumetricFogSettingsComponent {
-                quality: 1,
-                max_distance: range,
-                light_max_distance: range,
-                temporal_blend: blend,
-                ..Default::default()
-            },
-        );
-    }
-}
-
 fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
     let mut camera = Camera::perspective_look_at(
         glam::Vec3::new(4.0 * t, 2.3, 67.0 - 29.0 * t),
@@ -789,7 +733,6 @@ fn large_cathedral_camera(t: f32, aspect: f32) -> Camera {
 }
 
 fn populate_large_cathedral(world: &mut World) -> (Vec<Entity>, Vec<Entity>) {
-    configure_cathedral_fog(world, true);
     spawn_indoor_cathedral_sky(world);
     cathedral_large::populate(world);
     populate_cathedral_lights(world, true)
