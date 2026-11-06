@@ -67,6 +67,15 @@ impl FeatureRegistrar<'_> {
         self.registry.add_scene_derivation(derivation);
     }
 
+    /// Declares `buffer`, a scene buffer of geometry the feature draws, as
+    /// geometry the scene's ray tracing does not see (a kind with no
+    /// acceleration-structure projection: foliage, voxel volumes). A ray
+    /// tracing projection refuses a scene that holds such rows rather than
+    /// silently tracing a scene without them (`Renderer::untraced_geometry`).
+    pub fn untraced_geometry(&mut self, buffer: &'static str) {
+        self.registry.add_untraced_geometry(buffer);
+    }
+
     /// Declares a pass type of the feature that shares no builder-created
     /// resource with another pass: shader hot reload swaps it alone instead
     /// of rebuilding the graph (see [`helio_core::SwapPolicy`]).

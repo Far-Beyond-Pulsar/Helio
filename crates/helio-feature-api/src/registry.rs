@@ -471,6 +471,7 @@ pub struct NodeRegistry {
     finishers: Vec<FinishFn>,
     scene_derivations: Vec<helio_core::SceneDerivationFactory>,
     swap_policy: helio_core::SwapPolicy,
+    untraced_geometry: Vec<&'static str>,
 }
 
 /// Pins of generated nodes by kind, shared by a registry and its clones so a
@@ -591,6 +592,20 @@ impl NodeRegistry {
     /// The scene derivations the features registered, in registration order.
     pub fn scene_derivations(&self) -> &[helio_core::SceneDerivationFactory] {
         &self.scene_derivations
+    }
+
+    /// Declares a scene buffer of drawn geometry that the scene's ray tracing
+    /// does not see (see [`crate::FeatureRegistrar::untraced_geometry`]).
+    pub fn add_untraced_geometry(&mut self, buffer: &'static str) {
+        if !self.untraced_geometry.contains(&buffer) {
+            self.untraced_geometry.push(buffer);
+        }
+    }
+
+    /// The scene buffers of drawn geometry the scene's ray tracing does not
+    /// see, as the features declared them.
+    pub fn untraced_geometry(&self) -> &[&'static str] {
+        &self.untraced_geometry
     }
 
     /// Declares what of the features' passes shader hot reload may swap

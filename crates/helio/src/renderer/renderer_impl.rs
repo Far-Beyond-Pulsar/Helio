@@ -559,6 +559,14 @@ impl Renderer {
         self.graph.replace_pass_at(index, pass);
     }
 
+    /// Scene buffers of geometry this renderer draws that the scene's ray
+    /// tracing does not see (its features' declarations,
+    /// `FeatureRegistrar::untraced_geometry`): a ray-tracing projection
+    /// refuses a scene holding their rows.
+    pub fn untraced_geometry(&self) -> &[&'static str] {
+        self.graph.untraced_geometry()
+    }
+
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
     }

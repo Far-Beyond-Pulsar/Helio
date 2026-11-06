@@ -105,6 +105,7 @@ pub(crate) fn build_graph(
     }
 
     graph.set_scene_derivations(registry.scene_derivations().to_vec());
+    graph.set_untraced_geometry(registry.untraced_geometry().to_vec());
 
     if lock {
         graph.lock_sized(env.frame.render_size());

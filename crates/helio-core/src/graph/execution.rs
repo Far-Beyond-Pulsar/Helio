@@ -294,6 +294,9 @@ pub struct RenderGraph {
     /// ([`crate::SceneDerivationFactory`]), taken by the renderer that
     /// installs the graph.
     scene_derivations: Vec<crate::SceneDerivationFactory>,
+    /// Scene buffers of drawn geometry the scene's ray tracing does not see,
+    /// as the graph's features declared them.
+    untraced_geometry: Vec<&'static str>,
     /// Resource names registered via [`declare_external_input`](Self::declare_external_input) —
     /// resources supplied by the host rather than written by any pass in the
     /// graph. `validate_dependencies` treats every name in this set as
@@ -439,6 +442,7 @@ impl RenderGraph {
             graph_data: None,
             swap_policy: None,
             scene_derivations: Vec::new(),
+            untraced_geometry: Vec::new(),
             external_inputs: std::collections::HashSet::new(),
             frame_input_publishers: Vec::new(),
             frame_storage: RenderFrameStorage::new(),
@@ -590,6 +594,18 @@ impl RenderGraph {
     /// makes each it has not made yet).
     pub fn take_scene_derivations(&mut self) -> Vec<crate::SceneDerivationFactory> {
         std::mem::take(&mut self.scene_derivations)
+    }
+
+    /// Records the scene buffers of drawn geometry the scene's ray tracing
+    /// does not see (the features' declarations).
+    pub fn set_untraced_geometry(&mut self, buffers: Vec<&'static str>) {
+        self.untraced_geometry = buffers;
+    }
+
+    /// The scene buffers of drawn geometry the scene's ray tracing does not
+    /// see: a ray-tracing projection refuses a scene holding their rows.
+    pub fn untraced_geometry(&self) -> &[&'static str] {
+        &self.untraced_geometry
     }
 
     /// The policy set by [`set_swap_policy`](Self::set_swap_policy), if any.
