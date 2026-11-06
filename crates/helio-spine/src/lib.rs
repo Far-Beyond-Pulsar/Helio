@@ -178,7 +178,14 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                 } else {
                     tsr
                 };
-                let tsr = if build.boolean("transparency_reactivity") {
+                // A feature asks for the mask too (`color::ReactiveMask`: water, whose
+                // animated surface has no motion vectors).
+                let tsr = if build.boolean("transparency_reactivity")
+                    || build
+                        .env
+                        .setting::<helio_frame_api::color::ReactiveMask>()
+                        .is_some()
+                {
                     tsr.with_transparency_reactivity()
                 } else {
                     tsr
