@@ -70,3 +70,8 @@ pub fn glare(env: &mut BuildEnv<'_>) -> Option<&'static str> {
 /// over the scene colour after lighting (transparency under HLFS and TSR).
 #[derive(Clone, Copy, Debug)]
 pub struct ReactiveMask;
+
+/// The reactive mask's graph key: per-pixel coverage (`R8Unorm`, 1 = do not
+/// accumulate) that what draws over the scene colour after lighting writes
+/// and the anti-aliasing reads. Present while [`ReactiveMask`] is set.
+pub const REACTIVE_MASK: &str = "transparency_reactivity";

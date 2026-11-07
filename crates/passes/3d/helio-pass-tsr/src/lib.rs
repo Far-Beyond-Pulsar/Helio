@@ -1231,7 +1231,7 @@ impl RenderPass for TsrPass {
             builder.read(alias);
         }
         if self.transparency_reactivity {
-            builder.read("transparency_reactivity");
+            builder.read(helio_frame_api::color::REACTIVE_MASK);
         }
         if self.stochastic_mask {
             builder.read(STOCHASTIC_MASK);
@@ -1389,7 +1389,7 @@ impl RenderPass for TsrPass {
         let reactive_view = if self.transparency_reactivity {
             ctx.registry
                 .read_texture_view(
-                    helio_core::ResourceKey::new("transparency_reactivity"),
+                    helio_core::ResourceKey::new(helio_frame_api::color::REACTIVE_MASK),
                     "TSR",
                 )
                 .ok_or_else(|| {
