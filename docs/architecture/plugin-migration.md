@@ -2504,6 +2504,12 @@ issue (above); views are the next design item, not p17's.
   own `PrefabAsset` beside `pulsar_class::prefab::PrefabAsset` (and reads
   `prefab.json` raw for animation events). Waits on: the Blueprint plugin
   adopting `pulsar_class`'s model.
+- Pulsar-Native (sky): **night-sky panoramas as assets**: the sky
+  feature's build script downloads 4K deep-space HDR panoramas and embeds
+  them (about 25 MB in every binary that links the sky, voxel_craft 49 to
+  76 MB), so builds need the network and games carry them unasked; they
+  should be project assets the sky component names. Waits on: the user's
+  sky work.
 - Plugin_Shaders: **superseded**: the shader graph editor is
   `pulsar.materials`' graph editor and compiles through the materials'
   compiler. Waits on: the user's decision on the repo (archive or keep).
