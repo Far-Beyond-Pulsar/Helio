@@ -2507,6 +2507,10 @@ issue (above); views are the next design item, not p17's.
   76 MB), so builds need the network and games carry them unasked; they
   should be project assets the sky component names. Waits on: the user's
   sky work.
+- Pulsar-Native (pulsar_game, CI): **generated game links on Linux**:
+  `generated_project_compiles` (`--ignored`, CI only) fails as on p16 with
+  an undefined `__gxx_personality_v0` (a C++ dependency linked without its
+  runtime). Waits on: finding the C++ dependency and its link flags.
 - Plugin_Shaders: **superseded**: the shader graph editor is
   `pulsar.materials`' graph editor and compiles through the materials'
   compiler. Waits on: the user's decision on the repo (archive or keep).
