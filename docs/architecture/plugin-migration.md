@@ -2625,6 +2625,28 @@ rename would leave behind.
   `"environment_cubes"` (the lights' row attribute and the ledger follow).
 - `helio-controls`' unused `PerspectiveLens` is gone, and SSR's local named
   `material` (an ORM texel) is renamed.
+- *`helio-pass-sdf` is deleted* (the user, 2026-11-07: "old"): an SDF
+  terrain kind with its own sky, sun and fog, superseded by `pulsar.voxel`.
+  Its one user, the meshes' web `sdf_demo`, went with it, and so did its
+  workspace entries and its ledger row.
+- *The simple cube moved to the test host*: `helio-pass-simple-cube` (a
+  spinning cube drawn straight into the output, to check a device and
+  surface) was a feature in every renderer's default set, behind
+  `Preset::Simple` and the built-in pipeline `helio.simple`. Nothing in
+  Pulsar used either; Helio's `simple_graph` example did. The pass is now
+  that example's own module (`crates/examples/simple_cube.rs`, which builds
+  its one-pass graph itself); the crate, the preset, the pipeline and its
+  tests (which mirrored the private vertex struct and checked arithmetic)
+  are gone.
+
+**The rest of `crates/passes/3d`, judged**: FXAA, SSR (a Hi-Z march with
+the frame's TLAS for misses), the buffer view, the debug overlay, Hi-Z, TSR
+and the tone map are the frame's or diagnostics, and name no kind. Planar
+reflection names none either: it is a screen-space trace against one plane
+given by `PlanarReflectionSettings`, writing an indirect-specular layer. Its
+plane is content (a mirror, a water surface) that should come from whatever
+shows it, and a true planar capture is a mirrored view: it waits on **views**
+(Helio#390), not on a move.
 
 **Recorded, with what each waits on** (`kind-names.txt`; each is a design
 decision of its own, not a move):
@@ -2647,6 +2669,3 @@ decision of its own, not a move):
   63..83, the tone map's lens input). Waits on the lens settings leaving the
   post-settings contract, as fog's did in p17 (an ABI change, saved masks,
   and whether volumes may blend a lens).
-- *`helio-pass-sdf`*, an SDF terrain kind with its own sky, sun and fog,
-  used only by the meshes' web demo. The user's call whether it is deleted
-  (superseded by `pulsar.voxel`) or gets a plugin.

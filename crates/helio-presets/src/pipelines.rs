@@ -17,7 +17,6 @@ pub const HLFS: &str = "helio.hlfs";
 pub const HLFS_FXAA: &str = "helio.fxaa_hlfs";
 pub const FORWARD_OPAQUE: &str = "helio.forward_opaque";
 pub const FORWARD_ONLY: &str = "helio.forward_only";
-pub const SIMPLE: &str = "helio.simple";
 /// The default deferred pipeline built from its node graph
 /// ([`crate::graphs::deferred_graph_asset`]) rather than from code.
 pub const DEFERRED_GRAPH: &str = "helio.deferred_graph";
@@ -65,12 +64,6 @@ const SPECS: &[Spec] = &[
         label: "Forward Only",
         description: "Single forward pass, no deferred buffers. Cheapest option.",
         preset: Preset::Forward,
-    },
-    Spec {
-        id: SIMPLE,
-        label: "Simple",
-        description: "A single test pass. Useful to verify the device and surface.",
-        preset: Preset::Simple,
     },
 ];
 

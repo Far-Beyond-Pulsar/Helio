@@ -89,8 +89,6 @@ helio-pass-fxaa = { layer = "feature", group = "post-aa" }
 helio-pass-debug-overlay = { layer = "feature", group = "debug" }
 helio-pass-perf-overlay = { layer = "feature", group = "debug" }
 helio-pass-buffer-view = { layer = "feature", group = "debug" }
-helio-pass-simple-cube = { layer = "feature", group = "debug" }
-helio-pass-sdf = { layer = "feature", group = "sdf" }
 helio-bake = { layer = "feature", group = "bake" }
 
 # renderer
