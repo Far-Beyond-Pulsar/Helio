@@ -61,7 +61,7 @@ enum Aa {
 }
 
 impl Preset {
-    pub const ALL: [Preset; 6] = [
+    pub const ALL: [Preset; 5] = [
         Preset::Deferred,
         Preset::DeferredFxaa,
         Preset::Hlfs,

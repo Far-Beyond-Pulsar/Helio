@@ -673,9 +673,12 @@ dependencies = [
 name = "examples"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "env_logger",
  "glam",
  "helio",
+ "helio-core",
+ "helio-frame-api",
  "helio-presets",
  "log",
  "pollster 0.4.0",
@@ -1165,30 +1168,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-sdf"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "helio-core",
- "helio-frame-api",
- "log",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-simple-cube"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "log",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-ssr"
 version = "0.1.0"
 dependencies = [
@@ -1240,7 +1219,6 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
  "helio-pass-postprocess",
- "helio-pass-simple-cube",
  "helio-pass-ssr",
  "helio-pass-tsr",
  "helio-spine",
