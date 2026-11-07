@@ -13,6 +13,34 @@ pub const LAMBERT_PROBE: helio_core::shader::ShaderSnippet = helio_core::wgsl_sn
     "../shaders/surface_probe_lambert.wgsl"
 );
 
+/// The material profile shader opted into every snippet of the probe (its
+/// markers prepended, the ones its own text uses included), with those
+/// snippets: what the overlay compiles.
+pub fn profile_source(
+    probe: Option<&helio_frame_api::diagnostics::SurfaceProbe>,
+) -> (String, Vec<helio_core::shader::ShaderSnippet>) {
+    let snippets = probe.map_or_else(|| vec![LAMBERT_PROBE], |probe| probe.snippets.clone());
+    let markers: String = snippets.iter().map(|s| format!("{}\n", s.marker)).collect();
+    (
+        format!(
+            "{markers}{}",
+            include_str!("../shaders/profile_material.wgsl")
+        ),
+        snippets,
+    )
+}
+
+/// The overlay's composed shaders as compiled, for shader validation without
+/// a device: each file's path and its source (the profile shader over the
+/// Lambert stand-in, its snippets resolved).
+pub fn validation_sources() -> Vec<(String, String)> {
+    let (source, snippets) = profile_source(None);
+    vec![(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/profile_material.wgsl").to_string(),
+        helio_core::shader::resolve_with(&source, &snippets).into_owned(),
+    )]
+}
+
 // ── Shared GPU state (created once, shared between passes) ──────────────────────
 
 pub struct PerfOverlayShared {
@@ -1029,13 +1057,7 @@ impl MaterialProfiler {
             mapped_at_creation: false,
         });
 
-        // Every snippet of the probe, the ones its own text uses included.
-        let snippets = probe.map_or_else(|| vec![LAMBERT_PROBE], |probe| probe.snippets.clone());
-        let markers: String = snippets.iter().map(|s| format!("{}\n", s.marker)).collect();
-        let source = format!(
-            "{markers}{}",
-            include_str!("../shaders/profile_material.wgsl")
-        );
+        let (source, snippets) = profile_source(probe);
         let profile_shader = helio_core::shader::module_with(
             device,
             "Material Profile Shader",

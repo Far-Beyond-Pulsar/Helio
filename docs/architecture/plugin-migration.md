@@ -2639,6 +2639,20 @@ rename would leave behind.
   tests (which mirrored the private vertex struct and checked arithmetic)
   are gone.
 
+**Helio passes its own tests from its own clone**: `wgsl_validation` failed
+on four shaders on main (since p17's 2026-11-06 commits). The test composed
+shaders with its own snippet list and its own per-file rules, and those
+commits changed how four shaders are built (the frame's
+`indirect_specular` snippet in SSR's compose, the row join's placement
+hooks, the perf overlay's offered surface probe, the LUT build's
+post-settings prefix); a `//!use` marker nobody provides passes
+`resolve_with` silently and fails later as an unknown identifier. Now each
+crate that composes shaders offers `validation_sources()` (the file's path
+and its source, built by the same function its pass compiles with:
+`lut_build_source`, `profile_source`, `row_join_source`), the test takes
+those instead of re-implementing them, lists every snippet the repo
+declares, and fails on any marker its list does not provide.
+
 **The rest of `crates/passes/3d`, judged**: FXAA, SSR (a Hi-Z march with
 the frame's TLAS for misses), the buffer view, the debug overlay, Hi-Z, TSR
 and the tone map are the frame's or diagnostics, and name no kind. Planar

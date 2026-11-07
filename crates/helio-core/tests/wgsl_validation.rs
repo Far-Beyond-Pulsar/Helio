@@ -15,23 +15,64 @@
 //! Sources go through `helio_core::shader::resolve_with` first — the same call
 //! (modulo which snippets a given pass registers) the runtime makes — so a
 //! prelude/snippet-using shader is validated as the GPU will see it, not as
-//! the bare file on disk. The snippet list here (HIZ, the frame's sky and
-//! view remaps) is this
-//! test's own aggregation of every pass-owned snippet in the workspace, not
-//! something `helio-core` itself knows about — `resolve_with` never fails
-//! for a marker with no matching snippet, so listing all of them here is
-//! harmless for shaders that only use a subset.
+//! the bare file on disk. The snippet list here is every snippet the Helio
+//! repo declares (`wgsl_snippet!`); `resolve_with` leaves a marker with no
+//! snippet in place, so the test fails on any `//!use` marker the list does
+//! not provide rather than reporting an unknown identifier further down.
+//!
+//! A shader its crate assembles from pieces (shared declarations, a prefix,
+//! hook defaults) is validated as that crate compiles it: each such crate
+//! offers `validation_sources()` (the file's path and its composed source,
+//! built by the function the pass itself uses), and the walk takes that
+//! source for the file instead of the bare one.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_hiz::HIZ_SNIPPET,
+    helio_frame_api::gbuffer::OUTPUT_SNIPPET,
+    helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET,
     helio_frame_api::lighting::sky::ATMOSPHERE_SNIPPET,
     helio_frame_api::lighting::sky::ATMOSPHERE_SKY_TABLE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
     helio_frame_api::media::SNIPPET,
     helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
 ];
+
+/// Helio's own prelude marker, which `resolve_with` always provides.
+const PRELUDE_MARKER: &str = "//!use helio_prelude";
+
+/// Every composed shader, by its file's canonical path.
+fn composed_sources() -> HashMap<PathBuf, String> {
+    [
+        helio_scene_join::validation_sources(),
+        helio_scene_derivations::validation_sources(),
+        helio_pass_postprocess::validation_sources(),
+        helio_pass_perf_overlay::validation_sources(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|(path, source)| {
+        let path = Path::new(&path)
+            .canonicalize()
+            .unwrap_or_else(|e| panic!("composed shader {path}: {e}"));
+        (path, source)
+    })
+    .collect()
+}
+
+/// The `//!use` markers of `source` that neither the prelude nor a listed
+/// snippet provides.
+fn unknown_markers(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with("//!use "))
+        .filter(|line| *line != PRELUDE_MARKER && !SNIPPETS.iter().any(|s| s.marker == *line))
+        .map(str::to_string)
+        .collect()
+}
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 
@@ -70,28 +111,6 @@ fn is_fragment(source: &str) -> bool {
     !(source.contains("@vertex") || source.contains("@fragment") || source.contains("@compute"))
 }
 
-/// Assembles the shaders their passes build from more than one piece, the
-/// same way the pass does, so they are validated as the GPU sees them.
-fn compose(path: &Path, source: String) -> String {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    // The scene derivations prefix the shared join declarations
-    // (`helio_scene_join::join_source`), wherever their crate keeps them:
-    // the hierarchy resolve, the row join, and each kind's own join.
-    const JOINS: &[&str] = &["hierarchy_resolve.wgsl", "row_join.wgsl"];
-    if path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| JOINS.contains(&name))
-    {
-        return helio_scene_join::join_source(&source);
-    }
-    // The tone map prefixes the post settings' declarations.
-    if normalized.ends_with("helio-pass-postprocess/shaders/postprocess.wgsl") {
-        return helio_pass_postprocess::with_post_settings(&source);
-    }
-    source
-}
-
 /// Maps a line number in resolved source back to the original file, so a
 /// diagnostic in a prelude-using shader points at a line that actually exists in
 /// the file the reader will open.
@@ -121,20 +140,35 @@ fn every_wgsl_shader_parses_and_validates() {
         root.display()
     );
 
+    let mut composed = composed_sources();
     let mut failures = Vec::new();
     let mut checked = 0usize;
     let mut skipped = Vec::new();
 
     for path in &shaders {
         let rel = path.strip_prefix(&root).unwrap_or(path);
-        let source = std::fs::read_to_string(path).expect("shader should be readable");
-        let source = compose(path, source);
+        let canonical = path.canonicalize().expect("shader path should resolve");
+        let source = match composed.remove(&canonical) {
+            Some(source) => source,
+            None => std::fs::read_to_string(path).expect("shader should be readable"),
+        };
 
         if is_fragment(&source) {
             skipped.push(rel.display().to_string());
             continue;
         }
         checked += 1;
+
+        let unknown = unknown_markers(&source);
+        if !unknown.is_empty() {
+            failures.push(format!(
+                "{}: no snippet in this test's list provides {} (add the owner's \
+                 snippet to SNIPPETS)",
+                rel.display(),
+                unknown.join(", ")
+            ));
+            continue;
+        }
 
         // Exactly what create_shader_module would receive.
         let resolved = helio_core::shader::resolve_with(&source, SNIPPETS);
@@ -163,6 +197,11 @@ fn every_wgsl_shader_parses_and_validates() {
     }
 
     assert!(
+        composed.is_empty(),
+        "composed shaders whose file the walk did not find: {:?}",
+        composed.keys().collect::<Vec<_>>()
+    );
+    assert!(
         failures.is_empty(),
         "{} of {checked} standalone shaders failed to compile:\n\n{}",
         failures.len(),
@@ -184,46 +223,5 @@ fn every_wgsl_shader_parses_and_validates() {
         "{} shaders were skipped as fragments/composed modules, which is more than expected:\n{}",
         skipped.len(),
         skipped.join("\n")
-    );
-}
-
-/// Shaders their crates assemble from pieces (shared declarations, the
-/// terrain program, row strides), validated exactly as each crate compiles
-/// them.
-#[test]
-fn composed_shaders_parse_and_validate() {
-    let sources = helio_scene_derivations::validation_sources();
-    let failures: Vec<String> = sources
-        .iter()
-        .filter_map(|(name, source)| {
-            let source = helio_core::shader::resolve_with(source, SNIPPETS).into_owned();
-            let module = match naga::front::wgsl::parse_str(&source) {
-                Ok(module) => module,
-                Err(e) => {
-                    return Some(format!(
-                        "{name}:
-{}",
-                        e.emit_to_string(&source)
-                    ))
-                }
-            };
-            Validator::new(ValidationFlags::all(), Capabilities::all())
-                .validate(&module)
-                .err()
-                .map(|e| format!("{name}: {e:?}"))
-        })
-        .collect();
-    assert!(sources.len() >= 2, "{} composed shaders", sources.len());
-    assert!(
-        failures.is_empty(),
-        "{} composed shaders failed:
-
-{}",
-        failures.len(),
-        failures.join(
-            "
-
-"
-        )
     );
 }

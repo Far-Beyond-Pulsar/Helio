@@ -9,17 +9,16 @@
 
 pub mod hierarchy_resolve;
 
-/// Every scene derivation shader in Helio as compiled (shader validation
-/// without a device): the hierarchy resolve and the row join.
+/// The derivations' shaders as compiled, for shader validation without a
+/// device: each file's path and its source with the join's shared
+/// declarations (the row join's are `helio_scene_join::validation_sources`).
 pub fn validation_sources() -> Vec<(String, String)> {
-    vec![
-        (
-            "hierarchy_resolve.wgsl".to_string(),
-            helio_scene_join::join_source(include_str!("../shaders/hierarchy_resolve.wgsl")),
-        ),
-        (
-            "row_join.wgsl".to_string(),
-            helio_scene_join::row_join_source(),
-        ),
-    ]
+    vec![(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/shaders/hierarchy_resolve.wgsl"
+        )
+        .to_string(),
+        helio_scene_join::join_source(include_str!("../shaders/hierarchy_resolve.wgsl")),
+    )]
 }

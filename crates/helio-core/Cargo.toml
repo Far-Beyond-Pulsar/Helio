@@ -31,6 +31,7 @@ helio-frame-api = { path = "../helio-frame-api" }
 helio-scene-derivations = { workspace = true }
 helio-scene-join = { workspace = true }
 helio-pass-postprocess = { workspace = true }
+helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 
 [features]
 default = ["profiling", "shader-hot-reload"]

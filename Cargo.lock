@@ -1042,6 +1042,7 @@ dependencies = [
  "glam",
  "helio-frame-api",
  "helio-pass-hiz",
+ "helio-pass-perf-overlay",
  "helio-pass-postprocess",
  "helio-scene-derivations",
  "helio-scene-join",

@@ -178,6 +178,27 @@ pub const AUTO_EXPOSURE_MAYBE_ACTIVE: &str = "auto_exposure_maybe_active";
 /// readers ([`with_post_settings`]).
 pub const POST_SETTINGS_WGSL: &str = include_str!("../shaders/post_settings.wgsl");
 
+/// The colour-grading LUT build shader as [`LutBuilder`] compiles it.
+pub fn lut_build_source() -> String {
+    with_post_settings(include_str!("../shaders/lut_build.wgsl"))
+}
+
+/// The crate's shaders as compiled, for shader validation without a device:
+/// each file's path and its source with the post settings' declarations (the
+/// tone map without host effects).
+pub fn validation_sources() -> Vec<(String, String)> {
+    vec![
+        (
+            concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/postprocess.wgsl").to_string(),
+            with_post_settings(include_str!("../shaders/postprocess.wgsl")),
+        ),
+        (
+            concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/lut_build.wgsl").to_string(),
+            lut_build_source(),
+        ),
+    ]
+}
+
 /// `source` (a shader opting into Helio's prelude) with the post settings'
 /// struct after its first line.
 pub fn with_post_settings(source: &str) -> String {

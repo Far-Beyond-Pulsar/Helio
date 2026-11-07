@@ -51,6 +51,16 @@ pub fn row_join_source() -> String {
     placement_source(None)
 }
 
+/// The join's shaders as compiled, for shader validation without a device:
+/// each file's path and its source with the shared declarations and every
+/// placement hook's default ([`row_join_source`]).
+pub fn validation_sources() -> Vec<(String, String)> {
+    vec![(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/row_join.wgsl").to_string(),
+        row_join_source(),
+    )]
+}
+
 /// The row join's shader without any placement hook.
 fn row_join_base() -> String {
     join_source(include_str!("../shaders/row_join.wgsl"))
