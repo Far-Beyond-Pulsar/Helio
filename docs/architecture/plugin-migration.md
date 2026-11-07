@@ -2382,6 +2382,34 @@ the 60-minute limit on p16); the CPU tests of the same crates still run.
   editor tool, which a game never links); its first module carries it
   (`PluginDescriptor::installing_module`).
 
+- *The animator leaves the skinned mesh*: `SkeletalMeshComponent` was the
+  player too (graph, Montages, notifies, root motion, the physics blend). It
+  is now the skinned mesh only: its asset, skin stream, inverse binds and
+  joint palette, showing the pose it is given
+  (`SkeletalMeshComponent::show_pose`) and its bind pose without one. The
+  animation plugin's runtime module `animation_component` owns
+  `AnimationComponent` (moved as-is: the instance, Montages, notifies, root
+  motion, the physics blend, the animation phase and its tests, and the
+  skeleton, sequence and graph loaders). The owner's `n`-th animator drives
+  its `n`-th skinned mesh: it plays on the skeleton the mesh's header names
+  and shows its drawn pose there each time it changes. The two meet in a
+  core contract (`helio_component::skinning`): `SkinnedMeshAccess` (the
+  meshes': find the mesh, read its binding, show a pose) and
+  `SkeletalPoseAccess` (the animator's: the pose a physics rig reads and the
+  bones it drives). `helio_mesh_api::skinning` is gone (an api crate may not
+  collect registrations). Saved levels and class prefabs migrate on load
+  (`animation_component::records::split_animator`, now also run on prefabs
+  by `PrefabAsset::load_from_dir`); Blueprint event nodes are the
+  animator's, and graphs saved with the mesh's class still compile and
+  show their titles. How others do it: Unity's Animator writes the pose a
+  SkinnedMeshRenderer skins with its bind poses; Unreal keeps the
+  `UAnimInstance` inside `USkeletalMeshComponent`. Ours is Unity's split,
+  so a skinned mesh needs no animation plugin and an animator drives any
+  skinned mesh through the contract. Behaviour is unchanged (the user,
+  2026-11-06: animation is structural only in p17); dead pieces went with
+  the move (`SKELETAL_PREVIOUS_BONE_PALETTE_BUFFER`,
+  `register_loaded_animation_notifies`).
+
 **Known issues, structural only in p17** (the user, 2026-11-06: virtual
 geometry, animation and portals/water are not in their final form; p17 puts
 each in its owner's place behind generic seams and does not fix their
@@ -2394,21 +2422,91 @@ behaviour, and a move must not make them worse than before):
   next look would be the page-residency (107) and error-vs-tau (109) debug
   views, to see whether fine pages never stream in. The suite stays out of
   CI's `ci` profile.
-- *Animation*, *portals' G-buffer drawer*, *water's reflection capture*: moved
-  to their owners as they are; their open rendering problems stay open.
+- *Animation*: in the animation plugin as above; its open problems stay
+  open.
+- *Portals' G-buffer drawer*, *water's reflection capture*: in their own
+  plugins as they are; their open rendering problems stay open. Both are
+  known exceptions to one owner, waiting on **views** (the next design
+  item, below), owned by the portals and water plugins:
+  - water's capture graph names the meshes' passes (object batch, indirect
+    dispatch, occlusion culling, G-buffer, deferred light) and builds them
+    through `PassContext::execute_secondary_graph`: one kind reaching into
+    another kind's internals;
+  - the portals' `PortalInstancePass` keeps its own mesh G-buffer program
+    (`gbuffer_portal.wgsl`): a second copy of the meshes' drawer.
+
+**Views, the next design item** (a new capability, so not p17's: it changes
+what reflections and portals show). What it is:
+- The preset composes a view graph from the frame's members, as it composes
+  the primary graph: a capture asks for phases and slots (scene prep,
+  visibility, the G-buffer phase, geometry, lighting) and gets every feature
+  registered there, not a pass list it names.
+- Per-view mirroring in every drawer: a mirrored view (a planar reflection)
+  flips winding for each drawer through the view's description, instead of
+  one pass's `set_mirrored_view`.
+- Remapped, clip-masked culling and draws: a portal publishes a view (the
+  chain's composed transform and its clip mask); the meshes cull and draw it
+  with their own program, and the portals' second program goes.
+- What it adds: the foliage, decal and virtual-geometry drawers appear in
+  reflections and through portals (today only the meshes do), at their cost
+  in each view.
+- `one_owner`'s list has no entry for either: the check finds WGSL copies
+  of snippets and key literals, and neither copy is one (water's is a Rust
+  dependency; the portal program reads the meshes' rows through their
+  snippets). This note is their record until views land.
 
 **Not done yet** (p17 continues on the same branches; nothing here is
-handed off): render acceptance's water fog after a move, a light's shadows
-off, the lens prescription, the depth and normal debug views and the windy
-lake; dense VG acceptance (3); the material table as entities (sections and
-voxel slots indexing one table; voxel's unused `VoxelMaterialMap` path is
-the start); `shader_editor` into `pulsar.materials`; animation out of
-`SkeletalMeshComponent`; the portals' second G-buffer drawer and water's
-capture graph (drawers drawing extra views); the row join's per-kind
-placements; the mesh host's by-name ray-tracing refusal; the fog block in
-Helio's post-process ABI (fog -> post); per-drawer G-buffer output
-structs; descriptors for the pre-rewrite (DLL) plugins; `ObjectType::Light`/
-`Mesh`.
+handed off): nothing of p17's design list. Dense VG acceptance is a known
+issue (above); views are the next design item, not p17's.
+
+**After the split** (deferred from p17, one issue each; repo, what, waits on):
+- Helio + Pulsar-Native (meshes, portals, water): **views**: the preset
+  composes a view graph from phase and slot members, every drawer honours
+  per-view mirroring, and the meshes cull and draw remapped, clip-masked
+  views; removes water's capture graph naming the meshes' passes and the
+  portals' copy of the mesh G-buffer program. Waits on: its design (a new
+  capability that changes what reflections and portals show).
+- Pulsar-Native (meshes, VG): **dense VG acceptance**:
+  `virtual_geometry_dense_acceptance` fails as on p16 (hardware raster, no
+  dense tiles). Waits on: VG's final structure.
+- Pulsar-Native (meshes, VG): **VG's final structure**: virtual geometry is
+  in its owner but not in its final form (the user, 2026-11-06). Waits on:
+  the user's VG rework.
+- Plugin_SKM: **animation runtime behaviour**: the animator moved as it was;
+  its open problems stay open. Waits on: the user's animation work.
+- Plugin_SKM: **several meshes per animator**: the owner's `n`-th animator
+  drives its `n`-th skinned mesh; a modular character (one animator, several
+  meshes on one skeleton, Unreal's leader pose) needs the animator to drive
+  every mesh on its skeleton. Waits on: the animation runtime work.
+- Plugin_SKM + Pulsar-Native (engine_backend): **graph dependency reload**:
+  `reload_animation_dependencies` has no caller, so editing a sequence a
+  running graph uses does not recompile it. Waits on: an asset-change hook
+  for dependency closures.
+- Plugin_Physics: **ragdolls need an animator**: the rig drives the pose
+  through `SkeletalPoseAccess`, so a skinned mesh with no
+  `AnimationComponent` has no pose to drive. Waits on: the animation
+  runtime work (a pose without an animator).
+- Pulsar-Native (voxel, sky): **voxel and sky test failures**: `clouds_cost`
+  (perf), `foliage_on_voxels` (no blades near the eye) and
+  `voxel_pass_graph`'s chunk-pass settle fail as before p17; the chunks
+  suite needs `--release`. Waits on: the user's voxel and sky work.
+- Pulsar-Native (scene_inventory): **ledger and architecture checks** fail
+  on rows and roots older than p16. Waits on: a ledger pass after the split
+  (the paths move with the plugin repos).
+- Pulsar-Native (engine_fs and its users): **one asset-reference
+  resolver**: texture, skeleton, image and skeletal-mesh references each
+  resolve through the file index in their own crate. Waits on: asset
+  categories as registered kinds (step 4).
+- Pulsar-Native (ui_types_common, pulsar_content, engine_fs): **asset
+  categories** (`AssetKind::Mesh`/`Material`) are file vocabulary rather
+  than registered kinds. Waits on: step 4 of the split.
+- Plugin_Blueprints: **one prefab model**: the Blueprint editor keeps its
+  own `PrefabAsset` beside `pulsar_class::prefab::PrefabAsset` (and reads
+  `prefab.json` raw for animation events). Waits on: the Blueprint plugin
+  adopting `pulsar_class`'s model.
+- Plugin_Shaders: **superseded**: the shader graph editor is
+  `pulsar.materials`' graph editor and compiles through the materials'
+  compiler. Waits on: the user's decision on the repo (archive or keep).
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
