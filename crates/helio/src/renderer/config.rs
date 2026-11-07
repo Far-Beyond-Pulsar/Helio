@@ -101,8 +101,9 @@ pub fn ray_queries_usable(info: &wgpu::AdapterInfo) -> bool {
     !(info.device_type == wgpu::DeviceType::Cpu || software(&info.name) || software(&info.driver))
 }
 
-/// 64-bit integers and 64-bit atomic min/max, for the virtual-geometry software raster.
-pub const VIRTUAL_GEOMETRY_INT64_FEATURES: wgpu::Features =
+/// 64-bit integers and 64-bit atomic min/max (a software raster's packed
+/// depth-and-id `atomicMax`); requested together when the adapter has both.
+pub const INT64_ATOMIC_FEATURES: wgpu::Features =
     wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
@@ -113,12 +114,11 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE | wgpu::Features::RG11B10UFLOAT_RENDERABLE |
         wgpu::Features::PIPELINE_CACHE | // persistent driver-validated pipeline cache
-        wgpu::Features::SHADER_INT64 | // hardware wide multiplies (voxel planet fixed-point math)
+        wgpu::Features::SHADER_INT64 | // hardware wide multiplies (fixed-point world math)
         wgpu::Features::POLYGON_MODE_LINE; // wireframe debug view
-                                           // Virtual geometry's software raster uses a 64-bit atomicMax; both features
-                                           // are needed together, and without them it falls back to a tiled kernel.
-    if adapter_features.contains(VIRTUAL_GEOMETRY_INT64_FEATURES) {
-        optional |= VIRTUAL_GEOMETRY_INT64_FEATURES;
+                                           // Both or neither: a kernel that needs them falls back without them.
+    if adapter_features.contains(INT64_ATOMIC_FEATURES) {
+        optional |= INT64_ATOMIC_FEATURES;
     }
     #[cfg(not(target_arch = "wasm32"))]
     if adapter_features.contains(TEXTURE_BINDING_ARRAYS) {
@@ -285,10 +285,6 @@ pub struct RendererConfig {
     pub debug_mode: u32,
     pub render_scale: f32,
     pub perf_overlay_mode: PerfOverlayMode,
-    /// Legacy custom-graph setting. Default graphs use the lights' `ShadowSettings` budget.
-    pub shadow_atlas_size: u32,
-    /// Legacy custom-graph setting. Default graphs use packed residency and the shadow budget.
-    pub shadow_face_capacity: u32,
     /// Enable the screen-space reflection pass. Default `false`.
     ///
     /// SSR traces the Hi-Z buffer per pixel and is one of the most expensive
@@ -354,8 +350,6 @@ impl RendererConfig {
             debug_mode: 0,
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
-            shadow_atlas_size: 1024,
-            shadow_face_capacity: 32,
             enable_ssr: false,
             features: helio_feature_api::FeatureSettings::new(),
             enable_planar_reflections: false,
@@ -415,12 +409,6 @@ impl RendererConfig {
 
     pub fn with_hdr_output_mode(mut self, mode: helio_pass_postprocess::HdrOutputMode) -> Self {
         self.hdr_output_mode = mode;
-        self
-    }
-
-    /// Legacy custom-graph setting; default graphs use the lights' `ShadowSettings` budget.
-    pub fn with_shadow_face_capacity(mut self, capacity: u32) -> Self {
-        self.shadow_face_capacity = capacity.clamp(1, 256);
         self
     }
 

@@ -295,9 +295,7 @@ pub struct ExtensionPoint(pub &'static str);
 /// built: where a node type enforces a contract on what its passes declare
 /// (a draw phase's attachments, say).
 pub type CheckFn = Arc<
-    dyn Fn(&BuildEnv<'_>, &RenderGraph, std::ops::Range<usize>) -> Result<(), String>
-        + Send
-        + Sync,
+    dyn Fn(&BuildEnv<'_>, &RenderGraph, std::ops::Range<usize>) -> Result<(), String> + Send + Sync,
 >;
 
 /// A node type.

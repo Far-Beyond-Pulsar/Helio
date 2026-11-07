@@ -114,7 +114,7 @@ fn reflected_segment_filters_only_sheets_before_nearest_opaque_hit() {
                     let instances: Vec<_> = sheets
                         .iter()
                         .map(|(x, t)| TlasInstanceInput {
-                            mesh_id: if t[0] == 0.0 { 2 } else { 1 },
+                            geometry_id: if t[0] == 0.0 { 2 } else { 1 },
                             transform: [1.0, 0.0, 0.0, *x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                         })
                         .collect();

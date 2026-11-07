@@ -23,14 +23,14 @@ mod validate;
 
 pub use asset::{
     Connection, GraphAsset, GraphComment, GraphSection, GraphZipTie, GraphZipTieEdge, NodeInstance,
-    Params, PinRef, SectionPort,
-    EXTENSION, FORMAT_VERSION, SECTION_ENTRY, SECTION_EXIT, SECTION_PREFIX,
+    Params, PinRef, SectionPort, EXTENSION, FORMAT_VERSION, SECTION_ENTRY, SECTION_EXIT,
+    SECTION_PREFIX,
 };
-pub use compile::{compile, Fallback, GraphAssetPipeline, MakeAsset};
-pub use layout::{auto_layout, LANE_PREFIX};
-pub use helio_feature_api::{PinDesc, PinKind, PinShape, PinType};
-pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
 pub use compile::build_env;
+pub use compile::{compile, Fallback, GraphAssetPipeline, MakeAsset};
+pub use helio_feature_api::{PinDesc, PinKind, PinShape, PinType};
+pub use layout::{auto_layout, LANE_PREFIX};
+pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
 // A graph document is made of node types: they are part of this crate's API.
 pub use helio_feature_api::{
     BuildEnv, BuildFn, CheckFn, ExtensionPoint, FinishFn, FrameDesc, MarkerFn, NodeBuild,

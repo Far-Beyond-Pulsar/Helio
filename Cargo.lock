@@ -729,15 +729,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "float-cmp"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
 name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -970,7 +961,6 @@ dependencies = [
  "arrayvec",
  "bytemuck",
  "glam",
- "helio-bake-types",
  "helio-core",
  "helio-feature-api",
  "helio-frame-api",
@@ -980,7 +970,6 @@ dependencies = [
  "helio-xr",
  "image",
  "log",
- "meshopt",
  "openxr",
  "pollster 0.4.0",
  "pulsar_reflection",
@@ -1268,13 +1257,9 @@ name = "helio-scene-derivations"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam",
- "helio",
  "helio-core",
- "helio-frame-api",
  "helio-scene-join",
  "log",
- "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -1715,18 +1700,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "meshopt"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01e77ead21976b3a9f01ec1724f766923da74f0726364e2b0f425658935d71a"
-dependencies = [
- "bitflags 2.13.1",
- "cc",
- "float-cmp",
- "thiserror 2.0.20",
 ]
 
 [[package]]

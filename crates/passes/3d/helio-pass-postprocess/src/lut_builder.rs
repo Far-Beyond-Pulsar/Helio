@@ -1,4 +1,3 @@
-
 pub struct LutBuilder {
     pipeline: wgpu::ComputePipeline,
     pipeline_layout: wgpu::PipelineLayout,

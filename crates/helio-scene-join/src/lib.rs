@@ -1,15 +1,15 @@
 //! Scene derivation building blocks no kind of object owns.
 //!
 //! - The layouts of the rows every join reads: owners, generations, hidden
-//!   flags, transforms, mesh bounds ([`OWNER_ROW_BYTES`], …), the shared
+//!   flags, transforms, owner bounds ([`OWNER_ROW_BYTES`], …), the shared
 //!   WGSL ([`join_source`]) and the frame-origin helpers.
 //! - [`RowJoin`]: places a kind's component rows (one source row per
 //!   component instance, in the owner's space) into the rows its passes read
 //!   (in the frame's space), on the GPU. A kind describes its tables
 //!   ([`RowTable`]) and builds its own `RowJoin`: fog, post-process volumes,
 //!   the lens, water, foliage, the sky, decals, particle emitters and sprites
-//!   each have one in their crate. The hierarchy resolve and the scene join
-//!   (meshes, lights) stay in `helio-scene-derivations`.
+//!   each have one in their crate (the meshes and the lights, whose joins
+//!   are their own, too). The hierarchy resolve is `helio-scene-derivations`'.
 
 mod row_join;
 
@@ -30,8 +30,10 @@ pub const HIDDEN_ROW_BYTES: u64 = 4;
 /// as an f32 pair (`hi`, the nearest f32, then `lo`, what that drops), YXZ
 /// Euler rotation in degrees, scale (four `[f32; 3]`).
 pub const TRANSFORM_ROW_BYTES: u64 = 48;
-/// A mesh instance's local bounding sphere `[center.xyz, radius]`.
-pub const MESH_BOUNDS_ROW_BYTES: u64 = 16;
+/// The local bounding sphere `[center.xyz, radius]` of a piece of content
+/// attached to an owner (rows keyed like the owners'), whichever kind
+/// publishes them; a placement bounded by its owner's content reads them.
+pub const OWNER_BOUNDS_ROW_BYTES: u64 = 16;
 
 /// A join shader with the shared join WGSL (row layouts, transforms) before
 /// it.

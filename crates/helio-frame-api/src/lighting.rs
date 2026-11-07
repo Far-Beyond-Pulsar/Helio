@@ -138,10 +138,10 @@ pub fn last_specular_layer(env: &mut BuildEnv<'_>) -> Option<&'static str> {
 /// The environment's parallax probes: SceneDB rows (`ReflectionCaptureRow`
 /// layout) each naming a layer of [`ENVIRONMENT_CUBES`]. The base the
 /// specular layers composite over.
-pub const ENVIRONMENT_PROBES: &str = "reflection_captures";
+pub const ENVIRONMENT_PROBES: &str = "environment_probes";
 /// The probes' prefiltered cube array (graph resource) and its sampler.
-pub const ENVIRONMENT_CUBES: &str = "baked_reflection";
-pub const ENVIRONMENT_CUBES_SAMPLER: &str = "baked_reflection_sampler";
+pub const ENVIRONMENT_CUBES: &str = "environment_cubes";
+pub const ENVIRONMENT_CUBES_SAMPLER: &str = "environment_cubes_sampler";
 
 /// The sun's visibility at each pixel (full resolution, `Rgba16Float`: `x`
 /// the visibility, `yzw` the sun direction it holds for): occluders' and

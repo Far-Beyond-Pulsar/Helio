@@ -117,7 +117,7 @@ impl Renderer {
             device
                 .features()
                 .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
-            "Helio requires INDIRECT_FIRST_INSTANCE because GPU-driven object and meshlet \
+            "Helio requires INDIRECT_FIRST_INSTANCE because GPU-driven indirect \
              draws use non-zero indirect first_instance values; create the device with \
              helio::required_wgpu_features(adapter.features())"
         );

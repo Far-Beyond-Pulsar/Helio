@@ -497,7 +497,7 @@ impl Renderer {
     ) -> HelioResult<Option<wgpu::SurfaceTexture>> {
         if self.graph.requires_ray_tracing() {
             return Err(helio_core::Error::InvalidPassConfig(
-                "HLFS RT stereo support is not implemented".into(),
+                "stereo rendering of a graph that traces rays is not implemented".into(),
             ));
         }
         if self.owns_device {

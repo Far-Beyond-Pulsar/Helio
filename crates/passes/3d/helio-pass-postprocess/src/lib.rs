@@ -187,12 +187,6 @@ pub fn with_post_settings(source: &str) -> String {
     }
 }
 
-/// Maximum active volumes blended per frame. SceneDB buffers can be larger:
-/// rows are addressed by sparse entity index, so shaders scan the full buffer
-/// before compacting into this fixed active-volume budget.
-pub const MAX_PP_VOLUMES: u32 = 64;
-const _: () = assert!(MAX_PP_VOLUMES == 64);
-
 /// A host's WGSL effects compiled into the post-process shader (see
 /// [`PostProcessPass::new_with_user_effects`]), as a feature setting: a
 /// graph's post-process node builds with it.

@@ -330,7 +330,11 @@ pub static RENDERER: Group = Group {
             "render_mode",
             "Render Mode",
             "Quality",
-            &[choice("deferred", "Deferred"), choice("forward_opaque", "Forward Opaque"), choice("forward_only", "Forward Only")],
+            &[
+                choice("deferred", "Deferred"),
+                choice("forward_opaque", "Forward Opaque"),
+                choice("forward_only", "Forward Only"),
+            ],
             "deferred",
             "Renderer path",
         ),
@@ -341,13 +345,30 @@ pub static RENDERER: Group = Group {
             true,
             "Environment cubemap specular, the base reflection layer (metals are black without it)",
         ),
-        toggle("screen_space_reflections", "Screen Space Reflections", "Reflections", false, "Screen-space reflections"),
-        toggle("planar_reflections", "Planar Reflections", "Reflections", false, "Render authored planar reflection surfaces"),
+        toggle(
+            "screen_space_reflections",
+            "Screen Space Reflections",
+            "Reflections",
+            false,
+            "Screen-space reflections",
+        ),
+        toggle(
+            "planar_reflections",
+            "Planar Reflections",
+            "Reflections",
+            false,
+            "Render authored planar reflection surfaces",
+        ),
         pick(
             "hdr_output_mode",
             "HDR Output",
             "Output",
-            &[choice("ldr", "SDR"), choice("hdr10", "HDR10"), choice("scrgb", "scRGB"), choice("passthrough", "Passthrough")],
+            &[
+                choice("ldr", "SDR"),
+                choice("hdr10", "HDR10"),
+                choice("scrgb", "scRGB"),
+                choice("passthrough", "Passthrough"),
+            ],
             "ldr",
             "Display output encoding",
         ),
@@ -376,7 +397,6 @@ pub static RENDERER: Group = Group {
         ),
     ],
 };
-
 
 #[cfg(test)]
 mod tests {

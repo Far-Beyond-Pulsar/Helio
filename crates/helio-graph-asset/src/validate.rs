@@ -17,8 +17,8 @@ use serde_json::Value;
 
 use crate::asset::{GraphAsset, NodeInstance};
 use crate::core_nodes::{ON_FRAME_START, OUTPUT};
-use helio_feature_api::{PinKind, PinType};
 use helio_feature_api::{NodePins, NodeRegistry};
+use helio_feature_api::{PinKind, PinType};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
@@ -408,8 +408,8 @@ mod tests {
     use super::*;
     use crate::asset::{Connection, NodeInstance, PinRef};
     use crate::core_nodes::{PERSISTENT_BUFFER, TEXTURE};
-    use helio_feature_api::PinDesc;
     use helio_feature_api::NodeDescriptor;
+    use helio_feature_api::PinDesc;
     use serde_json::json;
 
     fn node(id: &str, kind: &str, name: Option<&str>) -> NodeInstance {

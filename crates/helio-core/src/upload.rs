@@ -121,7 +121,13 @@ struct Ring {
 impl Ring {
     /// Room for `size` bytes at the cursor: what the buffer holds flushed,
     /// then a buffer twice the size.
-    fn reserve(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, label: &'static str, size: u64) {
+    fn reserve(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &'static str,
+        size: u64,
+    ) {
         if self.cursor + size > self.buffer.size() {
             self.flush(queue);
             let grown = (self.buffer.size() * 2).max(size.next_power_of_two());
@@ -183,7 +189,9 @@ impl FrameUploads {
     }
 
     fn ring(&self) -> std::sync::MutexGuard<'_, Ring> {
-        self.ring.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.ring
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// `data` written into `target` at `offset` at this point of `encoder`'s
@@ -226,7 +234,8 @@ impl FrameUploads {
         ring.reserve(&self.device, &self.queue, self.label, size);
         let source = ring.buffer.clone();
         let at = ring.push(data);
-        ring.deferred.push((source, at, target.clone(), offset, size));
+        ring.deferred
+            .push((source, at, target.clone(), offset, size));
     }
 
     /// The deferred writes' copies, in one encoder to submit before the
@@ -264,7 +273,10 @@ impl FrameUploads {
         ring.flush(&self.queue);
         ring.cursor = 0;
         ring.flushed = 0;
-        (std::mem::take(&mut ring.writes), std::mem::take(&mut ring.flushes))
+        (
+            std::mem::take(&mut ring.writes),
+            std::mem::take(&mut ring.flushes),
+        )
     }
 }
 
@@ -288,7 +300,9 @@ mod tests {
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
         queue.submit([encoder.finish()]);
-        staging.slice(..).map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         let words = bytemuck::cast_slice(&staging.slice(..).get_mapped_range().unwrap()).to_vec();
         words
@@ -313,13 +327,28 @@ mod tests {
         for frame in 0..3u32 {
             let mut encoder = device.create_command_encoder(&Default::default());
             let mut recorder = crate::CommandRecorder::from_encoder(&mut encoder);
-            uploads.write(&mut recorder, &target, 0, bytemuck::cast_slice(&[frame, 1, 2, 3]));
+            uploads.write(
+                &mut recorder,
+                &target,
+                0,
+                bytemuck::cast_slice(&[frame, 1, 2, 3]),
+            );
             recorder.copy_buffer_to_buffer(&target, 0, &between, 0, 16);
-            uploads.write(&mut recorder, &target, 0, bytemuck::cast_slice(&[frame + 10]));
+            uploads.write(
+                &mut recorder,
+                &target,
+                0,
+                bytemuck::cast_slice(&[frame + 10]),
+            );
             // 256 KiB: more than the first buffer holds.
             let big: Vec<u32> = (0..(1u32 << 16)).map(|i| i ^ frame).collect();
             uploads.write(&mut recorder, &target, 16, bytemuck::cast_slice(&big));
-            uploads.write(&mut recorder, &target, 16 + (1 << 18), bytemuck::cast_slice(&[7u32; 4]));
+            uploads.write(
+                &mut recorder,
+                &target,
+                16 + (1 << 18),
+                bytemuck::cast_slice(&[7u32; 4]),
+            );
             uploads.flush();
             drop(recorder);
             queue.submit([encoder.finish()]);

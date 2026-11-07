@@ -91,6 +91,18 @@ impl FeatureRegistrar<'_> {
             .add_swap_policy(&helio_core::SwapPolicy::new().group_types(members));
     }
 
+    /// Declares that passes of type `P` hold the build-environment handle `R`
+    /// (a type of its creator's api crate) that another feature created or
+    /// takes: hot reload swaps every pass that holds `R` together. Features
+    /// that share a handle meet at its type, never at each other's passes.
+    pub fn swap_shares<R: ?Sized + 'static, P: ?Sized>(&mut self) {
+        self.registry
+            .add_swap_policy(&helio_core::SwapPolicy::new().shares(
+                helio_core::graph::type_name_of::<R>(),
+                helio_core::graph::type_name_of::<P>(),
+            ));
+    }
+
     /// Sets what adds a performance marker after nodes built
     /// `with_marker_after`.
     pub fn marker(&mut self, marker: MarkerFn) {

@@ -45,8 +45,7 @@ fn default_graph_renders_on_a_device_with_texture_binding_arrays() {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: bindless native default graph");
             return;
         };
-        let required_features =
-            wgpu::Features::INDIRECT_FIRST_INSTANCE | TEXTURE_BINDING_ARRAYS;
+        let required_features = wgpu::Features::INDIRECT_FIRST_INSTANCE | TEXTURE_BINDING_ARRAYS;
         if !adapter.features().contains(required_features) {
             eprintln!("GPU_VALIDATION_SKIPPED_NO_BINDLESS_TIER: bindless native default graph");
             return;

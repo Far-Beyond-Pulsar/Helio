@@ -77,10 +77,7 @@ fn compose(path: &Path, source: String) -> String {
     // The scene derivations prefix the shared join declarations
     // (`helio_scene_join::join_source`), wherever their crate keeps them:
     // the hierarchy resolve, the row join, and each kind's own join.
-    const JOINS: &[&str] = &[
-        "hierarchy_resolve.wgsl",
-        "row_join.wgsl",
-    ];
+    const JOINS: &[&str] = &["hierarchy_resolve.wgsl", "row_join.wgsl"];
     if path
         .file_name()
         .and_then(|name| name.to_str())

@@ -28,7 +28,7 @@
 use crate::{
     entry, signature, BufferHandle, BufferKey, SceneBufferProjection, SceneDerivation,
     SceneDerivationContext, SceneDerivationOutput, GENERATION_ROW_BYTES, HIDDEN_ROW_BYTES,
-    MESH_BOUNDS_ROW_BYTES, OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
+    OWNER_BOUNDS_ROW_BYTES, OWNER_ROW_BYTES, TRANSFORM_ROW_BYTES,
 };
 
 /// What the join itself does with a table's placed rows (bits; see
@@ -61,8 +61,8 @@ pub struct Placement {
     pub follows_origin: bool,
     /// Reads `directional_light` ([`RowJoinKeys::directional_light`]).
     pub reads_lights: bool,
-    /// Reads `mesh_bounds` ([`RowJoinKeys::mesh_bounds`]).
-    pub reads_mesh_bounds: bool,
+    /// Reads `owner_bounds` ([`RowJoinKeys::owner_bounds`]).
+    pub reads_owner_bounds: bool,
 }
 
 impl Placement {
@@ -74,7 +74,7 @@ impl Placement {
             reads_transforms: false,
             follows_origin: false,
             reads_lights: false,
-            reads_mesh_bounds: false,
+            reads_owner_bounds: false,
         }
     }
 
@@ -103,10 +103,10 @@ impl Placement {
         }
     }
 
-    /// Reads the owners' mesh bounds.
-    pub const fn mesh_bounded(self) -> Self {
+    /// Reads the bounds of its owner's content.
+    pub const fn owner_bounded(self) -> Self {
         Self {
-            reads_mesh_bounds: true,
+            reads_owner_bounds: true,
             ..self
         }
     }
@@ -168,9 +168,11 @@ pub struct RowJoinKeys {
     pub generations: BufferKey,
     pub hidden: BufferKey,
     pub transforms: BufferKey,
-    /// Mesh instances' local bounding spheres, for a placement bounded by
-    /// its owner's meshes ([`Placement::mesh_bounded`]).
-    pub mesh_bounds: BufferKey,
+    /// The local bounding spheres of content attached to owners (keyed like
+    /// the owners; whichever kind publishes them: the engine names the key),
+    /// for a placement bounded by its owner's content
+    /// ([`Placement::owner_bounded`]).
+    pub owner_bounds: BufferKey,
     /// The directional light a placement takes ([`Placement::lit`]: its
     /// first `vec4`, the direction toward it and 1), named by the kind that
     /// places a sun (water: the lights' directional lights). `None`: no
@@ -323,27 +325,35 @@ impl RowTable {
     }
 
     fn reads_lights(&self) -> bool {
-        self.placement.is_some_and(|placement| placement.reads_lights)
+        self.placement
+            .is_some_and(|placement| placement.reads_lights)
     }
 
-    fn reads_mesh_bounds(&self) -> bool {
-        self.placement.is_some_and(|placement| placement.reads_mesh_bounds)
+    fn reads_owner_bounds(&self) -> bool {
+        self.placement
+            .is_some_and(|placement| placement.reads_owner_bounds)
     }
 
     /// Whether this table holds positions, which follow the frame's world
     /// origin.
     fn follows_origin(&self) -> bool {
         self.flags & OWNER_AABB != 0
-            || self.placement.is_some_and(|placement| placement.follows_origin)
+            || self
+                .placement
+                .is_some_and(|placement| placement.follows_origin)
     }
 
     fn reads_transforms(&self) -> bool {
         self.flags & OWNER_AABB != 0
-            || self.placement.is_some_and(|placement| placement.reads_transforms)
+            || self
+                .placement
+                .is_some_and(|placement| placement.reads_transforms)
     }
 
     fn uniform_flags(&self) -> u32 {
-        let reads = self.placement.is_some_and(|placement| placement.reads_transforms);
+        let reads = self
+            .placement
+            .is_some_and(|placement| placement.reads_transforms);
         self.flags | if reads { READS_TRANSFORMS } else { 0 }
     }
 
@@ -591,13 +601,23 @@ impl SceneDerivation for RowJoin {
         let inputs = ctx.inputs;
         let reported = &mut self.reported;
         let owners = Self::input(reported, name, inputs, keys.owners, OWNER_ROW_BYTES);
-        let generations =
-            Self::input(reported, name, inputs, keys.generations, GENERATION_ROW_BYTES);
+        let generations = Self::input(
+            reported,
+            name,
+            inputs,
+            keys.generations,
+            GENERATION_ROW_BYTES,
+        );
         let hidden = Self::input(reported, name, inputs, keys.hidden, HIDDEN_ROW_BYTES);
         let transforms = Self::input(reported, name, inputs, keys.transforms, TRANSFORM_ROW_BYTES);
         let lights = keys.directional_light.and_then(|key| inputs.get(key));
-        let mesh_bounds =
-            Self::input(reported, name, inputs, keys.mesh_bounds, MESH_BOUNDS_ROW_BYTES);
+        let owner_bounds = Self::input(
+            reported,
+            name,
+            inputs,
+            keys.owner_bounds,
+            OWNER_BOUNDS_ROW_BYTES,
+        );
         let mut recorded = false;
         let (origin_hi, origin_lo) = crate::origin_pair(ctx.world_origin);
         let origin_key = crate::origin_bits(ctx.world_origin)
@@ -626,12 +646,12 @@ impl SceneDerivation for RowJoin {
             let lit_by = lights.filter(|_| {
                 spec.reads_lights() || table.layers.iter().any(|(layer, _)| layer.reads_lights())
             });
-            let bounded_by = mesh_bounds.filter(|_| {
-                spec.reads_mesh_bounds()
+            let bounded_by = owner_bounds.filter(|_| {
+                spec.reads_owner_bounds()
                     || table
                         .layers
                         .iter()
-                        .any(|(layer, _)| layer.reads_mesh_bounds())
+                        .any(|(layer, _)| layer.reads_owner_bounds())
             });
             let mut table_inputs = vec![
                 owners,
@@ -728,7 +748,7 @@ impl SceneDerivation for RowJoin {
                         entry(5, &source.buffer),
                         entry(6, &table.buffer),
                         entry(7, lights.map_or(&self.empty, |h| &h.buffer)),
-                        entry(8, mesh_bounds.map_or(&self.empty, |h| &h.buffer)),
+                        entry(8, owner_bounds.map_or(&self.empty, |h| &h.buffer)),
                     ],
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
