@@ -2320,10 +2320,16 @@ the 60-minute limit on p16); the CPU tests of the same crates still run.
   instance, so a reload rewrites one row. Users acquire instances by source
   (`acquire`/`release`, interned per world: equal sources share one row).
   The meshes keep a scene subsystem (`MeshMaterialInstances`, change cursors
-  on static and skeletal meshes) that gives each slot its instance; a section
-  row is `{first, count, material_row}` (16 bytes, was 128) and the join
-  copies the row into the object row and reads class and hash from the key
-  row (a class change regroups draws), writing no material data. Voxel faces
+  on static and skeletal meshes) that gives each slot its instance and the
+  mesh's entity a `MeshMaterialRows` (its slots' table rows, a var-len GPU
+  row). A section row is `{first, count, material_slot}` (16 bytes, was 128);
+  the join reads `rows[slot]` through the mesh's handle, copies it into the
+  object row and reads class and hash from the key row (a class change
+  regroups draws), writing no material data. Assigning or reloading a
+  material writes that small row, never the mesh: a first version wrote the
+  instance rows into the mesh component, and every guarded mesh write
+  re-dispatches the mesh's geometry and draw rows (about 1.3 ms a mesh at 2k
+  meshes, superlinear), which stalled a 50k-mesh scene for minutes. Voxel faces
   that show scene materials (`VoxelMaterialMap`) index the same rows; the
   voxel palette (per-voxel colour, patches, flecks) stays the voxel's own
   appearance data. How others do it: Unreal keeps one uniform buffer per
@@ -2350,6 +2356,46 @@ the 60-minute limit on p16); the CPU tests of the same crates still run.
   api now owns it (`helio_frame_api::gbuffer::OUTPUT_SNIPPET`:
   `GBufferOutput`, and `GBufferDepthOutput` for a drawer that writes depth)
   beside `TARGETS`, so the layout changes in one place.
+
+- *Object types are structural*: `ObjectType` named kinds (`Light(LightType)`,
+  `Mesh(MeshType)`, `ParticleSystem`, `AudioSource`) in the scene model, the
+  level format, picking, the hierarchy and the AI tools. It is now `Empty`,
+  `Folder`, `Camera`, `Blueprint`; what an object draws or lights is its
+  components. Levels that named a kind load those objects as `Empty`.
+  Picking picks by an object's editor icon or its content's geometry
+  (`ContentGeometryRegistration`), never by a box for its type; the
+  hierarchy shows the icon a kind registers for objects its components make
+  (`ui_level_editor::extend::ObjectIconRegistration`: the lights' bulb, the
+  meshes' box); the AI tools' kinds are the structural ones (a lamp is an
+  object with a `LightComponent`). `SetMovability` was already generic over a
+  `movability` property. How others do it: Unity's GameObject has no type
+  (its icon follows its components); Unreal's actor classes are the kind's
+  module's. Ours is Unity's, so the scene model names no kind.
+- *Every plugin describes itself*: the pre-rewrite plugins (asset viewer,
+  code editor, table editor, Matter, animation, physics, UI, input, render
+  graph, Blueprints) have `pulsar-plugin.toml` descriptors and submit their
+  editor providers from their own crates
+  (`plugin_manager::PluginEditorProvider`, origin-gated), so a project that
+  disables one has no such editor or file type. `ui_core` names none of them
+  (it registers only the Level Editor), and the engine binary links them
+  through the installed set. A descriptor may list no runtime module (an
+  editor tool, which a game never links); its first module carries it
+  (`PluginDescriptor::installing_module`).
+
+**Known issues, structural only in p17** (the user, 2026-11-06: virtual
+geometry, animation and portals/water are not in their final form; p17 puts
+each in its owner's place behind generic seams and does not fix their
+behaviour, and a move must not make them worse than before):
+- *Dense VG*: `virtual_geometry_dense_acceptance` fails as on p16. The crowd
+  is drawn by the hardware raster (tier view blue) with coarse clusters, the
+  dense-overlap view is nearly black, and the stats report `dense_tiles` 0
+  and `engaged` false even at tau 0.25 and sensitivity 8. Every VG pass runs
+  (the late raster classifies); the counters are the software raster's. The
+  next look would be the page-residency (107) and error-vs-tau (109) debug
+  views, to see whether fine pages never stream in. The suite stays out of
+  CI's `ci` profile.
+- *Animation*, *portals' G-buffer drawer*, *water's reflection capture*: moved
+  to their owners as they are; their open rendering problems stay open.
 
 **Not done yet** (p17 continues on the same branches; nothing here is
 handed off): render acceptance's water fog after a move, a light's shadows

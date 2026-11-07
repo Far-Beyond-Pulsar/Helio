@@ -437,7 +437,12 @@ struct Pipelines {
 }
 
 impl Pipelines {
-    fn new(device: &wgpu::Device, name: &'static str, placement: Option<&Placement>) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        name: &'static str,
+        layout: &wgpu::PipelineLayout,
+        placement: Option<&Placement>,
+    ) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(name),
             source: wgpu::ShaderSource::Wgsl(placement_source(placement).into()),
@@ -447,7 +452,7 @@ impl Pipelines {
                 device,
                 wgpu::ComputePipelineDescriptor {
                     label: Some(name),
-                    layout: None,
+                    layout: Some(layout),
                     module: &module,
                     entry_point: Some(entry_point),
                     compilation_options: Default::default(),
@@ -470,6 +475,9 @@ pub struct RowJoin {
     /// Per placement (by name; `None`: the join's own): the in-place and
     /// packing pipelines.
     pipelines: Vec<(Option<&'static str>, Pipelines)>,
+    /// Every placement's bindings: one layout whatever a placement reads, so
+    /// one bind group serves any of them.
+    bind_layout: wgpu::BindGroupLayout,
     empty: wgpu::Buffer,
     tables: Vec<Table>,
     reported: Vec<BufferKey>,
@@ -483,6 +491,36 @@ impl RowJoin {
         keys: RowJoinKeys,
         tables: Vec<RowTable>,
     ) -> Self {
+        let entry = |binding: u32, ty: wgpu::BufferBindingType| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let read = wgpu::BufferBindingType::Storage { read_only: true };
+        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some(name),
+            entries: &[
+                entry(0, wgpu::BufferBindingType::Uniform),
+                entry(1, read),
+                entry(2, read),
+                entry(3, read),
+                entry(4, read),
+                entry(5, read),
+                entry(6, wgpu::BufferBindingType::Storage { read_only: false }),
+                entry(7, read),
+                entry(8, read),
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(name),
+            bind_group_layouts: &[Some(&bind_layout)],
+            immediate_size: 0,
+        });
         let mut pipelines: Vec<(Option<&'static str>, Pipelines)> = Vec::new();
         let placements = tables.iter().flat_map(|table| {
             std::iter::once(table.placement).chain(table.layers.iter().map(|layer| layer.placement))
@@ -490,13 +528,17 @@ impl RowJoin {
         for placement in placements {
             let key = placement.map(|placement| placement.name);
             if !pipelines.iter().any(|(name, _)| *name == key) {
-                pipelines.push((key, Pipelines::new(device, name, placement.as_ref())));
+                pipelines.push((
+                    key,
+                    Pipelines::new(device, name, &pipeline_layout, placement.as_ref()),
+                ));
             }
         }
         Self {
             name,
             keys,
             pipelines,
+            bind_layout,
             empty: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Row Join Empty Input"),
                 size: 256,
@@ -674,10 +716,9 @@ impl SceneDerivation for RowJoin {
                     Some(_) => (&pipelines.compact, 1),
                     None => (&pipelines.rows, rows.div_ceil(WORKGROUP).max(1)),
                 };
-                let layout = pipeline.get_bind_group_layout(0);
                 let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(spec.label),
-                    layout: &layout,
+                    layout: &self.bind_layout,
                     entries: &[
                         entry(0, uniforms),
                         entry(1, &owners.buffer),
