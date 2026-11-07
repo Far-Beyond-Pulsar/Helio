@@ -2490,9 +2490,6 @@ issue (above); views are the next design item, not p17's.
   (perf), `foliage_on_voxels` (no blades near the eye) and
   `voxel_pass_graph`'s chunk-pass settle fail as before p17; the chunks
   suite needs `--release`. Waits on: the user's voxel and sky work.
-- Pulsar-Native (scene_inventory): **ledger and architecture checks** fail
-  on rows and roots older than p16. Waits on: a ledger pass after the split
-  (the paths move with the plugin repos).
 - Pulsar-Native (engine_fs and its users): **one asset-reference
   resolver**: texture, skeleton, image and skeletal-mesh references each
   resolve through the file index in their own crate. Waits on: asset
