@@ -438,6 +438,23 @@ struct Pipelines {
 
 impl Pipelines {
     fn new(device: &wgpu::Device, name: &'static str, placement: Option<&Placement>) -> Self {
+        // Which bindings a placement's shader names decides the pipeline's
+        // inferred layout, and `derive` binds the light and the mesh bounds by
+        // the placement's flags: the two must agree.
+        if let Some(placement) = placement {
+            debug_assert_eq!(
+                placement.wgsl.contains("directional_light"),
+                placement.reads_lights,
+                "placement `{}`: `Placement::lit` must be set exactly when its WGSL reads `directional_light`",
+                placement.name
+            );
+            debug_assert_eq!(
+                placement.wgsl.contains("mesh_bounds"),
+                placement.reads_mesh_bounds,
+                "placement `{}`: `Placement::mesh_bounded` must be set exactly when its WGSL reads `mesh_bounds`",
+                placement.name
+            );
+        }
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(name),
             source: wgpu::ShaderSource::Wgsl(placement_source(placement).into()),
@@ -675,20 +692,31 @@ impl SceneDerivation for RowJoin {
                     None => (&pipelines.rows, rows.div_ceil(WORKGROUP).max(1)),
                 };
                 let layout = pipeline.get_bind_group_layout(0);
+                // The pipelines use an inferred layout, which holds only the
+                // bindings the shader names: the light and the mesh bounds are
+                // bound exactly when the placement says it reads them.
+                let mut entries = vec![
+                    entry(0, uniforms),
+                    entry(1, &owners.buffer),
+                    entry(2, &generations.buffer),
+                    entry(3, hidden.map_or(&self.empty, |h| &h.buffer)),
+                    entry(4, transforms.map_or(&self.empty, |h| &h.buffer)),
+                    entry(5, &source.buffer),
+                    entry(6, &table.buffer),
+                ];
+                if spec.placement.is_some_and(|placement| placement.reads_lights) {
+                    entries.push(entry(7, lights.map_or(&self.empty, |h| &h.buffer)));
+                }
+                if spec
+                    .placement
+                    .is_some_and(|placement| placement.reads_mesh_bounds)
+                {
+                    entries.push(entry(8, mesh_bounds.map_or(&self.empty, |h| &h.buffer)));
+                }
                 let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(spec.label),
                     layout: &layout,
-                    entries: &[
-                        entry(0, uniforms),
-                        entry(1, &owners.buffer),
-                        entry(2, &generations.buffer),
-                        entry(3, hidden.map_or(&self.empty, |h| &h.buffer)),
-                        entry(4, transforms.map_or(&self.empty, |h| &h.buffer)),
-                        entry(5, &source.buffer),
-                        entry(6, &table.buffer),
-                        entry(7, lights.map_or(&self.empty, |h| &h.buffer)),
-                        entry(8, mesh_bounds.map_or(&self.empty, |h| &h.buffer)),
-                    ],
+                    entries: &entries,
                 });
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some(spec.label),
