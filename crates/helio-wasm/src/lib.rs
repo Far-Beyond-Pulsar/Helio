@@ -106,6 +106,22 @@ pub trait HelioWasmApp: Sized + 'static {
         0.75
     }
 
+    /// The features of the object kinds this app draws (a plugin's, such as
+    /// the meshes'), added to the default graph's Helio features. None by
+    /// default: Helio's default graph draws no object kind.
+    fn features() -> helio_feature_api::FeatureSet {
+        helio_feature_api::FeatureSet::new()
+    }
+
+    /// Registers the SceneDB component columns of the kinds this app spawns,
+    /// before the world's GPU mirror is attached (so a column's first rows
+    /// are never lost to lazy registration). None by default.
+    fn register_columns(
+        _store: &mut pulsar_scenedb::gpu::SceneGpuStore,
+        _device: &std::sync::Arc<wgpu::Device>,
+    ) {
+    }
+
     /// Optionally build a custom render graph for this demo.
     ///
     /// Return `None` (the default) to use helio's standard deferred graph.

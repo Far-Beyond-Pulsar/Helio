@@ -5,7 +5,14 @@ fn raster_and_ray_query_sources_validate_with_shared_gbuffer_contract() {
         include_str!("../shaders/ssr_trace_rt.wgsl"),
         include_str!("../shaders/ssr_compose.wgsl"),
     ] {
-        let resolved = helio_core::shader::resolve_with(source, &[helio_pass_hiz::HIZ_SNIPPET]);
+        let resolved = helio_core::shader::resolve_with(
+            source,
+            &[
+                helio_pass_hiz::HIZ_SNIPPET,
+                helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
+                helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET,
+            ],
+        );
         let module = naga::front::wgsl::parse_str(&resolved)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&resolved)));
         naga::valid::Validator::new(
@@ -31,7 +38,9 @@ fn half_resolution_contract_reconstructs_full_resolution_inputs() {
         assert!(source.contains("let source_dims = textureDimensions(gbuf_depth)"));
         assert!(source.contains("let source_px = clamp"));
     }
-    assert!(compose.contains("let reflection_dims=textureDimensions(reflection)"));
+    // The half-resolution trace is read through the frame's reconstruction,
+    // as every reader of a specular layer reads it.
+    assert!(compose.contains("indirect_specular_at(reflection,uv)"));
 }
 
 #[test]
@@ -69,6 +78,7 @@ fn hybrid_pipeline_accepts_shared_camera_and_normal_contract() {
             &device,
             &camera,
             wgpu::TextureFormat::Rgba16Float,
+            "indirect_specular_0",
         );
         assert!(
             errors.pop().await.is_none(),

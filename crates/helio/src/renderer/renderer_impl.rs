@@ -30,32 +30,18 @@ pub type GraphRebuilder = Arc<
 >;
 
 /// Reapplies application-owned pass settings after a rebuild replaces the graph.
+/// Makes a pass the renderer keeps in every graph it builds (see
+/// [`Renderer::install_persistent_pass`]).
+pub type PassFactory = Arc<dyn Fn() -> Box<dyn RenderPass> + Send + Sync>;
+
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
 use crate::camera::Camera;
-use helio_mats::radiant::{RadiantTemplateRegistry, SharedTemplateRegistry};
 
 use super::debug::DebugDrawState;
 
 /// Mono, stereo, and a few application-owned auxiliary views.
 const MAX_VIEW_HISTORY: usize = 16;
-
-/// Backend-only fallback bindings for the material sampling contract.
-///
-/// Material parameters and texture references are authored in SceneDB. The
-/// renderer keeps only the descriptor objects required by the passes to bind
-/// that data. SceneDB texture-store slots supply cached views; vacant slots use the white
-/// fallback. Frontends must clear material slot references before freeing them.
-pub(crate) struct MaterialBindingResources {
-    pub(crate) _fallback_texture: wgpu::Texture,
-    pub(crate) fallback_view: wgpu::TextureView,
-    pub(crate) fallback_sampler: wgpu::Sampler,
-    pub(crate) texture_count: usize,
-    pub(crate) version: u64,
-    pub(crate) scene_views: Vec<Option<(wgpu::Texture, wgpu::TextureView)>>,
-}
-
-pub use helio_pass_billboard::BillboardInstance;
 
 pub(crate) enum CullStatsReadbackState {
     Idle,
@@ -75,7 +61,6 @@ pub struct Renderer {
     /// The camera `camera_generation` currently describes.
     pub(crate) camera_identity: Option<CameraIdentity>,
     pub(crate) frame_count: u64,
-    pub(crate) ray_frame: helio_core::FrameAcceleration,
     /// Previous projection per stable camera/view id, and the world origin
     /// it is expressed in. Stereo callers submit eyes sequentially, so a
     /// single matrix would make each eye reproject from the other eye's
@@ -85,6 +70,9 @@ pub struct Renderer {
     /// ones, run each frame between the SceneDB snapshot and the graph. See
     /// `helio_core::scene_derivation`.
     pub(crate) scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
+    /// The names of the derivations the graphs' features brought, made once
+    /// each and run after the host's ([`helio_core::SceneDerivationFactory`]).
+    pub(crate) feature_derivations: Vec<&'static str>,
     /// This frame's world origin: every frame is camera-relative, its
     /// coordinates world positions minus this. Follows the eye
     /// ([`Renderer::origin_for`]).
@@ -99,28 +87,21 @@ pub struct Renderer {
     pub(crate) surface_format: wgpu::TextureFormat,
     pub(crate) debug_camera_buffer: wgpu::Buffer,
     pub(crate) cull_stats_buffer: wgpu::Buffer,
-    pub(crate) material_bindings: MaterialBindingResources,
-    pub(crate) ambient_color: [f32; 3],
-    pub(crate) ambient_intensity: f32,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
     /// rebuild (a config change, shader reload) hands the graph builder, so the new
     /// graph has the same passes and pass settings (Helio#254/#255).
     ///
     /// Opaque to the renderer: it never interprets pass-specific fields
-    /// (shadow atlas, SSR, foliage, portals, TSR, reflections), it only
+    /// (shadow atlas, SSR, TSR, reflections), it only
     /// stores what the graph was built with. The size, scale, surface format,
     /// debug mode, render mode and XR flag have live fields of their own;
     /// [`Renderer::renderer_config`] overlays those onto this.
     pub(crate) graph_config: RendererConfig,
-    /// Coordinate-space transforms supplied by the frontend for portal and
-    /// sublevel instances. Kept on Renderer so graph rebuilds cannot reset
-    /// the G-buffer's table back to identity.
+    /// Coordinate-space transforms supplied by the frontend (rigid frames,
+    /// placed sublevels, what its features project). Kept on Renderer so
+    /// graph rebuilds cannot reset the G-buffer's table back to identity.
     pub(crate) coordinate_spaces: Vec<glam::Mat4>,
-    /// Active dense portal projection counts supplied by the resolver bridge.
-    /// Growable SceneDB buffers are capacity-sized, so passes must not infer
-    /// active rows from their allocation size.
-    pub(crate) portal_projection_counts: Option<(u32, u32)>,
     /// Whether the current renderer output is an XR eye view.
     pub(crate) xr_mode: bool,
     /// TSR quality preset, preserved across graph rebuilds.
@@ -130,15 +111,6 @@ pub struct Renderer {
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
     pub(crate) last_render_time: Instant,
     pub(crate) delta_time: f32,
-    /// Application-authored textures handed to the graph (Helio#257).
-    ///
-    /// Same accepted exception as `template_registry`: the application
-    /// creates these once and passes them in, and the renderer only forwards
-    /// them into the frame registry (`"color_grading_lut"` for PostProcessPass,
-    /// `"ies_textures"` for DeferredLightPass). The renderer never creates,
-    /// sizes or formats them, so it holds no pass-internal state here.
-    pub(crate) color_grading_lut_view: Option<wgpu::TextureView>,
-    pub(crate) ies_texture_view: Option<wgpu::TextureView>,
     pub(crate) graph_time_ms: f32,
     /// The last frame's graph submission. See [`Self::last_submission`].
     pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
@@ -160,13 +132,9 @@ pub struct Renderer {
     pub(crate) frame_clock_delta: Option<f32>,
     /// A bake to run before the next frame. Its result is owned by the
     /// graph's `BakeInjectPass`, never by the renderer (Helio#256).
-    #[cfg(feature = "bake")]
-    pub(crate) bake_pending: Option<helio_bake::BakeRequest>,
     /// Optional CPU bake projection supplied by the SceneDB/frontend owner.
     /// The renderer may execute it, but never traverses or synthesizes scene
     /// entities to build it.
-    #[cfg(feature = "bake")]
-    pub(crate) bake_scene: Option<helio_bake::SceneGeometry>,
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
     /// A configuration change asks for a graph rebuild before the next frame.
@@ -176,6 +144,11 @@ pub struct Renderer {
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
+    /// What the host published for the next frames' features to read
+    /// ([`Self::set_scene_payloads`]).
+    pub(crate) scene_payloads: helio_core::ScenePayloads,
+    /// Passes a host installed that survive graph rebuilds, by pass name.
+    pub(crate) persistent_passes: Vec<(&'static str, PassFactory)>,
     /// Shader hot-reload bookkeeping (see `shader_reload.rs`).
     #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
     pub(crate) shader_reload: super::shader_reload::ShaderReloadState,
@@ -190,15 +163,7 @@ pub struct Renderer {
     /// joystick locomotion drives. Applied to the located eye poses, so it moves the
     /// cameras and nothing else.
     pub(crate) xr_stage_transform: glam::Mat4,
-    /// Templates registered by the user for the gbuffer (opaque) path.
-    /// Preserved across graph rebuilds. Shared (not cloned) with
-    /// passes and the GPU scene via `Arc<RwLock<_>>` — see
-    /// `SharedTemplateRegistry` for why cloning this must be avoided.
-    pub(crate) template_registry: SharedTemplateRegistry,
 
-    /// Templates registered by the user for the transparent path.
-    /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
-    pub(crate) transparent_template_registry: SharedTemplateRegistry,
     pub(crate) render_mode: RenderMode,
     /// Whether the render graph was built in OpenXR multiview mode. Mirrors
     /// `config.enable_xr` and is preserved across graph rebuilds so an
@@ -247,14 +212,6 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Publish an already-built frontend acceleration projection (its TLAS
-    /// and the rows that follow its instance order) for the next frame
-    /// only. Call after flushing SceneDB and preparing its BLAS/TLAS; an
-    /// omitted update expires instead of reusing potentially stale geometry.
-    pub fn set_ray_tracing_frame(&mut self, rays: helio_core::RayFrame<'_>) {
-        self.ray_frame.publish(self.frame_count, rays);
-    }
-
     /// Raw depth-buffer texture (`Depth32Float`, already `COPY_SRC`) for
     /// external debug capture (e.g. an example dumping it to a PNG to
     /// answer "is anything actually being rasterized"). Every other
@@ -390,14 +347,25 @@ impl Renderer {
         }
     }
 
-    /// Change the shadow quality. The passes that use it are configured at
-    /// graph build, so this rebuilds the graph before the next frame; it
-    /// used to only take effect at the next window resize.
-    pub fn set_shadow_quality(&mut self, quality: helio_pass_shadow_matrix::ShadowQuality) {
-        if self.graph_config.shadow_quality != quality {
-            self.graph_config.shadow_quality = quality;
-            self.request_graph_rebuild();
-        }
+    /// Sets a feature's settings (one value per settings type, see
+    /// [`helio_feature_api::FeatureSettings`]). Features read their settings
+    /// when the graph builds, so this rebuilds the graph before the next frame.
+    pub fn set_feature<T: std::any::Any + Send + Sync>(&mut self, setting: T) {
+        self.graph_config.features.insert(setting);
+        self.request_graph_rebuild();
+    }
+
+    /// Sets a feature setting whose readers read it every frame (the
+    /// frame's `AmbientLight`), without
+    /// rebuilding the graph. A setting read when the graph builds needs
+    /// [`Self::set_feature`].
+    pub fn set_feature_live<T: std::any::Any + Send + Sync>(&mut self, setting: T) {
+        self.graph_config.features.insert(setting);
+    }
+
+    /// The feature setting of type `T` this renderer builds with, if set.
+    pub fn feature<T: std::any::Any>(&self) -> Option<&T> {
+        self.graph_config.features.get::<T>()
     }
 
     /// Rebuild the graph from [`Self::renderer_config`] before the next frame.
@@ -431,8 +399,8 @@ impl Renderer {
         self.frame_delta_override = seconds;
     }
 
-    /// Drive the frame clock animation reads (material graph `time`, foliage
-    /// wind, particles; `PrepareContext::time`) from the host's clock: each
+    /// Drive the frame clock animation reads (material graph `time`, a feature's
+    /// animation; `PrepareContext::time`) from the host's clock: each
     /// frame advances it by `seconds`, until changed. `Some(0.0)` freezes it
     /// (an editor viewport that is not realtime, a paused game); a game
     /// passes its clock's delta every frame, so animation follows pause and
@@ -486,33 +454,15 @@ impl Renderer {
         }
     }
 
-    /// Set the world-anchored pixel text shown by the editor's portal overlay.
-    pub fn set_portal_debug_texts(
-        &mut self,
-        texts: Vec<helio_pass_portal_instances::PortalDebugText>,
-    ) -> bool {
-        self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
-            .is_some_and(|pass| pass.set_debug_texts(texts))
-    }
-
-    /// Set transient portal-through geometry for the editor diagnostics view.
-    pub fn set_portal_debug_geometry(&mut self, vertices: Vec<[f64; 3]>) -> bool {
-        self.find_pass_mut::<helio_pass_portal_instances::PortalEditorOverlayPass>()
-            .is_some_and(|pass| pass.set_ghost_vertices(vertices))
-    }
-
-    /// Pass the latest asynchronous DeferredLight timestamp to its cost view.
-    pub fn set_deferred_light_timing_ms(&mut self, milliseconds: f32) -> bool {
-        self.find_pass_mut::<helio_pass_deferred_light::DeferredLightPass>()
-            .is_some_and(|pass| pass.set_measured_lighting_ms(milliseconds))
+    /// Hands every pass its own latest GPU time (passes whose output shows
+    /// their cost use it). Returns whether any output changes, so a host that
+    /// idles between frames knows to draw one.
+    pub fn feed_measured_gpu_times(&mut self) -> bool {
+        self.graph.feed_measured_gpu_times()
     }
 
     pub fn is_editor_mode(&self) -> bool {
         self.editor_mode
-    }
-
-    pub fn shadow_quality(&self) -> helio_pass_shadow_matrix::ShadowQuality {
-        self.graph_config.shadow_quality
     }
 
     /// Return the frontend-owned SceneDB GPU projection.
@@ -609,8 +559,43 @@ impl Renderer {
         self.graph.replace_pass_at(index, pass);
     }
 
+    /// Scene buffers of geometry this renderer draws that the scene's ray
+    /// tracing does not see (its features' declarations,
+    /// `FeatureRegistrar::untraced_geometry`): a ray-tracing projection
+    /// refuses a scene holding their rows.
+    pub fn untraced_geometry(&self) -> &[&'static str] {
+        self.graph.untraced_geometry()
+    }
+
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
+    }
+
+    /// The CPU payloads the scene's content publishes for the features that
+    /// read them ([`helio_core::PayloadContract`]), from the next frame on,
+    /// replacing the previous ones: an engine publishes them every frame.
+    pub fn set_scene_payloads(&mut self, payloads: helio_core::ScenePayloads) {
+        self.scene_payloads = payloads;
+    }
+
+    /// Publish `value` under `contract` (keeping the other payloads).
+    pub fn set_scene_payload<T: std::any::Any + Send + Sync>(
+        &mut self,
+        contract: &helio_core::PayloadContract<T>,
+        value: Arc<T>,
+    ) {
+        self.scene_payloads.insert(contract, value);
+    }
+
+    /// Whether a pass needs more frames to finish what it shows: a host
+    /// that renders on demand keeps rendering while this holds.
+    pub fn needs_frame(&self) -> bool {
+        self.graph.needs_frame()
+    }
+
+    /// The passes' diagnostics lines, for a host's log.
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.graph.diagnostics()
     }
 
     /// Configure passes in the current graph and every graph a rebuild creates.
@@ -627,7 +612,7 @@ impl Renderer {
     /// Set the coordinate-space table through the generic graph input seam
     /// (the non-identity tail: slot 0 is the world and implicit). The host owns
     /// the one table: every producer of spaces (rigid frames, sublevel
-    /// placements, portal projections) takes its slots from the host's
+    /// placements, a feature's projections) takes its slots from the host's
     /// [`helio_core::CoordinateSpaceAllocator`], and the host hands the result
     /// here. The owning pass uploads its GPU table during prepare.
     pub fn set_coordinate_spaces(&mut self, spaces: &[glam::Mat4]) {
@@ -636,37 +621,9 @@ impl Renderer {
         self.apply_coordinate_spaces();
     }
 
-    /// Upload a resolver-generated portal projection frame built with its own
-    /// table (`PortalProjectionBridge::build`): its spaces become the table.
-    /// A host that shares the table with other producers builds with
-    /// `build_into` and calls [`Self::set_coordinate_spaces`] and
-    /// [`Self::set_portal_projection_counts`] instead.
-    pub fn set_portal_projection_frame(
-        &mut self,
-        frame: &helio_pass_portal_cull::PortalProjectionFrame,
-    ) {
-        self.coordinate_spaces.clear();
-        self.coordinate_spaces
-            .extend_from_slice(frame.renderer_coordinate_spaces());
-        self.set_portal_projection_counts(
-            frame.counts.portal_view_count,
-            frame.counts.portal_chain_count,
-        );
-    }
-
-    /// The live portal view and chain counts of a projection whose spaces the
-    /// host placed in the table itself.
-    pub fn set_portal_projection_counts(&mut self, portal_views: u32, portal_chains: u32) {
-        self.portal_projection_counts = Some((portal_views, portal_chains));
-        self.apply_coordinate_spaces();
-    }
-
     pub(crate) fn apply_coordinate_spaces(&mut self) {
         let inputs = RenderFrameInputs {
             coordinate_spaces: &self.coordinate_spaces,
-            projection_counts: self
-                .portal_projection_counts
-                .map(|(view_count, chain_count)| [view_count, chain_count]),
             xr_mode: self.xr_mode,
         };
         self.graph.set_frame_inputs(&inputs);
@@ -682,40 +639,8 @@ impl Renderer {
         }
     }
 
-    /// Access the gbuffer template registry (preserved across graph rebuilds).
-    /// Register custom surface templates here instead of through the pass
-    /// directly to ensure they survive graph rebuilds.
-    pub fn template_registry_mut(
-        &mut self,
-    ) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
-        self.template_registry
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    /// Access the transparent template registry for alpha-blended materials.
-    pub fn transparent_template_registry_mut(
-        &mut self,
-    ) -> std::sync::RwLockWriteGuard<'_, RadiantTemplateRegistry> {
-        self.transparent_template_registry
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
         self.clear_color = color;
-    }
-
-    /// Replace the shared sampler used by SceneDB material texture slots.
-    /// Incrementing the binding version refreshes pass descriptor caches.
-    pub fn set_material_sampler(&mut self, descriptor: &wgpu::SamplerDescriptor<'_>) {
-        self.material_bindings.fallback_sampler = self.device.create_sampler(descriptor);
-        self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
-    }
-
-    pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
-        self.ambient_color = color;
-        self.ambient_intensity = intensity;
     }
 
     pub fn set_graph(&mut self, mut graph: RenderGraph) {
@@ -733,64 +658,55 @@ impl Renderer {
         self.graph_rebuilder = Some(rebuilder);
     }
 
-    #[cfg(feature = "bake")]
-    pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
-        self.bake_pending = Some(request);
+    /// Keep a pass in the graph from now on: it is added (or replaces the
+    /// pass of the same [`RenderPass::name`]) now and after every graph
+    /// rebuild, made fresh by `factory`. A host's results the graph cannot
+    /// build itself (a finished bake, say) stay rendered this way.
+    pub fn install_persistent_pass(&mut self, factory: PassFactory) {
+        let pass = factory();
+        let name = pass.name();
+        self.place_pass(pass);
+        self.persistent_passes
+            .retain(|(existing, _)| *existing != name);
+        self.persistent_passes.push((name, factory));
     }
 
-    /// Supply the explicit CPU bake projection assembled by the SceneDB
-    /// owner. This replaces the removed renderer scene traversal.
-    #[cfg(feature = "bake")]
-    pub fn set_bake_scene(&mut self, scene: helio_bake::SceneGeometry) {
-        self.bake_scene = Some(scene);
-    }
-
-    /// Bake the scene last given to [`Self::set_bake_scene`] before the next
-    /// frame. Build it with [`crate::bake_scene_from_world`]. Returns whether a
-    /// bake was queued, so a missing scene is not a silent no-op (Helio#256).
-    #[cfg(feature = "bake")]
-    pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) -> bool {
-        let Some(scene) = self.bake_scene.clone() else {
-            log::error!(
-                "Renderer::auto_bake requires set_bake_scene(helio::bake_scene_from_world(..)) first; nothing was baked"
-            );
-            return false;
-        };
-        self.configure_bake(helio_bake::BakeRequest { scene, config });
-        true
-    }
-
-    /// Hand a finished bake to the graph. `BakeInjectPass` owns it from here
-    /// and publishes it every frame; a re-bake replaces the previous one.
-    #[cfg(feature = "bake")]
-    pub(crate) fn install_baked_data(&mut self, baked: std::sync::Arc<helio_bake::BakedData>) {
-        let pass = Box::new(helio_bake::BakeInjectPass::new(baked));
-        match self.graph.pass_index_of::<helio_bake::BakeInjectPass>() {
+    fn place_pass(&mut self, pass: Box<dyn RenderPass>) {
+        match self.graph.pass_index_named(pass.name()) {
             Some(index) => self.graph.replace_pass_at(index, pass),
             None => self.graph.add_pass_live(pass),
         }
     }
 
-    /// The baked data the current graph publishes, for carrying it into a
-    /// rebuilt graph.
-    #[cfg(feature = "bake")]
-    pub(crate) fn installed_baked_data(&self) -> Option<std::sync::Arc<helio_bake::BakedData>> {
-        self.graph
-            .find_pass::<helio_bake::BakeInjectPass>()
-            .map(|pass| pass.baked_data().clone())
-    }
-
-    /// Replace the graph, keeping what the old one owned that a freshly
-    /// built graph cannot know about (a finished bake, the debug mode for
-    /// passes that only learn it through `set_debug_mode`).
+    /// Replace the graph, keeping what a freshly built graph cannot know
+    /// about: the persistent passes and the debug mode for passes that only
+    /// learn it through `set_debug_mode`.
     pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
         graph.set_debug_mode(self.debug_mode);
-        #[cfg(feature = "bake")]
-        let baked = self.installed_baked_data();
+        let derivations = graph.take_scene_derivations();
         self.graph = graph;
-        #[cfg(feature = "bake")]
-        if let Some(baked) = baked {
-            self.install_baked_data(baked);
+        self.adopt_scene_derivations(derivations);
+        let persistent: Vec<PassFactory> = self
+            .persistent_passes
+            .iter()
+            .map(|(_, factory)| Arc::clone(factory))
+            .collect();
+        for factory in persistent {
+            self.place_pass(factory());
+        }
+    }
+
+    /// Makes the scene derivations a graph's features bring that this
+    /// renderer has not made yet (by name), run after the host's.
+    pub(crate) fn adopt_scene_derivations(
+        &mut self,
+        factories: Vec<helio_core::SceneDerivationFactory>,
+    ) {
+        for factory in factories {
+            if !self.feature_derivations.contains(&factory.name) {
+                self.feature_derivations.push(factory.name);
+                self.scene_derivations.push((factory.make)(&self.device));
+            }
         }
     }
 
@@ -824,7 +740,7 @@ impl Renderer {
             tsr_quality: self.tsr_quality,
             render_mode: self.render_mode,
             enable_xr: self.enable_xr,
-            ..self.graph_config
+            ..self.graph_config.clone()
         }
     }
 
@@ -939,30 +855,6 @@ impl Renderer {
     /// Whether the renderer was built with the OpenXR multiview path enabled.
     pub(crate) fn xr_enabled(&self) -> bool {
         self.enable_xr
-    }
-
-    /// Set or clear the 3D colour grading LUT texture.
-    /// Call with `None` to disable LUT grading.
-    /// The LUT texture must be `Rgba16Float`, `TextureDimension::D3`.
-    pub fn set_color_grading_lut(&mut self, view: Option<wgpu::TextureView>) {
-        self.color_grading_lut_view = view;
-    }
-
-    /// Returns the current colour grading LUT view, if any.
-    pub fn color_grading_lut(&self) -> Option<&wgpu::TextureView> {
-        self.color_grading_lut_view.as_ref()
-    }
-
-    /// Returns the current IES texture array view, if any.
-    pub fn ies_texture_view(&self) -> Option<&wgpu::TextureView> {
-        self.ies_texture_view.as_ref()
-    }
-
-    /// Set the IES profile texture array view (`R8Unorm`, `D2Array`, one
-    /// layer per profile; a light's `ies_profile_index` selects the layer).
-    /// The application creates the texture; see `examples/ies_demo.rs`.
-    pub fn set_ies_texture_view(&mut self, view: wgpu::TextureView) {
-        self.ies_texture_view = Some(view);
     }
 }
 

@@ -1,3 +1,6 @@
+pub mod feature;
+pub use feature::PerfOverlayFeature;
+
 pub mod analysis;
 pub mod rendering;
 

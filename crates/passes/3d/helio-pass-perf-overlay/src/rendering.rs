@@ -6,6 +6,13 @@ use crate::{
 use helio_core::{CommandRecorder, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
 
+/// The overlay's stand-in surface for its cost probe when no kind offers one
+/// (`helio_frame_api::diagnostics::SurfaceProbe`): Lambert.
+pub const LAMBERT_PROBE: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
+    helio_frame_api::diagnostics::SURFACE_PROBE_MARKER,
+    "../shaders/surface_probe_lambert.wgsl"
+);
+
 // ── Shared GPU state (created once, shared between passes) ──────────────────────
 
 pub struct PerfOverlayShared {
@@ -41,6 +48,9 @@ pub struct PerfOverlayShared {
     pub(crate) cost_compute_params_buf: wgpu::Buffer,
 
     pub(crate) material_profiler: Option<MaterialProfiler>,
+    /// What a kind offered the overlay to measure (`helio_frame_api::diagnostics`).
+    pub(crate) tile_counter: Option<helio_frame_api::diagnostics::TileCounter>,
+    pub(crate) surface_probe: Option<helio_frame_api::diagnostics::SurfaceProbe>,
 
     pub(crate) mode: Mutex<PerfOverlayMode>,
     pub(crate) runtime: Mutex<PerfOverlayRuntime>,
@@ -93,7 +103,17 @@ impl PixelTargets {
 }
 
 impl PerfOverlayShared {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Arc<Mutex<Self>> {
+    /// `tile_counter` and `surface_probe`: what the graph's kinds offered
+    /// (`helio_frame_api::diagnostics`). A counter whose tiles are not the
+    /// overlay's [`TILE_SIZE`] is not read.
+    pub fn new(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        tile_counter: Option<helio_frame_api::diagnostics::TileCounter>,
+        surface_probe: Option<helio_frame_api::diagnostics::SurfaceProbe>,
+    ) -> Arc<Mutex<Self>> {
+        let tile_counter = tile_counter.filter(|counter| counter.tile_px == TILE_SIZE);
         let num_tiles_x = width.div_ceil(TILE_SIZE);
         let num_tiles_y = height.div_ceil(TILE_SIZE);
 
@@ -360,6 +380,8 @@ impl PerfOverlayShared {
             cost_compute_bgl,
             cost_compute_params_buf,
             material_profiler: None,
+            tile_counter,
+            surface_probe,
             mode: Mutex::new(PerfOverlayMode::Disabled),
             runtime: Mutex::new(PerfOverlayRuntime {
                 frame_num: 0,
@@ -426,7 +448,11 @@ impl PerfOverlayShared {
 
     pub fn init_material_profiler(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         if self.material_profiler.is_none() {
-            self.material_profiler = Some(MaterialProfiler::new(device, queue));
+            self.material_profiler = Some(MaterialProfiler::new(
+                device,
+                queue,
+                self.surface_probe.as_ref(),
+            ));
         }
     }
 
@@ -806,9 +832,13 @@ impl RenderPass for PerfOverlayPass {
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
             ctx.registry
-                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
-            ctx.registry
-                .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(
+                    helio_frame_api::gbuffer::GROUP,
+                )),
+            shared.tile_counter.as_ref().and_then(|counter| {
+                ctx.registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(counter.resource))
+            }),
         ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
@@ -860,10 +890,14 @@ impl RenderPass for PerfOverlayPass {
         }
 
         if let (Some(_pre_aa), Some(gbuffer)) = (
+            ctx.registry.read_texture_view(
+                helio_core::ResourceKey::new(helio_frame_api::color::SCENE_COLOR),
+                "PerfOverlay",
+            ),
             ctx.registry
-                .read_texture_view(helio_core::ResourceKey::new("pre_aa"), "PerfOverlay"),
-            ctx.registry
-                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(
+                    helio_frame_api::gbuffer::GROUP,
+                )),
         ) {
             let gbuffer_orm_ptr = gbuffer.views[2] as *const _ as usize;
             let key = (gbuffer_orm_ptr, shared.targets_generation);
@@ -951,7 +985,12 @@ pub struct MaterialProfiler {
 }
 
 impl MaterialProfiler {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+    /// Times `probe`'s surface (the overlay's Lambert stand-in without one).
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        probe: Option<&helio_frame_api::diagnostics::SurfaceProbe>,
+    ) -> Self {
         let test_size = 32;
         let test_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Material Profile Test Texture"),
@@ -990,36 +1029,32 @@ impl MaterialProfiler {
             mapped_at_creation: false,
         });
 
-        let profile_shader = helio_core::shader::module(
+        // Every snippet of the probe, the ones its own text uses included.
+        let snippets = probe.map_or_else(|| vec![LAMBERT_PROBE], |probe| probe.snippets.clone());
+        let markers: String = snippets.iter().map(|s| format!("{}\n", s.marker)).collect();
+        let source = format!(
+            "{markers}{}",
+            include_str!("../shaders/profile_material.wgsl")
+        );
+        let profile_shader = helio_core::shader::module_with(
             device,
             "Material Profile Shader",
-            helio_core::include_wgsl!("../shaders/profile_material.wgsl"),
+            source.as_str(),
+            &snippets,
         );
 
         let profile_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Material Profile BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+                count: None,
+            }],
         });
 
         let profile_pipeline_layout =
@@ -1126,7 +1161,6 @@ impl MaterialProfiler {
         &mut self,
         device: &wgpu::Device,
         encoder: &mut CommandRecorder<'_>,
-        light_buf: &wgpu::Buffer,
     ) -> bool {
         if self.profiling_complete {
             return true;
@@ -1143,16 +1177,10 @@ impl MaterialProfiler {
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Material Profile BG"),
             layout: &self.profile_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: params_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: light_buf.as_entire_binding(),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            }],
         });
 
         encoder.write_timestamp(&self.query_set, 0);

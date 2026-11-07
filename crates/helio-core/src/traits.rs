@@ -420,6 +420,15 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// the values for its next `prepare()` call.
     fn set_frame_inputs(&mut self, _inputs: &RenderFrameInputs<'_>) {}
 
+    /// Receives the pass's own GPU time as last measured (milliseconds), for
+    /// a pass whose output shows its cost (a cost debug view). Returns
+    /// whether that output changes. See [`RenderGraph::feed_measured_gpu_times`].
+    ///
+    /// [`RenderGraph::feed_measured_gpu_times`]: crate::RenderGraph::feed_measured_gpu_times
+    fn set_measured_gpu_ms(&mut self, _milliseconds: f32) -> bool {
+        false
+    }
+
     /// Executes the pass by recording GPU commands.
     ///
     /// This is the main entry point for recording work. Implementations should:
@@ -705,6 +714,19 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// while they are members. The graph also asks once at lock, with no
     /// scene: content questions answer "none" then.
     ///
+    /// Whether the pass needs more frames to finish what it shows (content
+    /// streaming in, a request it answers a few frames later): a host that
+    /// renders on demand keeps rendering while any pass says so.
+    fn needs_frame(&self) -> bool {
+        false
+    }
+
+    /// One line on the pass's state for a host's diagnostics log, if it
+    /// keeps any (residency, timings).
+    fn diagnostics(&self) -> Option<String> {
+        None
+    }
+
     /// Default: always a member.
     fn is_member(&mut self, _scene: &mut crate::graph::SceneContent<'_>) -> bool {
         true

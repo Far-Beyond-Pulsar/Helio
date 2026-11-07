@@ -12,6 +12,9 @@
 //! - **Scene Normals** (`NORMALS_VIEW`): world-space normal as RGB
 //!   (R = +X, G = +Y, B = +Z).
 
+pub mod feature;
+pub use feature::BufferViewFeature;
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{DebugViewDescriptor, PassContext, RenderPass, Result as HelioResult};
 
@@ -145,7 +148,7 @@ impl RenderPass for BufferViewPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("gbuffer");
+        builder.read(helio_frame_api::gbuffer::GROUP);
     }
 
     fn render_pass_descriptor_with_storage<'a>(
@@ -183,7 +186,7 @@ impl RenderPass for BufferViewPass {
             return Ok(());
         }
         let Some(gbuffer) = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
-            helio_core::ResourceKey::new("gbuffer"),
+            helio_core::ResourceKey::new(helio_frame_api::gbuffer::GROUP),
             "BufferView",
         ) else {
             return Ok(());
@@ -221,7 +224,13 @@ impl RenderPass for BufferViewPass {
         ctx.write_buffer(
             &self.view_buf,
             0,
-            &[self.mode.to_le_bytes(), [0; 4], [0; 4], [0; 4]].concat(),
+            &[
+                u32::from(self.mode == NORMALS_VIEW).to_le_bytes(),
+                [0; 4],
+                [0; 4],
+                [0; 4],
+            ]
+            .concat(),
         );
         let Some(mut rp) = ctx.render_cmds() else {
             return Ok(());

@@ -1,8 +1,10 @@
 //! GPU-native post-processing pipeline for Helio.
 //!
-//! Volume blending lives in [`PostProcessVolumeBlendPass`] and is scheduled ahead
-//! of this pass, so that earlier readers of the post-process config (notably
-//! `VolumetricFogPass`) see the blended values rather than the camera defaults.
+//! The tone map reads the frame's post settings ([`POST_SETTINGS`], a
+//! `GpuPostProcessUniforms` buffer) and the scene colour the colour chain
+//! hands it. Whoever resolves the scene's settings (the post-process volumes
+//! feature) publishes them early in the frame, so every reader sees the
+//! same values; without a publisher the tone map uses the defaults.
 //!
 //! Sub-stages (execution order in `execute()`):
 //!   1. `cs_exposure`/`cs_exposure_reduce`/`cs_exposure_adapt` — metered log luminance and eye adaptation (compute)
@@ -16,7 +18,6 @@
 //!   Main BGLs (group 0): uniforms, samplers, hdr/depth, bloom, noise, custom, volumes, blend output
 //!   Bloom BGL (group 1): per-dispatch bloom src (sampled) + dst (storage write)
 //!   Bloom upsample BGL (group 2): mip i + coarser sum (sampled) + sum i (storage write)
-//!   Blend BGL (group 0, separate layout): postprocess, camera, pp_volumes, blend_output
 //!
 //! See also `postprocess.wgsl` for shader-level injection points:
 //!   INJECTION_POINT_0 (pre-blend), INJECTION_POINT_1 (post-tonemap),
@@ -26,19 +27,8 @@ use bytemuck;
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-mod components;
 pub mod gpu_types;
-pub use components::{CameraPostProcessComponent, PostProcessVolumeComponent};
 pub use gpu_types::*;
-
-mod volume_blend;
-pub use volume_blend::{
-    PostProcessVolumeBlendPass, AUTO_EXPOSURE_MAYBE_ACTIVE, BLOOM_MAYBE_ACTIVE,
-    FOG_SETTINGS_MAYBE_ACTIVE,
-};
-
-mod fog_composite;
-pub use fog_composite::{FogCompositePass, FOGGED_HDR, FOGGED_HDR_FORMAT};
 
 mod lut_builder;
 pub use lut_builder::LutBuilder;
@@ -150,11 +140,64 @@ impl LocalExposureGrid {
     }
 }
 
+/// Graph key of the post settings the tone map reads this frame (a
+/// `GpuPostProcessUniforms` buffer, uniform and storage): the post-settings
+/// contract. Whoever resolves the scene's post settings (post-process
+/// volumes) publishes it; without it the tone map uses the host's
+/// [`POST_BASELINE`].
+pub const POST_SETTINGS: &str = "postprocess_uniforms";
+
+/// The host's post settings: what the frame's post settings are where
+/// nothing overrides them. The tone map's stand-in for [`POST_SETTINGS`],
+/// and the base a publisher of those (post-process volumes) blends over.
+/// Without it, `PostProcessSettings::default()`.
+pub const POST_BASELINE: helio_core::PayloadContract<PostProcessSettings> =
+    helio_core::PayloadContract::new("post_settings_baseline");
+
+/// The camera's 3D colour-grading LUT (a renderer config's `features`):
+/// `Rgba16Float`, `TextureDimension::D3`. Without it grading uses the
+/// identity LUT.
+#[derive(Clone, Debug)]
+pub struct ColorGradingLut(pub wgpu::TextureView);
+
+/// `bool` registry key: false only when no source the post settings' publisher blends from
+/// (defaults, camera rows, volumes) can enable bloom, so the resolved
+/// `bloom_enabled` is certainly 0 this frame and nothing samples the bloom
+/// mips. Hosts register these columns up front, so the check reads the rows
+/// back when they change (`SceneBufferLiveness`) and is true until they have
+/// been read.
+pub const BLOOM_MAYBE_ACTIVE: &str = "bloom_maybe_active";
+
+/// `bool` registry key: false only when no source the post settings' publisher blends from
+/// can select auto exposure, so the resolved `exposure_mode` is certainly
+/// manual this frame and nothing reads the metered luminance. Tracked like
+/// [`BLOOM_MAYBE_ACTIVE`].
+pub const AUTO_EXPOSURE_MAYBE_ACTIVE: &str = "auto_exposure_maybe_active";
+
+/// `GpuPostProcessUniforms` in WGSL, for the post settings' publishers and
+/// readers ([`with_post_settings`]).
+pub const POST_SETTINGS_WGSL: &str = include_str!("../shaders/post_settings.wgsl");
+
+/// `source` (a shader opting into Helio's prelude) with the post settings'
+/// struct after its first line.
+pub fn with_post_settings(source: &str) -> String {
+    match source.split_once('\n') {
+        Some((first, rest)) => format!("{first}\n{POST_SETTINGS_WGSL}\n{rest}"),
+        None => format!("{POST_SETTINGS_WGSL}\n{source}"),
+    }
+}
+
 /// Maximum active volumes blended per frame. SceneDB buffers can be larger:
 /// rows are addressed by sparse entity index, so shaders scan the full buffer
 /// before compacting into this fixed active-volume budget.
 pub const MAX_PP_VOLUMES: u32 = 64;
 const _: () = assert!(MAX_PP_VOLUMES == 64);
+
+/// A host's WGSL effects compiled into the post-process shader (see
+/// [`PostProcessPass::new_with_user_effects`]), as a feature setting: a
+/// graph's post-process node builds with it.
+#[derive(Clone, Copy, Debug)]
+pub struct UserEffects(pub &'static str);
 
 /// Position in the uber-shader effect chain where a user effect is injected.
 #[repr(u32)]
@@ -178,6 +221,16 @@ pub struct UserEffectEntry {
 
 pub struct PostProcessPass {
     color_input: &'static str,
+    color_alias: Option<&'static str>,
+    /// The glare an optical effect published (`helio_frame_api::color::glare`),
+    /// composited with the scene's exposure; black without one.
+    glare: Option<&'static str>,
+    /// The host's [`POST_BASELINE`] (`PostProcessSettings::default()`
+    /// without one): the post settings while nothing publishes
+    /// [`POST_SETTINGS`].
+    default_settings: wgpu::Buffer,
+    /// The baseline `default_settings` holds.
+    baseline: GpuPostProcessUniforms,
     uber_timing_query: Option<wgpu::QuerySet>,
     compute_timing_query: Option<wgpu::QuerySet>,
     avg_luminance_buf: wgpu::Buffer,
@@ -249,12 +302,14 @@ pub struct PostProcessPass {
     noise_texture: wgpu::Texture,
     noise_view: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
-    /// 1x1 black stand-in bound at b17 when the graph has no lens pass.
+    /// 1x1 black stand-in bound at b17 when nothing published glare.
     fallback_lens_view: wgpu::TextureView,
     /// 1x1 (0,0) stand-in bound at b18 when the graph has no velocity pass.
     fallback_velocity_view: wgpu::TextureView,
     /// 1x1x1 identity LUT bound at b19 when no LUT is loaded.
     fallback_lut_view: wgpu::TextureView,
+    /// The grading LUT ([`ColorGradingLut`]); identity without.
+    color_grading_lut: Option<wgpu::TextureView>,
     custom_params_buf: wgpu::Buffer,
     custom_params: Vec<[f32; 4]>,
 
@@ -323,22 +378,30 @@ fn uber_pipelines(
 
 impl PostProcessPass {
     /// Select the linear HDR input published by the preceding graph pass.
+    /// Grades with `lut` instead of the identity LUT.
+    pub fn with_color_grading_lut(mut self, lut: Option<wgpu::TextureView>) -> Self {
+        self.color_grading_lut = lut;
+        self
+    }
+
     pub fn with_color_input(mut self, key: &'static str) -> Self {
         self.color_input = key;
         self
     }
-    /// Consume the linear HDR intermediate published by FXAA.
-    pub fn with_fxaa_input(mut self) -> Self {
-        self.color_input = "fxaa_color";
+
+    /// The image the colour input may be a view of
+    /// (`helio_frame_api::color::alias`), read too so it stays alive.
+    pub fn with_color_alias(mut self, alias: Option<&'static str>) -> Self {
+        self.color_alias = alias;
         self
     }
 
-    /// Consume the HDR history resolve published by TSR.
-    pub fn with_tsr_input(mut self) -> Self {
-        self.color_input = "tsr_color";
+    /// The glare to composite (`helio_frame_api::color::glare`): light an
+    /// optical effect adds inside the tone map with the scene's exposure.
+    pub fn with_glare(mut self, glare: Option<&'static str>) -> Self {
+        self.glare = glare;
         self
     }
-
     /// Optional GPU timestamps around the full-screen tonemap and effects pass.
     pub fn enable_uber_timing(&mut self, device: &wgpu::Device) -> bool {
         if !device.features().contains(
@@ -799,7 +862,7 @@ impl PostProcessPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        // Stand-in for the lens response when no LensFlarePass is in the graph.
+        // Stand-in for the glare when nothing published one.
         // Textures are zero-initialised, and black adds nothing.
         let fallback_lens_view = device
             .create_texture(&wgpu::TextureDescriptor {
@@ -908,9 +971,23 @@ impl PostProcessPass {
         });
 
         let stored_snippet = user_effects_fn.map(|s| s.to_string());
+        let default_settings = wgpu::util::DeviceExt::create_buffer_init(
+            device,
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("PostProcess Default Settings"),
+                contents: bytemuck::bytes_of(&PostProcessSettings::default().to_gpu()),
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST,
+            },
+        );
 
         Self {
-            color_input: "pre_aa",
+            color_input: helio_frame_api::color::SCENE_COLOR,
+            color_alias: None,
+            glare: None,
+            default_settings,
+            baseline: PostProcessSettings::default().to_gpu(),
             uber_timing_query: None,
             compute_timing_query: None,
             avg_luminance_buf,
@@ -955,6 +1032,7 @@ impl PostProcessPass {
             fallback_lens_view,
             fallback_velocity_view,
             fallback_lut_view,
+            color_grading_lut: None,
             custom_params_buf,
             custom_params: Vec::new(),
             user_shader_snippet: stored_snippet,
@@ -982,7 +1060,7 @@ impl PostProcessPass {
             "PostProcess Shader",
             helio_core::include_wgsl!("../shaders/postprocess.wgsl"),
         );
-        let mut result = base.to_string();
+        let mut result = with_post_settings(&base);
 
         // Collect module-scope definitions and per-position calls.
         let mut defs = String::new();
@@ -1376,37 +1454,10 @@ impl RenderPass for PostProcessPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        match self.color_input {
-            "lens_color" => &[
-                "lens_color",
-                "postprocess_uniforms",
-                "lens_output",
-                "color_grading_lut",
-            ],
-            "fxaa_color" => &[
-                "fxaa_color",
-                "postprocess_uniforms",
-                "lens_output",
-                "color_grading_lut",
-            ],
-            "tsr_color" => &[
-                "tsr_color",
-                "postprocess_uniforms",
-                "lens_output",
-                "color_grading_lut",
-            ],
-            "fogged_hdr" => &[
-                "fogged_hdr",
-                "postprocess_uniforms",
-                "lens_output",
-                "color_grading_lut",
-            ],
-            _ => &[
-                "pre_aa",
-                "postprocess_uniforms",
-                "lens_output",
-                "color_grading_lut",
-            ],
+        // The scene colour it tone maps is the chain's (`declare_resources`).
+        match self.glare {
+            Some(glare) => helio_frame_api::static_names(&[POST_SETTINGS, glare]),
+            None => &[POST_SETTINGS],
         }
     }
 
@@ -1421,21 +1472,21 @@ impl RenderPass for PostProcessPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
-        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
-        // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == crate::FOGGED_HDR {
-            builder.read("pre_aa");
+        // The input may be a view of an earlier image
+        // (`helio_frame_api::color::alias`); keep the pool from reusing it.
+        if let Some(alias) = self.color_alias {
+            builder.read(alias);
         }
-        // Resolved camera + volume settings from PostProcessVolumeBlendPass.
-        builder.read("postprocess_uniforms");
-        // Optional: graphs without a LensFlarePass never publish this, and the
-        // uber shader binds a 1x1 black fallback.
-        builder.read("lens_output");
+        // The frame's post settings; the defaults without a publisher.
+        builder.read(POST_SETTINGS);
+        // Optional: without a published glare the uber shader binds a 1x1
+        // black fallback.
+        if let Some(glare) = self.glare {
+            builder.read(glare);
+        }
         // Optional: graphs without a GBuffer pass or velocity pass fall back to
         // a 1x1 zero-velocity texture (no per-object motion blur).
-        builder.read("gbuffer_velocity");
-        // Optional: 3D LUT for colour grading; falls back to identity LUT.
-        builder.read("color_grading_lut");
+        builder.read(helio_frame_api::gbuffer::VELOCITY);
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
@@ -1501,6 +1552,15 @@ impl PostProcessPass {
         );
         self.exposure_history = true;
 
+        let baseline = ctx
+            .scene_buffers
+            .payload(&POST_BASELINE)
+            .map_or_else(|| PostProcessSettings::default().to_gpu(), |b| b.to_gpu());
+        if bytemuck::bytes_of(&baseline) != bytemuck::bytes_of(&self.baseline) {
+            ctx.write_buffer(&self.default_settings, 0, bytemuck::bytes_of(&baseline));
+            self.baseline = baseline;
+        }
+
         // Deferred shader rebuild: if a snippet was queued, apply it now.
         if self.pending_shader_snippet.is_some() {
             let pending = self.pending_shader_snippet.take().unwrap();
@@ -1547,29 +1607,29 @@ impl PostProcessPass {
         if input_size != self.analysis_size {
             self.resize_analysis(ctx.device, input_size.0, input_size.1);
         }
-        let postprocess_buf = match ctx
+        let postprocess_buf = ctx
             .registry
-            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("postprocess_uniforms"))
-        {
-            Some(v) => v,
-            None => return Ok(()),
-        };
+            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(POST_SETTINGS))
+            .map_or_else(|| self.default_settings.clone(), |buffer| (*buffer).clone());
+        let postprocess_buf = &postprocess_buf;
 
         let camera_buf = ctx.camera;
 
-        // None when no LensFlarePass is in the graph; rebuild_bind_groups then
-        // binds the 1x1 black fallback. Part of the key so that a lens pass
+        // None when nothing published glare; rebuild_bind_groups then
+        // binds the 1x1 black fallback. Part of the key so that a glare pass
         // being added, removed, or resized rebuilds the group instead of
         // leaving b17 pointing at a stale view.
-        let lens_view = ctx
-            .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("lens_output"));
+        let lens_view = self.glare.and_then(|glare| {
+            ctx.registry
+                .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(glare))
+        });
         let velocity_view = ctx
             .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("gbuffer_velocity"));
-        let lut_view = ctx
-            .registry
-            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new("color_grading_lut"));
+            .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(
+                helio_frame_api::gbuffer::VELOCITY,
+            ));
+        let lut_view = self.color_grading_lut.clone();
+        let lut_view = lut_view.as_ref();
 
         let bg_key = (
             pre_aa_view.clone(),
@@ -1621,10 +1681,8 @@ impl PostProcessPass {
         // must follow them on that same encoder.
         let mut cmds = ctx.graphics_cmds();
 
-        // 0. Volume blending now runs in PostProcessVolumeBlendPass, scheduled
-        //    ahead of this pass — see volume_blend.rs. It cannot happen here:
-        //    VolumetricFogPass reads the blended fog config earlier in the graph,
-        //    and would silently get the unblended camera defaults instead.
+        // 0. Volume blending runs in the post plugin's volume blend pass,
+        //    scheduled ahead of this pass (it publishes POST_SETTINGS).
 
         // 1. Sampled log luminance: one sample per 4x4 block, then one final
         // workgroup reduction. Each partial has a unique writer. Only auto

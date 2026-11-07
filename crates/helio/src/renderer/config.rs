@@ -1,5 +1,4 @@
-use crate::material::MAX_TEXTURES;
-use helio_mats::BINDLESS_MATERIAL_FEATURES;
+use helio_core::{TEXTURE_BINDING_ARRAYS, TEXTURE_TABLE_LIMIT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -122,8 +121,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         optional |= VIRTUAL_GEOMETRY_INT64_FEATURES;
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if adapter_features.contains(BINDLESS_MATERIAL_FEATURES) {
-        optional |= BINDLESS_MATERIAL_FEATURES;
+    if adapter_features.contains(TEXTURE_BINDING_ARRAYS) {
+        optional |= TEXTURE_BINDING_ARRAYS;
     }
     // Request ray tracing if available (native only, requires Vulkan)
     #[cfg(not(target_arch = "wasm32"))]
@@ -175,7 +174,7 @@ pub fn required_experimental_features(
 #[cfg(test)]
 mod tests {
     use super::{ray_queries_usable, required_wgpu_features, RendererConfig};
-    use helio_mats::BINDLESS_MATERIAL_FEATURES;
+    use helio_core::TEXTURE_BINDING_ARRAYS;
 
     fn adapter(name: &str, driver: &str, device_type: wgpu::DeviceType) -> wgpu::AdapterInfo {
         wgpu::AdapterInfo {
@@ -226,15 +225,15 @@ mod tests {
     }
 
     #[test]
-    fn complete_material_binding_array_capability_is_requested_together() {
-        let requested = required_wgpu_features(BINDLESS_MATERIAL_FEATURES);
-        assert!(requested.contains(BINDLESS_MATERIAL_FEATURES));
+    fn complete_texture_binding_array_capability_is_requested_together() {
+        let requested = required_wgpu_features(TEXTURE_BINDING_ARRAYS);
+        assert!(requested.contains(TEXTURE_BINDING_ARRAYS));
     }
 
     #[test]
-    fn partial_material_binding_array_capability_is_not_requested() {
+    fn partial_texture_binding_array_capability_is_not_requested() {
         let requested = required_wgpu_features(wgpu::Features::TEXTURE_BINDING_ARRAY);
-        assert!(!requested.intersects(BINDLESS_MATERIAL_FEATURES));
+        assert!(!requested.intersects(TEXTURE_BINDING_ARRAYS));
     }
 
     #[test]
@@ -247,9 +246,9 @@ mod tests {
 
 pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
-        max_sampled_textures_per_shader_stage: (MAX_TEXTURES as u32)
+        max_sampled_textures_per_shader_stage: (TEXTURE_TABLE_LIMIT as u32)
             .min(adapter_limits.max_sampled_textures_per_shader_stage),
-        max_samplers_per_shader_stage: (MAX_TEXTURES as u32)
+        max_samplers_per_shader_stage: (TEXTURE_TABLE_LIMIT as u32)
             .min(adapter_limits.max_samplers_per_shader_stage),
         // Clamped to 4 GiB - 1 because wgpu-core's indirect-draw validation asserts
         // `max_buffer_size <= u32::MAX` while building its helper pipelines, and that
@@ -261,14 +260,14 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
         // Every other limit here is taken straight from the adapter, and on a GPU
         // reporting more than 4 GiB of addressable buffer that spread is a hard panic
         // before a single frame is drawn. Helio allocates nothing near this ceiling — the
-        // largest single buffer in the engine is the foliage blade arena at a few hundred
-        // MiB — so lowering it costs nothing real.
+        // largest single buffers are a few hundred MiB — so lowering it costs nothing
+        // real.
         max_buffer_size: adapter_limits.max_buffer_size.min(u32::MAX as u64),
         ..adapter_limits
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
@@ -283,16 +282,13 @@ pub struct RendererConfig {
     /// FXAA, fog-composite and post-process passes, so `[0.0; 4]` leaves the scene background
     /// transparent for a compositor (GPUI's `paint_surface` blends the dma-buf with alpha).
     pub background_color: [f32; 4],
-    pub shadow_quality: helio_pass_shadow_matrix::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
     pub perf_overlay_mode: PerfOverlayMode,
-    /// Legacy custom-graph setting. Default graphs use `shadow_budget.max_resolution`.
+    /// Legacy custom-graph setting. Default graphs use the lights' `ShadowSettings` budget.
     pub shadow_atlas_size: u32,
-    /// Legacy custom-graph setting. Default graphs use packed residency and `shadow_budget`.
+    /// Legacy custom-graph setting. Default graphs use packed residency and the shadow budget.
     pub shadow_face_capacity: u32,
-    /// GPU tile residency, atlas memory, and per-frame rendering limits.
-    pub shadow_budget: helio_pass_shadow_matrix::ShadowBudget,
     /// Enable the screen-space reflection pass. Default `false`.
     ///
     /// SSR traces the Hi-Z buffer per pixel and is one of the most expensive
@@ -300,33 +296,11 @@ pub struct RendererConfig {
     /// 1×1 black fallback when the pass is absent, so disabling it costs only
     /// the reflection contribution.
     pub enable_ssr: bool,
-    /// Enable the foliage passes. Default `true`.
-    ///
-    /// This is the outermost of three independent zero-cost guarantees, and the only one
-    /// that removes the passes from the graph entirely. The other two are runtime: with
-    /// the passes present but no foliage types registered, `Scene` leaves the `foliage`
-    /// frame slot unwritten and both passes early-out; with types registered but the ring
-    /// empty, the rasteriser issues four `draw_indirect` calls with zero instances.
-    ///
-    /// Defaults ON precisely because those runtime guarantees make an unplanted scene free
-    /// — a scene with no SceneDB `foliage_types` column pays nothing for this being true.
-    pub enable_foliage: bool,
-    /// Densest foliage ground in tufts per square metre, or `None` for the default (8).
-    /// Sizes the bands' candidate grids at graph-build time: a type's `density` (tufts a
-    /// square metre) above this is thinned to it.
-    pub foliage_tufts_per_m2: Option<f32>,
-    /// Blades a tuft averages, or `None` for the default (8): sizes the near band's
-    /// slabs (a record per blade).
-    pub foliage_blades_per_tuft: Option<f32>,
-    /// Foliage quality preset: the default range, the density multiplier, the near LOD
-    /// distance's scale and the cull granularity. Default [`FoliageQuality::Medium`].
-    ///
-    /// [`FoliageQuality::Medium`]: helio_pass_foliage_place::FoliageQuality::Medium
-    pub foliage_quality: helio_pass_foliage_place::FoliageQuality,
-    /// Metres foliage reaches, or `None` for the quality preset's. Bands of tiles
-    /// (`helio_pass_foliage_place::plan_bands`) carry it out there at a cost that grows
-    /// with the number of bands, one per doubling of the range.
-    pub foliage_range: Option<f32>,
+    /// Settings of the features the renderer runs, one value per feature's
+    /// settings type (`helio_pass_ssr::SsrSettings`, …). The
+    /// renderer knows none of them; graph builds hand them to the features'
+    /// nodes. Edit with `config.features.edit::<FooSettings>()`.
+    pub features: helio_feature_api::FeatureSettings,
     /// Enable the planar reflection pass. Default `false`.
     ///
     /// Planar reflections re-render the scene mirrored across each reflection
@@ -368,31 +342,6 @@ pub struct RendererConfig {
     /// [`HelioGraphicsConfig::vr_support`](crate::HelioGraphicsConfig::vr_support)
     /// before creating the scene GPU mirror and renderer. Default `false`.
     pub enable_xr: bool,
-
-    /// Enable the portal duplicate-draw passes (`PortalCullPass`/`PortalInstancePass`).
-    /// Default `true`.
-    ///
-    /// Sublevels have no separate pass to gate — a sublevel-tagged instance is
-    /// drawn through the *existing* GBuffer/shadow pipeline (see
-    /// `helio_pass_object_batch::coordinate_space`), so there is nothing here for a scene
-    /// with no sublevels to pay for. Portals are the one part of this
-    /// mechanism with real fixed GPU allocations (~10 MB, see
-    /// `helio-pass-portal-cull`'s module docs) and a per-frame dispatch, so
-    /// unlike sublevels they get an actual off switch: a scene that never
-    /// authors no SceneDB `portal_views` column can skip paying for it by setting this `false`.
-    pub enable_portals: bool,
-
-    /// The world-space GI probes' finest spacing (metres; each coarser
-    /// level doubles it). `None` (default): the graph's choice, 1 m over
-    /// voxel terrain and 0.5 m in mesh scenes, whose rooms, pillars and
-    /// furniture are a few metres apart.
-    pub gi_probe_spacing: Option<f32>,
-    /// Opaque id of the virtual-geometry runtime (`helio_vg_stream::VgRuntime::handle_id`)
-    /// the default deferred graph builds its virtual-geometry passes for, or
-    /// `None` (the default) for classic rendering only. The passes are added
-    /// only when the device supports them (`helio_default_passes::virtual_geometry_supported`);
-    /// otherwise the graph is exactly the classic one.
-    pub virtual_geometry: Option<u64>,
 }
 
 impl RendererConfig {
@@ -402,42 +351,26 @@ impl RendererConfig {
             height: height.max(1),
             surface_format,
             background_color: [0.0, 0.0, 0.0, 1.0],
-            shadow_quality: helio_pass_shadow_matrix::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
-            shadow_budget: helio_pass_shadow_matrix::ShadowBudget::default(),
             enable_ssr: false,
-            enable_foliage: true,
-            foliage_tufts_per_m2: None,
-            foliage_blades_per_tuft: None,
-            foliage_quality: helio_pass_foliage_place::FoliageQuality::Medium,
-            foliage_range: None,
+            features: helio_feature_api::FeatureSettings::new(),
             enable_planar_reflections: false,
             enable_environment_reflections: true,
             tsr_quality: None,
             hdr_output_mode: helio_pass_postprocess::HdrOutputMode::Ldr,
             render_mode: RenderMode::Deferred,
             enable_xr: false,
-            enable_portals: true,
-            gi_probe_spacing: None,
-            virtual_geometry: None,
         }
     }
 
-    /// Build the default deferred graph's virtual-geometry passes for `runtime`
-    /// (when the device supports them).
-    pub fn with_virtual_geometry(mut self, runtime: &helio_vg_stream::VgRuntime) -> Self {
-        self.virtual_geometry = Some(runtime.handle_id());
-        // `VG_DEBUG_VIEW` selects a virtual-geometry debug view at creation (tests,
-        // headless captures); an explicit `debug_mode` is left alone.
-        if self.debug_mode == 0 {
-            if let Some(view) = helio_vg_format::debug_view::from_env() {
-                self.debug_mode = view.id();
-            }
-        }
+    /// Adds (or replaces) a feature's setting in [`Self::features`]: what a
+    /// feature's nodes read (a terrain to draw, a post effect's WGSL, …).
+    pub fn with_feature<T: std::any::Any + Send + Sync>(mut self, setting: T) -> Self {
+        self.features.insert(setting);
         self
     }
 
@@ -453,12 +386,6 @@ impl RendererConfig {
         self
     }
 
-    /// The GI probes' finest spacing (metres; [`Self::gi_probe_spacing`]).
-    pub fn with_gi_probe_spacing(mut self, metres: f32) -> Self {
-        self.gi_probe_spacing = Some(metres);
-        self
-    }
-
     /// Enable/disable the screen-space reflection pass.
     pub fn with_ssr(mut self, enabled: bool) -> Self {
         self.enable_ssr = enabled;
@@ -468,11 +395,6 @@ impl RendererConfig {
     /// Enable/disable the planar reflection pass.
     pub fn with_planar_reflections(mut self, enabled: bool) -> Self {
         self.enable_planar_reflections = enabled;
-        self
-    }
-
-    pub fn with_shadow_quality(mut self, quality: helio_pass_shadow_matrix::ShadowQuality) -> Self {
-        self.shadow_quality = quality;
         self
     }
 
@@ -496,12 +418,7 @@ impl RendererConfig {
         self
     }
 
-    pub fn with_shadow_budget(mut self, budget: helio_pass_shadow_matrix::ShadowBudget) -> Self {
-        self.shadow_budget = budget;
-        self
-    }
-
-    /// Legacy custom-graph setting; use `with_shadow_budget` for default graphs.
+    /// Legacy custom-graph setting; default graphs use the lights' `ShadowSettings` budget.
     pub fn with_shadow_face_capacity(mut self, capacity: u32) -> Self {
         self.shadow_face_capacity = capacity.clamp(1, 256);
         self

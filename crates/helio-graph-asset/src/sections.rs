@@ -19,8 +19,8 @@ use crate::asset::{
 };
 use crate::core_nodes::{ON_FRAME_START, OUTPUT};
 use crate::layout::LANE_PREFIX;
-use crate::pins::{PinDesc, PinType};
-use crate::registry::{NodePins, NodeRegistry};
+use helio_feature_api::{PinDesc, PinType};
+use helio_feature_api::{NodePins, NodeRegistry};
 use crate::validate::{Diagnostic, Severity};
 
 /// The id of the section a node kind stands for.

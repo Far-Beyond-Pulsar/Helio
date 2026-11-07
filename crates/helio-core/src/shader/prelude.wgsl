@@ -1,7 +1,9 @@
 // Helio shader prelude — the canonical camera layout and the depth/G-buffer
 // conventions that go with it.
 //
-// Prepended to any shader whose first lines contain `//!use helio_prelude`.
+// Prepended to any shader that opts in with the `helio_prelude` marker (the
+// `MARKER` of helio_core::shader). The marker is never written out here: text
+// that holds it would opt in again when a composed source is resolved.
 // See helio_core::shader.
 //
 // This exists because every pass used to re-derive this math from scratch, and
@@ -12,11 +14,11 @@
 // is not per-pass policy, so it does not live in per-pass code.
 
 // ── Camera ──────────────────────────────────────────────────────────────────
-// Field-for-field mirror of helio_core / libhelio `GpuCameraUniforms` (256 B).
+// Field-for-field mirror of helio_core `GpuCameraUniforms` (368 B).
 // Shaders declare their OWN binding (the group/binding varies per pass) but must
 // use this struct rather than redeclaring it:
 //
-//     //!use helio_prelude
+//     (opt in with the helio_prelude marker)
 //     @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
 //
 struct Camera {
@@ -135,130 +137,53 @@ fn helio_gbuffer_normal(raw: vec3<f32>) -> vec3<f32> {
     return normalize(raw);
 }
 
-// ── Shadows ─────────────────────────────────────────────────────────────────
-// The *math* of shadow lookup, shared; the texture sample itself stays in the
-// consumer. WGSL cannot take a storage-array pointer as a plain function
-// parameter, so a full `shadow_factor()` here would have to hard-code the atlas
-// binding — and the whole point of the prelude is that group/binding stays the
-// caller's business. Cascade selection and projection are the parts that
-// actually drifted, and they are pure functions.
+// Surface tags (`helio_frame_api::gbuffer::LIGHTMAP_UV`). The lightmap-UV
+// target (Rg16Float) holds a lightmapped surface's UV (x >= 0) or, for a
+// surface without a lightmap, a tag saying what the lighting must know about
+// it. Drawers write a tag by these names; lighting models read it through the
+// predicates below. Nothing writes or compares a raw tag value.
 
-/// Which cascade(s) a view distance falls in, and how much to blend between them.
-struct HelioCsmSelection {
-    /// Primary cascade index (0..3).
-    cascade_a: u32,
-    /// Cascade to blend toward; equals `cascade_a` outside a blend zone.
-    cascade_b: u32,
-    /// 0 = use `cascade_a` alone, >0 = mix toward `cascade_b`.
-    blend: f32,
+/// An ordinary surface without a lightmap.
+const GBUFFER_TAG_UNLIGHTMAPPED: vec2<f32> = vec2<f32>(-1.0, -1.0);
+/// Dense geometry that carries its own occlusion (a meadow's blades): its
+/// many thin layers fill a screen-space AO kernel and would turn whole fields
+/// black, so the lighting applies none.
+const GBUFFER_TAG_OWN_OCCLUSION: vec2<f32> = vec2<f32>(-1.0, -1.5);
+/// A surface a drawer traced rather than rasterized (a voxel terrain), with
+/// its occlusion its own: no screen-space AO (a coarse lattice's edges
+/// overwhelm the kernel at distance). Debug views of the visible surface's
+/// source show it as traced.
+const GBUFFER_TAG_TRACED: vec2<f32> = vec2<f32>(-1.0, -2.0);
+
+/// The tag of content drawn through view-remap chain `chain`
+/// (`helio_frame_api::lighting::VIEW_REMAPS`): (-1, -3 - chain).
+fn gbuffer_tag_view_remap(chain: u32) -> vec2<f32> {
+    return vec2<f32>(-1.0, -3.0 - f32(chain));
 }
 
-/// Fraction of a split distance spent cross-fading between adjacent cascades.
-/// Without it, a cascade boundary is a hard line across the floor.
-const HELIO_CSM_BLEND_ZONE: f32 = 0.1;
+/// Whether a lightmap-UV texel is a lightmapped surface's UV.
+fn gbuffer_has_lightmap(lightmap_uv: vec2<f32>) -> bool {
+    return lightmap_uv.x >= 0.0;
+}
 
-/// Pick CSM cascades for a view distance.
-///
-/// `splits` is `Globals.csm_splits`: xyz are the three cascade boundaries
-/// (cascade 3 runs from splits.z to the far plane). `view_dist` is the distance
-/// from the camera to the shaded point, not its depth-buffer value.
-fn helio_csm_select(view_dist: f32, splits: vec4<f32>) -> HelioCsmSelection {
-    var s: HelioCsmSelection;
-    s.cascade_a = 3u;
-    s.cascade_b = 3u;
-    s.blend = 0.0;
+/// Whether a lightmap-UV texel is tag `tag`.
+fn gbuffer_tagged(lightmap_uv: vec2<f32>, tag: vec2<f32>) -> bool {
+    return lightmap_uv.x == tag.x && lightmap_uv.y == tag.y;
+}
 
-    let half_zone = HELIO_CSM_BLEND_ZONE * 0.5;
+/// Whether the surface's occlusion is its own: the lighting adds no
+/// screen-space AO.
+fn gbuffer_own_occlusion(lightmap_uv: vec2<f32>) -> bool {
+    return gbuffer_tagged(lightmap_uv, GBUFFER_TAG_TRACED)
+        || gbuffer_tagged(lightmap_uv, GBUFFER_TAG_OWN_OCCLUSION);
+}
 
-    if view_dist < splits.x * (1.0 - half_zone) {
-        s.cascade_a = 0u;
-    } else if view_dist < splits.x * (1.0 + half_zone) {
-        s.cascade_a = 0u;
-        s.cascade_b = 1u;
-        s.blend = smoothstep(splits.x * (1.0 - half_zone), splits.x * (1.0 + half_zone), view_dist);
-    } else if view_dist < splits.y * (1.0 - half_zone) {
-        s.cascade_a = 1u;
-    } else if view_dist < splits.y * (1.0 + half_zone) {
-        s.cascade_a = 1u;
-        s.cascade_b = 2u;
-        s.blend = smoothstep(splits.y * (1.0 - half_zone), splits.y * (1.0 + half_zone), view_dist);
-    } else if view_dist < splits.z * (1.0 - half_zone) {
-        s.cascade_a = 2u;
-    } else if view_dist < splits.z * (1.0 + half_zone) {
-        s.cascade_a = 2u;
-        s.cascade_b = 3u;
-        s.blend = smoothstep(splits.z * (1.0 - half_zone), splits.z * (1.0 + half_zone), view_dist);
+/// The view-remap chain a pixel belongs to, or -1.
+fn view_remap_of(lightmap_uv: vec2<f32>) -> i32 {
+    if lightmap_uv.x > -1.5 && lightmap_uv.x < -0.5 && lightmap_uv.y < -2.5 {
+        return min(i32(round(-3.0 - lightmap_uv.y)), 255);
     }
-
-    return s;
-}
-
-/// A world position projected into a shadow map.
-struct HelioShadowProj {
-    /// Atlas UV (y down), only meaningful when `valid`.
-    uv: vec2<f32>,
-    /// [0,1] depth to compare against, only meaningful when `valid`.
-    depth: f32,
-    /// False when the point is behind the light or outside the map — callers
-    /// must treat that as *lit*, not shadowed, or geometry outside the cascade
-    /// goes black.
-    valid: bool,
-}
-
-/// Project a world position into a shadow map's UV + depth.
-///
-/// `light_view_proj` is `shadow_matrices[layer].mat`. The y-flip goes through
-/// `helio_ndc_to_uv` for the same reason it does everywhere else — shadow UV is
-/// framebuffer-oriented (y down) while NDC is y up.
-fn helio_shadow_project(light_view_proj: mat4x4<f32>, world_pos: vec3<f32>) -> HelioShadowProj {
-    var s: HelioShadowProj;
-    s.uv = vec2<f32>(0.0);
-    s.depth = 0.0;
-    s.valid = false;
-
-    let clip = light_view_proj * vec4<f32>(world_pos, 1.0);
-    // Behind the light's near plane: the perspective divide would mirror the
-    // point back into frame and shadow it against unrelated depths.
-    if clip.w <= 0.0 { return s; }
-
-    let ndc = clip.xyz / clip.w;
-    let uv = helio_ndc_to_uv(ndc.xy);
-    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
-        return s;
-    }
-
-    s.uv = uv;
-    s.depth = ndc.z;
-    s.valid = true;
-    return s;
-}
-
-// ── Froxel grid ─────────────────────────────────────────────────────────────
-// The volumetric fog grid is a view-space 3D texture with exponentially spaced
-// depth slices — dense near the camera, sparse far away, which is where the
-// detail actually matters.
-//
-// Two shaders must agree on this mapping exactly: the fog pass writes froxels by
-// slice index, and the post-process composite reads them back by pixel depth. A
-// mismatch does not error, it just samples the wrong slice and puts the fog at
-// the wrong distance. Hence: here, once, rather than once per shader.
-
-/// Near plane of the froxel grid.
-///
-/// Deliberately not the camera near plane. Exponential spacing from 0.1 would
-/// spend most of the 64 slices within a couple of metres of the camera and leave
-/// almost none for the distance the fog is actually read at.
-const HELIO_FROXEL_NEAR: f32 = 0.5;
-
-/// View depth (not radial distance) → normalized slice coordinate in [0,1].
-fn helio_froxel_slice_from_view_depth(view_depth: f32, far: f32) -> f32 {
-    let d = max(view_depth, HELIO_FROXEL_NEAR);
-    return log(d / HELIO_FROXEL_NEAR) / log(max(far, HELIO_FROXEL_NEAR * 2.0) / HELIO_FROXEL_NEAR);
-}
-
-/// Normalized slice coordinate in [0,1] → view depth. Inverse of the above.
-fn helio_froxel_view_depth_from_slice(slice_norm: f32, far: f32) -> f32 {
-    return HELIO_FROXEL_NEAR * pow(max(far, HELIO_FROXEL_NEAR * 2.0) / HELIO_FROXEL_NEAR, slice_norm);
+    return -1;
 }
 
 // ── Volumetric scattering ───────────────────────────────────────────────────

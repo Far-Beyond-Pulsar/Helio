@@ -1,0 +1,82 @@
+// The rows every scene join reads (`helio_scene_join::join_source` puts this
+// before a join shader): owner links, pool handles, object transforms and
+// the frame-origin rebasing. Joins never declare their own copies.
+
+const NO_OWNER: u32 = 0xFFFFFFFFu;
+
+/// A component instance's owner link (`ComponentOwner`, 12 bytes), keyed by
+/// the instance entity. A zero row (no owner, detached, removed) has
+/// `enabled == 0`.
+struct Owner {
+    owner_index: u32,
+    owner_generation: u32,
+    enabled: u32,
+}
+
+/// A component's slice of a variable-length SceneDB pool (`PoolContract`):
+/// `count` entries from `offset`.
+struct Handle {
+    offset: u32,
+    count: u32,
+}
+
+/// An object's world transform (`TransformRow`, 48 bytes), keyed by the
+/// object entity: its f64 position as an f32 pair (`position_hi`, the
+/// nearest f32; `position_lo`, what that drops), so a position on a
+/// planet keeps its millimetres; `rotation` is YXZ Euler angles in degrees.
+struct ObjectTransform {
+    position_hi: array<f32, 3>,
+    position_lo: array<f32, 3>,
+    rotation: array<f32, 3>,
+    scale: array<f32, 3>,
+}
+
+/// `Ry(yaw) * Rx(pitch) * Rz(roll)` with yaw = rotation[1], pitch =
+/// rotation[0], roll = rotation[2], in degrees: the rotation glam's
+/// `Quat::from_euler(EulerRot::YXZ, yaw, pitch, roll)` describes.
+fn object_rotation(t: ObjectTransform) -> mat3x3<f32> {
+    let to_rad = 0.017453292519943295;
+    let yaw = t.rotation[1] * to_rad;
+    let pitch = t.rotation[0] * to_rad;
+    let roll = t.rotation[2] * to_rad;
+    let cy = cos(yaw);
+    let sy = sin(yaw);
+    let cx = cos(pitch);
+    let sx = sin(pitch);
+    let cz = cos(roll);
+    let sz = sin(roll);
+    let ry = mat3x3<f32>(vec3<f32>(cy, 0.0, -sy), vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(sy, 0.0, cy));
+    let rx = mat3x3<f32>(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, cx, sx), vec3<f32>(0.0, -sx, cx));
+    let rz = mat3x3<f32>(vec3<f32>(cz, sz, 0.0), vec3<f32>(-sz, cz, 0.0), vec3<f32>(0.0, 0.0, 1.0));
+    return ry * rx * rz;
+}
+
+fn position_hi(t: ObjectTransform) -> vec3<f32> {
+    return vec3<f32>(t.position_hi[0], t.position_hi[1], t.position_hi[2]);
+}
+
+fn position_lo(t: ObjectTransform) -> vec3<f32> {
+    return vec3<f32>(t.position_lo[0], t.position_lo[1], t.position_lo[2]);
+}
+
+/// The object's world position, rounded to f32 (for passes that draw in
+/// world space).
+fn object_position(t: ObjectTransform) -> vec3<f32> {
+    return position_hi(t) + position_lo(t);
+}
+
+/// The object's position relative to the world origin `origin_hi +
+/// origin_lo` (the f64 origin's f32 pair, `scene_join::origin_pair`), part by
+/// part: near the origin `position_hi - hi` is exact, so the offset keeps the
+/// f64 position's precision. Each part goes through `origin_hi.w` (1.0,
+/// unknown to the compiler): a driver reassociating the sum to
+/// `(hi + lo) - origin` rounds the low part away (NVIDIA's Vulkan driver
+/// does, in some shaders).
+fn object_relative(t: ObjectTransform, origin_hi: vec4<f32>, origin_lo: vec4<f32>) -> vec3<f32> {
+    let one = origin_hi.w;
+    return (position_hi(t) - origin_hi.xyz) * one + (position_lo(t) - origin_lo.xyz) * one;
+}
+
+fn object_scale(t: ObjectTransform) -> vec3<f32> {
+    return vec3<f32>(t.scale[0], t.scale[1], t.scale[2]);
+}

@@ -22,7 +22,7 @@ pub enum ResourceFormat {
 }
 
 impl ResourceFormat {
-    pub fn to_wgpu(self) -> wgpu::TextureFormat {
+    pub const fn to_wgpu(self) -> wgpu::TextureFormat {
         match self {
             Self::Rg11b10Ufloat => wgpu::TextureFormat::Rg11b10Ufloat,
             Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,

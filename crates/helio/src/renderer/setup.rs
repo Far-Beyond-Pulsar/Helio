@@ -1,6 +1,5 @@
 use bytemuck::Zeroable;
 use std::sync::{Arc, Mutex};
-use wgpu::util::DeviceExt;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -8,7 +7,6 @@ use std::time::Instant;
 use web_time::Instant;
 
 use helio_core::{PipelineFormatSet, RenderGraph};
-use helio_mats::radiant::RadiantTemplateRegistry;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
@@ -160,55 +158,14 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // Keep the material binding ABI valid even before a frontend publishes
-        // texture components. Material rows and their indices come from
-        // SceneDB; this is only the backend descriptor fallback for an
-        // untextured scene.
-        let material_binding = helio_mats::MaterialBindingConfig::for_device(&device);
-        // `material_textures`/`coordinate_spaces`/`coordinate_spaces_prev` are
-        // now `GBufferPass`-owned (see `GBufferPass::new`/`coordinate_spaces_buffer`)
-        // -- a generic `Renderer` has no business knowing `MaterialTextureData`'s
-        // struct layout or the portal/sublevel space-id scheme.
-        let fallback_texture = device.create_texture_with_data(
-            &queue,
-            &wgpu::TextureDescriptor {
-                label: Some("Default Material Texture"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &[255, 255, 255, 255],
-        );
-        let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let fallback_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Default Material Sampler"),
-            ..Default::default()
-        });
-        let material_bindings = super::renderer_impl::MaterialBindingResources {
-            _fallback_texture: fallback_texture,
-            fallback_view,
-            fallback_sampler,
-            texture_count: material_binding.max_textures,
-            version: 0,
-            scene_views: vec![None; material_binding.max_textures],
-        };
-
         // Camera jitter is only valid when a temporal pass reconstructs it.
         // Applying it to FXAA/non-temporal graphs shifts the final image every
         // frame and presents as whole-scene shimmer.
         let enable_jitter = graph.requires_camera_jitter();
 
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        let renderer = Self {
+        let feature_derivations = graph.take_scene_derivations();
+        let mut renderer = Self {
             device,
             queue,
             graph,
@@ -225,27 +182,21 @@ impl Renderer {
             camera_generation: 0,
             camera_identity: None,
             frame_count: 0,
-            ray_frame: Default::default(),
             prev_view_proj_by_view: Default::default(),
             scene_derivations: Vec::new(),
+            feature_derivations: Vec::new(),
             world_origin: glam::DVec3::ZERO,
             debug_camera_buffer,
-            ambient_color: [0.05, 0.05, 0.08],
-            ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
-            graph_config: config,
+            graph_config: config.clone(),
             coordinate_spaces: Vec::new(),
-            portal_projection_counts: None,
             xr_mode: false,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
             last_render_time: Instant::now(),
             delta_time: 0.0,
-            color_grading_lut_view: None,
-            ies_texture_view: None,
             cull_stats_staging,
-            material_bindings,
             cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
             graph_time_ms: 0.0,
@@ -257,10 +208,6 @@ impl Renderer {
             frame_delta_override: None,
             frame_clock: 0.0,
             frame_clock_delta: None,
-            #[cfg(feature = "bake")]
-            bake_pending: None,
-            #[cfg(feature = "bake")]
-            bake_scene: None,
             clear_target_next_frame: true,
             xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,
@@ -270,16 +217,12 @@ impl Renderer {
             cull_stats_buffer,
             graph_rebuilder,
             graph_rebuild_hook: None,
+            scene_payloads: Default::default(),
+            persistent_passes: Vec::new(),
             #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
             shader_reload: Default::default(),
             scene_db,
             tsr_quality: config.tsr_quality,
-            template_registry: std::sync::Arc::new(std::sync::RwLock::new(
-                RadiantTemplateRegistry::new(),
-            )),
-            transparent_template_registry: std::sync::Arc::new(std::sync::RwLock::new(
-                RadiantTemplateRegistry::new(),
-            )),
             render_mode: config.render_mode,
             enable_xr: config.enable_xr,
             #[cfg(not(target_arch = "wasm32"))]
@@ -305,7 +248,7 @@ impl Renderer {
             #[cfg(not(target_arch = "wasm32"))]
             xr_mirror_size: [0, 0],
         };
-
+        renderer.adopt_scene_derivations(feature_derivations);
         renderer
     }
 }

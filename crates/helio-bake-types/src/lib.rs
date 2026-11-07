@@ -4,7 +4,7 @@
 //! dependency on `nebula`, Helio's heavyweight offline baker, and is itself
 //! only pulled into `helio` behind the optional `"bake"` feature. The
 //! `baked_pvs` frame resource (published by `helio-bake`'s `BakeInjectPass`)
-//! is read by `helio-pass-occlusion-cull`, which must compile whether or not
+//! is read by the meshes' occlusion culling, which must compile whether or not
 //! baking is — so this crate holds only the plain data shape, no baking
 //! logic and no dependency on `nebula`, and is always available regardless
 //! of the `"bake"` feature.
@@ -63,3 +63,7 @@ impl<'a> BakedPvsRef<'a> {
         Some(dx as usize + dy as usize * gx as usize + dz as usize * gx as usize * gy as usize)
     }
 }
+
+/// Graph key of the baked lightmap atlas view the bake's inject pass
+/// publishes (lighting samples it where a surface has lightmap UVs).
+pub const BAKED_LIGHTMAP: &str = "baked_lightmap";

@@ -6,9 +6,18 @@ pub struct SsrCompositePass {
     camera: wgpu::BindGroup,
     layout: wgpu::BindGroupLayout,
     textures: Option<([wgpu::TextureView; 5], wgpu::BindGroup)>,
+    /// The indirect-specular layer it adds.
+    layer: &'static str,
 }
 impl SsrCompositePass {
-    pub fn new(device: &wgpu::Device, camera: &wgpu::Buffer, format: wgpu::TextureFormat) -> Self {
+    /// Adds `layer` (an indirect-specular layer, as a trace writes it) to the
+    /// lit colour.
+    pub fn new(
+        device: &wgpu::Device,
+        camera: &wgpu::Buffer,
+        format: wgpu::TextureFormat,
+        layer: &'static str,
+    ) -> Self {
         let mut camera_entry = super::buffer_uniform_entry(0);
         camera_entry.visibility = wgpu::ShaderStages::FRAGMENT;
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -38,10 +47,11 @@ impl SsrCompositePass {
             label: Some("SSR composition textures"),
             entries: &entries,
         });
-        let shader = helio_core::shader::module(
+        let shader = helio_core::shader::module_with(
             device,
             "SSR composition",
             helio_core::include_wgsl!("../shaders/ssr_compose.wgsl"),
+            &[helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET],
         );
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SSR composition"),
@@ -89,6 +99,7 @@ impl SsrCompositePass {
             camera,
             layout,
             textures: None,
+            layer,
         }
     }
 }
@@ -97,13 +108,13 @@ impl RenderPass for SsrCompositePass {
         "SsrCompositePass"
     }
     fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
+        &[helio_frame_api::color::SCENE_COLOR]
     }
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.read("gbuffer");
-        builder.read("depth");
-        builder.read("ssr_trace");
-        builder.read("pre_aa");
+        builder.read(helio_frame_api::gbuffer::GROUP);
+        builder.read(helio_frame_api::gbuffer::DEPTH);
+        builder.read(self.layer);
+        builder.read(helio_frame_api::color::SCENE_COLOR);
     }
     fn render_pass_descriptor<'a>(
         &'a self,
@@ -114,16 +125,19 @@ impl RenderPass for SsrCompositePass {
         None
     }
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let Some(gbuffer) = ctx
+        let Some(gbuffer) = ctx.registry.read::<helio_core::ViewGroup<'_, 4>>(
+            ResourceKey::new(helio_frame_api::gbuffer::GROUP),
+            self.name(),
+        ) else {
+            return Ok(());
+        };
+        let Some(output) = ctx
             .registry
-            .read::<helio_core::ViewGroup<'_, 4>>(ResourceKey::new("gbuffer"), self.name())
+            .get(ResourceKey::new(helio_frame_api::color::SCENE_COLOR))
         else {
             return Ok(());
         };
-        let Some(output) = ctx.registry.get(ResourceKey::new("pre_aa")) else {
-            return Ok(());
-        };
-        let Some(reflection) = ctx.resource_pool.get_view("ssr_trace") else {
+        let Some(reflection) = ctx.resource_pool.get_view(self.layer) else {
             return Ok(());
         };
         let views = [
@@ -203,7 +217,12 @@ mod tests {
                 contents: bytemuck::cast_slice(&[camera, camera]),
                 usage: wgpu::BufferUsages::STORAGE,
             });
-            let pass = SsrCompositePass::new(&device, &camera, wgpu::TextureFormat::Rgba8Unorm);
+            let pass = SsrCompositePass::new(
+                &device,
+                &camera,
+                wgpu::TextureFormat::Rgba8Unorm,
+                "indirect_specular_0",
+            );
             let size = wgpu::Extent3d {
                 width: 3,
                 height: 1,

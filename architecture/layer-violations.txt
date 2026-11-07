@@ -1,0 +1,2 @@
+# Layer violations that exist today (scripts/architecture/check_layers.py).
+# This list may only shrink. Do not add to it: fix the dependency.

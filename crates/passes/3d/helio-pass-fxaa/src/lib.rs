@@ -7,11 +7,19 @@
 //! ## O(1) guarantee
 //! `execute()` records exactly one `draw(0..3, 0..1)`.
 
+pub mod feature;
+pub use feature::FxaaFeature;
+
+/// The anti-aliased scene colour FXAA writes when it has an intermediate
+/// target (the colour chain's next colour after it).
+pub const FXAA_COLOR: &str = "fxaa_color";
+
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct FxaaPass {
     color_input: &'static str,
+    color_alias: Option<&'static str>,
     intermediate_format: Option<wgpu::TextureFormat>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -24,6 +32,13 @@ pub struct FxaaPass {
 impl FxaaPass {
     pub fn with_color_input(mut self, key: &'static str) -> Self {
         self.color_input = key;
+        self
+    }
+
+    /// The image the colour input may be a view of
+    /// (`helio_frame_api::color::alias`), read too so it stays alive.
+    pub fn with_color_alias(mut self, alias: Option<&'static str>) -> Self {
+        self.color_alias = alias;
         self
     }
     /// Create the FXAA pass.
@@ -109,7 +124,8 @@ impl FxaaPass {
         );
 
         Self {
-            color_input: "pre_aa",
+            color_input: helio_frame_api::color::SCENE_COLOR,
+            color_alias: None,
             intermediate_format: None,
             pipeline,
             bind_group_layout,
@@ -134,10 +150,10 @@ impl RenderPass for FxaaPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
-        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
-        // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == "fogged_hdr" {
-            builder.read("pre_aa");
+        // The input may be a view of an earlier image
+        // (`helio_frame_api::color::alias`); keep the pool from reusing it.
+        if let Some(alias) = self.color_alias {
+            builder.read(alias);
         }
         if let Some(format) = self.intermediate_format {
             builder.write_color_raw(

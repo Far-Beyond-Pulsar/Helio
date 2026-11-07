@@ -4,7 +4,9 @@
 // fog, anti-aliasing, the lens and tone mapping leave the values untouched.
 
 struct View {
-    mode: u32,
+    // 1: the normals (`NORMALS_VIEW`); 0: the depth (`DEPTH_VIEW`). The pass
+    // maps its debug mode to this, so the mode ids live in Rust only.
+    normals: u32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
@@ -14,9 +16,6 @@ struct View {
 @group(0) @binding(1) var gbuf_normal: texture_2d<f32>;
 @group(0) @binding(2) var<storage, read> cameras: array<Camera, 2>;
 @group(0) @binding(3) var<uniform> view: View;
-
-const MODE_DEPTH: u32 = 40u;
-const MODE_NORMALS: u32 = 41u;
 
 struct VSOut {
     @builtin(position) clip_pos: vec4<f32>,
@@ -42,7 +41,7 @@ fn texel(tex: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> {
 
 @fragment
 fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
-    if view.mode == MODE_NORMALS {
+    if view.normals != 0u {
         let n = texel(gbuf_normal, in.uv).xyz;
         if dot(n, n) < 1.0e-6 { return vec4(0.0, 0.0, 0.0, 1.0); }
         // World space, remapped: R = +X, G = +Y, B = +Z.

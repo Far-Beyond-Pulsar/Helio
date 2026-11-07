@@ -41,7 +41,7 @@
 //! [`PRELUDE`] is the one snippet `helio-core` owns directly — every pass
 //! shares exactly one camera/depth convention, so it names no specific pass.
 //! Anything else a pass wants pre-pended by marker (Hi-Z traversal, a
-//! material PBR evaluation library, a foliage wind model, ...) is declared as
+//! material PBR evaluation library, an atmosphere model, ...) is declared as
 //! a [`ShaderSnippet`] by the pass crate that owns that content and passed
 //! explicitly to [`resolve_with`]/[`module_with`] — `helio-core` never
 //! hardcodes a specific snippet's name or source, only the generic
@@ -252,7 +252,7 @@ impl TextSource for Embedded {
 ///
 /// Declared as a `const` by whichever pass crate owns the snippet's content
 /// (e.g. `helio-pass-hiz`'s Hi-Z traversal, `helio-pass-gbuffer`'s PBR
-/// evaluation library, `helio-pass-foliage-place`'s wind model) and passed
+/// evaluation library, `helio-frame-api`'s atmosphere) and passed
 /// explicitly to [`resolve_with`]/[`module_with`] by the pass that wants it.
 /// `helio-core` never declares one itself and never hardcodes a marker or
 /// source string belonging to a specific domain — only this generic shape.
@@ -413,12 +413,50 @@ pub(crate) fn resolve_from<'a>(
     }
     // Snippets follow the prelude, in caller-supplied order — the order a
     // pass lists its own snippets in is that pass's concern, not the core's.
-    for snippet in active {
+    for snippet in &active {
         out.push_str(&text.snippet(snippet));
         out.push('\n');
     }
     out.push_str(&body);
+    // Mark what was expanded as done (`//!used ...`, a comment like the
+    // marker, one line for one line), so a composed source resolved again
+    // (a template composed into a program, then built into a module) never
+    // includes the same declarations twice.
+    let mut expanded: Vec<&str> = active.iter().map(|s| s.marker).collect();
+    if prelude {
+        expanded.push(MARKER);
+    }
+    for marker in expanded {
+        out = mark_done(&out, marker);
+    }
     Cow::Owned(out)
+}
+
+/// `text` with every whole occurrence of `marker` (not a prefix of a longer
+/// marker) rewritten from `//!use name` to `//!used name`.
+fn mark_done(text: &str, marker: &str) -> String {
+    if !marker.starts_with("//!use") {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut rest = text;
+    while let Some(at) = rest.find(marker) {
+        let end = at + marker.len();
+        let whole = !rest[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+        out.push_str(&rest[..at]);
+        if whole {
+            out.push_str("//!used");
+            out.push_str(&marker["//!use".len()..]);
+        } else {
+            out.push_str(marker);
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The text of a shader a pass rewrites in Rust before compiling it (binding
@@ -531,7 +569,8 @@ mod tests {
         let src = "//!use helio_prelude\n@compute @workgroup_size(1) fn main() {}";
         let out = resolve(src);
         assert!(out.contains("struct Camera"));
-        assert!(out.ends_with(src));
+        // The body follows, its marker marked as expanded.
+        assert!(out.ends_with(&src.replace("//!use helio_prelude", "//!used helio_prelude")));
     }
 
     #[test]
@@ -609,5 +648,24 @@ mod tests {
         let first_pos = resolved.find("FIRST").unwrap();
         let second_pos = resolved.find("SECOND").unwrap();
         assert!(first_pos < second_pos);
+    }
+
+    /// A composed source resolved again (a template composed into a program,
+    /// then built into a module) includes each snippet and the prelude once.
+    #[test]
+    fn resolving_twice_includes_once() {
+        const A: ShaderSnippet = ShaderSnippet::new("//!use test_a", "struct A { a: u32 }\n");
+        const AB: ShaderSnippet = ShaderSnippet::new("//!use test_a_b", "struct AB { a: u32 }\n");
+        let src = "//!use helio_prelude\n//!use test_a\n//!use test_a_b\nbody";
+        let once = resolve_with(src, &[A, AB]).into_owned();
+        let twice = resolve_with(&once, &[A, AB]).into_owned();
+        assert_eq!(once, twice);
+        assert_eq!(twice.matches("struct A {").count(), 1);
+        assert_eq!(twice.matches("struct AB {").count(), 1);
+        assert_eq!(twice.matches("struct Camera {").count(), 1);
+        assert_eq!(
+            once.lines().count(),
+            src.lines().count() + expanded_lines_with(src, &[A, AB])
+        );
     }
 }

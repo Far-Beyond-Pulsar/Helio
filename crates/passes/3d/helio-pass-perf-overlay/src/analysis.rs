@@ -76,12 +76,13 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             return Ok(());
         }
 
-        let color_texture =
-            if let Some(pre_aa) = ctx.registry.get(helio_core::ResourceKey::new("pre_aa")) {
-                pre_aa
-            } else {
-                ctx.target
-            };
+        let color_texture = if let Some(pre_aa) = ctx.registry.get(helio_core::ResourceKey::new(
+            helio_frame_api::color::SCENE_COLOR,
+        )) {
+            pre_aa
+        } else {
+            ctx.target
+        };
 
         if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
             ctx.compute_cmds()
@@ -186,10 +187,6 @@ impl PerfOverlayCostAnalyzerPass {
 }
 
 impl RenderPass for PerfOverlayCostAnalyzerPass {
-    fn scene_buffers(&self) -> &'static [&'static str] {
-        &["scene_lights"]
-    }
-
     fn name(&self) -> &'static str {
         "PerfOverlay Cost Analyzer"
     }
@@ -280,12 +277,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
 
         if let Some(profiler) = &mut shared.material_profiler {
             if !profiler.profiling_complete {
-                let lights_buf = ctx
-                    .scene_buffers
-                    .get(helio_core::BufferKey::of("scene_lights"))
-                    .map(|handle| &handle.buffer)
-                    .unwrap_or(ctx.camera);
-                profiler.profile_next(ctx.device, &mut ctx.graphics_cmds(), lights_buf);
+                profiler.profile_next(ctx.device, &mut ctx.graphics_cmds());
 
                 profiler.read_current_sample_blocking(ctx.device, ctx.owns_device);
             }
@@ -293,9 +285,13 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (
             ctx.registry
-                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new("gbuffer")),
-            ctx.registry
-                .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("tile_light_counts")),
+                .get::<helio_core::ViewGroup<'_, 4>>(helio_core::ResourceKey::new(
+                    helio_frame_api::gbuffer::GROUP,
+                )),
+            shared.tile_counter.as_ref().and_then(|counter| {
+                ctx.registry
+                    .get::<&wgpu::Buffer>(helio_core::ResourceKey::new(counter.resource))
+            }),
         ) {
             let cost_compute_bg = self.cost_compute_bg.get_or_create(
                 ctx.device,

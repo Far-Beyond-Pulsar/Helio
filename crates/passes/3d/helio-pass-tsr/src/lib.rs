@@ -22,8 +22,8 @@
 //! about their shading: `transparency_reactivity` (coverage that must not
 //! accumulate, [`TsrPass::with_transparency_reactivity`]) and
 //! [`STOCHASTIC_MASK`] (shading sampled stochastically per frame that relies
-//! on accumulation, [`TsrPass::with_stochastic_mask`]). [`MOTION_VECTORS`]
-//! give each texel's motion, so moving objects reproject with themselves
+//! on accumulation, [`TsrPass::with_stochastic_mask`]). The G-buffer's motion vectors
+//! (`helio_frame_api::gbuffer::VELOCITY`) give each texel's motion, so moving objects reproject with themselves
 //! ([`TsrPass::with_motion_vectors`]); without them the camera's motion is
 //! used for every texel.
 //!
@@ -78,6 +78,12 @@ mod depth_history_tests;
 mod temporal_quality_tests;
 
 // ── Quality presets ───────────────────────────────────────────────────────────
+
+/// A setting a feature inserts (in a preparer) when it rotates samples over
+/// blocks of pixels for TSR to integrate (the voxel terrain's sun samples):
+/// a graph's TSR then reads the stochastic mask.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StochasticSamples;
 
 /// Temporal Super-Resolution quality presets: the internal / display
 /// resolution ratio. The resolve is the same for all of them; fewer input
@@ -144,22 +150,9 @@ impl TsrQuality {
 /// still drops history.
 pub const STOCHASTIC_MASK: &str = "tsr_stochastic";
 
-/// Graph resource of per-texel motion vectors, which the geometry passes
-/// write with the G-buffer (`gbuffer_velocity`).
-///
-/// Contract: an `Rgba16Float` texture at the internal (pre-AA) resolution.
-/// `xy` is the texel's motion since last frame in pixels: its raster position
-/// this frame minus the same surface point's last frame, both with that
-/// frame's camera jitter (fragment position minus the point projected by the
-/// previous, jittered view-projection and its previous transform or
-/// animation). Bit 0 of `w` (as an integer) is set for geometry that moves
-/// by itself: a moving or skinned instance, animated foliage. Elsewhere
-/// (static geometry, passes that write none, the cleared target) the resolve
-/// derives the camera's motion from depth, which is exact where a writer's
-/// camera-relative matrices round (UE's velocity buffer holds only dynamic
-/// geometry the same way). The rest of `w` and `z` are the writers' own.
-/// Read only when [`TsrPass::with_motion_vectors`] is set.
-pub const MOTION_VECTORS: &str = "gbuffer_velocity";
+/// The anti-aliased scene-linear colour TSR writes (the colour chain's next
+/// colour after it).
+pub const TSR_COLOR: &str = "tsr_color";
 
 // ── GPU uniform ───────────────────────────────────────────────────────────────
 
@@ -361,6 +354,7 @@ pub struct TsrPass {
     active_xr_right: bool,
     xr_mode: bool,
     color_input: &'static str,
+    color_alias: Option<&'static str>,
     intermediate_output: bool,
     timing_query: Option<wgpu::QuerySet>,
     // ── Resolve ───────────────────────────────────────────────────────────────
@@ -374,7 +368,7 @@ pub struct TsrPass {
     transparency_reactivity: bool,
     /// Read [`STOCHASTIC_MASK`] (zero when off).
     stochastic_mask: bool,
-    /// Read [`MOTION_VECTORS`] (none when off: the camera's motion).
+    /// Read the G-buffer's motion vectors (`helio_frame_api::gbuffer::VELOCITY`) (none when off: the camera's motion).
     motion_vectors: bool,
     /// The uniform's flags as `prepare` set them; `execute` adds bit 2 when
     /// this frame's graph published motion vectors.
@@ -436,6 +430,13 @@ impl TsrPass {
         if let Some(right) = &mut self.xr_right {
             right.color_input = key;
         }
+        self
+    }
+
+    /// The image the colour input may be a view of
+    /// (`helio_frame_api::color::alias`), read too so it stays alive.
+    pub fn with_color_alias(mut self, alias: Option<&'static str>) -> Self {
+        self.color_alias = alias;
         self
     }
     /// Publish the HDR resolve for post-processing without a redundant surface blit.
@@ -717,7 +718,8 @@ impl TsrPass {
             xr_right: None,
             active_xr_right: false,
             xr_mode: false,
-            color_input: "pre_aa",
+            color_input: helio_frame_api::color::SCENE_COLOR,
+            color_alias: None,
             intermediate_output: false,
             timing_query: None,
             pipeline,
@@ -820,7 +822,7 @@ impl TsrPass {
         }
     }
 
-    /// Read [`MOTION_VECTORS`], which a graph's geometry passes write. Off,
+    /// Read the G-buffer's motion vectors (`helio_frame_api::gbuffer::VELOCITY`), which a graph's geometry passes write. Off,
     /// every texel moves with the camera.
     pub fn with_motion_vectors(mut self) -> Self {
         self.motion_vectors = true;
@@ -1223,19 +1225,19 @@ impl RenderPass for TsrPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
-        // FogCompositePass may publish pre_aa's view as fogged_hdr (no fog
-        // possible); reading pre_aa keeps the pool from reusing it before us.
-        if self.color_input == "fogged_hdr" {
-            builder.read("pre_aa");
+        // The input may be a view of an earlier image
+        // (`helio_frame_api::color::alias`); keep the pool from reusing it.
+        if let Some(alias) = self.color_alias {
+            builder.read(alias);
         }
         if self.transparency_reactivity {
-            builder.read("transparency_reactivity");
+            builder.read(helio_frame_api::color::REACTIVE_MASK);
         }
         if self.stochastic_mask {
             builder.read(STOCHASTIC_MASK);
         }
         if self.motion_vectors {
-            builder.read(MOTION_VECTORS);
+            builder.read(helio_frame_api::gbuffer::VELOCITY);
         }
     }
 
@@ -1293,6 +1295,7 @@ impl RenderPass for TsrPass {
                     self.quality,
                 );
                 right.color_input = self.color_input;
+                right.color_alias = self.color_alias;
                 right.intermediate_output = self.intermediate_output;
                 right.transparency_reactivity = self.transparency_reactivity;
                 right.stochastic_mask = self.stochastic_mask;
@@ -1386,7 +1389,7 @@ impl RenderPass for TsrPass {
         let reactive_view = if self.transparency_reactivity {
             ctx.registry
                 .read_texture_view(
-                    helio_core::ResourceKey::new("transparency_reactivity"),
+                    helio_core::ResourceKey::new(helio_frame_api::color::REACTIVE_MASK),
                     "TSR",
                 )
                 .ok_or_else(|| {
@@ -1409,8 +1412,10 @@ impl RenderPass for TsrPass {
         let motion = self
             .motion_vectors
             .then(|| {
-                ctx.registry
-                    .read_texture_view(helio_core::ResourceKey::new(MOTION_VECTORS), "TSR")
+                ctx.registry.read_texture_view(
+                    helio_core::ResourceKey::new(helio_frame_api::gbuffer::VELOCITY),
+                    "TSR",
+                )
             })
             .flatten();
         let motion_bound = motion.is_some();

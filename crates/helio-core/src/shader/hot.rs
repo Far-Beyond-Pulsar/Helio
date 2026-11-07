@@ -1390,7 +1390,7 @@ mod tests {
         add_shader(
             &mut state,
             "/w/sky.wgsl",
-            "/w/helio-pass-sky",
+            "/w/helio-pass-other",
             "Sky",
             "// z",
             &[snippet()],

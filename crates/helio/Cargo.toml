@@ -8,6 +8,7 @@ description = "High-level facade over helio-core for stable scene handles and O(
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../helio-frame-api" }
 pulsar_reflection = { workspace = true }
 arrayvec = "0.7"
 bytemuck = { workspace = true, features = ["derive"] }
@@ -15,31 +16,15 @@ glam.workspace = true
 image = { workspace = true, features = ["png"] }
 helio-core = { workspace = true }
 helio-settings = { workspace = true }
-helio-vg-stream = { path = "../helio-vg-stream" }
-helio-vg-format = { path = "../helio-vg-format" }
-helio-pass-portal-cull = { workspace = true }
-helio-pass-portal-instances = { path = "../passes/3d/helio-pass-portal-instances" }
-helio-pass-foliage-place = { workspace = true }
+helio-feature-api = { path = "../helio-feature-api" }
 helio-pass-postprocess = { workspace = true }
-helio-pass-volumetric-fog = { workspace = true }
 helio-pass-tsr = { workspace = true }
-helio-pass-sky = { workspace = true }
-helio-pass-billboard = { workspace = true }
-helio-pass-corona = { workspace = true }
-helio-mats = { workspace = true }
-helio-pass-forward-lit = { workspace = true }
-helio-pass-deferred-light = { path = "../passes/3d/helio-pass-deferred-light" }
-helio-pass-object-batch = { workspace = true }
-helio-pass-gbuffer = { workspace = true }
-helio-pass-shadow-matrix = { workspace = true }
 helio-bake-types = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }
 pollster = { workspace = true }
 quark.workspace = true
-helio-bake = { path = "../helio-bake", optional = true }
-uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"
 # MeshPool's vertex/index storage delegates to `VarLenGpuPool` (a growable
 # GPU pool + freelist suballocator) instead of hand-rolling its own —
@@ -73,7 +58,6 @@ pulsar_scenedb = { workspace = true }
 [features]
 default = ["profiling", "shader-hot-reload"]
 profiling = ["helio-core/profiling"]
-bake = ["helio-bake", "uuid"]
 # Edit a `.wgsl` file while the app runs and the render graph is rebuilt with
 # the new source. On by default (see helio-core); compiled out on wasm32.
 shader-hot-reload = ["helio-core/shader-hot-reload"]

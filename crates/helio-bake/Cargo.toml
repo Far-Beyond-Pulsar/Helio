@@ -6,6 +6,8 @@ description = "Offline baking for Helio via Nebula (AO, lightmaps, reflection pr
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+helio-frame-api = { path = "../helio-frame-api" }
+uuid = { version = "1" }
 # Nebula baker — all heavyweight GPU bake passes live here
 nebula = { path = "../../vendor/nebula/crates/nebula", default-features = false, features = ["ao", "light", "probe", "visibility"] }
 

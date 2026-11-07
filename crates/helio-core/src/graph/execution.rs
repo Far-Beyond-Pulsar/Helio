@@ -171,6 +171,9 @@ pub enum DeclaredKind {
 pub struct DeclaredResource {
     pub name: &'static str,
     pub kind: DeclaredKind,
+    /// The texture format a write declares (`None` for reads, buffers and
+    /// bare names).
+    pub format: Option<crate::graph::ResourceFormat>,
 }
 
 /// What one pass declares, see [`RenderGraph::pass_declaration`].
@@ -287,11 +290,20 @@ pub struct RenderGraph {
     /// Kept apart from `graph_data` (which holds a single value, the
     /// rebuilder) so a builder can set both. See [`SwapPolicy`].
     swap_policy: Option<crate::graph::SwapPolicy>,
+    /// The scene derivations the graph's features bring
+    /// ([`crate::SceneDerivationFactory`]), taken by the renderer that
+    /// installs the graph.
+    scene_derivations: Vec<crate::SceneDerivationFactory>,
+    /// Scene buffers of drawn geometry the scene's ray tracing does not see,
+    /// as the graph's features declared them.
+    untraced_geometry: Vec<&'static str>,
     /// Resource names registered via [`declare_external_input`](Self::declare_external_input) —
     /// resources supplied by the host rather than written by any pass in the
     /// graph. `validate_dependencies` treats every name in this set as
     /// available from pass index 0. See `docs/helio_3_0_spec.md` §6.
     external_inputs: std::collections::HashSet<&'static str>,
+    /// Frame inputs features supply ([`Self::add_frame_input_publisher`]).
+    frame_input_publishers: Vec<Box<dyn crate::FrameInputPublisher>>,
     /// Executor-owned transient descriptor storage. Passes that build dynamic
     /// attachment slices can retain them here for the duration of a frame.
     pub(crate) frame_storage: RenderFrameStorage,
@@ -429,7 +441,10 @@ impl RenderGraph {
             resize_pending: false,
             graph_data: None,
             swap_policy: None,
+            scene_derivations: Vec::new(),
+            untraced_geometry: Vec::new(),
             external_inputs: std::collections::HashSet::new(),
+            frame_input_publishers: Vec::new(),
             frame_storage: RenderFrameStorage::new(),
             uploads: crate::upload::FrameUploads::new(device, queue, "graph uploads"),
         }
@@ -569,6 +584,30 @@ impl RenderGraph {
         self.swap_policy = Some(policy);
     }
 
+    /// Records the scene derivations the graph's features bring, for the
+    /// renderer that installs it ([`take_scene_derivations`](Self::take_scene_derivations)).
+    pub fn set_scene_derivations(&mut self, derivations: Vec<crate::SceneDerivationFactory>) {
+        self.scene_derivations = derivations;
+    }
+
+    /// The scene derivations the graph's features bring (once: the renderer
+    /// makes each it has not made yet).
+    pub fn take_scene_derivations(&mut self) -> Vec<crate::SceneDerivationFactory> {
+        std::mem::take(&mut self.scene_derivations)
+    }
+
+    /// Records the scene buffers of drawn geometry the scene's ray tracing
+    /// does not see (the features' declarations).
+    pub fn set_untraced_geometry(&mut self, buffers: Vec<&'static str>) {
+        self.untraced_geometry = buffers;
+    }
+
+    /// The scene buffers of drawn geometry the scene's ray tracing does not
+    /// see: a ray-tracing projection refuses a scene holding their rows.
+    pub fn untraced_geometry(&self) -> &[&'static str] {
+        &self.untraced_geometry
+    }
+
     /// The policy set by [`set_swap_policy`](Self::set_swap_policy), if any.
     pub fn swap_policy(&self) -> Option<&crate::graph::SwapPolicy> {
         self.swap_policy.as_ref()
@@ -677,8 +716,7 @@ impl RenderGraph {
 
     /// Registers `name` as supplied by the host rather than by any pass in
     /// the graph. Called once at graph-build time by whoever writes the
-    /// value every frame (today: `helio`'s `Renderer`, for
-    /// `billboards`/`vg`/`corona_emitters`/`main_scene`).
+    /// value every frame (the host, for the inputs features declare).
     ///
     /// `validate_dependencies()` treats every registered external input as
     /// available from pass index 0, replacing the hardcoded literal list —
@@ -687,6 +725,24 @@ impl RenderGraph {
     /// instead of a silent hardcoded exception.
     pub fn declare_external_input(&mut self, name: &'static str) {
         self.external_inputs.insert(name);
+    }
+
+    /// Adds a feature's frame-input publisher (see
+    /// [`crate::FrameInputPublisher`]): updated and published every frame
+    /// before any pass runs. The node adding it also declares what it
+    /// publishes ([`Self::declare_external_input`]).
+    pub fn add_frame_input_publisher(&mut self, publisher: Box<dyn crate::FrameInputPublisher>) {
+        self.frame_input_publishers.push(publisher);
+    }
+
+    /// Refreshes every frame-input publisher; the host calls this once a
+    /// frame, before [`Self::publish_frame_inputs`].
+    pub fn update_frame_inputs(&mut self, ctx: &crate::FrameInputContext<'_>) -> crate::Result<()> {
+        for publisher in &mut self.frame_input_publishers {
+            let _scope = crate::CpuScope::new(publisher.name());
+            publisher.update(ctx)?;
+        }
+        Ok(())
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
@@ -782,6 +838,18 @@ impl RenderGraph {
             .chain(self.dormant.iter_mut().map(|(_, pass)| pass))
     }
 
+    /// Whether any pass needs more frames ([`RenderPass::needs_frame`]).
+    pub fn needs_frame(&self) -> bool {
+        self.all_passes().any(|(_, pass)| pass.needs_frame())
+    }
+
+    /// Every pass's diagnostics line ([`RenderPass::diagnostics`]).
+    pub fn diagnostics(&self) -> Vec<String> {
+        self.all_passes()
+            .filter_map(|(_, pass)| pass.diagnostics())
+            .collect()
+    }
+
     /// Number of passes that are not members of the current frame.
     pub fn dormant_count(&self) -> usize {
         self.dormant.len()
@@ -850,6 +918,11 @@ impl RenderGraph {
         self.locked
     }
 
+    /// Find the index of the first pass whose [`RenderPass::name`] is `name`.
+    pub fn pass_index_named(&self, name: &str) -> Option<usize> {
+        self.passes.iter().position(|p| p.name() == name)
+    }
+
     /// Find the index of the first pass matching type `T`.
     pub fn pass_index_of<T: RenderPass + 'static>(&self) -> Option<usize> {
         self.passes
@@ -901,6 +974,14 @@ impl RenderGraph {
             unsafe {
                 pass.publish_frame_inputs(camera, &mut *frame_ptr);
             }
+        }
+        for publisher in &self.frame_input_publishers {
+            // The same lifetime bridge as the passes' publications: the
+            // publishers live in the graph, which outlives the frame's
+            // registry, and nothing mutates them until the next update.
+            let publisher: &'a dyn crate::FrameInputPublisher =
+                unsafe { &*(publisher.as_ref() as *const dyn crate::FrameInputPublisher) };
+            publisher.publish(unsafe { &mut *frame_ptr });
         }
     }
 
@@ -1159,11 +1240,67 @@ impl RenderGraph {
         (self.internal_w, self.internal_h)
     }
 
+    /// Hands each scheduled pass its own GPU time from the latest timing
+    /// snapshot ([`RenderPass::set_measured_gpu_ms`]). Returns whether any
+    /// pass's output changes, so a host idling between frames knows to draw
+    /// one.
+    pub fn feed_measured_gpu_times(&mut self) -> bool {
+        let times: Vec<(&'static str, f32)> = self
+            .profiler
+            .timing_snapshot()
+            .passes
+            .iter()
+            .filter_map(|pass| pass.gpu_ms.map(|ms| (pass.name, ms)))
+            .collect();
+        let mut changed = false;
+        for pass in &mut self.passes {
+            if let Some(&(_, ms)) = times.iter().find(|(name, _)| *name == pass.name()) {
+                changed |= pass.set_measured_gpu_ms(ms);
+            }
+        }
+        changed
+    }
+
+    /// What every pass declares, scheduled or dormant, in build order, with
+    /// whether it is a member of the current frame: a graph's whole pass
+    /// list whatever the scene holds (tools, preset snapshots).
+    pub fn build_order_declarations(&self) -> Vec<(PassDeclaration, bool)> {
+        let mut all: Vec<(usize, PassDeclaration, bool)> = self
+            .member_slots
+            .iter()
+            .zip(&self.passes)
+            .map(|(slot, pass)| (*slot, Self::declaration_of(pass.as_ref()), true))
+            .chain(
+                self.dormant
+                    .iter()
+                    .map(|(slot, pass)| (*slot, Self::declaration_of(pass.as_ref()), false)),
+            )
+            .collect();
+        all.sort_by_key(|(slot, _, _)| *slot);
+        all.into_iter()
+            .map(|(_, declaration, member)| (declaration, member))
+            .collect()
+    }
+
+    /// The resource declarations pass `index` makes in `declare_resources`,
+    /// group members one by one (contract checks compare their formats).
+    pub fn pass_resources(&self, index: usize) -> Vec<crate::graph::ResourceDecl> {
+        let Some(pass) = self.passes.get(index) else {
+            return Vec::new();
+        };
+        let mut builder = crate::graph::ResourceBuilder::new();
+        pass.declare_resources(&mut builder);
+        builder.declarations().to_vec()
+    }
+
     /// What pass `index` declares, for tools: the resources it reads and
     /// writes (from `reads()`/`writes()` and `declare_resources`) with their
     /// kind where the pass declares one, and the SceneDB buffers it consumes.
     pub fn pass_declaration(&self, index: usize) -> Option<PassDeclaration> {
-        let pass = self.passes.get(index)?;
+        Some(Self::declaration_of(self.passes.get(index)?.as_ref()))
+    }
+
+    fn declaration_of(pass: &dyn RenderPass) -> PassDeclaration {
         let mut declaration = PassDeclaration {
             pass: pass.name(),
             type_name: pass.type_name(),
@@ -1173,27 +1310,34 @@ impl RenderGraph {
         };
         let mut push = |list: &mut Vec<DeclaredResource>,
                         name: &'static str,
-                        kind: DeclaredKind| {
+                        kind: DeclaredKind,
+                        format: Option<crate::graph::ResourceFormat>| {
             match list.iter_mut().find(|existing| existing.name == name) {
                 // A precise kind beats the unknown one a bare name implies.
-                Some(existing) if existing.kind == DeclaredKind::Unknown => existing.kind = kind,
+                Some(existing) if existing.kind == DeclaredKind::Unknown => {
+                    existing.kind = kind;
+                    existing.format = format;
+                }
                 Some(_) => {}
-                None => list.push(DeclaredResource { name, kind }),
+                None => list.push(DeclaredResource { name, kind, format }),
             }
         };
         for &name in pass.reads() {
-            push(&mut declaration.reads, name, DeclaredKind::Unknown);
+            push(&mut declaration.reads, name, DeclaredKind::Unknown, None);
         }
         for &name in pass.writes() {
-            push(&mut declaration.writes, name, DeclaredKind::Unknown);
+            push(&mut declaration.writes, name, DeclaredKind::Unknown, None);
         }
         let mut builder = crate::graph::ResourceBuilder::new();
         pass.declare_resources(&mut builder);
         for resource in builder.declarations() {
             match resource.access {
-                crate::graph::ResourceAccess::Read => {
-                    push(&mut declaration.reads, resource.name, DeclaredKind::Unknown)
-                }
+                crate::graph::ResourceAccess::Read => push(
+                    &mut declaration.reads,
+                    resource.name,
+                    DeclaredKind::Unknown,
+                    None,
+                ),
                 crate::graph::ResourceAccess::Write => {
                     let kind = match resource.format {
                         None => DeclaredKind::Buffer,
@@ -1206,11 +1350,12 @@ impl RenderGraph {
                         &mut declaration.writes,
                         resource.group.unwrap_or(resource.name),
                         kind,
+                        resource.format,
                     );
                 }
             }
         }
-        Some(declaration)
+        declaration
     }
 
     pub fn dump_dependency_graph(&self) {
@@ -2471,23 +2616,27 @@ impl RenderGraph {
             });
             tex.create_view(&wgpu::TextureViewDescriptor::default())
         };
-        let dummy_depth = self.pool.get_view("depth").cloned().unwrap_or_else(|| {
-            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Lock Dummy Depth"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
+        let dummy_depth = self
+            .pool
+            .get_view(crate::resource_keys::DEPTH)
+            .cloned()
+            .unwrap_or_else(|| {
+                let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Lock Dummy Depth"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                tex.create_view(&wgpu::TextureViewDescriptor::default())
             });
-            tex.create_view(&wgpu::TextureViewDescriptor::default())
-        });
 
         let probes: Vec<Option<(usize, Vec<usize>)>> = self
             .passes

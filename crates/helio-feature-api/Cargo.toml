@@ -1,0 +1,12 @@
+[package]
+name = "helio-feature-api"
+version = "0.1.0"
+edition = "2021"
+description = "What a Helio rendering feature registers: graph node types, the buffer contracts it reads, its settings. Knows no renderer and no feature."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+wgpu = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

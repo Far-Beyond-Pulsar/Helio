@@ -1,3 +1,6 @@
+pub mod feature;
+pub use feature::SimpleCubeFeature;
+
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
@@ -236,7 +239,9 @@ impl RenderPass for SimpleCubePass {
                 },
             })]));
         let depth_view = resources
-            .get(helio_core::ResourceKey::new("full_res_depth"))
+            .get(helio_core::ResourceKey::new(
+                helio_frame_api::depth::FULL_RES_DEPTH,
+            ))
             .unwrap_or(depth);
         Some(wgpu::RenderPassDescriptor {
             label: Some("SimpleCube"),

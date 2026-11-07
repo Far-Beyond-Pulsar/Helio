@@ -64,3 +64,15 @@ pub struct BakeRequest {
     /// Which passes to bake and quality/cache settings.
     pub config: BakeConfig,
 }
+
+/// The id a baked mesh is recovered by: `slot` (the host's index for the
+/// mesh) in bytes 0..8, little-endian, zeros after; nil without one. Bake
+/// recovery reads `mesh_id[0] == slot as u64`, `mesh_id[1] == 0`.
+pub fn bake_mesh_id(slot: Option<u32>) -> uuid::Uuid {
+    let Some(slot) = slot else {
+        return uuid::Uuid::nil();
+    };
+    let mut id_bytes = [0u8; 16];
+    id_bytes[0..8].copy_from_slice(&(slot as u64).to_le_bytes());
+    uuid::Uuid::from_bytes(id_bytes)
+}

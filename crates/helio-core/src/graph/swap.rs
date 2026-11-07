@@ -57,17 +57,15 @@ pub fn type_in_crate(type_name: &str, crate_name: &str) -> bool {
 ///
 /// # Audit of the default graphs
 ///
-/// The policy shipped with `helio-default-passes` was derived by reading every
+/// The policy shipped with `helio-presets` was derived by reading every
 /// constructor call in that crate. Resources the builder creates itself and
 /// hands to more than one pass:
 ///
 /// | resource | passes holding it |
 /// |---|---|
 /// | shadow dirty-flag buffer | `ShadowMatrixPass`, `ShadowDirtyPass` |
-/// | shadow face dirty / geometry-count buffers | `ShadowDirtyPass`, `ShadowCullPass`, `ShadowPass` |
-/// | shadow face indirect / count buffers | `ShadowCullPass`, `ShadowPass` |
+/// | shadow face dirty / geometry-count buffers | `ShadowDirtyPass`, `ShadowPass` |
 /// | Hi-Z sampler | `HiZBuildPass`, `OcclusionCullPass` |
-/// | portal cull output buffers | `PortalCullPass`, `PortalInstancePass` |
 /// | foliage arena / tile / blade / indirect buffers | `FoliagePlacePass`, `FoliageGBufferPass` |
 /// | perf-overlay shared state | every perf-overlay pass |
 ///
@@ -102,6 +100,23 @@ impl SwapPolicy {
     /// one of them swaps all of them (every instance of each type).
     pub fn group_types(mut self, members: &[&'static str]) -> Self {
         self.groups.push(members.to_vec());
+        self
+    }
+
+    /// This policy and `other`'s declarations: a preset's own passes and
+    /// what the features it builds with declared for theirs
+    /// (`FeatureRegistrar::swappable`, `FeatureRegistrar::swap_group`).
+    pub fn merged(mut self, other: &SwapPolicy) -> Self {
+        for listed in &other.independent {
+            if !self.independent.contains(listed) {
+                self.independent.push(listed);
+            }
+        }
+        for group in &other.groups {
+            if !self.groups.contains(group) {
+                self.groups.push(group.clone());
+            }
+        }
         self
     }
 

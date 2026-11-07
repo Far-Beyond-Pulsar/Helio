@@ -2,6 +2,7 @@
 // SSR, and the same shared Hi-Z march.
 //!use helio_prelude
 //!use helio_hiz
+//!use frame_ray_transmission
 enable wgpu_ray_query;
 
 @group(0) @binding(0) var<storage, read> cameras: array<Camera, 2>;
@@ -27,15 +28,8 @@ const FADE_START:    f32 = 0.6;
 // Transmission query contract: nearest opaque endpoint, then tint only the
 // segment before it. Candidate traversal order is unspecified, so accumulating
 // tint while searching for the endpoint would include panes behind that hit.
-struct RayTransmissionData { header: vec4<u32>, rows: array<vec4<f32>> };
 @group(2) @binding(2) var<storage, read> ray_transmission: RayTransmissionData;
 struct ReflectionHit { position: vec4<f32>, throughput: vec3<f32> };
-fn reflection_tint(instance: u32) -> vec3<f32> {
-    if instance>=min(ray_transmission.header.y,arrayLength(&ray_transmission.rows)) {
-        return vec3<f32>(0.0);
-    }
-    return ray_transmission.rows[instance].rgb;
-}
 fn ray_query_hit_position(world_pos: vec3<f32>, normal: vec3<f32>, R: vec3<f32>) -> ReflectionHit {
     let origin = world_pos + normal * 0.002;
     let transmitting=ray_transmission.header.y!=0u;
@@ -46,7 +40,7 @@ fn ray_query_hit_position(world_pos: vec3<f32>, normal: vec3<f32>, R: vec3<f32>)
         RayDesc(select(0x01u,0x02u,transmitting), 0xFFu, 0.001, MAX_RAY_DIST, origin, R));
     while rayQueryProceed(&rq) {
         let candidate=rayQueryGetCandidateIntersection(&rq);
-        if all(reflection_tint(candidate.instance_index)==vec3<f32>(0.0)) {
+        if all(ray_transmission_of(candidate.instance_index)==vec3<f32>(0.0)) {
             rayQueryConfirmIntersection(&rq);
         }
     }
@@ -63,7 +57,7 @@ fn ray_query_hit_position(world_pos: vec3<f32>, normal: vec3<f32>, R: vec3<f32>)
             let sheet=rayQueryGetCandidateIntersection(&tint_query);
             // Strict endpoint exclusion also rejects coplanar endpoint hits.
             if sheet.t<hit.t {
-                throughput*=reflection_tint(sheet.instance_index);
+                throughput*=ray_transmission_of(sheet.instance_index);
             }
         }
     }

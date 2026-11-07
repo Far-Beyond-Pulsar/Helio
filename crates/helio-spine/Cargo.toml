@@ -1,0 +1,16 @@
+[package]
+name = "helio-spine"
+version = "0.1.0"
+edition = "2021"
+workspace = "../../"
+description = "Helio's spine as a feature: the passes no object kind owns (the shadow views, the background, the depth pyramid, light binning, lighting, TSR, the tone map) and the settings they read."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-frame-api = { path = "../helio-frame-api" }
+helio-core = { workspace = true }
+helio-feature-api = { path = "../helio-feature-api" }
+wgpu = { workspace = true }
+helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
+helio-pass-tsr = { workspace = true }
+helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }

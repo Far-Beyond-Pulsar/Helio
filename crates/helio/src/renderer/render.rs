@@ -129,46 +129,6 @@ impl Renderer {
             self.apply_rebuild_now();
         }
 
-        #[cfg(feature = "bake")]
-        if let Some(request) = self.bake_pending.take() {
-            let obj_count = request.scene.meshes.len();
-            let light_count = request.scene.lights.len();
-
-            log::info!(
-                "[helio-bake] Starting pre-frame-1 bake for scene '{}' (cache: {})…",
-                request.config.scene_name,
-                request.config.cache_dir.display(),
-            );
-
-            let bake_start = Instant::now();
-            let baked = helio_bake::run_bake_blocking(
-                &self.device,
-                &self.queue,
-                &request.scene,
-                &request.config,
-            )
-            .map_err(|e| helio_core::Error::InvalidPassConfig(e.to_string()))?;
-            let bake_duration = bake_start.elapsed();
-
-            let baked = std::sync::Arc::new(baked);
-
-            log::info!(
-                "[helio-bake] ✓ Bake complete in {:.2}s — {} objects, {} lights (avg {:.1}ms/obj)",
-                bake_duration.as_secs_f32(),
-                obj_count,
-                light_count,
-                if obj_count > 0 {
-                    bake_duration.as_millis() as f32 / obj_count as f32
-                } else {
-                    0.0
-                }
-            );
-
-            // The graph owns the result (Helio#256): BakeInjectPass publishes
-            // the baked resources as frame inputs and survives graph rebuilds.
-            self.install_baked_data(baked);
-        }
-
         let now = Instant::now();
         let dt = now
             .duration_since(self.last_render_time)
@@ -248,6 +208,9 @@ impl Renderer {
     /// single-layer desktop target. Sampling passes use `depth_sampler_view`,
     /// which exposes layer 0 as a plain D2 view in XR.
     fn submit_frame(&mut self, target: &wgpu::TextureView, multiview: bool) -> HelioResult<()> {
+        // The frame's ray-traced scene, if its builder published one for this
+        // frame (`helio_frame_api::rays`): good for this frame only.
+        let rays = self.scene_payloads.take(&helio_frame_api::rays::SCENE_RAYS);
         helio_core::cpu_scope!("Helio::Renderer::submit_frame");
         self.last_submission = None;
         #[cfg(not(target_arch = "wasm32"))]
@@ -275,86 +238,21 @@ impl Renderer {
         if let Ok(mut state) = self.debug_state.lock() {
             state.world_origin = self.world_origin;
         }
-        // SceneDB owns texture residency. Retain descriptor views by GPU handle
-        // identity, including slot replacement/removal; no duplicate uploads.
-        let texture_store = self.scene_db.texture_store();
-        let texture_guard = {
-            // Shared with SceneDB's texture streaming/upload side, which takes
-            // the write half; a long wait here is streaming holding the store.
-            helio_core::cpu_scope!("Helio: wait SceneDB texture store lock");
-            texture_store
-                .as_ref()
-                .map(|store| {
-                    store.read().map_err(|_| {
-                        helio_core::Error::InvalidPassConfig(
-                            "SceneDB texture store lock poisoned".into(),
-                        )
-                    })
-                })
-                .transpose()?
-        };
-        let bind_textures_scope = helio_core::CpuScope::new("Helio: bind material textures");
-        if texture_guard
-            .as_ref()
-            .is_some_and(|store| store.slot_count() as usize > self.material_bindings.texture_count)
-        {
-            return Err(helio_core::Error::InvalidPassConfig(
-                "SceneDB texture slots exceed the device material binding capacity".into(),
-            ));
-        }
-        for (slot, cached) in self.material_bindings.scene_views.iter_mut().enumerate() {
-            let texture = texture_guard
-                .as_ref()
-                .and_then(|store| store.texture(slot as u32));
-            if cached.as_ref().map(|(texture, _)| texture) == texture {
-                continue;
-            }
-            if let Some(texture) = texture {
-                if texture.dimension() != wgpu::TextureDimension::D2
-                    || texture.depth_or_array_layers() != 1
-                    || texture.sample_count() != 1
-                    || !texture
-                        .usage()
-                        .contains(wgpu::TextureUsages::TEXTURE_BINDING)
-                    || texture
-                        .format()
-                        .sample_type(None, Some(self.device.features()))
-                        != Some(wgpu::TextureSampleType::Float { filterable: true })
-                {
-                    return Err(helio_core::Error::InvalidPassConfig(format!(
-                        "SceneDB material texture slot {slot} requires a filterable, single-layer, single-sample 2D texture"
-                    )));
-                }
-                *cached = Some((texture.clone(), texture.create_view(&Default::default())));
-            } else {
-                *cached = None;
-            }
-            self.material_bindings.version = self.material_bindings.version.wrapping_add(1);
-        }
-        drop(texture_guard);
-        drop(bind_textures_scope);
-        let material_texture_views: Vec<_> = self
-            .material_bindings
-            .scene_views
-            .iter()
-            .map(|entry| {
-                entry
-                    .as_ref()
-                    .map(|(_, view)| view)
-                    .unwrap_or(&self.material_bindings.fallback_view)
-            })
-            .collect();
-        let material_samplers =
-            vec![&self.material_bindings.fallback_sampler; self.material_bindings.texture_count];
+        // Frame inputs features supply (the materials' texture table):
+        // refreshed before anything is published.
+        self.graph
+            .update_frame_inputs(&helio_core::FrameInputContext {
+                device: &self.device,
+                queue: &self.queue,
+                camera: &self.camera_data,
+                frame_num: self.frame_count,
+            })?;
         let mut resource_registry = helio_core::ResourceRegistry::empty();
         // Pass-owned buffers are published through the graph before any pass
         // executes. The renderer only consumes the generic contracts and no
         // longer downcasts into GBufferPass to discover its storage.
         self.graph
             .publish_frame_inputs(&self.camera_data, &mut resource_registry);
-        let material_textures_buf = resource_registry
-            .get::<&wgpu::Buffer>(helio_core::ResourceKey::new("material_texture_fallback"))
-            .unwrap_or(&self.camera_buffer);
         let coordinate_spaces = resource_registry
             .get::<helio_core::CoordinateSpacesFrameData<'_>>(
                 helio_core::resource_keys::coordinate_spaces(),
@@ -363,58 +261,27 @@ impl Renderer {
                 coordinate_spaces: &self.camera_buffer,
                 coordinate_spaces_prev: &self.camera_buffer,
             });
-        resource_registry.write(
-            helio_core::resource_keys::material_textures(),
-            helio_mats::MaterialTextureBindings {
-                material_textures: material_textures_buf,
-                texture_views: &material_texture_views,
-                samplers: &material_samplers,
-                version: self.material_bindings.version,
-            },
-            "Renderer",
-        );
+        let ambient = self
+            .graph_config
+            .features
+            .get_or_default::<helio_frame_api::lighting::AmbientLight>();
         resource_registry.write(
             helio_core::resource_keys::render_environment(),
             helio_core::RenderEnvironment {
                 clear_color: self.clear_color,
-                ambient_color: self.ambient_color,
-                ambient_intensity: self.ambient_intensity,
-                tlas: self.ray_frame.tlas(self.frame_count),
+                ambient_color: ambient.color,
+                ambient_intensity: ambient.intensity,
+                tlas: rays.as_deref().map(|rays| &rays.tlas),
             },
             "Renderer",
         );
-        if let Some(transmission) = self.ray_frame.transmission(self.frame_count) {
-            resource_registry.write(
-                helio_core::ResourceKey::new("ray_transmission"),
-                transmission,
-                "Renderer",
-            );
+        for (key, buffer) in rays.iter().flat_map(|rays| rays.buffers.iter()) {
+            resource_registry.write(helio_core::ResourceKey::new(*key), buffer, "Renderer");
         }
-        if let Some(instances) = self.ray_frame.instances(self.frame_count) {
-            resource_registry.write(
-                helio_core::ResourceKey::new(helio_core::RAY_INSTANCES),
-                instances,
-                "Renderer",
-            );
-        }
-        if let Some((vertices, indices)) = self.ray_frame.proxies(self.frame_count) {
-            resource_registry.write(
-                helio_core::ResourceKey::new(helio_core::RAY_PROXY_VERTICES),
-                vertices,
-                "Renderer",
-            );
-            resource_registry.write(
-                helio_core::ResourceKey::new(helio_core::RAY_PROXY_INDICES),
-                indices,
-                "Renderer",
-            );
-        }
-        // Every instance
-        // implicitly uses `space_id = 0` (identity) until a real portal/
-        // sublevel producer exists. Without this, `OcclusionCullPass`/
-        // `IndirectDispatchPass`/`ShadowPass`/`ShadowCullPass`/both portal
-        // passes all hard-require this resource and silently never dispatch
-        // without it -- stalling the entire GPU-driven cull pipeline.
+        // Content without a coordinate space of its own uses `space_id = 0`
+        // (identity). Passes that place content by space (an object kind's
+        // culling and drawers, the portals) hard-require this resource and
+        // would never dispatch without it.
         resource_registry.write(
             helio_core::resource_keys::coordinate_spaces(),
             coordinate_spaces,
@@ -423,20 +290,6 @@ impl Renderer {
         // Geometry, materials, lights, shadows, and transforms are SceneDB
         // component buffers. Passes resolve them by BufferKey from the
         // read-only SceneInput projection; Renderer owns none of those rows.
-        if let Some(ref lut) = self.color_grading_lut_view {
-            resource_registry.write(
-                helio_core::ResourceKey::new("color_grading_lut"),
-                lut,
-                "Renderer",
-            );
-        }
-        if let Some(ref ies) = self.ies_texture_view {
-            resource_registry.write(
-                helio_core::ResourceKey::new("ies_textures"),
-                ies,
-                "Renderer",
-            );
-        }
         #[cfg(not(target_arch = "wasm32"))]
         let depth_texture: &wgpu::Texture = if multiview {
             self.xr_depth_texture.as_ref().ok_or_else(|| {
@@ -477,7 +330,7 @@ impl Renderer {
             .map(|v| v as &wgpu::TextureView)
         {
             resource_registry.write(
-                helio_core::ResourceKey::new("full_res_depth"),
+                helio_core::ResourceKey::new(helio_frame_api::depth::FULL_RES_DEPTH),
                 v,
                 "Renderer",
             );
@@ -557,6 +410,7 @@ impl Renderer {
                 self.frame_count,
                 self.world_origin,
             );
+            scene_input.set_payloads(self.scene_payloads.clone());
             helio_core::cpu_scope!("Helio: scene derivations");
             scene_input.run_derivations(&mut self.scene_derivations);
             scene_input

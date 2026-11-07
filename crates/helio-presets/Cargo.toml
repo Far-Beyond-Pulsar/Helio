@@ -1,0 +1,40 @@
+[package]
+name = "helio-presets"
+version = "0.1.0"
+edition = "2021"
+workspace = "../../"
+description = "Helio's shipped pipelines as node-graph presets, the feature list they build from, and the renderer config helpers"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-frame-api = { path = "../helio-frame-api" }
+# The scene join's world origin (`SceneDerivationContext::world_origin`).
+glam = { workspace = true }
+helio = { path = "../helio" }
+helio-feature-api = { path = "../helio-feature-api" }
+helio-spine = { path = "../helio-spine" }
+helio-graph-asset = { path = "../helio-graph-asset" }
+helio-core = { workspace = true }
+image = { workspace = true, features = ["png"] }
+wgpu = { workspace = true }
+serde_json = { workspace = true }
+helio-pass-debug-overlay = { path = "../passes/3d/helio-pass-debug-overlay" }
+helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
+helio-pass-buffer-view = { path = "../passes/3d/helio-pass-buffer-view" }
+helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
+helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
+helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
+helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
+helio-pass-simple-cube = { path = "../passes/3d/helio-pass-simple-cube" }
+helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
+helio-pass-tsr = { workspace = true }
+
+[dev-dependencies]
+bytemuck = { workspace = true }
+pulsar_scenedb = { workspace = true }
+helio-components = { path = "../helio-components" }
+env_logger = { workspace = true }
+profiling = { workspace = true }
+pollster = { workspace = true }
+glam = { workspace = true }
+serde_json = { workspace = true }

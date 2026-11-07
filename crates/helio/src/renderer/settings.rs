@@ -40,23 +40,12 @@ impl TsrSetting {
     }
 }
 
-fn tier<T>(text: &str, [low, medium, high, ultra]: [T; 4]) -> T {
-    match text {
-        "low" => low,
-        "high" => high,
-        "ultra" => ultra,
-        _ => medium,
-    }
-}
-
 impl RendererConfig {
     /// The config with a host's [`helio_settings::RENDERER`] values. The
     /// temporal preset is the host's to resolve ([`TsrSetting`]): this sets
     /// the render scale it uses while TSR is off.
     pub fn with_settings(mut self, settings: &Resolved) -> Self {
-        use helio_pass_foliage_place::FoliageQuality;
         use helio_pass_postprocess::HdrOutputMode;
-        use helio_pass_shadow_matrix::ShadowQuality;
         debug_assert!(std::ptr::eq(settings.group(), &helio_settings::RENDERER));
         let f = |key| settings.number(key) as f32;
         self.render_scale = f("render_scale").clamp(0.25, 1.0);
@@ -65,47 +54,9 @@ impl RendererConfig {
             "forward_only" => RenderMode::ForwardOnly,
             _ => RenderMode::Deferred,
         };
-        self.shadow_quality = tier(
-            settings.text("shadow_quality"),
-            [
-                ShadowQuality::Low,
-                ShadowQuality::Medium,
-                ShadowQuality::High,
-                ShadowQuality::Ultra,
-            ],
-        );
-        let budget = &mut self.shadow_budget;
-        budget.memory_bytes = (settings.number("shadow_memory_mb") * 1024.0 * 1024.0) as u64;
-        budget.max_resolution = settings
-            .text("shadow_max_resolution")
-            .parse()
-            .unwrap_or(budget.max_resolution);
-        budget.updates_per_frame = settings.number("shadow_updates_per_frame") as u32;
-        budget.update_texels_per_frame =
-            (settings.number("shadow_update_megatexels") * 1024.0 * 1024.0) as u32;
-        budget.max_distance = f("shadow_max_distance");
-        budget.fade_frames = settings.number("shadow_fade_frames") as u32;
-        budget.hysteresis = f("shadow_hysteresis");
-        budget.page_invalidation = settings.bool("shadow_page_invalidation");
         self.enable_environment_reflections = settings.bool("environment_reflections");
         self.enable_ssr = settings.bool("screen_space_reflections");
         self.enable_planar_reflections = settings.bool("planar_reflections");
-        self.gi_probe_spacing = settings.optional("gi_probe_spacing").map(|m| m as f32);
-        self.enable_foliage = settings.bool("foliage");
-        self.foliage_quality = tier(
-            settings.text("foliage_quality"),
-            [
-                FoliageQuality::Low,
-                FoliageQuality::Medium,
-                FoliageQuality::High,
-                FoliageQuality::Ultra,
-            ],
-        );
-        self.foliage_range = settings.optional("foliage_range").map(|m| m as f32);
-        self.foliage_tufts_per_m2 = settings.optional("foliage_tufts_per_m2").map(|n| n as f32);
-        self.foliage_blades_per_tuft = settings
-            .optional("foliage_blades_per_tuft")
-            .map(|n| n as f32);
         self.hdr_output_mode = match settings.text("hdr_output_mode") {
             "hdr10" => HdrOutputMode::Hdr10,
             "scrgb" => HdrOutputMode::ScRgb,
@@ -113,7 +64,6 @@ impl RendererConfig {
             _ => HdrOutputMode::Ldr,
         };
         self.background_color = settings.color("background_color");
-        self.enable_portals = settings.bool("portals");
         self.perf_overlay_mode = match settings.text("perf_overlay") {
             "pass_overdraw" => PerfOverlayMode::PassOverdraw,
             "shader_complexity" => PerfOverlayMode::ShaderComplexity,
