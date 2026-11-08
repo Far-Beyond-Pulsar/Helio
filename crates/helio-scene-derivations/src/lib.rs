@@ -4,25 +4,21 @@
 //!
 //! - [`hierarchy_resolve`]: parent-relative transforms to world space.
 //! - Each object kind's rows are joined by its own crate's derivation (a
-//!   lights plugin's light join, a meshes plugin's scene join).
-//! - Every other kind's rows are placed by a `helio_scene_join::RowJoin`
-//!   each kind builds in its own crate.
-//! - [`texture_means`]: per-material texture means for ray-traced lighting.
+//!   lights plugin's light join, a meshes plugin's scene join), or placed by
+//!   a `helio_scene_join::RowJoin` the kind builds in its own crate.
 
 pub mod hierarchy_resolve;
-pub mod texture_means;
 
-/// Every scene derivation shader in Helio as compiled (shader validation
-/// without a device): the hierarchy resolve and the row join.
+/// The derivations' shaders as compiled, for shader validation without a
+/// device: each file's path and its source with the join's shared
+/// declarations (the row join's are `helio_scene_join::validation_sources`).
 pub fn validation_sources() -> Vec<(String, String)> {
-    vec![
-        (
-            "hierarchy_resolve.wgsl".to_string(),
-            helio_scene_join::join_source(include_str!("../shaders/hierarchy_resolve.wgsl")),
-        ),
-        (
-            "row_join.wgsl".to_string(),
-            helio_scene_join::row_join_source(),
-        ),
-    ]
+    vec![(
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/shaders/hierarchy_resolve.wgsl"
+        )
+        .to_string(),
+        helio_scene_join::join_source(include_str!("../shaders/hierarchy_resolve.wgsl")),
+    )]
 }

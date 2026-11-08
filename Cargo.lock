@@ -673,9 +673,12 @@ dependencies = [
 name = "examples"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "env_logger",
  "glam",
  "helio",
+ "helio-core",
+ "helio-frame-api",
  "helio-presets",
  "log",
  "pollster 0.4.0",
@@ -726,15 +729,6 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
-]
-
-[[package]]
-name = "float-cmp"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b09cf3155332e944990140d967ff5eceb70df778b34f77d8075db46e4704e6d8"
-dependencies = [
- "num-traits",
 ]
 
 [[package]]
@@ -970,7 +964,6 @@ dependencies = [
  "arrayvec",
  "bytemuck",
  "glam",
- "helio-bake-types",
  "helio-core",
  "helio-feature-api",
  "helio-frame-api",
@@ -980,7 +973,6 @@ dependencies = [
  "helio-xr",
  "image",
  "log",
- "meshopt",
  "openxr",
  "pollster 0.4.0",
  "pulsar_reflection",
@@ -1050,6 +1042,7 @@ dependencies = [
  "glam",
  "helio-frame-api",
  "helio-pass-hiz",
+ "helio-pass-perf-overlay",
  "helio-pass-postprocess",
  "helio-scene-derivations",
  "helio-scene-join",
@@ -1176,30 +1169,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-sdf"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "helio-core",
- "helio-frame-api",
- "log",
- "wgpu",
-]
-
-[[package]]
-name = "helio-pass-simple-cube"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "helio-feature-api",
- "helio-frame-api",
- "log",
- "wgpu",
-]
-
-[[package]]
 name = "helio-pass-ssr"
 version = "0.1.0"
 dependencies = [
@@ -1251,7 +1220,6 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
  "helio-pass-postprocess",
- "helio-pass-simple-cube",
  "helio-pass-ssr",
  "helio-pass-tsr",
  "helio-spine",
@@ -1268,13 +1236,9 @@ name = "helio-scene-derivations"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "glam",
- "helio",
  "helio-core",
- "helio-frame-api",
  "helio-scene-join",
  "log",
- "pollster 0.4.0",
  "wgpu",
 ]
 
@@ -1715,18 +1679,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
 dependencies = [
  "autocfg",
-]
-
-[[package]]
-name = "meshopt"
-version = "0.6.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e01e77ead21976b3a9f01ec1724f766923da74f0726364e2b0f425658935d71a"
-dependencies = [
- "bitflags 2.13.1",
- "cc",
- "float-cmp",
- "thiserror 2.0.20",
 ]
 
 [[package]]

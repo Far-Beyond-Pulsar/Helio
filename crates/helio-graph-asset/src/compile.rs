@@ -8,8 +8,8 @@ use helio::{GraphRebuilder, IntoGraph, PassBuildContext};
 use helio_core::RenderGraph;
 
 use crate::asset::{GraphAsset, NodeInstance};
-use helio_feature_api::{BuildEnv, NodeBuild, NodeRegistry};
 use crate::validate::{validate, Diagnostic, Severity};
+use helio_feature_api::{BuildEnv, NodeBuild, NodeRegistry};
 
 /// Called after each node is built with the node, the graph so far and the
 /// range of pass indices the node added.

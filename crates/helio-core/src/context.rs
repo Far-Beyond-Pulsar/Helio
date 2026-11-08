@@ -260,7 +260,8 @@ pub struct PassContext<'a> {
     /// Pointer to the parent graph's retained secondary-view graphs. The
     /// executor lends this only for the duration of `execute()`; passes must
     /// use [`Self::execute_secondary_graph`] rather than retain the pointer.
-    pub(crate) secondary_graphs: *mut std::collections::HashMap<&'static str, crate::graph::RenderGraph>,
+    pub(crate) secondary_graphs:
+        *mut std::collections::HashMap<&'static str, crate::graph::RenderGraph>,
 
     /// Open typed per-frame resource registry.
     pub registry: &'a crate::ResourceRegistry<'a>,
@@ -352,7 +353,9 @@ impl<'a> PassContext<'a> {
         // exclusive access to its secondary graph map, and PassContext cannot
         // escape the synchronous pass execution that owns that borrow.
         let graphs = unsafe { &mut *self.secondary_graphs };
-        let graph = graphs.entry(key).or_insert_with(|| build(self.device, self.queue));
+        let graph = graphs
+            .entry(key)
+            .or_insert_with(|| build(self.device, self.queue));
         let size = graph.render_size().internal;
         if !graph.is_locked() {
             graph.lock(width.max(1), height.max(1));

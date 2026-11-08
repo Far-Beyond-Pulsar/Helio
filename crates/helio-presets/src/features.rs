@@ -34,7 +34,6 @@ pub fn default_features() -> FeatureSet {
         .with(helio_pass_fxaa::FxaaFeature)
         .with(helio_pass_buffer_view::BufferViewFeature)
         .with(helio_pass_perf_overlay::PerfOverlayFeature)
-        .with(helio_pass_simple_cube::SimpleCubeFeature)
         .with(RendererNodes)
 }
 

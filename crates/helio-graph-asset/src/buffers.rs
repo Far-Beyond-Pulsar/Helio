@@ -23,10 +23,10 @@ use serde_json::Value;
 use crate::asset::{Connection, GraphAsset, NodeInstance, PinRef};
 use crate::core_nodes::{BUFFER_GET, BUFFER_SET};
 use crate::layout::stable_topological_order;
-use helio_feature_api::{PinKind, PinType};
 use crate::probe::SCENEDB_PREFIX;
-use helio_feature_api::NodeRegistry;
 use crate::validate::{Diagnostic, Severity};
+use helio_feature_api::NodeRegistry;
+use helio_feature_api::{PinKind, PinType};
 
 /// Parses a `buffer` parameter, `<tag>:<name>`.
 pub fn parse_entry(text: &str) -> Option<(PinType, String)> {
@@ -335,8 +335,8 @@ pub fn flatten(asset: &GraphAsset, registry: &NodeRegistry) -> Flattened {
 mod tests {
     use super::*;
     use crate::core_nodes::{ON_FRAME_START, OUTPUT};
-    use helio_feature_api::PinDesc;
     use helio_feature_api::NodeDescriptor;
+    use helio_feature_api::PinDesc;
     use serde_json::json;
 
     fn node(id: &str, kind: &str) -> NodeInstance {

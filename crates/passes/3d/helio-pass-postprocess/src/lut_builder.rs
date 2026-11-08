@@ -1,4 +1,3 @@
-
 pub struct LutBuilder {
     pipeline: wgpu::ComputePipeline,
     pipeline_layout: wgpu::PipelineLayout,
@@ -11,11 +10,8 @@ pub struct LutBuilder {
 
 impl LutBuilder {
     pub fn new(device: &wgpu::Device, size: u32) -> Self {
-        let shader = helio_core::shader::module(
-            device,
-            "LUT Build Shader",
-            &crate::with_post_settings(include_str!("../shaders/lut_build.wgsl")),
-        );
+        let shader =
+            helio_core::shader::module(device, "LUT Build Shader", &crate::lut_build_source());
 
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("LUT Build BGL"),

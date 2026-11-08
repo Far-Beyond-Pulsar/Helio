@@ -4,7 +4,7 @@ use helio::{PassBuildContext, PassGraphBuilderFn};
 // point must remain directly usable with RendererBuilder::with_pass_build_context.
 #[test]
 fn default_graph_builders_match_pass_build_context_abi() {
-    let builders: [PassGraphBuilderFn; 8] = [
+    let builders: [PassGraphBuilderFn; 7] = [
         Box::new(helio_presets::deferred),
         Box::new(helio_presets::deferred),
         Box::new(helio_presets::deferred_fxaa),
@@ -12,7 +12,6 @@ fn default_graph_builders_match_pass_build_context_abi() {
         Box::new(helio_presets::hlfs_fxaa),
         Box::new(helio_presets::forward),
         Box::new(helio_presets::forward),
-        Box::new(helio_presets::simple),
     ];
     let _ = builders;
 }

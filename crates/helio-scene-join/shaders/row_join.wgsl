@@ -26,7 +26,7 @@
 //   fn placement_range(row: u32, slot: u32, offset: u32) // its range of the pool
 //
 // Hooks read the bindings and helpers below (`u`, `owners`, `transforms`,
-// `sources`, `rows_out`, `directional_light`, `mesh_bounds`, `source_base`,
+// `sources`, `rows_out`, `directional_light`, `owner_bounds`, `source_base`,
 // `source_size`, `placed_position`, `placed_altitude`, the `object_*`
 // helpers of `scene_join_common.wgsl`).
 
@@ -75,8 +75,8 @@ const WORKGROUP: u32 = 64u;
 // The directional light a placement takes (`RowJoinKeys::directional_light`:
 // its first `vec4`, the direction toward it and 1).
 @group(0) @binding(7) var<storage, read> directional_light: array<vec4<f32>>;
-// Mesh instances' local bounding spheres, keyed like `owners`.
-@group(0) @binding(8) var<storage, read> mesh_bounds: array<vec4<f32>>;
+// The owners' content's local bounding spheres, keyed like `owners`.
+@group(0) @binding(8) var<storage, read> owner_bounds: array<vec4<f32>>;
 
 fn source_base(row: u32) -> u32 {
     return row * u.source_words + u.source_offset;

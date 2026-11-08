@@ -359,7 +359,11 @@ Rules:
   also → group). `scripts/architecture/check_layers.py` (`just arch`, CI)
   fails on new violations; today's 19 are in
   `architecture/layer-violations.txt`, which may only shrink. A budget on
-  `#[derive(SceneStore)]` in Helio (31) may only go down.
+  `#[derive(SceneStore)]` in Helio (31) may only go down. Since p18 the same
+  script fails when a crate outside the test host names an object kind
+  (`[kinds]` in the manifest; what remains is in
+  `architecture/kind-names.txt`, with its reason, and may only shrink; see
+  plugin-migration.md, "As built, p18").
 - Delete the dead crates (3 stubs, 4 unused passes).
 - Move `helio-component` into Pulsar-Native (`crates/core/helio_component`);
   drop the 5-level workspace path and the 5-level asset paths.

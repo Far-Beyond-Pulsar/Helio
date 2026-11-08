@@ -148,9 +148,9 @@ fn geometry(vertices: &wgpu::Buffer, revision: u64) -> BlasGeometry<'_> {
     }
 }
 
-fn instance(mesh_id: u64, x: f32) -> TlasInstanceInput {
+fn instance(geometry_id: u64, x: f32) -> TlasInstanceInput {
     TlasInstanceInput {
-        mesh_id,
+        geometry_id,
         transform: [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
     }
 }

@@ -26,9 +26,9 @@ use helio_core::{DeclaredKind, PassDeclaration};
 
 use crate::asset::GraphAsset;
 use crate::compile::build_graph;
-use helio_feature_api::{PinDesc, PinType};
-use helio_feature_api::{BuildEnv, NodePins, NodeRegistry};
 use crate::validate::Diagnostic;
+use helio_feature_api::{BuildEnv, NodePins, NodeRegistry};
+use helio_feature_api::{PinDesc, PinType};
 
 /// Prefix of the resource name of a SceneDB buffer pin.
 pub const SCENEDB_PREFIX: &str = "scenedb.";

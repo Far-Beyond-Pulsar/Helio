@@ -191,11 +191,7 @@ impl ScenePayloads {
         contract: &PayloadContract<T>,
     ) -> Option<Arc<T>> {
         let index = self.entries.iter().position(|(k, _)| *k == contract.key)?;
-        self.entries
-            .remove(index)
-            .1
-            .downcast::<T>()
-            .ok()
+        self.entries.remove(index).1.downcast::<T>().ok()
     }
 
     pub fn is_empty(&self) -> bool {

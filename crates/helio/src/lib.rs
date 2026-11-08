@@ -11,9 +11,6 @@ mod quark_commands;
 mod renderer;
 // SceneDB is the sole scene authority; the legacy scene container was removed.
 
-#[cfg(target_arch = "wasm32")]
-mod wasm_cpp_alloc;
-
 pub use camera::{follow_origin, Camera, WORLD_ORIGIN_CELL};
 /// Unified window, WGPU, and optional OpenXR startup (native targets only).
 #[cfg(not(target_arch = "wasm32"))]
@@ -26,8 +23,8 @@ pub use helio_core::{
     GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
     RenderPassTiming, RenderTimingSnapshot, Result,
 };
-pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_frame_api::lighting::AmbientLight;
+pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
 pub use helio_pass_tsr::TsrQuality;
 pub use helio_settings;
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};

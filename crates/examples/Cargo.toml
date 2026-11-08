@@ -15,6 +15,10 @@ path = "simple_graph.rs"
 [dependencies]
 helio = { workspace = true }
 helio-presets = { path = "../helio-presets" }
+# simple_graph's own pass (simple_cube.rs).
+helio-core = { workspace = true }
+helio-frame-api = { path = "../helio-frame-api" }
+bytemuck = { workspace = true, features = ["derive"] }
 pulsar_scenedb = { workspace = true }
 scenedb-inspector-agent = { path = "../scenedb-inspector-agent" }
 glam = { workspace = true }

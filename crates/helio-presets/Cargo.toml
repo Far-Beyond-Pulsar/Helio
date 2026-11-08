@@ -25,7 +25,6 @@ helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
-helio-pass-simple-cube = { path = "../passes/3d/helio-pass-simple-cube" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
 helio-pass-tsr = { workspace = true }
 

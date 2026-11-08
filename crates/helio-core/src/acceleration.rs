@@ -10,7 +10,7 @@ pub enum AccelerationError {
     Unsupported,
     #[error("invalid BLAS geometry: {0}")]
     InvalidGeometry(&'static str),
-    #[error("TLAS references missing BLAS for mesh {0}")]
+    #[error("TLAS references missing BLAS for geometry {0}")]
     MissingBlas(u64),
     #[error("TLAS instance count exceeds the device or host index limit")]
     TooManyInstances,
@@ -18,8 +18,8 @@ pub enum AccelerationError {
     InvalidTransform,
 }
 
-/// An opaque triangle mesh in an existing GPU allocation. Positions are Float32x3
-/// at the start of each vertex; optional indices are mesh-local Uint32 values.
+/// Opaque triangle geometry in an existing GPU allocation. Positions are Float32x3
+/// at the start of each vertex; optional indices are geometry-local Uint32 values.
 /// Increment `revision` after every in-place geometry write. Buffer replacement,
 /// offsets and counts are also part of the cache key, independently of revision.
 pub struct BlasGeometry<'a> {
@@ -108,14 +108,14 @@ impl BlasGeometry<'_> {
     }
 }
 
-/// Manages Bottom-Level Acceleration Structures (BLAS) for scene meshes.
+/// Manages Bottom-Level Acceleration Structures (BLAS) for scene geometry, keyed by an id its owner chooses.
 pub struct BlasManager {
     blas_map: HashMap<u64, wgpu::Blas>,
     geometry_keys: HashMap<u64, GeometryKey>,
     device: Arc<wgpu::Device>,
     rt_available: bool,
     /// Changes whenever a cached BLAS handle is replaced or evicted. TLAS
-    /// reuse must include this generation because a mesh id can retain its
+    /// reuse must include this generation because a geometry id can retain its
     /// numeric identity while pointing at a newly-built BLAS.
     revision: u64,
 }
@@ -150,16 +150,16 @@ impl BlasManager {
     /// use a GPU copy into temporary build input. Returns whether a build was recorded.
     ///
     /// Submit this encoder before any TLAS/query consuming the result. If the
-    /// encoder is abandoned, remove the affected mesh or clear the manager before
+    /// encoder is abandoned, remove the affected geometry or clear the manager before
     /// attempting to reuse it. GPU-written indices must be within vertex_count;
     /// their contents cannot be validated here without a readback.
     pub fn build_from_buffers(
         &mut self,
-        mesh_id: u64,
+        geometry_id: u64,
         encoder: &mut wgpu::CommandEncoder,
         geometry: BlasGeometry<'_>,
     ) -> Result<bool, AccelerationError> {
-        self.build_from_buffers_with_opacity(mesh_id, encoder, geometry, true)
+        self.build_from_buffers_with_opacity(geometry_id, encoder, geometry, true)
     }
 
     /// As `build_from_buffers`, with explicit triangle opacity. Non-opaque
@@ -167,7 +167,7 @@ impl BlasManager {
     /// part of the cache key and changing it rebuilds the BLAS.
     pub fn build_from_buffers_with_opacity(
         &mut self,
-        mesh_id: u64,
+        geometry_id: u64,
         encoder: &mut wgpu::CommandEncoder,
         geometry: BlasGeometry<'_>,
         opaque: bool,
@@ -177,7 +177,7 @@ impl BlasManager {
         }
         if let Err(error) = geometry.validate() {
             // An invalid replacement must not leave the old shape queryable.
-            self.remove_blas(mesh_id);
+            self.remove_blas(geometry_id);
             return Err(error);
         }
         let primitives = if geometry.indices.is_some() {
@@ -186,13 +186,13 @@ impl BlasManager {
             geometry.vertex_count
         } / 3;
         if primitives > self.device.limits().max_blas_primitive_count {
-            self.remove_blas(mesh_id);
+            self.remove_blas(geometry_id);
             return Err(AccelerationError::InvalidGeometry(
                 "triangle count exceeds the device limit",
             ));
         }
         let key = geometry.key(opaque);
-        if self.geometry_keys.get(&mesh_id) == Some(&key) {
+        if self.geometry_keys.get(&geometry_id) == Some(&key) {
             return Ok(false);
         }
         let mut copy_input = |source: &wgpu::Buffer, offset: u64, size: u64| {
@@ -233,7 +233,7 @@ impl BlasManager {
         };
         let blas = self.device.create_blas(
             &wgpu::CreateBlasDescriptor {
-                label: Some("versioned_mesh_blas"),
+                label: Some("versioned_geometry_blas"),
                 flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             },
@@ -268,8 +268,8 @@ impl BlasManager {
             std::iter::once(&entry),
             std::iter::empty::<&wgpu::Tlas>(),
         );
-        self.blas_map.insert(mesh_id, blas);
-        self.geometry_keys.insert(mesh_id, key);
+        self.blas_map.insert(geometry_id, blas);
+        self.geometry_keys.insert(geometry_id, key);
         self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
@@ -277,7 +277,7 @@ impl BlasManager {
     /// Build a BLAS from vertex/index data.
     pub fn build_blas(
         &mut self,
-        mesh_id: u64,
+        geometry_id: u64,
         queue: &wgpu::Queue,
         vertex_data: &[u8],
         vertex_count: u32,
@@ -289,8 +289,8 @@ impl BlasManager {
             return None;
         }
 
-        if self.blas_map.contains_key(&mesh_id) {
-            return self.blas_map.get(&mesh_id);
+        if self.blas_map.contains_key(&geometry_id) {
+            return self.blas_map.get(&geometry_id);
         }
 
         let blas = self.build_blas_inner(
@@ -301,8 +301,8 @@ impl BlasManager {
             index_data,
             index_count,
         )?;
-        self.blas_map.insert(mesh_id, blas);
-        self.blas_map.get(&mesh_id)
+        self.blas_map.insert(geometry_id, blas);
+        self.blas_map.get(&geometry_id)
     }
 
     fn build_blas_inner(
@@ -330,7 +330,7 @@ impl BlasManager {
 
         let blas = device.create_blas(
             &wgpu::CreateBlasDescriptor {
-                label: Some("mesh_blas"),
+                label: Some("geometry_blas"),
                 flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             },
@@ -388,18 +388,18 @@ impl BlasManager {
 
         queue.submit(std::iter::once(encoder.finish()));
         // Later submissions on this queue are ordered after the build. A host
-        // wait here unnecessarily serialized every mesh upload.
+        // wait here unnecessarily serialized every geometry upload.
 
         Some(blas)
     }
 
-    pub fn get_blas(&self, mesh_id: u64) -> Option<&wgpu::Blas> {
-        self.blas_map.get(&mesh_id)
+    pub fn get_blas(&self, geometry_id: u64) -> Option<&wgpu::Blas> {
+        self.blas_map.get(&geometry_id)
     }
 
-    pub fn remove_blas(&mut self, mesh_id: u64) {
-        let removed = self.blas_map.remove(&mesh_id).is_some();
-        self.geometry_keys.remove(&mesh_id);
+    pub fn remove_blas(&mut self, geometry_id: u64) {
+        let removed = self.blas_map.remove(&geometry_id).is_some();
+        self.geometry_keys.remove(&geometry_id);
         if removed {
             self.revision = self.revision.wrapping_add(1);
         }
@@ -509,8 +509,8 @@ impl TlasManager {
                 return Err(AccelerationError::TooManyInstances);
             }
             for input in instances {
-                if blas_manager.get_blas(input.mesh_id).is_none() {
-                    return Err(AccelerationError::MissingBlas(input.mesh_id));
+                if blas_manager.get_blas(input.geometry_id).is_none() {
+                    return Err(AccelerationError::MissingBlas(input.geometry_id));
                 }
                 if input.transform.iter().any(|value| !value.is_finite()) {
                     return Err(AccelerationError::InvalidTransform);
@@ -542,7 +542,7 @@ impl TlasManager {
         // Static scenes commonly call this once per render frame. Reusing the
         // existing TLAS avoids re-recording and rebuilding every instance when
         // neither transforms nor the referenced BLAS handles changed. The
-        // BLAS generation check is essential for in-place mesh replacement.
+        // BLAS generation check is essential for in-place geometry replacement.
         if self.tlas.is_some()
             && self.last_blas_revision == Some(blas_manager.revision())
             && self.last_instances == instances
@@ -572,7 +572,7 @@ impl TlasManager {
             if unchanged {
                 continue;
             }
-            if let Some(blas) = blas_manager.get_blas(input.mesh_id) {
+            if let Some(blas) = blas_manager.get_blas(input.geometry_id) {
                 tlas[i] = Some(wgpu::TlasInstance::new(
                     blas,
                     input.transform,
@@ -603,7 +603,6 @@ impl TlasManager {
 /// Input for one TLAS instance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TlasInstanceInput {
-    pub mesh_id: u64,
+    pub geometry_id: u64,
     pub transform: [f32; 12],
 }
-

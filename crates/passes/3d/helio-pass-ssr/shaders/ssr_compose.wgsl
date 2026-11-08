@@ -18,11 +18,11 @@
     // The trace at this pixel, premultiplied (the frame's reconstruction).
     let premul=indirect_specular_at(reflection,uv).rgb;
     let n=textureLoad(normals,p,0);
-    let material=textureLoad(orm,p,0);
-    let f0=clamp(vec3<f32>(n.w,material.a,textureLoad(emissive,p,0).a),vec3<f32>(0.0),vec3<f32>(0.999));
+    let orm_texel=textureLoad(orm,p,0);
+    let f0=clamp(vec3<f32>(n.w,orm_texel.a,textureLoad(emissive,p,0).a),vec3<f32>(0.0),vec3<f32>(0.999));
     let world=helio_world_from_depth(cameras[0].view_proj_inv,uv,d);
     let v=normalize(cameras[0].position_near.xyz-world);
     let ndv=max(dot(helio_gbuffer_normal(n.xyz),v),0.0);
-    let f=f0+(max(vec3<f32>(1.0-material.g),f0)-f0)*pow(1.0-ndv,5.0);
-    return vec4<f32>(premul*f*clamp(material.r,0.0,1.0),0.0);
+    let f=f0+(max(vec3<f32>(1.0-orm_texel.g),f0)-f0)*pow(1.0-ndv,5.0);
+    return vec4<f32>(premul*f*clamp(orm_texel.r,0.0,1.0),0.0);
 }

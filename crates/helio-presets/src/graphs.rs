@@ -423,16 +423,10 @@ mod tests {
         };
         // A pass reads through its own Get and writes through its own Set; nothing is
         // wired from one pass to another.
-        assert!(has(
-            ("get:hiz@unlit", "hiz"),
-            ("unlit", "hiz")
-        ));
+        assert!(has(("get:hiz@unlit", "hiz"), ("unlit", "hiz")));
         assert!(has(("hiz", "out_hiz"), ("set:hiz@hiz", "hiz")));
         assert!(has(("get:depth@hiz", "depth"), ("hiz", "depth")));
-        assert!(has(
-            ("unlit", "out_depth"),
-            ("set:depth@unlit", "depth")
-        ));
+        assert!(has(("unlit", "out_depth"), ("set:depth@unlit", "depth")));
         assert!(has(
             ("get:scenedb.rows@unlit", "scenedb.rows"),
             ("unlit", "scenedb.rows")

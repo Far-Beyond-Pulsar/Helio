@@ -267,8 +267,6 @@ fn presets_follow_the_config() {
     assert!(phases.contains(&helio_frame_api::Phase::Forward));
     assert!(!phases.contains(&helio_frame_api::Phase::GBuffer));
     assert!(!has::<helio_spine::UnlitPass>(&graph));
-    let graph = Preset::Simple.build(fixtures.context());
-    assert_eq!(graph.pass_count(), 1);
 }
 
 /// Helio has no lighting model (it is the lights plugin's): every G-buffer

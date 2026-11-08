@@ -55,28 +55,26 @@ pub fn type_in_crate(type_name: &str, crate_name: &str) -> bool {
 /// Types are identified by [`type_name_of`]. Anything not listed is not
 /// swappable.
 ///
-/// # Audit of the default graphs
+/// Passes share a builder-created resource in two ways, and the policy has a
+/// declaration for each:
 ///
-/// The policy shipped with `helio-presets` was derived by reading every
-/// constructor call in that crate. Resources the builder creates itself and
-/// hands to more than one pass:
+/// - inside one feature (a buffer its builder hands to two of its own passes):
+///   the feature lists them as a group ([`group_types`](Self::group_types));
+/// - across features, through a handle one feature puts in the build
+///   environment for others to take (a type of its api crate): each feature
+///   declares its own passes on that handle ([`shares`](Self::shares)), so
+///   they swap together without either naming the other's pass types.
 ///
-/// | resource | passes holding it |
-/// |---|---|
-/// | shadow dirty-flag buffer | `ShadowMatrixPass`, `ShadowDirtyPass` |
-/// | shadow face dirty / geometry-count buffers | `ShadowDirtyPass`, `ShadowPass` |
-/// | Hi-Z sampler | `HiZBuildPass`, `OcclusionCullPass` |
-/// | foliage arena / tile / blade / indirect buffers | `FoliagePlacePass`, `FoliageGBufferPass` |
-/// | perf-overlay shared state | every perf-overlay pass |
-///
-/// Each row is one group. Handles that come from the renderer (camera, debug
-/// camera, cull-stats buffers, the debug-draw state, the SceneDB handle) are the
-/// same objects in the live and the replacement graph, so they never make a
-/// pass unsafe to swap.
+/// Handles that come from the renderer (camera, debug camera, cull-stats
+/// buffers, the debug-draw state, the SceneDB handle) are the same objects in
+/// the live and the replacement graph, so they never make a pass unsafe to
+/// swap.
 #[derive(Clone, Debug, Default)]
 pub struct SwapPolicy {
     independent: Vec<&'static str>,
     groups: Vec<Vec<&'static str>>,
+    /// Per shared resource (its type name), the pass types holding it.
+    shared: Vec<(&'static str, Vec<&'static str>)>,
 }
 
 impl SwapPolicy {
@@ -103,6 +101,32 @@ impl SwapPolicy {
         self
     }
 
+    /// Declares that passes of type `pass` hold the builder-created resource
+    /// `resource` (the [`type_name_of`] of the handle that carries it). Every
+    /// pass declared on the same resource is swapped with the others, so the
+    /// features that create and take a handle meet at its type, never at
+    /// each other's pass types.
+    pub fn shares(mut self, resource: &'static str, pass: &'static str) -> Self {
+        match self
+            .shared
+            .iter_mut()
+            .find(|(listed, _)| *listed == resource)
+        {
+            Some((_, passes)) if passes.contains(&pass) => {}
+            Some((_, passes)) => passes.push(pass),
+            None => self.shared.push((resource, vec![pass])),
+        }
+        self
+    }
+
+    /// Every set of pass types that swaps together: the groups, and the
+    /// holders of each shared resource.
+    fn all_groups(&self) -> impl Iterator<Item = &Vec<&'static str>> {
+        self.groups
+            .iter()
+            .chain(self.shared.iter().map(|(_, passes)| passes))
+    }
+
     /// This policy and `other`'s declarations: a preset's own passes and
     /// what the features it builds with declared for theirs
     /// (`FeatureRegistrar::swappable`, `FeatureRegistrar::swap_group`).
@@ -117,14 +141,18 @@ impl SwapPolicy {
                 self.groups.push(group.clone());
             }
         }
+        for (resource, passes) in &other.shared {
+            for pass in passes {
+                self = self.shares(resource, pass);
+            }
+        }
         self
     }
 
     fn lists(&self, type_name: &str) -> bool {
         self.independent.iter().any(|listed| *listed == type_name)
             || self
-                .groups
-                .iter()
+                .all_groups()
                 .any(|group| group.iter().any(|listed| *listed == type_name))
     }
 
@@ -137,7 +165,7 @@ impl SwapPolicy {
         let mut set: BTreeSet<&'static str> = requested.iter().copied().collect();
         loop {
             let before = set.len();
-            for group in &self.groups {
+            for group in self.all_groups() {
                 if group.iter().any(|member| set.contains(member)) {
                     set.extend(group.iter().copied());
                 }
@@ -334,6 +362,28 @@ mod tests {
             policy.closure(&["crate_b::B"]).unwrap(),
             vec!["crate_b::B", "crate_c::C", "crate_c::D"]
         );
+    }
+
+    #[test]
+    fn passes_sharing_a_resource_swap_together() {
+        // Two features declare their own passes on one handle, each knowing
+        // only the handle's type; merged, they form one group.
+        let creator = SwapPolicy::new().shares("api::Handle", "crate_b::B");
+        let taker = SwapPolicy::new()
+            .shares("api::Handle", "crate_c::C")
+            .group_types(&["crate_c::C", "crate_c::D"]);
+        let policy = SwapPolicy::new().merged(&creator).merged(&taker);
+        assert_eq!(
+            policy.closure(&["crate_b::B"]).unwrap(),
+            vec!["crate_b::B", "crate_c::C", "crate_c::D"]
+        );
+        assert_eq!(
+            policy.closure(&["crate_c::D"]).unwrap(),
+            vec!["crate_b::B", "crate_c::C", "crate_c::D"]
+        );
+        // Another resource is another group.
+        let policy = policy.shares("api::Other", "crate_a::A");
+        assert_eq!(policy.closure(&["crate_a::A"]).unwrap(), vec!["crate_a::A"]);
     }
 
     #[test]

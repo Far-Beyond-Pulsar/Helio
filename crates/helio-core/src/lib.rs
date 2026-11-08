@@ -396,8 +396,8 @@ pub mod depth;
 pub mod entity;
 pub mod error;
 pub mod frame_demands;
-mod frame_inputs;
 pub mod frame_input_publisher;
+mod frame_inputs;
 pub mod frame_storage;
 pub mod gpu_cache;
 pub mod graph;
@@ -508,10 +508,7 @@ pub const TEXTURE_TABLE_LIMIT: usize = 256;
     target_os = "android"
 ))]
 pub const TEXTURE_TABLE_LIMIT: usize = 16;
-pub use profiling::{
-    FocusedTiming, FocusedTimingGroup, FocusedTimingReport, GpuTimingAvailability, Profiler,
-    RenderPassTiming, RenderTimingSnapshot,
-};
+pub use profiling::{GpuTimingAvailability, Profiler, RenderPassTiming, RenderTimingSnapshot};
 pub use scene_derivation::{
     run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationFactory,
     SceneDerivationOutput,

@@ -1,5 +1,5 @@
-pub mod feature;
-pub use feature::SimpleCubeFeature;
+//! A spinning test cube drawn straight into the output: the one pass of
+//! `simple_graph`, which checks a device and surface with no scene content.
 
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use wgpu::util::DeviceExt;
@@ -102,7 +102,7 @@ impl SimpleCubePass {
         let shader = helio_core::shader::module(
             device,
             "SimpleCube Shader",
-            helio_core::include_wgsl!("../shaders/simple_cube.wgsl"),
+            helio_core::include_wgsl!("simple_cube.wgsl"),
         );
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

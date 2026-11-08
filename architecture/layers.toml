@@ -10,6 +10,14 @@
 # Today's violations are recorded in architecture/layer-violations.txt. That
 # list may only shrink: a new violation fails the check, a fixed one must be
 # removed from the list (`--update`).
+#
+# Helio is core only (docs/architecture/plugin-migration.md, "C. Helio repo is
+# core only"): no crate outside the test host (`test_host = true`) may name an
+# object kind, whose contracts are its plugin's (Pulsar-Native
+# plugins/vendor/<kind>). [kinds] lists each kind's words; the check reads
+# identifiers and key-like string literals of every .rs/.wgsl file (comments,
+# prose strings and tests left out). What still names a kind is recorded with
+# its reason in architecture/kind-names.txt, a list that may only shrink.
 
 [layers.leaf]
 about = "No dependency on any other workspace crate."
@@ -20,8 +28,8 @@ about = "gpu + graph (helio-core today; splits into helio-gpu and helio-graph in
 may_use = ["leaf"]
 
 [layers.scene]
-about = "Buffer contracts and the scene-input projection; materials ABI. No components."
-may_use = ["core", "leaf"]
+about = "Buffer contracts, the scene join's building blocks and the derivations no kind owns (hierarchy resolve). No components, no kind."
+may_use = ["scene", "core", "leaf"]
 
 [layers.feature_api]
 about = "What a feature registers (node types, contracts, settings) and the frame it registers into (helio-frame-api: slots, draw phases, lighting inputs, the colour chain). Knows no renderer, no feature and no kind of object."
@@ -81,8 +89,6 @@ helio-pass-fxaa = { layer = "feature", group = "post-aa" }
 helio-pass-debug-overlay = { layer = "feature", group = "debug" }
 helio-pass-perf-overlay = { layer = "feature", group = "debug" }
 helio-pass-buffer-view = { layer = "feature", group = "debug" }
-helio-pass-simple-cube = { layer = "feature", group = "debug" }
-helio-pass-sdf = { layer = "feature", group = "sdf" }
 helio-bake = { layer = "feature", group = "bake" }
 
 # renderer
@@ -91,20 +97,44 @@ helio-xr = { layer = "renderer" }
 
 # presets
 helio-presets = { layer = "preset" }
-helio-scene-derivations = { layer = "preset" }
+helio-scene-derivations = { layer = "scene" }
 helio-graph-asset = { layer = "preset" }
 
 # hosts
-examples = { layer = "host" }
+examples = { layer = "host", test_host = true }
 helio-controls = { layer = "host" }
 helio-wasm = { layer = "host" }
-helio-components = { layer = "host" }       # SceneDB components for Helio's own hosts
+helio-components = { layer = "host", test_host = true }  # SceneDB components for Helio's own hosts
 
 [budgets]
 # `#[derive(SceneStore)]` structs below the host layer. Components belong to
 # whoever produces the data (an engine's plugins; for Helio's own hosts,
 # helio-components), never to the renderer (layered-rewrite.md §3, phase 1).
 scene_store_derives = 0
+
+[kinds]
+# Words (lower case, a multi-word term matches consecutive words of an
+# identifier: `PostProcessVolume` is "post process volume") that name each
+# kind. Words the frame owns are not here: "light" (the light list and
+# directional lights are lighting inputs), "sky" (the sky lighting input),
+# "shadow" (the shadow-caster phase), "reflection" (indirect specular).
+meshes = ["mesh", "meshes", "meshlet", "meshopt", "vg", "virtual geometry", "skinned", "skinning", "skeletal"]
+lights = ["ies", "hlfs", "light field", "reflection capture", "reflection captures"]
+materials = ["material", "materials"]
+sky = ["atmosphere", "cloud", "clouds"]
+fog = ["fog", "fogged"]
+post = ["post process volume", "post process volumes", "pp volume", "pp volumes"]
+lens = ["lens", "lenses", "flare"]
+water = ["water", "caustic", "caustics"]
+foliage = ["foliage"]
+voxel = ["voxel", "voxels", "terrain"]
+decals = ["decal", "decals"]
+particles = ["particle", "particles", "corona"]
+sprites = ["sprite", "sprites"]
+portals = ["portal", "portals"]
+splines = ["spline", "splines"]
+gi = ["gi", "ddgi"]
+baked-lighting = ["lightmap", "lightmaps", "baked", "pvs"]
 
 [renamed]
 # Old crate names in git history -> today's crate, for the co-change report.

@@ -50,8 +50,6 @@ pub enum Preset {
     HlfsFxaa,
     /// One forward pass for opaque geometry, no G-buffer; FXAA.
     Forward,
-    /// A test cube straight into the output: checks the device and surface.
-    Simple,
 }
 
 /// The anti-aliasing a preset ends its scene-linear chain with.
@@ -63,13 +61,12 @@ enum Aa {
 }
 
 impl Preset {
-    pub const ALL: [Preset; 6] = [
+    pub const ALL: [Preset; 5] = [
         Preset::Deferred,
         Preset::DeferredFxaa,
         Preset::Hlfs,
         Preset::HlfsFxaa,
         Preset::Forward,
-        Preset::Simple,
     ];
 
     pub fn name(self) -> &'static str {
@@ -79,7 +76,6 @@ impl Preset {
             Preset::Hlfs => "HLFS",
             Preset::HlfsFxaa => "HLFS + FXAA",
             Preset::Forward => "Forward",
-            Preset::Simple => "Simple",
         }
     }
 
@@ -92,7 +88,7 @@ impl Preset {
         match self {
             Preset::Deferred if tsr => Aa::Tsr,
             Preset::Hlfs if tsr => Aa::Tsr,
-            Preset::Hlfs | Preset::Simple => Aa::None,
+            Preset::Hlfs => Aa::None,
             Preset::Deferred | Preset::DeferredFxaa | Preset::HlfsFxaa | Preset::Forward => {
                 Aa::Fxaa
             }
@@ -102,7 +98,6 @@ impl Preset {
     /// The draw phases the preset runs, in frame order.
     pub fn phases(self) -> Vec<Phase> {
         match self {
-            Preset::Simple => Vec::new(),
             Preset::Forward => vec![
                 Phase::ShadowCasters,
                 Phase::Forward,
@@ -121,7 +116,7 @@ impl Preset {
     /// How the preset's lighting takes the indirect-specular layers.
     fn specular_layers(self) -> SpecularLayers {
         match self {
-            Preset::Forward | Preset::Simple => SpecularLayers::None,
+            Preset::Forward => SpecularLayers::None,
             _ if self.hlfs() => SpecularLayers::CompositedAfter,
             _ => SpecularLayers::Read,
         }
@@ -130,7 +125,7 @@ impl Preset {
     /// The lighting model the preset resolves its G-buffer with.
     fn lighting_model(self) -> LightingModel {
         match self {
-            Preset::Forward | Preset::Simple => LightingModel::Forward,
+            Preset::Forward => LightingModel::Forward,
             _ if self.hlfs() => LightingModel::LightField,
             _ => LightingModel::Deferred,
         }
@@ -153,10 +148,6 @@ impl Preset {
             registry,
             list: Vec::new(),
         };
-        if self == Preset::Simple {
-            nodes.pass("simple_cube");
-            return nodes.list;
-        }
         let aa = self.aa(config);
 
         // Scene prep: per-frame tables (an object kind's batches first), the
@@ -230,11 +221,9 @@ impl Preset {
             });
             from = id;
         }
-        if self != Preset::Simple {
-            for descriptor in registry.placed(HOST_INPUTS) {
-                let id = descriptor.kind.replace('.', "_");
-                asset.nodes.push(node(&id, &descriptor.kind));
-            }
+        for descriptor in registry.placed(HOST_INPUTS) {
+            let id = descriptor.kind.replace('.', "_");
+            asset.nodes.push(node(&id, &descriptor.kind));
         }
         asset
     }
@@ -258,11 +247,7 @@ impl Preset {
             }),
             registry,
         );
-        if self == Preset::Simple {
-            pipeline
-        } else {
-            pipeline.with_swap_policy(crate::default_swap_policy())
-        }
+        pipeline.with_swap_policy(crate::default_swap_policy())
     }
 
     /// The preset as a pipeline over the default features' nodes.
@@ -348,10 +333,6 @@ pub fn hlfs_fxaa(ctx: PassBuildContext<'_>) -> RenderGraph {
 
 pub fn forward(ctx: PassBuildContext<'_>) -> RenderGraph {
     Preset::Forward.build(ctx)
-}
-
-pub fn simple(ctx: PassBuildContext<'_>) -> RenderGraph {
-    Preset::Simple.build(ctx)
 }
 
 fn tsr_quality(config: &RendererConfig) -> &'static str {

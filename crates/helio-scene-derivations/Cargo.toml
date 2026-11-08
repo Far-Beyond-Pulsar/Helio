@@ -3,16 +3,12 @@ name = "helio-scene-derivations"
 version = "0.1.0"
 edition = "2021"
 workspace = "../../"
-description = "Scene derivations Helio's hosts run between the SceneDB snapshot and the graph: the mesh and light joins, hierarchy resolve, texture means."
+description = "Scene derivations no kind owns, run between the SceneDB snapshot and the graph: the hierarchy resolve (parent-relative transforms to world space)."
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio-frame-api = { path = "../helio-frame-api" }
-helio = { path = "../helio" }
 helio-core = { workspace = true }
 helio-scene-join = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true }
-glam = { workspace = true }
 log = { workspace = true }
-pollster = { workspace = true }

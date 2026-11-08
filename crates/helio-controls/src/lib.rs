@@ -320,24 +320,6 @@ impl FlyCamera {
     }
 }
 
-/// Standard perspective lens kept separate from pose/controller state.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PerspectiveLens {
-    pub fov_y_radians: f32,
-    pub near: f32,
-    pub far: f32,
-}
-
-impl Default for PerspectiveLens {
-    fn default() -> Self {
-        Self {
-            fov_y_radians: core::f32::consts::FRAC_PI_3,
-            near: 0.1,
-            far: 1_000.0,
-        }
-    }
-}
-
 #[cfg(feature = "winit")]
 pub fn navigation_action_from_winit_key(key: winit::keyboard::KeyCode) -> Option<NavigationAction> {
     use winit::keyboard::KeyCode;

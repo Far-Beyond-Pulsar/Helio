@@ -572,8 +572,8 @@ fn lane_comment(
 mod tests {
     use super::*;
     use crate::asset::{Connection, NodeInstance, PinRef};
-    use helio_feature_api::{PinDesc, PinType};
     use helio_feature_api::NodeDescriptor;
+    use helio_feature_api::{PinDesc, PinType};
 
     fn node(id: &str, kind: &str) -> NodeInstance {
         NodeInstance {

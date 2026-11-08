@@ -20,6 +20,7 @@ use helio::{
 };
 
 mod common;
+mod simple_cube;
 use common::new_scene_db_with_gpu_mirror;
 use winit::{
     application::ApplicationHandler,
@@ -173,7 +174,15 @@ impl ApplicationHandler for App {
         // GPU mirror is still required to build one.
         let scene_db = new_scene_db_with_gpu_mirror(&device, &queue);
         let renderer = RendererBuilder::new(config, common::scene_db_handle(&scene_db))
-            .with_pass_build_context(Box::new(helio_presets::simple))
+            .with_pass_build_context(Box::new(|ctx: helio::PassBuildContext<'_>| {
+                let mut graph =
+                    helio_core::RenderGraph::new_with_external_device(ctx.device, ctx.queue);
+                graph.add_pass(Box::new(simple_cube::SimpleCubePass::new(
+                    ctx.device,
+                    ctx.config.surface_format,
+                )));
+                graph
+            }))
             .build_with_graphics_context(&mut graphics)
             .expect("Helio renderer");
         let surface = graphics.surface;
