@@ -245,7 +245,11 @@ mod tests {
             .register_into(&mut registry);
         assert_eq!(registry.feature_of("one.node"), Some("one"));
         assert_eq!(registry.feature_of("two.a"), Some("two"));
-        assert_eq!(registry.feature_of("core"), None, "no feature owns a core node");
+        assert_eq!(
+            registry.feature_of("core"),
+            None,
+            "no feature owns a core node"
+        );
         let by_feature = registry.feature_nodes();
         assert_eq!(by_feature.get("one"), Some(&vec!["one.node"]));
         assert_eq!(by_feature.get("two"), Some(&vec!["two.a", "two.b"]));
