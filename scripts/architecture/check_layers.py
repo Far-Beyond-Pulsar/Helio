@@ -22,6 +22,9 @@ Reads <root>/architecture/layers.toml and `cargo metadata`, and fails when:
   [scan] dirs lists the directories read (default: crates, src).
 
 Usage: python scripts/architecture/check_layers.py [--root DIR] [--update]
+
+--update rewrites layer-violations.txt and drops kind-names.txt lines whose
+names are gone; it never adds a kind name.
 """
 
 import json
@@ -209,13 +212,16 @@ def checked_files(config, dirs):
             if rel.parts[0] in ("tests", "benches", "examples"):
                 continue
             files[path] = path.read_text(encoding="utf-8", errors="replace")
-    test_modules = set()
+    # A `#[cfg(test)] mod x;` is x.rs, or the directory x/ with every file
+    # under it (its own submodules).
+    test_files, test_dirs = set(), set()
     for path, text in files.items():
         for name in CFG_TEST_MOD.findall(text):
             base = path.parent if path.name in ("lib.rs", "main.rs", "mod.rs") else path.with_suffix("")
-            test_modules |= {base / f"{name}.rs", base / name / "mod.rs"}
+            test_files.add(base / f"{name}.rs")
+            test_dirs.add(base / name)
     for path in sorted(files):
-        if path in test_modules:
+        if path in test_files or any(path.is_relative_to(d) for d in test_dirs):
             continue
         text = files[path]
         cut = re.search(r"^\s*#\[cfg\(test\)\]\s*(?:pub\s+)?mod\s+\w+\s*\{", text, re.M)
@@ -291,6 +297,17 @@ def main():
     recorded_names, name_errors = recorded_kind_names()
     new_names = sorted(set(names) - set(recorded_names))
     gone_names = sorted(set(recorded_names) - set(names))
+    if update and gone_names and not name_errors:
+        # Shrinking only: drop the lines whose names are gone, keep the rest
+        # (and every comment) as written.
+        dropped = set(gone_names)
+        kept = [
+            line for line in KIND_NAMES.read_text(encoding="utf-8").splitlines()
+            if line.startswith("#") or not line.strip()
+            or tuple(p.strip() for p in line.split("|", 2)[:2]) not in dropped
+        ]
+        KIND_NAMES.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        gone_names = []
 
     print(f"layer violations: {len(found)} recorded-and-present, "
           f"{len(new)} new, {len(gone)} fixed; SceneStore derives: {derives}; "
