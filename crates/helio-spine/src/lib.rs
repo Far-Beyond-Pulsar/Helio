@@ -18,6 +18,7 @@
 //! their renderer config into it).
 
 use helio_feature_api::{pass_node, BuildEnv, Feature, FeatureRegistrar, ParamDesc};
+use helio_frame_api::lighting::{model, LightingModel, RegisterLightingModel, Shading};
 use helio_frame_api::{color, host_input, FrameNode, Slot};
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_postprocess::PostProcessPass;
@@ -129,6 +130,9 @@ fn register_scene_prep(registry: &mut FeatureRegistrar<'_>) {
 }
 
 fn register_lighting(registry: &mut FeatureRegistrar<'_>) {
+    // The stand-in model: what a preset gets when the model it chose is not
+    // registered. Its pass is placed by the preset (it has no point).
+    registry.lighting_model(LightingModel::new(model::UNLIT, Shading::GBuffer));
     registry.node(pass_node(
         "unlit",
         "Lighting: Unlit (No Lighting Model)",

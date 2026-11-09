@@ -255,7 +255,7 @@ pub type BuildFn = Arc<dyn Fn(&mut NodeBuild<'_, '_>) -> Result<(), String> + Se
 pub const DEFAULT_SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The format the scene-linear colour is lit, fogged and anti-aliased in up
-/// to the tone map, as a setting (HLFS presets set the format their lighting
+/// to the tone map, as a setting (a lighting model sets the format their lighting
 /// prefers). Read it with [`BuildEnv::scene_format`].
 #[derive(Clone, Copy, Debug)]
 pub struct SceneColorFormat(pub wgpu::TextureFormat);
@@ -470,6 +470,7 @@ pub struct NodeRegistry {
     scene_derivations: Vec<helio_core::SceneDerivationFactory>,
     swap_policy: helio_core::SwapPolicy,
     untraced_geometry: Vec<&'static str>,
+    provisions: HashMap<TypeId, Vec<Arc<dyn Any + Send + Sync>>>,
 }
 
 /// Pins of generated nodes by kind, shared by a registry and its clones so a
@@ -604,6 +605,25 @@ impl NodeRegistry {
     /// see, as the features declared them.
     pub fn untraced_geometry(&self) -> &[&'static str] {
         &self.untraced_geometry
+    }
+
+    /// Adds a `value` of a type a frame contract defines (a lighting model,
+    /// say); whoever reads the contract finds it with [`Self::provided`].
+    /// The registry holds it by type and knows nothing of it.
+    pub fn provide<T: Any + Send + Sync>(&mut self, value: T) {
+        self.provisions
+            .entry(TypeId::of::<T>())
+            .or_default()
+            .push(Arc::new(value));
+    }
+
+    /// The values of type `T` the features provided, in registration order.
+    pub fn provided<T: Any>(&self) -> impl Iterator<Item = &T> {
+        self.provisions
+            .get(&TypeId::of::<T>())
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.downcast_ref::<T>())
     }
 
     /// Declares what of the features' passes shader hot reload may swap

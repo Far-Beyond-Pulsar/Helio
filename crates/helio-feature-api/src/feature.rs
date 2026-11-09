@@ -67,6 +67,13 @@ impl FeatureRegistrar<'_> {
         self.registry.add_scene_derivation(derivation);
     }
 
+    /// Provides `value`, a record of a type a frame contract defines (see
+    /// [`NodeRegistry::provide`]): the feature registers what the contract
+    /// asks for, and whoever reads the contract finds it by type.
+    pub fn provide<T: std::any::Any + Send + Sync>(&mut self, value: T) {
+        self.registry.provide(value);
+    }
+
     /// Declares `buffer`, a scene buffer of geometry the feature draws, as
     /// geometry the scene's ray tracing does not see (a kind with no
     /// acceleration-structure projection: foliage, voxel volumes). A ray

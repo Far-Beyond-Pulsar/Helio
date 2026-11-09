@@ -1017,21 +1017,35 @@ crate (helio-pass-light-cull, -shadow-matrix, -deferred-light, -hlfs,
   registration), `editor` (lights_plugin) and `examples` (lights-examples:
   `ies_demo`, `light_benchmark`, `billboard_demo`).
 - **Frame seams** (Helio), each the narrowest that lets the crates leave:
-  - **The lighting model is a kind's**: `helio_frame_api::lighting::LightingModel`
-    (a preset setting: `Deferred`, `LightField`, `Forward`) names the
-    extension point a model's nodes join (`lighting.model.deferred`,
-    `lighting.model.light_field`; forward draws lit in its phase). The
-    deferred preset expands its point, the HLFS preset its own; a point that
-    holds nothing gets the spine's `UnlitPass` (albedo + emissive over the
-    background), the intended failure without the lights.
+  - **The lighting model is a plugin's registration**
+    (Far-Beyond-Pulsar/Helio#393 item 3): a feature registers a
+    `helio_frame_api::lighting::LightingModel` (`registrar.lighting_model`,
+    stored by type through `FeatureRegistrar::provide`): an id, its shading
+    (`GBuffer` or `Forward`), the extension point its nodes join, and what it
+    reads (the specular-layer mode, where the lighting inputs run, whether
+    TSR gets a reactive mask), plus the pipelines it brings
+    (`ModelPipeline`: id, label, anti-aliasing). The lights register
+    `deferred` (`lighting.model.deferred`), `light-field` (HLFS,
+    `lighting.model.light_field`, the `helio.hlfs` and `helio.fxaa_hlfs`
+    pipelines) and `forward` (the drawers light as they draw). A preset
+    chooses a model by id (`Preset::Deferred` is `deferred`,
+    `Preset::Forward` is `forward`, a model's pipeline is
+    `Preset::Model(pipeline)`); the phases, the layer mode and the inputs
+    order come from the model, so `helio-presets` names no model beyond those
+    two ids. A chosen id nobody registered resolves to the spine's `unlit`
+    model (registered by the spine; its `UnlitPass` draws albedo + emissive
+    over the background): the intended failure without the lights, so
+    forward without the lights is an unlit G-buffer pipeline.
     `graph_parity::without_a_lighting_model_the_gbuffer_is_drawn_unlit` pins
-    it, and that a model at the point replaces it. How others do it: Bevy's
-    deferred lighting node is `bevy_pbr`'s, not `core_pipeline`'s (a core
-    pipeline without it shows no lit surfaces); Unity SRP's renderer asset
-    brings forward or deferred with its passes; Unreal builds the model in,
-    which is the coupling removed here. Light-field shading asks for its own
-    scene colour format in its preparer (the HLFS preset no longer names
-    `HlfsPass`).
+    it, and that a registered model replaces it;
+    `a_model_brings_its_own_pipeline_and_reads` pins a model's own pipeline.
+    How others do it: Bevy's deferred lighting node is `bevy_pbr`'s, not
+    `core_pipeline`'s (a core pipeline without it shows no lit surfaces);
+    Unity SRP's renderer asset brings forward or deferred with its passes;
+    Unreal builds the model in, which is the coupling removed here. A
+    light-field model growing into ReSTIR DI or a path-traced model is a
+    plugin change, not a frame change. Light-field shading asks for its own
+    scene colour format in its preparer.
   - The lights register where the frame places them: the shadow views
     (`ShadowViewsFeature`) first in the shadow-caster phase's compute (the
     casters' dirty pass reads their flags), light binning (`LightCullFeature`)
@@ -2674,8 +2688,6 @@ decision of its own, not a move):
   parameters in the frame's `AtmosphereParams`. Waits on splitting the
   contract into the frame's medium, sky table and suns, and the sky's own
   parameters.
-- *The light-field model* (`LightingModel::LightField`, the HLFS presets).
-  Waits on lighting models registered by the plugin that brings them.
 - *The perf overlay's shading-cost profiler* models per-material light
   loops. Waits on its cost model coming from the materials' `SurfaceProbe`
   offer.

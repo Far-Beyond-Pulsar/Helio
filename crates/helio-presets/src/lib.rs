@@ -1,7 +1,7 @@
 //! Helio's shipped pipelines and what they are made of.
 //!
 //! - [`Preset`]: the shipped pipelines as node graphs made from a renderer
-//!   config ([`presets`]): `deferred`, `hlfs`, `forward`, ….
+//!   config ([`presets`]): `deferred`, `forward`, and the pipelines lighting models bring.
 //! - [`features`]: the feature list they build from (the spine and every
 //!   feature crate's nodes), the renderer's own nodes and the config bridge.
 //! - [`graphs`]: node registries, the editor's template, the pin probe.
@@ -15,9 +15,7 @@ pub mod features;
 pub mod graphs;
 pub mod pipelines;
 pub mod presets;
-pub use presets::{
-    deferred, deferred_fxaa, forward, hlfs, hlfs_fxaa, registry, Preset, PresetGraph,
-};
+pub use presets::{deferred, deferred_fxaa, forward, registry, Preset, PresetGraph};
 
 use helio_pass_debug_overlay::DebugOverlayPass;
 use helio_pass_fxaa::FxaaPass;

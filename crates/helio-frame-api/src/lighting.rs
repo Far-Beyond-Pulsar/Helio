@@ -13,53 +13,202 @@
 //! | [`sky`] | atmosphere frame + sky table | the atmosphere | no atmosphere |
 //! | [`VIEW_REMAPS`] | SceneDB `mat4` per chain + G-buffer tag | portals | no remap |
 //!
-//! A lighting model (deferred, forward, HLFS) binds every contract it uses,
-//! the stand-in where it is absent; a publisher writes it at
-//! [`crate::Slot::LightingInputs`] (or before the G-buffer when it needs no
-//! G-buffer). Neither side knows the other. The lights themselves (their
-//! list, shadows, the directional light) are not frame contracts: they are
-//! the lights' own, and what reads them reads the lights' api.
+//! A lighting model binds every contract it uses, the stand-in where it is
+//! absent; a publisher writes it at [`crate::Slot::LightingInputs`] (or
+//! before the G-buffer when it needs no G-buffer). Neither side knows the
+//! other. The lights themselves (their list, shadows, the directional
+//! light) are not frame contracts: they are the lights' own, and what reads
+//! them reads the lights' api.
 //!
-//! The model is a kind's too: a preset asks for one ([`LightingModel`]) and
-//! places what is installed at its point, or the spine's unlit stand-in
-//! when nothing is.
+//! The model is a plugin's too: it registers a [`LightingModel`] (an id, its
+//! passes at its point, what it reads), a preset chooses one by id, and the
+//! spine's unlit stand-in ([`model::UNLIT`]) is the model used when the
+//! chosen id is not registered.
 
-use helio_feature_api::{BuildEnv, ExtensionPoint};
+use helio_feature_api::{BuildEnv, ExtensionPoint, FeatureRegistrar, NodeRegistry};
 
-/// The lighting model a graph resolves its G-buffer with: a setting its
-/// preset supplies. Deferred and light-field models are nodes placed at
-/// their [`LightingModel::point`] by whatever owns lighting (the lights
-/// plugin); a preset whose point holds nothing draws the G-buffer unlit
-/// (`helio_spine::UnlitPass`). How others do it: Bevy's deferred lighting
-/// node is `bevy_pbr`'s, not the core pipeline's, and a core pipeline
-/// without it shows no lit surfaces; Unity SRP's renderer asset picks
-/// forward or deferred and its passes come with it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LightingModel {
+/// The ids of the lighting models Helio's own presets choose, and of the
+/// stand-in that replaces a chosen model nobody registered.
+pub mod model {
+    /// The spine's stand-in: the G-buffer drawn unlit (registered by the
+    /// spine; used when the chosen model is absent).
+    pub const UNLIT: &str = "unlit";
     /// A full-screen pass over the G-buffer.
-    Deferred,
-    /// Hybrid light-field shading of the G-buffer.
-    LightField,
-    /// The forward phase's drawers light what they draw (through the
-    /// lights' forward function); nothing resolves a G-buffer.
+    pub const DEFERRED: &str = "deferred";
+    /// The forward phase's drawers light what they draw; nothing resolves a
+    /// G-buffer.
+    pub const FORWARD: &str = "forward";
+}
+
+/// How a lighting model turns geometry into lit colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shading {
+    /// The G-buffer phase draws surfaces and the model's nodes at its point
+    /// resolve it.
+    GBuffer,
+    /// The forward phase's drawers light what they draw; nothing resolves a
+    /// G-buffer.
     Forward,
 }
 
+/// The anti-aliasing a pipeline ends its scene-linear chain with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Antialiasing {
+    /// TSR when the renderer's config asks for it, FXAA otherwise.
+    TemporalOrFxaa,
+    /// TSR when the renderer's config asks for it, none otherwise.
+    TemporalOrNone,
+    /// FXAA, never TSR.
+    Fxaa,
+}
+
+/// A pipeline a lighting model brings next to Helio's shipped ones: the
+/// model it chooses, an anti-aliasing and the entry a host lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ModelPipeline {
+    /// The pipeline's id in a host's registry.
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    /// The lighting model it chooses.
+    pub model: &'static str,
+    pub aa: Antialiasing,
+}
+
+/// A lighting model, as the plugin that brings it registers it
+/// ([`RegisterLightingModel::lighting_model`]): its id, where its passes join
+/// the graph, and what it reads of the frame. A preset names the id.
+#[derive(Clone, Debug)]
+pub struct LightingModel {
+    /// The id a preset chooses it by.
+    pub id: &'static str,
+    /// How it shades.
+    pub shading: Shading,
+    /// Where its passes are placed (the nodes the registrar placed there with
+    /// [`helio_feature_api::NodeDescriptor::at`]). Forward models have none:
+    /// their drawers light as they draw.
+    pub point: Option<ExtensionPoint>,
+    /// How it takes the indirect-specular layers.
+    pub specular_layers: SpecularLayers,
+    /// Where the frame's lighting inputs run relative to it.
+    pub inputs_order: InputsOrder,
+    /// Whether it leaves transparency to the reactive mask a temporal
+    /// resolve reads (it does not light what draws after it).
+    pub reactive_transparency: bool,
+    /// Pipelines it brings.
+    pub pipelines: Vec<ModelPipeline>,
+}
+
 impl LightingModel {
-    /// Where the model's nodes are placed (`None`: forward, which draws
-    /// lit).
-    pub fn point(self) -> Option<ExtensionPoint> {
-        match self {
-            Self::Deferred => Some(ExtensionPoint("lighting.model.deferred")),
-            Self::LightField => Some(ExtensionPoint("lighting.model.light_field")),
-            Self::Forward => None,
+    /// A model of `id` that shades `shading`, with no point of its own, the
+    /// layers read before it and no pipelines of its own.
+    pub fn new(id: &'static str, shading: Shading) -> Self {
+        Self {
+            id,
+            shading,
+            point: None,
+            specular_layers: SpecularLayers::Read,
+            inputs_order: InputsOrder::BeforeLighting,
+            reactive_transparency: false,
+            pipelines: Vec::new(),
         }
+    }
+
+    /// The model's passes are placed at `point`.
+    pub fn at(mut self, point: ExtensionPoint) -> Self {
+        self.point = Some(point);
+        self
+    }
+
+    /// How the model takes the indirect-specular layers.
+    pub fn with_specular_layers(mut self, layers: SpecularLayers) -> Self {
+        self.specular_layers = layers;
+        self
+    }
+
+    /// Where the frame's lighting inputs run relative to the model.
+    pub fn with_inputs_order(mut self, order: InputsOrder) -> Self {
+        self.inputs_order = order;
+        self
+    }
+
+    /// The model leaves transparency to the reactive mask TSR reads.
+    pub fn with_reactive_transparency(mut self) -> Self {
+        self.reactive_transparency = true;
+        self
+    }
+
+    /// The model brings `pipeline`.
+    ///
+    /// # Panics
+    ///
+    /// When `pipeline` chooses another model.
+    pub fn with_pipeline(mut self, pipeline: ModelPipeline) -> Self {
+        assert_eq!(
+            pipeline.model, self.id,
+            "pipeline `{}` chooses another model",
+            pipeline.id
+        );
+        self.pipelines.push(pipeline);
+        self
     }
 }
 
-/// The graph's [`LightingModel`], when its preset said.
-pub fn lighting_model(env: &BuildEnv<'_>) -> Option<LightingModel> {
-    env.setting::<LightingModel>().copied()
+/// What a feature registers a lighting model through.
+pub trait RegisterLightingModel {
+    /// Registers `model`; a later one with the same id replaces the earlier.
+    fn lighting_model(&mut self, model: LightingModel);
+}
+
+impl RegisterLightingModel for FeatureRegistrar<'_> {
+    fn lighting_model(&mut self, model: LightingModel) {
+        self.provide(model);
+    }
+}
+
+/// Every registered lighting model, one per id (the latest registration), in
+/// the order their ids were first registered.
+pub fn registered_models(registry: &NodeRegistry) -> Vec<&LightingModel> {
+    let mut models: Vec<&LightingModel> = Vec::new();
+    for model in registry.provided::<LightingModel>() {
+        match models.iter_mut().find(|known| known.id == model.id) {
+            Some(known) => *known = model,
+            None => models.push(model),
+        }
+    }
+    models
+}
+
+/// The registered lighting model `id`, if any.
+pub fn registered_model<'r>(registry: &'r NodeRegistry, id: &str) -> Option<&'r LightingModel> {
+    registry
+        .provided::<LightingModel>()
+        .filter(|model| model.id == id)
+        .last()
+}
+
+/// The lighting model a preset that chose `id` gets: the registered one, or
+/// the spine's unlit stand-in when nothing registered `id` (the plugin that
+/// brings it is absent), so a host without it still shows its surfaces.
+///
+/// # Panics
+///
+/// When the spine's stand-in is not registered either (a registry without
+/// the spine builds no graph).
+pub fn resolve_model<'r>(registry: &'r NodeRegistry, id: &str) -> &'r LightingModel {
+    registered_model(registry, id)
+        .or_else(|| registered_model(registry, model::UNLIT))
+        .expect("the spine registers the unlit lighting model")
+}
+
+/// The id of the lighting model a graph resolves its G-buffer with: a
+/// setting its preset supplies (the resolved model, see [`resolve_model`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LightingModelId(pub &'static str);
+
+/// The graph's [`LightingModelId`], when its preset said.
+pub fn lighting_model(env: &BuildEnv<'_>) -> Option<&'static str> {
+    env.setting::<LightingModelId>().map(|id| id.0)
 }
 
 /// What a host asks of whichever lighting model is installed (a graph's
@@ -301,7 +450,7 @@ pub enum SpecularLayers {
     /// [`crate::Slot::LightingInputs`].
     #[default]
     Read,
-    /// The lighting does not read them (HLFS): publishers run after it, at
+    /// The lighting does not read them (a light-field model): publishers run after it, at
     /// [`crate::Slot::Lighting`], and add their layer to the lit colour.
     CompositedAfter,
     /// No screen-space layers (forward): publishers build nothing.
@@ -320,7 +469,7 @@ pub fn specular_layers(env: &BuildEnv<'_>) -> SpecularLayers {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum InputsOrder {
     /// Before the lighting, which reads what the slot publishes (deferred,
-    /// HLFS).
+    /// a light-field model).
     #[default]
     BeforeLighting,
     /// After a draw phase that lit the scene (forward): only what draws

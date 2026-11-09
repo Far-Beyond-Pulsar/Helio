@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use helio::{IntoGraph, PipelineFactory, PipelineInfo, PipelineOrigin, RenderPipelineRegistry};
 
+use helio_frame_api::lighting::registered_models;
+
 use crate::presets::Preset;
 
 /// Id of the full deferred pipeline, the default for a level that names none.
 pub const DEFAULT: &str = "helio.deferred";
 pub const DEFERRED_FXAA: &str = "helio.fxaa";
-pub const HLFS: &str = "helio.hlfs";
-pub const HLFS_FXAA: &str = "helio.fxaa_hlfs";
 pub const FORWARD_OPAQUE: &str = "helio.forward_opaque";
 pub const FORWARD_ONLY: &str = "helio.forward_only";
 /// The default deferred pipeline built from its node graph
@@ -40,18 +40,6 @@ const SPECS: &[Spec] = &[
         label: "Deferred + FXAA",
         description: "Deferred lighting with FXAA instead of temporal resolve.",
         preset: Preset::DeferredFxaa,
-    },
-    Spec {
-        id: HLFS,
-        label: "HLFS",
-        description: "Hybrid light-field shading pipeline.",
-        preset: Preset::Hlfs,
-    },
-    Spec {
-        id: HLFS_FXAA,
-        label: "HLFS + FXAA",
-        description: "Hybrid light-field shading with FXAA.",
-        preset: Preset::HlfsFxaa,
     },
     Spec {
         id: FORWARD_OPAQUE,
@@ -91,6 +79,24 @@ pub fn register_builtin_pipelines(
             factory,
         );
     }
+    // The pipelines the lighting models bring: their ids are the plugin's.
+    for model in registered_models(&nodes) {
+        for pipeline in &model.pipelines {
+            let preset = Preset::Model(*pipeline);
+            let nodes = Arc::clone(&nodes);
+            registry.register(
+                PipelineInfo {
+                    id: pipeline.id.to_string(),
+                    label: pipeline.label.to_string(),
+                    description: pipeline.description.to_string(),
+                    origin: PipelineOrigin::BuiltIn,
+                },
+                Arc::new(move || {
+                    Box::new(preset.with_registry(Arc::clone(&nodes))) as Box<dyn IntoGraph>
+                }),
+            );
+        }
+    }
     registry.register(
         PipelineInfo {
             id: DEFERRED_GRAPH.to_string(),
@@ -125,7 +131,6 @@ mod tests {
         assert_eq!(registry.list().len(), SPECS.len() + 1);
         assert_eq!(registry.default_id(), Some(DEFAULT));
         assert_eq!(registry.resolve(Some("missing")), Some(DEFAULT));
-        assert_eq!(registry.resolve(Some(HLFS)), Some(HLFS));
         assert!(registry.create(Some("missing")).is_some());
     }
 }

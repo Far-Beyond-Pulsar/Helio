@@ -3,7 +3,9 @@
 //! A preset is a graph of the spine's passes and the frame's slots and draw
 //! phases (`helio_frame_api`), made for the renderer config it is built
 //! with: the config picks the anti-aliasing (TSR when `tsr_quality` is set)
-//! and the TSR node's settings; the lighting model is the preset's. Every
+//! and the TSR node's settings; the preset chooses a lighting model by id (a
+//! plugin registers it; the spine's unlit stand-in is used when it is
+//! absent). Every
 //! other node joins where its feature placed it (a slot, or a phase's
 //! drawers and the compute before them), so a feature (meshes, GI, the
 //! clouds, an engine's object kinds) joins
@@ -26,7 +28,9 @@ use helio::{IntoGraph, PassBuildContext, RendererConfig};
 use helio_core::RenderGraph;
 use helio_feature_api::ExtensionPoint;
 use helio_frame_api::color::ReactiveMask;
-use helio_frame_api::lighting::{InputsOrder, LightingModel, SpecularLayers};
+use helio_frame_api::lighting::{
+    model, resolve_model, Antialiasing, LightingModel, LightingModelId, ModelPipeline, Shading,
+};
 use helio_frame_api::{Phase, PhaseList, Slot, HOST_INPUTS};
 use helio_graph_asset::{
     core_nodes, Connection, GraphAsset, GraphAssetPipeline, NodeInstance, NodeRegistry, Params,
@@ -36,20 +40,22 @@ use serde_json::Value;
 
 use crate::features::kind;
 
-/// One of Helio's shipped pipelines.
+/// One of Helio's shipped pipelines, or a pipeline a lighting model brings.
+/// A preset chooses its lighting model by id; what the model is, where its
+/// passes join and what it reads come from the registry
+/// ([`resolve_model`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Preset {
-    /// Deferred lighting; TSR when the config asks for it, FXAA otherwise.
+    /// The `deferred` model; TSR when the config asks for it, FXAA otherwise.
     Deferred,
-    /// Deferred lighting with FXAA, never TSR.
+    /// The `deferred` model with FXAA, never TSR.
     DeferredFxaa,
-    /// Hybrid light-field shading; TSR when the config asks for it, no
-    /// anti-aliasing otherwise.
-    Hlfs,
-    /// Hybrid light-field shading with FXAA, never TSR.
-    HlfsFxaa,
-    /// One forward pass for opaque geometry, no G-buffer; FXAA.
+    /// The `forward` model: one forward pass for opaque geometry, no
+    /// G-buffer; FXAA.
     Forward,
+    /// A pipeline a registered lighting model brings
+    /// ([`helio_frame_api::lighting::LightingModel::pipelines`]).
+    Model(ModelPipeline),
 }
 
 /// The anti-aliasing a preset ends its scene-linear chain with.
@@ -61,82 +67,67 @@ enum Aa {
 }
 
 impl Preset {
-    pub const ALL: [Preset; 5] = [
-        Preset::Deferred,
-        Preset::DeferredFxaa,
-        Preset::Hlfs,
-        Preset::HlfsFxaa,
-        Preset::Forward,
-    ];
+    /// The presets Helio ships, whatever plugins are installed.
+    pub const ALL: [Preset; 3] = [Preset::Deferred, Preset::DeferredFxaa, Preset::Forward];
 
     pub fn name(self) -> &'static str {
         match self {
             Preset::Deferred => "Deferred",
             Preset::DeferredFxaa => "Deferred + FXAA",
-            Preset::Hlfs => "HLFS",
-            Preset::HlfsFxaa => "HLFS + FXAA",
             Preset::Forward => "Forward",
+            Preset::Model(pipeline) => pipeline.label,
         }
     }
 
-    fn hlfs(self) -> bool {
-        matches!(self, Preset::Hlfs | Preset::HlfsFxaa)
+    /// The id of the lighting model the preset chooses.
+    pub fn model_id(self) -> &'static str {
+        match self {
+            Preset::Deferred | Preset::DeferredFxaa => model::DEFERRED,
+            Preset::Forward => model::FORWARD,
+            Preset::Model(pipeline) => pipeline.model,
+        }
+    }
+
+    /// The lighting model the preset gets from `registry`: the registered one
+    /// it chose, or the spine's unlit stand-in when nobody registered it.
+    pub fn model(self, registry: &NodeRegistry) -> &LightingModel {
+        resolve_model(registry, self.model_id())
+    }
+
+    fn antialiasing(self) -> Antialiasing {
+        match self {
+            Preset::Deferred => Antialiasing::TemporalOrFxaa,
+            Preset::DeferredFxaa | Preset::Forward => Antialiasing::Fxaa,
+            Preset::Model(pipeline) => pipeline.aa,
+        }
     }
 
     fn aa(self, config: &RendererConfig) -> Aa {
         let tsr = config.tsr_quality.is_some();
-        match self {
-            Preset::Deferred if tsr => Aa::Tsr,
-            Preset::Hlfs if tsr => Aa::Tsr,
-            Preset::Hlfs => Aa::None,
-            Preset::Deferred | Preset::DeferredFxaa | Preset::HlfsFxaa | Preset::Forward => {
-                Aa::Fxaa
-            }
+        match self.antialiasing() {
+            Antialiasing::TemporalOrFxaa if tsr => Aa::Tsr,
+            Antialiasing::TemporalOrNone if tsr => Aa::Tsr,
+            Antialiasing::TemporalOrNone => Aa::None,
+            Antialiasing::TemporalOrFxaa | Antialiasing::Fxaa => Aa::Fxaa,
         }
     }
 
-    /// The draw phases the preset runs, in frame order.
-    pub fn phases(self) -> Vec<Phase> {
-        match self {
-            Preset::Forward => vec![
+    /// The draw phases the preset runs with `registry`'s models, in frame
+    /// order.
+    pub fn phases(self, registry: &NodeRegistry) -> Vec<Phase> {
+        match self.model(registry).shading {
+            Shading::Forward => vec![
                 Phase::ShadowCasters,
                 Phase::Forward,
                 Phase::Overlay,
                 Phase::Transparent,
             ],
-            _ => vec![
+            Shading::GBuffer => vec![
                 Phase::ShadowCasters,
                 Phase::GBuffer,
                 Phase::Overlay,
                 Phase::Transparent,
             ],
-        }
-    }
-
-    /// How the preset's lighting takes the indirect-specular layers.
-    fn specular_layers(self) -> SpecularLayers {
-        match self {
-            Preset::Forward => SpecularLayers::None,
-            _ if self.hlfs() => SpecularLayers::CompositedAfter,
-            _ => SpecularLayers::Read,
-        }
-    }
-
-    /// The lighting model the preset resolves its G-buffer with.
-    fn lighting_model(self) -> LightingModel {
-        match self {
-            Preset::Forward => LightingModel::Forward,
-            _ if self.hlfs() => LightingModel::LightField,
-            _ => LightingModel::Deferred,
-        }
-    }
-
-    /// Where the preset's lighting inputs run: after the forward phase,
-    /// which lit the scene, or before the lighting.
-    fn inputs_order(self) -> InputsOrder {
-        match self {
-            Preset::Forward => InputsOrder::AfterLighting,
-            _ => InputsOrder::BeforeLighting,
         }
     }
 
@@ -149,6 +140,7 @@ impl Preset {
             list: Vec::new(),
         };
         let aa = self.aa(config);
+        let model = self.model(registry);
 
         // Scene prep: per-frame tables (an object kind's batches first), the
         // shadow views and what casts into them (the phase's compute and
@@ -161,14 +153,14 @@ impl Preset {
 
         // Geometry and lighting: the forward phase draws lit; otherwise the
         // G-buffer is resolved by the installed lighting model, or unlit.
-        if self == Preset::Forward {
+        if model.shading == Shading::Forward {
             nodes.phase(Phase::Forward);
             nodes.slot(Slot::LightingInputs);
         } else {
             nodes.phase(Phase::GBuffer);
             nodes.slot(Slot::Geometry);
             nodes.slot(Slot::LightingInputs);
-            nodes.lighting_model(self.lighting_model());
+            nodes.lighting_model(model);
         }
         nodes.slot(Slot::Lighting);
 
@@ -185,7 +177,10 @@ impl Preset {
                     "tsr",
                     [
                         ("quality", Value::from(tsr_quality(config))),
-                        ("transparency_reactivity", Value::from(self.hlfs())),
+                        (
+                            "transparency_reactivity",
+                            Value::from(model.reactive_transparency),
+                        ),
                     ],
                 );
             }
@@ -236,11 +231,12 @@ impl Preset {
                     .require::<RendererConfig>()
                     .expect("a renderer build supplies its config")
                     .clone();
-                env.insert_setting(self.lighting_model());
-                env.insert_setting(PhaseList(self.phases()));
-                env.insert_setting(self.specular_layers());
-                env.insert_setting(self.inputs_order());
-                if self.hlfs() && self.aa(&config) == Aa::Tsr {
+                let model = self.model(registry);
+                env.insert_setting(LightingModelId(model.id));
+                env.insert_setting(PhaseList(self.phases(registry)));
+                env.insert_setting(model.specular_layers);
+                env.insert_setting(model.inputs_order);
+                if model.reactive_transparency && self.aa(&config) == Aa::Tsr {
                     env.insert_setting(ReactiveMask);
                 }
                 self.asset(registry, &config)
@@ -323,14 +319,6 @@ pub fn deferred_fxaa(ctx: PassBuildContext<'_>) -> RenderGraph {
     Preset::DeferredFxaa.build(ctx)
 }
 
-pub fn hlfs(ctx: PassBuildContext<'_>) -> RenderGraph {
-    Preset::Hlfs.build(ctx)
-}
-
-pub fn hlfs_fxaa(ctx: PassBuildContext<'_>) -> RenderGraph {
-    Preset::HlfsFxaa.build(ctx)
-}
-
 pub fn forward(ctx: PassBuildContext<'_>) -> RenderGraph {
     Preset::Forward.build(ctx)
 }
@@ -389,16 +377,13 @@ impl Nodes<'_> {
         self.at(slot.point());
     }
 
-    /// The lighting model's nodes, or the spine's unlit stand-in when none
-    /// is installed (the preset still shows its surfaces, unlit).
-    fn lighting_model(&mut self, model: LightingModel) {
-        let Some(point) = model.point() else {
-            return;
-        };
-        if self.registry.placed(point).is_empty() {
-            self.pass("unlit");
-        } else {
-            self.at(point);
+    /// The lighting model's nodes at its point, or the spine's unlit stand-in
+    /// when none are placed there (the preset still shows its surfaces,
+    /// unlit).
+    fn lighting_model(&mut self, model: &LightingModel) {
+        match model.point {
+            Some(point) if !self.registry.placed(point).is_empty() => self.at(point),
+            _ => self.pass("unlit"),
         }
     }
 
@@ -429,5 +414,73 @@ impl Nodes<'_> {
         }
         self.at(phase.open());
         self.at(phase.draw());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use helio_feature_api::{pass_node, FeatureRegistrar, FeatureSet};
+    use helio_frame_api::lighting::{InputsOrder, RegisterLightingModel, SpecularLayers};
+
+    const POINT: ExtensionPoint = ExtensionPoint("test.lighting.model");
+
+    /// A plugin that registers a model with a pass at its point.
+    struct Plugin(LightingModel);
+
+    impl helio_feature_api::Feature for Plugin {
+        fn id(&self) -> &'static str {
+            "test.lighting"
+        }
+
+        fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+            registrar.lighting_model(self.0.clone());
+            registrar.node(pass_node("test_lit", "Test lit", "Test", "", |_| Ok(())).at(POINT, 0));
+        }
+    }
+
+    fn kinds(preset: Preset, features: &FeatureSet) -> Vec<String> {
+        let registry = crate::graphs::registry_with(features);
+        preset
+            .nodes(&registry, &crate::graphs::template_config())
+            .into_iter()
+            .map(|node| node.kind)
+            .collect()
+    }
+
+    #[test]
+    fn an_unregistered_model_resolves_to_the_unlit_stand_in() {
+        let registry = crate::graphs::base_registry();
+        for preset in Preset::ALL {
+            assert_eq!(
+                preset.model(&registry).id,
+                model::UNLIT,
+                "{}",
+                preset.name()
+            );
+        }
+        let kinds = kinds(Preset::Deferred, &FeatureSet::new());
+        assert!(kinds.contains(&"helio.pass.unlit".to_string()));
+        // The forward preset has no model of its own either: it draws the
+        // G-buffer unlit.
+        assert!(Preset::Forward.phases(&registry).contains(&Phase::GBuffer));
+    }
+
+    #[test]
+    fn a_registered_model_is_placed_and_read_by_id() {
+        let registered = LightingModel::new(model::DEFERRED, Shading::GBuffer)
+            .at(POINT)
+            .with_specular_layers(SpecularLayers::CompositedAfter)
+            .with_inputs_order(InputsOrder::AfterLighting);
+        let features = FeatureSet::new().with(Plugin(registered));
+        let registry = crate::graphs::registry_with(&features);
+        let resolved = Preset::DeferredFxaa.model(&registry);
+        assert_eq!(resolved.id, model::DEFERRED);
+        assert_eq!(resolved.specular_layers, SpecularLayers::CompositedAfter);
+        let kinds = kinds(Preset::Deferred, &features);
+        assert!(kinds.contains(&"helio.pass.test_lit".to_string()));
+        assert!(!kinds.contains(&"helio.pass.unlit".to_string()));
+        // Another id is still the stand-in.
+        assert_eq!(Preset::Forward.model(&registry).id, model::UNLIT);
     }
 }
