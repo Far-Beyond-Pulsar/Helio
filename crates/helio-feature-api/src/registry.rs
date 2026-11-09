@@ -463,6 +463,11 @@ impl NodeDescriptor {
 #[derive(Clone, Default)]
 pub struct NodeRegistry {
     nodes: BTreeMap<String, Arc<NodeDescriptor>>,
+    /// The feature that registered each node kind ([`crate::Feature::id`]),
+    /// for kinds a feature added through its [`crate::FeatureRegistrar`].
+    /// A kind registered directly (the core nodes every graph has) has no
+    /// entry: no feature owns it.
+    owners: BTreeMap<String, &'static str>,
     pin_table: PinTable,
     marker: Option<MarkerFn>,
     preparers: Vec<PrepareFn>,
@@ -499,8 +504,38 @@ impl NodeRegistry {
         Self::default()
     }
 
-    /// Adds or replaces a node type.
-    pub fn register(&mut self, mut descriptor: NodeDescriptor) {
+    /// Adds or replaces a node type that no feature owns (a core node every
+    /// graph has). A feature adds its nodes through
+    /// [`crate::FeatureRegistrar::node`], which records it as their owner.
+    pub fn register(&mut self, descriptor: NodeDescriptor) {
+        self.owners.remove(&descriptor.kind);
+        self.insert(descriptor);
+    }
+
+    /// Adds or replaces a node type registered by feature `feature`.
+    pub(crate) fn register_owned(&mut self, descriptor: NodeDescriptor, feature: &'static str) {
+        self.owners.insert(descriptor.kind.clone(), feature);
+        self.insert(descriptor);
+    }
+
+    /// The feature that registered the node of `kind` (`None`: a core node,
+    /// or no such node).
+    pub fn feature_of(&self, kind: &str) -> Option<&'static str> {
+        self.owners.get(kind).copied()
+    }
+
+    /// Every feature's node kinds, by feature id, each list in kind order:
+    /// which feature contributed which nodes (a later feature that replaces
+    /// a kind owns it).
+    pub fn feature_nodes(&self) -> BTreeMap<&'static str, Vec<&str>> {
+        let mut by_feature: BTreeMap<&'static str, Vec<&str>> = BTreeMap::new();
+        for (kind, feature) in &self.owners {
+            by_feature.entry(feature).or_default().push(kind.as_str());
+        }
+        by_feature
+    }
+
+    fn insert(&mut self, mut descriptor: NodeDescriptor) {
         if descriptor.generated {
             let table = Arc::clone(&self.pin_table);
             let kind = descriptor.kind.clone();
