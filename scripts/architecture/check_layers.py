@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""Layer gate for the Helio workspace (docs/architecture/layered-rewrite.md).
+"""Layer gate for a Cargo workspace (docs/architecture/layered-rewrite.md).
 
-Reads architecture/layers.toml and `cargo metadata`, and fails when:
-- a workspace crate has no layer;
-- a normal/build dependency breaks the layer rules and is not in
-  architecture/layer-violations.txt (new coupling);
+Helio's gate (`just arch`), and Pulsar-Native's: Pulsar runs this script from
+its Helio submodule with `--root .` over its own architecture/layers.toml, so
+both repositories hold their layers to one implementation.
+
+Reads <root>/architecture/layers.toml and `cargo metadata`, and fails when:
+- a workspace crate has no layer (named in [crates], or by the longest
+  matching directory prefix in [paths]);
+- a dependency breaks the layer rules and is not in
+  architecture/layer-violations.txt (new coupling). Normal and build
+  dependencies are checked; dev dependencies too when [check]
+  dev_dependencies is true. A path dependency outside the workspace (an
+  excluded crate) is checked by its directory;
 - a recorded violation no longer exists (shrink the list with --update);
 - a budget in [budgets] is exceeded, or has slack (lower it);
-- code outside the test host names an object kind ([kinds]) where
+- code outside the test host (a crate with `test_host = true`, or in a
+  layer with `names_kinds = true`) names an object kind ([kinds]) where
   architecture/kind-names.txt does not record it, or a recorded name is gone
   (docs/architecture/plugin-migration.md, "C. Helio repo is core only").
+  [scan] dirs lists the directories read (default: crates, src).
 
-Usage: python scripts/architecture/check_layers.py [--update]
+Usage: python scripts/architecture/check_layers.py [--root DIR] [--update]
 """
 
 import json
@@ -21,7 +31,14 @@ import sys
 import tomllib
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+def root_arg():
+    args = sys.argv[1:]
+    if "--root" in args:
+        return Path(args[args.index("--root") + 1]).resolve()
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT = root_arg()
 LAYERS = ROOT / "architecture" / "layers.toml"
 VIOLATIONS = ROOT / "architecture" / "layer-violations.txt"
 KIND_NAMES = ROOT / "architecture" / "kind-names.txt"
@@ -33,42 +50,82 @@ WORD = re.compile(r"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+")
 CFG_TEST_MOD = re.compile(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;")
 
 
-def workspace():
+def workspace(config):
+    """(deps, dirs): each member's checked dependencies as (name, dir, dev),
+    and each member's directory. A dependency counts when it is a member or
+    a path dependency (an excluded crate, checked by its directory)."""
     out = subprocess.run(
         ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-        cwd=ROOT, check=True, capture_output=True, text=True,
+        cwd=ROOT, check=True, capture_output=True, text=True, encoding="utf-8",
     ).stdout
     meta = json.loads(out)
-    names = {p["name"] for p in meta["packages"]}
-    deps, dirs = {}, {}
+    dev = config.get("check", {}).get("dev_dependencies", False)
+    dirs = {p["name"]: Path(p["manifest_path"]).resolve().parent for p in meta["packages"]}
+    deps = {}
     for p in meta["packages"]:
-        deps[p["name"]] = sorted({
-            d["name"] for d in p["dependencies"]
-            if d["name"] in names and d["kind"] in (None, "build")
-        })
-        dirs[p["name"]] = Path(p["manifest_path"]).resolve().parent
+        found = set()
+        for d in p["dependencies"]:
+            kind = d["kind"]
+            if kind not in (None, "build") and not (dev and kind == "dev"):
+                continue
+            if d["name"] in dirs:
+                found.add((d["name"], dirs[d["name"]], kind == "dev"))
+            elif d.get("path"):
+                found.add((d["name"], Path(d["path"]).resolve(), kind == "dev"))
+        # A crate both used and dev-used is reported once, as used.
+        used = {(n, at) for n, at, is_dev in found if not is_dev}
+        deps[p["name"]] = sorted(
+            (n, at, is_dev) for n, at, is_dev in found if not (is_dev and (n, at) in used)
+        )
     return deps, dirs
 
 
-def violations(config, deps):
-    layers, crates = config["layers"], config["crates"]
+def crate_info(config, name, path):
+    """A crate's entry: [crates] by name, else the longest [paths] prefix
+    containing its directory, else None."""
+    if name in config.get("crates", {}):
+        return config["crates"][name]
+    try:
+        rel = path.relative_to(ROOT).as_posix()
+    except ValueError:
+        return None
+    best = None
+    for prefix, entry in config.get("paths", {}).items():
+        prefix = prefix.rstrip("/")
+        if rel == prefix or rel.startswith(prefix + "/"):
+            if best is None or len(prefix) > len(best[0]):
+                best = (prefix, entry)
+    return best[1] if best else None
+
+
+def exempt_from_kinds(config, info):
+    """The test host: a crate marked `test_host`, or one in a layer whose
+    crates may name kinds (`names_kinds`)."""
+    if info is None:
+        return False
+    return bool(info.get("test_host") or config["layers"][info["layer"]].get("names_kinds"))
+
+
+def violations(config, deps, dirs):
+    layers = config["layers"]
     errors, found = [], []
     for name in sorted(deps):
-        if name not in crates:
+        a = crate_info(config, name, dirs[name])
+        if a is None:
             errors.append(f"{name}: no layer in architecture/layers.toml")
             continue
-        a = crates[name]
-        for dep in deps[name]:
-            b = crates.get(dep)
+        for dep, path, is_dev in deps[name]:
+            b = crate_info(config, dep, path)
             if b is None:
-                continue  # reported above
+                continue  # a member without a layer is reported above
             same_group = a.get("group") and a.get("group") == b.get("group")
             if same_group:
                 continue
+            dev = " dev" if is_dev else ""
             if b["layer"] not in layers[a["layer"]]["may_use"]:
-                found.append(f"{name} -> {dep}  ({a['layer']} -> {b['layer']})")
+                found.append(f"{name} -> {dep}  ({a['layer']} ->{dev} {b['layer']})")
             elif a["layer"] == b["layer"] == "feature":
-                found.append(f"{name} -> {dep}  (feature {a['group']} -> feature {b['group']})")
+                found.append(f"{name} -> {dep}  (feature {a['group']} ->{dev} feature {b['group']})")
     return errors, found
 
 
@@ -84,7 +141,8 @@ def scene_store_derives(config, dirs):
             if "target" in path.parts:
                 continue
             owner = next((n for n, d in by_depth if path.is_relative_to(d)), None)
-            if owner is None or config["crates"].get(owner, {}).get("layer", "host") == "host":
+            info = crate_info(config, owner, dirs[owner]) if owner else None
+            if info is None or info.get("layer", "host") == "host":
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             n = sum("SceneStore" in m.group(1) for m in SCENE_STORE.finditer(text))
@@ -140,12 +198,12 @@ def checked_files(config, dirs):
     and what follows a `#[cfg(test)]` module in a file."""
     by_depth = sorted(dirs.items(), key=lambda kv: len(kv[1].parts), reverse=True)
     files = {}
-    for top in ("crates", "src"):
+    for top in config.get("scan", {}).get("dirs", ["crates", "src"]):
         for path in sorted((ROOT / top).resolve().rglob("*")):
             if path.suffix not in (".rs", ".wgsl") or "target" in path.parts:
                 continue
             owner = next((n for n, d in by_depth if path.is_relative_to(d)), None)
-            if owner is None or config["crates"].get(owner, {}).get("test_host"):
+            if owner is None or exempt_from_kinds(config, crate_info(config, owner, dirs[owner])):
                 continue
             rel = path.relative_to(dirs[owner])
             if rel.parts[0] in ("tests", "benches", "examples"):
@@ -199,8 +257,8 @@ def recorded_kind_names():
 def main():
     update = "--update" in sys.argv[1:]
     config = tomllib.loads(LAYERS.read_text(encoding="utf-8"))
-    deps, dirs = workspace()
-    errors, found = violations(config, deps)
+    deps, dirs = workspace(config)
+    errors, found = violations(config, deps, dirs)
     recorded = set()
     if VIOLATIONS.exists():
         recorded = {
@@ -219,14 +277,14 @@ def main():
         new, gone = [], []
 
     budget = config.get("budgets", {}).get("scene_store_derives")
-    derives, sites = scene_store_derives(config, dirs)
+    derives, sites = scene_store_derives(config, dirs) if budget is not None else (0, [])
     budget_errors = []
     if budget is not None and derives > budget:
-        budget_errors.append(f"#[derive(SceneStore)] in Helio: {derives} > budget {budget}. "
+        budget_errors.append(f"#[derive(SceneStore)] below the host layer: {derives} > budget {budget}. "
                              "Components belong to plugins, not Helio:")
         budget_errors.extend(sites)
     elif budget is not None and derives < budget:
-        budget_errors.append(f"#[derive(SceneStore)] in Helio: {derives} < budget {budget}. "
+        budget_errors.append(f"#[derive(SceneStore)] below the host layer: {derives} < budget {budget}. "
                              "Lower scene_store_derives in architecture/layers.toml.")
 
     names = kind_names(config, dirs)
