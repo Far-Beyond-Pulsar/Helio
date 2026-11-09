@@ -1,9 +1,10 @@
 //! The lighting model's stand-in: the G-buffer drawn unlit (albedo plus
 //! emission) into the scene colour, when no lighting model is installed.
 //!
-//! The lighting model is a kind's (the lights plugin's deferred lighting or
-//! light-field shading, at `helio_frame_api::lighting::LightingModel`'s
-//! point). A preset whose model has nothing placed draws this instead, so an
+//! The lighting model is a plugin's: the lights register deferred lighting and
+//! light-field shading (`helio_frame_api::lighting::LightingModel`). A preset
+//! whose chosen model is not registered gets the spine's `unlit` model, which
+//! draws this pass, so an
 //! engine without the lights still shows its surfaces: the right failure,
 //! as Bevy's `StandardMaterial::unlit` and Unreal's unlit view mode show
 //! surfaces without any light. Covered pixels only; the background stays.

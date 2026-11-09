@@ -67,7 +67,7 @@ pub fn glare(env: &mut BuildEnv<'_>) -> Option<&'static str> {
 }
 
 /// Set by a preset whose anti-aliasing wants a reactive mask from what draws
-/// over the scene colour after lighting (transparency under HLFS and TSR).
+/// over the scene colour after lighting (transparency under a light-field model and TSR).
 #[derive(Clone, Copy, Debug)]
 pub struct ReactiveMask;
 

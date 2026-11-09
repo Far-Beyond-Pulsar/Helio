@@ -255,7 +255,7 @@ pub type BuildFn = Arc<dyn Fn(&mut NodeBuild<'_, '_>) -> Result<(), String> + Se
 pub const DEFAULT_SCENE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The format the scene-linear colour is lit, fogged and anti-aliased in up
-/// to the tone map, as a setting (HLFS presets set the format their lighting
+/// to the tone map, as a setting (a lighting model sets the format their lighting
 /// prefers). Read it with [`BuildEnv::scene_format`].
 #[derive(Clone, Copy, Debug)]
 pub struct SceneColorFormat(pub wgpu::TextureFormat);
@@ -463,6 +463,11 @@ impl NodeDescriptor {
 #[derive(Clone, Default)]
 pub struct NodeRegistry {
     nodes: BTreeMap<String, Arc<NodeDescriptor>>,
+    /// The feature that registered each node kind ([`crate::Feature::id`]),
+    /// for kinds a feature added through its [`crate::FeatureRegistrar`].
+    /// A kind registered directly (the core nodes every graph has) has no
+    /// entry: no feature owns it.
+    owners: BTreeMap<String, &'static str>,
     pin_table: PinTable,
     marker: Option<MarkerFn>,
     preparers: Vec<PrepareFn>,
@@ -470,6 +475,7 @@ pub struct NodeRegistry {
     scene_derivations: Vec<helio_core::SceneDerivationFactory>,
     swap_policy: helio_core::SwapPolicy,
     untraced_geometry: Vec<&'static str>,
+    provisions: HashMap<TypeId, Vec<Arc<dyn Any + Send + Sync>>>,
 }
 
 /// Pins of generated nodes by kind, shared by a registry and its clones so a
@@ -498,8 +504,38 @@ impl NodeRegistry {
         Self::default()
     }
 
-    /// Adds or replaces a node type.
-    pub fn register(&mut self, mut descriptor: NodeDescriptor) {
+    /// Adds or replaces a node type that no feature owns (a core node every
+    /// graph has). A feature adds its nodes through
+    /// [`crate::FeatureRegistrar::node`], which records it as their owner.
+    pub fn register(&mut self, descriptor: NodeDescriptor) {
+        self.owners.remove(&descriptor.kind);
+        self.insert(descriptor);
+    }
+
+    /// Adds or replaces a node type registered by feature `feature`.
+    pub(crate) fn register_owned(&mut self, descriptor: NodeDescriptor, feature: &'static str) {
+        self.owners.insert(descriptor.kind.clone(), feature);
+        self.insert(descriptor);
+    }
+
+    /// The feature that registered the node of `kind` (`None`: a core node,
+    /// or no such node).
+    pub fn feature_of(&self, kind: &str) -> Option<&'static str> {
+        self.owners.get(kind).copied()
+    }
+
+    /// Every feature's node kinds, by feature id, each list in kind order:
+    /// which feature contributed which nodes (a later feature that replaces
+    /// a kind owns it).
+    pub fn feature_nodes(&self) -> BTreeMap<&'static str, Vec<&str>> {
+        let mut by_feature: BTreeMap<&'static str, Vec<&str>> = BTreeMap::new();
+        for (kind, feature) in &self.owners {
+            by_feature.entry(feature).or_default().push(kind.as_str());
+        }
+        by_feature
+    }
+
+    fn insert(&mut self, mut descriptor: NodeDescriptor) {
         if descriptor.generated {
             let table = Arc::clone(&self.pin_table);
             let kind = descriptor.kind.clone();
@@ -604,6 +640,25 @@ impl NodeRegistry {
     /// see, as the features declared them.
     pub fn untraced_geometry(&self) -> &[&'static str] {
         &self.untraced_geometry
+    }
+
+    /// Adds a `value` of a type a frame contract defines (a lighting model,
+    /// say); whoever reads the contract finds it with [`Self::provided`].
+    /// The registry holds it by type and knows nothing of it.
+    pub fn provide<T: Any + Send + Sync>(&mut self, value: T) {
+        self.provisions
+            .entry(TypeId::of::<T>())
+            .or_default()
+            .push(Arc::new(value));
+    }
+
+    /// The values of type `T` the features provided, in registration order.
+    pub fn provided<T: Any>(&self) -> impl Iterator<Item = &T> {
+        self.provisions
+            .get(&TypeId::of::<T>())
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.downcast_ref::<T>())
     }
 
     /// Declares what of the features' passes shader hot reload may swap

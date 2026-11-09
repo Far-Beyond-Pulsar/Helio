@@ -6,7 +6,7 @@
 //! background stays this colour. This pass took over the clear the retired
 //! procedural `SkyPass` did (Pulsar-Native #1057), so every graph's lighting
 //! and geometry passes load a defined `pre_aa`: forward lighting draws over
-//! it, HLFS reads it at uncovered pixels, and SSR and planar reflections
+//! it, a light-field model reads it at uncovered pixels, and SSR and planar reflections
 //! sample it before deferred lighting.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};

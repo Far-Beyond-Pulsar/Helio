@@ -116,7 +116,7 @@ The full rules are in the plan docs; a change must keep all of these:
 4. **The consumer's api crate owns a row ABI.** The component asserts that its layout matches, and Rust/WGSL layout tests guard it.
 5. **`*-api` and `feature-api` crates have no `static`, `thread_local!` or `inventory::collect!`.**
 6. **Graphs are data.** Code registers nodes; presets name no kind.
-7. **A disabled plugin is absent.** Every registration carries `origin: pulsar_plugins::origin!()` and is iterated through `pulsar_plugins::registered::<T>()`. No host links a plugin crate by name (`plugins/installed` is generated).
+7. **A disabled plugin is absent.** A plugin registers only from its root crate (the package at its directory, `<kind>_plugin`; editor registrations behind its `editor` feature). Every registration carries `origin: pulsar_plugins::origin!()`, implements `pulsar_plugins::Contribution` (declared with `pulsar_plugins::registration!`) and is iterated through `pulsar_plugins::registered::<T>()`. No host links a plugin crate by name: hosts reach a plugin through its root (`plugins/installed` is generated).
 8. **Kinds meet only at frame contracts, extension points, draw phases, and each other's api crates.**
 
 ## 5. Implement

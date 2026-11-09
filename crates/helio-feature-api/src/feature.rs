@@ -43,9 +43,10 @@ impl FeatureRegistrar<'_> {
         self.feature
     }
 
-    /// Adds (or replaces) a node type.
+    /// Adds (or replaces) a node type, owned by this feature
+    /// ([`NodeRegistry::feature_of`]).
     pub fn node(&mut self, descriptor: NodeDescriptor) {
-        self.registry.register(descriptor);
+        self.registry.register_owned(descriptor, self.feature);
     }
 
     /// Adds a step run before any node of a graph is built (see
@@ -65,6 +66,13 @@ impl FeatureRegistrar<'_> {
     /// [`helio_core::SceneDerivationFactory`]).
     pub fn scene_derivation(&mut self, derivation: helio_core::SceneDerivationFactory) {
         self.registry.add_scene_derivation(derivation);
+    }
+
+    /// Provides `value`, a record of a type a frame contract defines (see
+    /// [`NodeRegistry::provide`]): the feature registers what the contract
+    /// asks for, and whoever reads the contract finds it by type.
+    pub fn provide<T: std::any::Any + Send + Sync>(&mut self, value: T) {
+        self.registry.provide(value);
     }
 
     /// Declares `buffer`, a scene buffer of geometry the feature draws, as
@@ -214,6 +222,43 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_registry_records_which_feature_added_each_node() {
+        struct Two;
+        impl Feature for Two {
+            fn id(&self) -> &'static str {
+                "two"
+            }
+            fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+                for kind in ["two.b", "two.a"] {
+                    registrar.node(NodeDescriptor::new(kind, kind, "Test", "", |_| Ok(())));
+                }
+            }
+        }
+        let mut registry = NodeRegistry::new();
+        registry.register(NodeDescriptor::new("core", "Core", "Test", "", |_| Ok(())));
+        FeatureSet::new()
+            .with(Probe("one", "one.node"))
+            .with(Two)
+            .register_into(&mut registry);
+        assert_eq!(registry.feature_of("one.node"), Some("one"));
+        assert_eq!(registry.feature_of("two.a"), Some("two"));
+        assert_eq!(
+            registry.feature_of("core"),
+            None,
+            "no feature owns a core node"
+        );
+        let by_feature = registry.feature_nodes();
+        assert_eq!(by_feature.get("one"), Some(&vec!["one.node"]));
+        assert_eq!(by_feature.get("two"), Some(&vec!["two.a", "two.b"]));
+        assert_eq!(by_feature.len(), 2);
+
+        // A core registration of a feature's kind takes it back from the feature.
+        registry.register(NodeDescriptor::new("two.a", "Core", "Test", "", |_| Ok(())));
+        assert_eq!(registry.feature_of("two.a"), None);
+        assert_eq!(registry.feature_nodes().get("two"), Some(&vec!["two.b"]));
     }
 
     #[test]

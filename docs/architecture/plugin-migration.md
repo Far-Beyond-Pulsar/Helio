@@ -97,17 +97,17 @@ repository (the table's second column), a submodule at
 
 | Plugin | Repository | Components | Feature owns | Leaves Helio/Pulsar today's |
 |---|---|---|---|---|
-| `pulsar.materials` | [Plugin_Materials](https://github.com/Far-Beyond-Pulsar/Plugin_Materials) | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | done (batch 6): `plugins/vendor/materials/` (`api` = helio-mats, `feature` = helio-pass-materials: the material texture table, `component` = materials_component, `editor` = materials_plugin); the Helio repo has no material crate. The material assets and the graph compiler are the plugin's since Phase C step 3 part B (`assets`, `graph`, `graph_preview`; the meshes read them through `helio_mats::asset`); images stay core. Left: the engine's material table being the meshes' join (see "As built, batch 6") |
-| `pulsar.meshes` | [Plugin_Meshes](https://github.com/Far-Beyond-Pulsar/Plugin_Meshes) | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | crates done (batch 4): `plugins/vendor/meshes/` (`api` = helio-mesh-api, `feature/*`, `vg/*`, `asset-compat`, `host` = helio-mesh-host, `component` = meshes_component: the features' registrations, `editor` = meshes_plugin, `examples` = meshes-examples, `snapshot`, `web-demos`, `android-demos`); the Helio repo has no mesh crate. The SceneDB components, mesh assets and import, scene join, authored LOD selection, VG host, picking and thumbnails are the plugin's since Phase C step 3 part B, through generic registrations (see "As built, Phase C step 3 part B") |
-| `pulsar.lights` | [Plugin_Lights](https://github.com/Far-Beyond-Pulsar/Plugin_Lights) | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | done (batch 5): `plugins/vendor/lights/` (`api` = helio-light-api, `feature/{cull,shadows,deferred,hlfs,billboard}`, `host` = helio-light-host, `component` = lights_component with `LightComponent`/`ReflectionCaptureComponent`, `editor` = lights_plugin, `examples` = lights-examples); the Helio repo has no light crate |
-| `pulsar.sky` | [Plugin_Sky](https://github.com/Far-Beyond-Pulsar/Plugin_Sky) | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (`sky_component`, `feature` = helio-pass-sky, `sky_plugin`, `sky-examples`); no api crate: what others read of it is the frame's |
-| `pulsar.gi` | [Plugin_GI](https://github.com/Far-Beyond-Pulsar/Plugin_GI) | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | done (batch 3): `plugins/vendor/gi/` (`api` = helio-gi-api, `gi_component`: registrations and settings, `feature` = helio-pass-gi, `gi_plugin`, `gi-examples`) |
-| `pulsar.fog` | [Plugin_Fog](https://github.com/Far-Beyond-Pulsar/Plugin_Fog) | GlobalFog, LocalFogVolume | volumetric fog and its composite | done (batch 2): `plugins/vendor/fog/` (`fog_component`, `feature` = helio-pass-volumetric-fog, `fog_plugin`, `fog-examples`); publishes the frame's participating media |
-| `pulsar.post` | [Plugin_Post](https://github.com/Far-Beyond-Pulsar/Plugin_Post) | PostProcessVolume, CameraPostProcess | volume blend, publishes post settings | done (batch 2): `plugins/vendor/post/` (`post_component`, `feature` = helio-pass-post-volumes, `post_plugin`, `post-examples`); blends over the host's `POST_BASELINE` |
-| `pulsar.lens` | [Plugin_Lens](https://github.com/Far-Beyond-Pulsar/Plugin_Lens) | CameraLens | lens, flare (reads `light_list` via lights api) | done (batch 1): `plugins/vendor/lens/` (`lens_component`, `feature/{lens,flare,optics}`, `lens_plugin`, `lens-examples`); the view overscan through `ViewOverscanRegistration` |
-| `pulsar.water` | [Plugin_Water](https://github.com/Far-Beyond-Pulsar/Plugin_Water) | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | done (batch 2): `plugins/vendor/water/` (`water_component`, `api` = helio-water-api, `feature` = helio-pass-water-sim, `water_plugin`, `water-examples`) |
-| `pulsar.foliage` | [Plugin_Foliage](https://github.com/Far-Beyond-Pulsar/Plugin_Foliage) | Foliage, Wind | placement, drawers | done (batch 2): `plugins/vendor/foliage/` (`foliage_component`, `api` = helio-foliage-api, `feature/{place,gbuffer}`, `foliage_plugin`, `foliage-examples`) |
-| `pulsar.voxel` | [Plugin_Voxel](https://github.com/Far-Beyond-Pulsar/Plugin_Voxel) | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Pulsar `plugins/vendor/voxel/` with `component` (voxel_component), `api` (helio-voxel-data), `world` (helio-voxel-world), `feature` (helio-pass-voxel-planet, a G-buffer drawer since Phase A), `editor` (voxel_plugin), `examples` (helio-voxel-examples: voxel_craft, voxel_flight, water_world); the Helio repo has no voxel crate. Left: the sculpt tool and terrain panel in `ui_level_editor`, waiting on plugin-provided tool state, undo, commands and save hooks |
+| `pulsar.materials` | [Plugin_Materials](https://github.com/Far-Beyond-Pulsar/Plugin_Materials) | material assets, material graph | helio-mats (GPU material ABI, Radiant templates, texture bindings), material texture means | done (batch 6): `plugins/vendor/materials/` (`api` = helio-mats, `feature` = helio-pass-materials: the material texture table, root = materials_plugin (every registration, p19), `component` = materials_component, `editor` = materials_editor); the Helio repo has no material crate. The material assets and the graph compiler are the plugin's since Phase C step 3 part B (`assets`, `graph`, `graph_preview`; the meshes read them through `helio_mats::asset`); images stay core. Left: the engine's material table being the meshes' join (see "As built, batch 6") |
+| `pulsar.meshes` | [Plugin_Meshes](https://github.com/Far-Beyond-Pulsar/Plugin_Meshes) | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | crates done (batch 4): `plugins/vendor/meshes/` (`api` = helio-mesh-api, `feature/*`, `vg/*`, `asset-compat`, `host` = helio-mesh-host, root = meshes_plugin (every registration, p19), `component` = meshes_component, `editor` = meshes_editor, `examples` = meshes-examples, `snapshot`, `web-demos`, `android-demos`); the Helio repo has no mesh crate. The SceneDB components, mesh assets and import, scene join, authored LOD selection, VG host, picking and thumbnails are the plugin's since Phase C step 3 part B, through generic registrations (see "As built, Phase C step 3 part B") |
+| `pulsar.lights` | [Plugin_Lights](https://github.com/Far-Beyond-Pulsar/Plugin_Lights) | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | done (batch 5): `plugins/vendor/lights/` (`api` = helio-light-api, `feature/{cull,shadows,deferred,hlfs,billboard}`, `host` = helio-light-host, root = lights_plugin (every registration, p19), `component` = lights_component with `LightComponent`/`ReflectionCaptureComponent`, `editor` = lights_editor, `examples` = lights-examples); the Helio repo has no light crate |
+| `pulsar.sky` | [Plugin_Sky](https://github.com/Far-Beyond-Pulsar/Plugin_Sky) | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (root = `sky_plugin`, `sky_component`, `feature` = helio-pass-sky, `sky_editor`, `sky-examples`); no api crate: what others read of it is the frame's |
+| `pulsar.gi` | [Plugin_GI](https://github.com/Far-Beyond-Pulsar/Plugin_GI) | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | done (batch 3): `plugins/vendor/gi/` (root = `gi_plugin`: the feature's registration and settings, `api` = helio-gi-api, `feature` = helio-pass-gi, `gi-examples`; no component or editor crate) |
+| `pulsar.fog` | [Plugin_Fog](https://github.com/Far-Beyond-Pulsar/Plugin_Fog) | GlobalFog, LocalFogVolume | volumetric fog and its composite | done (batch 2): `plugins/vendor/fog/` (root = `fog_plugin`, `fog_component`, `feature` = helio-pass-volumetric-fog, `fog_editor`, `fog-examples`); publishes the frame's participating media |
+| `pulsar.post` | [Plugin_Post](https://github.com/Far-Beyond-Pulsar/Plugin_Post) | PostProcessVolume, CameraPostProcess | volume blend, publishes post settings | done (batch 2): `plugins/vendor/post/` (root = `post_plugin`, `post_component`, `feature` = helio-pass-post-volumes, `post_editor`, `post-examples`); blends over the host's `POST_BASELINE` |
+| `pulsar.lens` | [Plugin_Lens](https://github.com/Far-Beyond-Pulsar/Plugin_Lens) | CameraLens | lens, flare (reads `light_list` via lights api) | done (batch 1): `plugins/vendor/lens/` (root = `lens_plugin`, `lens_component`, `feature/{lens,flare,optics}`, `lens-examples`; no editor crate); the view overscan through `ViewOverscanRegistration` |
+| `pulsar.water` | [Plugin_Water](https://github.com/Far-Beyond-Pulsar/Plugin_Water) | WaterVolume (+ physics hitbox rows via physics api) | water sim and draw, caustics as `transmission` | done (batch 2): `plugins/vendor/water/` (root = `water_plugin`, `water_component`, `api` = helio-water-api, `feature` = helio-pass-water-sim, `water_editor`, `water-examples`) |
+| `pulsar.foliage` | [Plugin_Foliage](https://github.com/Far-Beyond-Pulsar/Plugin_Foliage) | Foliage, Wind | placement, drawers | done (batch 2): `plugins/vendor/foliage/` (root = `foliage_plugin`, `foliage_component`, `api` = helio-foliage-api, `feature/{place,gbuffer}`, `foliage_editor`, `foliage-examples`) |
+| `pulsar.voxel` | [Plugin_Voxel](https://github.com/Far-Beyond-Pulsar/Plugin_Voxel) | VoxelTerrain, VoxelTerrainLayers | chunk passes, drawers, GI tracer, foliage ground, water terrain | done (layered-rewrite step 6.6): Pulsar `plugins/vendor/voxel/` with root `voxel_plugin` (every registration, p19), `component` (voxel_component), `api` (helio-voxel-data), `world` (helio-voxel-world), `feature` (helio-pass-voxel-planet, a G-buffer drawer since Phase A), `editor` (voxel_editor), `examples` (helio-voxel-examples: voxel_craft, voxel_flight, water_world); the Helio repo has no voxel crate. Left: the sculpt tool and terrain panel in `ui_level_editor`, waiting on plugin-provided tool state, undo, commands and save hooks |
 | `pulsar.decals` | [Plugin_Decals](https://github.com/Far-Beyond-Pulsar/Plugin_Decals) | Decal | decal drawer (after GBuffer) | done (batch 1): `plugins/vendor/decals/` |
 | `pulsar.particles` | [Plugin_Particles](https://github.com/Far-Beyond-Pulsar/Plugin_Particles) | ParticleEmitter | corona | done (batch 1): `plugins/vendor/particles/` (the `corona_emitters` host input is the feature's since Phase A) |
 | `pulsar.sprites` | [Plugin_Sprites](https://github.com/Far-Beyond-Pulsar/Plugin_Sprites) | Sprite | sprite cull/batch/simulate, 2D radiance cascades | done (batch 1): `plugins/vendor/sprites/` |
@@ -1017,21 +1017,35 @@ crate (helio-pass-light-cull, -shadow-matrix, -deferred-light, -hlfs,
   registration), `editor` (lights_plugin) and `examples` (lights-examples:
   `ies_demo`, `light_benchmark`, `billboard_demo`).
 - **Frame seams** (Helio), each the narrowest that lets the crates leave:
-  - **The lighting model is a kind's**: `helio_frame_api::lighting::LightingModel`
-    (a preset setting: `Deferred`, `LightField`, `Forward`) names the
-    extension point a model's nodes join (`lighting.model.deferred`,
-    `lighting.model.light_field`; forward draws lit in its phase). The
-    deferred preset expands its point, the HLFS preset its own; a point that
-    holds nothing gets the spine's `UnlitPass` (albedo + emissive over the
-    background), the intended failure without the lights.
+  - **The lighting model is a plugin's registration**
+    (Far-Beyond-Pulsar/Helio#393 item 3): a feature registers a
+    `helio_frame_api::lighting::LightingModel` (`registrar.lighting_model`,
+    stored by type through `FeatureRegistrar::provide`): an id, its shading
+    (`GBuffer` or `Forward`), the extension point its nodes join, and what it
+    reads (the specular-layer mode, where the lighting inputs run, whether
+    TSR gets a reactive mask), plus the pipelines it brings
+    (`ModelPipeline`: id, label, anti-aliasing). The lights register
+    `deferred` (`lighting.model.deferred`), `light-field` (HLFS,
+    `lighting.model.light_field`, the `helio.hlfs` and `helio.fxaa_hlfs`
+    pipelines) and `forward` (the drawers light as they draw). A preset
+    chooses a model by id (`Preset::Deferred` is `deferred`,
+    `Preset::Forward` is `forward`, a model's pipeline is
+    `Preset::Model(pipeline)`); the phases, the layer mode and the inputs
+    order come from the model, so `helio-presets` names no model beyond those
+    two ids. A chosen id nobody registered resolves to the spine's `unlit`
+    model (registered by the spine; its `UnlitPass` draws albedo + emissive
+    over the background): the intended failure without the lights, so
+    forward without the lights is an unlit G-buffer pipeline.
     `graph_parity::without_a_lighting_model_the_gbuffer_is_drawn_unlit` pins
-    it, and that a model at the point replaces it. How others do it: Bevy's
-    deferred lighting node is `bevy_pbr`'s, not `core_pipeline`'s (a core
-    pipeline without it shows no lit surfaces); Unity SRP's renderer asset
-    brings forward or deferred with its passes; Unreal builds the model in,
-    which is the coupling removed here. Light-field shading asks for its own
-    scene colour format in its preparer (the HLFS preset no longer names
-    `HlfsPass`).
+    it, and that a registered model replaces it;
+    `a_model_brings_its_own_pipeline_and_reads` pins a model's own pipeline.
+    How others do it: Bevy's deferred lighting node is `bevy_pbr`'s, not
+    `core_pipeline`'s (a core pipeline without it shows no lit surfaces);
+    Unity SRP's renderer asset brings forward or deferred with its passes;
+    Unreal builds the model in, which is the coupling removed here. A
+    light-field model growing into ReSTIR DI or a path-traced model is a
+    plugin change, not a frame change. Light-field shading asks for its own
+    scene colour format in its preparer.
   - The lights register where the frame places them: the shadow views
     (`ShadowViewsFeature`) first in the shadow-caster phase's compute (the
     casters' dirty pass reads their flags), light binning (`LightCullFeature`)
@@ -2674,8 +2688,6 @@ decision of its own, not a move):
   parameters in the frame's `AtmosphereParams`. Waits on splitting the
   contract into the frame's medium, sky table and suns, and the sky's own
   parameters.
-- *The light-field model* (`LightingModel::LightField`, the HLFS presets).
-  Waits on lighting models registered by the plugin that brings them.
 - *The perf overlay's shading-cost profiler* models per-material light
   loops. Waits on its cost model coming from the materials' `SurfaceProbe`
   offer.
@@ -2683,3 +2695,33 @@ decision of its own, not a move):
   63..83, the tone map's lens input). Waits on the lens settings leaving the
   post-settings contract, as fog's did in p17 (an ABI change, saved masks,
   and whether volumes may blend a lens).
+
+As built, p19 (2026-11-09, branch `rewrite/p19-plugin-catalog` in Helio,
+Pulsar-Native and the plugin repos; phases 0 and 1 of the plugin API plan,
+Pulsar-Native#1608, `.agents/PLUGIN_API_REFACTOR_PLAN.md` there):
+
+- **Feature-to-node ownership.** `FeatureRegistrar::node` records its
+  feature as the node kind's owner; `NodeRegistry::feature_of(kind)` and
+  `feature_nodes()` read it. A node registered directly (the core nodes)
+  has no owner; a later feature replacing a kind owns it. This is the only
+  Helio change: the graph, presets and pass lists are unchanged, and
+  `FeatureSet` stays the aggregate graphs build from.
+- **Each plugin has one root crate** (Pulsar side): the package at the
+  plugin's directory (`<kind>_plugin`), the one place it submits what it
+  contributes, its editor registrations behind an `editor` feature. The
+  descriptor names it (`root = "<kind>_plugin"`), every registration's
+  origin is it, and the installed set and generated games link only roots.
+  The editor crates are `<kind>_editor`; crates the move left empty are
+  gone (GI's component and editor crates: its root holds the feature set
+  and its configuration; the decals', particles' and lens's editor
+  crates). The plugin table above names each plugin's crates. A plugin's
+  component class is `#[world_component]` at its type and registered by
+  the root (`submit_world_component!`); SceneDB GPU-mirror hooks and
+  reflection tables stay with their type (no origin, inert without the
+  class); api crates hold no registrations.
+- **The catalog** (`plugin_manager::catalog`): every registration type
+  summarizes itself (`pulsar_plugins::Contribution`), and a render feature
+  registration's summary lists each feature with the nodes it registered,
+  read from `feature_nodes()`. The catalog's proof checks those node ids
+  against the engine's graph registry (`helio_presets::graphs::
+  registry_with(plugin_features())`) and the owning feature of each.

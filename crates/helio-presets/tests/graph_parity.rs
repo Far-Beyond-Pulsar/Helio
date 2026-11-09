@@ -1,8 +1,8 @@
 //! The shipped pipelines as node graphs: the editor's laid-out template builds
 //! the deferred preset's graph, each preset follows the renderer config (the
-//! anti-aliasing, reflections), a preset without a lighting model draws
-//! its G-buffer unlit, and the light-field preset writes one scene format
-//! end to end. (An engine's features joining the presets is tested
+//! anti-aliasing, reflections), a preset whose lighting model is not registered draws
+//! its G-buffer unlit, and a lighting model brings its own pipeline and reads.
+//! (An engine's features joining the presets is tested
 //! where they live: the voxel terrain's in its plugin's feature crate.)
 //!
 //! Everything needs a device: the graphs build their passes for real
@@ -258,33 +258,82 @@ fn presets_follow_the_config() {
         has::<helio_pass_ssr::SsrPass>(&graph),
         helio_core::REFLECTIONS_SUPPORTED
     );
+}
 
-    fixtures.config = base;
-    let graph = Preset::Forward.build(fixtures.context());
-    // The forward preset runs the forward phase, not the G-buffer: its
-    // drawers are an object kind's (the meshes plugin's forward drawer).
-    let phases = Preset::Forward.phases();
+/// A plugin's lighting model: the test's stand-in for what the lights
+/// register. `id` is the model, `point` where its one pass joins.
+struct Model {
+    model: helio_frame_api::lighting::LightingModel,
+}
+
+impl helio_feature_api::Feature for Model {
+    fn id(&self) -> &'static str {
+        "test.lighting_model"
+    }
+
+    fn register(&self, registrar: &mut helio_feature_api::FeatureRegistrar<'_>) {
+        use helio_frame_api::lighting::RegisterLightingModel;
+        registrar.lighting_model(self.model.clone());
+        if let Some(point) = self.model.point {
+            registrar.node(
+                helio_feature_api::pass_node("test_model", "Test model", "Test", "", |_| Ok(()))
+                    .at(point, 0),
+            );
+        }
+    }
+}
+
+/// The forward preset's model is the lights': without it the preset falls
+/// back to the unlit stand-in (a G-buffer pipeline), and with it the forward
+/// phase runs and nothing resolves a G-buffer.
+#[test]
+fn the_forward_preset_runs_the_forward_phase_when_its_model_is_registered() {
+    use helio_frame_api::lighting::{model, LightingModel, Shading};
+    let Some(fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: forward model");
+        return;
+    };
+    let nodes = graphs::base_registry();
+    let phases = Preset::Forward.phases(&nodes);
+    assert!(phases.contains(&helio_frame_api::Phase::GBuffer));
+    assert!(has::<helio_spine::UnlitPass>(
+        &Preset::Forward.build(fixtures.context())
+    ));
+
+    let forward = Model {
+        model: LightingModel::new(model::FORWARD, Shading::Forward),
+    };
+    let features = helio_feature_api::FeatureSet::new().with(forward);
+    let nodes = graphs::registry_with(&features);
+    let phases = Preset::Forward.phases(&nodes);
     assert!(phases.contains(&helio_frame_api::Phase::Forward));
     assert!(!phases.contains(&helio_frame_api::Phase::GBuffer));
+    let graph = Preset::Forward
+        .with_features(&features)
+        .build(fixtures.context());
     assert!(!has::<helio_spine::UnlitPass>(&graph));
 }
 
-/// Helio has no lighting model (it is the lights plugin's): every G-buffer
-/// preset resolves its G-buffer with the spine's unlit stand-in, the
-/// intended failure, so a host without the lights still shows its surfaces.
-/// A feature placed at the model's point takes its place.
+/// Helio has no lighting model (they are the lights plugin's): every
+/// G-buffer preset, and a preset that chose a model nobody registered,
+/// resolves its G-buffer with the spine's unlit stand-in, the intended
+/// failure, so a host without the lights still shows its surfaces. A feature
+/// that registers the chosen model takes its place.
 #[test]
 fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
-    let Some(mut fixtures) = fixtures() else {
+    use helio_frame_api::lighting::{model, Antialiasing, LightingModel, ModelPipeline, Shading};
+    let Some(fixtures) = fixtures() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: unlit stand-in");
         return;
     };
-    for preset in [
-        Preset::Deferred,
-        Preset::DeferredFxaa,
-        Preset::Hlfs,
-        Preset::HlfsFxaa,
-    ] {
+    let absent = Preset::Model(ModelPipeline {
+        id: "test.absent",
+        label: "Absent model",
+        description: "",
+        model: "absent",
+        aa: Antialiasing::TemporalOrNone,
+    });
+    for preset in [Preset::Deferred, Preset::DeferredFxaa, absent] {
         let graph = preset.build(fixtures.context());
         let unlit = passes(&graph)
             .into_iter()
@@ -300,57 +349,65 @@ fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
             .all(|write| write.name != helio_frame_api::gbuffer::GROUP));
     }
 
-    // A lighting model at the deferred point replaces the stand-in.
-    struct Model;
-    impl helio_feature_api::Feature for Model {
-        fn id(&self) -> &'static str {
-            "test.lighting_model"
-        }
-        fn register(&self, registrar: &mut helio_feature_api::FeatureRegistrar<'_>) {
-            let point = helio_frame_api::lighting::LightingModel::Deferred
-                .point()
-                .unwrap();
-            registrar.node(
-                helio_feature_api::pass_node("test_model", "Test model", "Test", "", |_| Ok(()))
-                    .at(point, 0),
-            );
-        }
-    }
+    // A registered model at its point replaces the stand-in.
+    let deferred = Model {
+        model: LightingModel::new(model::DEFERRED, Shading::GBuffer)
+            .at(helio_feature_api::ExtensionPoint("test.lighting.model")),
+    };
     let with_model = Preset::Deferred
-        .with_features(&helio_feature_api::FeatureSet::new().with(Model))
+        .with_features(&helio_feature_api::FeatureSet::new().with(deferred))
         .build(fixtures.context());
     assert!(!has::<helio_spine::UnlitPass>(&with_model));
-    // The forward preset draws lit in its phase: nothing resolves.
-    assert!(!has::<helio_spine::UnlitPass>(
-        &Preset::Forward.build(fixtures.context())
-    ));
 }
 
+/// What a model reads is its registration's: a model that leaves transparency
+/// to TSR's reactive mask and writes its own scene format is a preset by
+/// registration alone, with no preset of its own in Helio.
 #[test]
-fn the_light_field_preset_writes_one_scene_format() {
+fn a_model_brings_its_own_pipeline_and_reads() {
+    use helio_frame_api::lighting::{
+        Antialiasing, InputsOrder, LightingModel, ModelPipeline, Shading, SpecularLayers,
+    };
     let Some(mut fixtures) = fixtures() else {
-        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: HLFS format");
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: model pipeline");
         return;
     };
+    let registered = LightingModel::new("test.model", Shading::GBuffer)
+        .at(helio_feature_api::ExtensionPoint("test.lighting.model"))
+        .with_specular_layers(SpecularLayers::CompositedAfter)
+        .with_inputs_order(InputsOrder::BeforeLighting)
+        .with_reactive_transparency()
+        .with_pipeline(ModelPipeline {
+            id: "test.pipeline",
+            label: "Test pipeline",
+            description: "",
+            model: "test.model",
+            aa: Antialiasing::TemporalOrNone,
+        });
+    let pipeline = registered.pipelines[0];
+    let features = helio_feature_api::FeatureSet::new().with(Model { model: registered });
+
+    // Its pipeline is listed in a host's registry.
+    let mut listed = RenderPipelineRegistry::new();
+    helio_presets::pipelines::register_builtin_pipelines(&mut listed, &features);
+    assert_eq!(listed.resolve(Some("test.pipeline")), Some("test.pipeline"));
+
+    // Under TSR it resolves temporally; without, it is not anti-aliased.
     fixtures.config = fixtures
         .config
         .clone()
         .with_tsr_quality(helio::TsrQuality::Quality);
-    let graph = Preset::Hlfs.build(fixtures.context());
-    // Every pass that declares the lit colour's format declares one format.
-    let formats: HashSet<_> = passes(&graph)
-        .iter()
-        .flat_map(|pass| pass.writes.iter())
-        .filter(|write| write.name == helio_frame_api::color::SCENE_COLOR)
-        .filter_map(|write| write.format)
-        .collect();
-    assert_eq!(formats.len(), 1, "pre_aa is written as {formats:?}");
-    // Under TSR, light-field shading asks what draws after lighting for a
-    // reactive mask TSR reads: the meshes' transparency writes it (the
-    // plugin's pass lists).
-    assert!(passes(&graph)
-        .iter()
-        .any(|pass| pass.type_name == "helio_pass_tsr::TsrPass"));
+    let graph = Preset::Model(pipeline)
+        .with_features(&features)
+        .build(fixtures.context());
+    assert!(has::<helio_pass_tsr::TsrPass>(&graph));
+    assert!(!has::<helio_spine::UnlitPass>(&graph));
+    fixtures.config = fixtures.config.clone().without_tsr();
+    let graph = Preset::Model(pipeline)
+        .with_features(&features)
+        .build(fixtures.context());
+    assert!(!has::<helio_pass_tsr::TsrPass>(&graph));
+    assert!(!has::<helio_pass_fxaa::FxaaPass>(&graph));
 }
 
 #[test]

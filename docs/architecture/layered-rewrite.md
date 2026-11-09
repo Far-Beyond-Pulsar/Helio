@@ -605,8 +605,8 @@ As built, step 2 (2026-11-02): every shipped pipeline is a node graph.
 - New nodes: `hlfs`, `ssr_composite`, `virtual_geometry` (carries the
   geometry phase's perf marker), `simple_cube`; `transparent` and `tsr`
   gained the HLFS reactive-mask params. The scene-linear format is a
-  setting (`SceneColorFormat`, default `FOGGED_HDR_FORMAT`); HLFS presets
-  set their lighting's preferred format.
+  setting (`SceneColorFormat`, default `FOGGED_HDR_FORMAT`); a lighting model
+  sets its preferred format in its preparer.
 - Host WGSL is a setting: `helio_pass_postprocess::UserEffects`,
   `helio_pass_lens::LensUser`.
 - Every host moved: ~70 examples to `presets::*`, voxel_craft,
