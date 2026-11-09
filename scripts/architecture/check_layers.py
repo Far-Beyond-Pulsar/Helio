@@ -50,7 +50,8 @@ IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 STRING = re.compile(r'"((?:[^"\\]|\\.)*)"', re.S)
 KEYLIKE = re.compile(r"[A-Za-z0-9_./:-]+")
 WORD = re.compile(r"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+")
-CFG_TEST_MOD = re.compile(r"#\[cfg\(test\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;")
+CFG_TEST_MOD = re.compile(
+    r'#\[cfg\(test\)\]\s*(?:#\[path\s*=\s*"([^"]+)"\]\s*)?(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;')
 
 
 def workspace(config):
@@ -213,10 +214,14 @@ def checked_files(config, dirs):
                 continue
             files[path] = path.read_text(encoding="utf-8", errors="replace")
     # A `#[cfg(test)] mod x;` is x.rs, or the directory x/ with every file
-    # under it (its own submodules).
+    # under it (its own submodules); with `#[path = "f.rs"]`, the file f.rs
+    # beside the declaring file.
     test_files, test_dirs = set(), set()
     for path, text in files.items():
-        for name in CFG_TEST_MOD.findall(text):
+        for explicit, name in CFG_TEST_MOD.findall(text):
+            if explicit:
+                test_files.add((path.parent / explicit).resolve())
+                continue
             base = path.parent if path.name in ("lib.rs", "main.rs", "mod.rs") else path.with_suffix("")
             test_files.add(base / f"{name}.rs")
             test_dirs.add(base / name)
