@@ -1,0 +1,12 @@
+# A suite that creates a wgpu device per test crashes with
+# STATUS_ACCESS_VIOLATION on some Windows drivers when two run at once
+# (Pulsar-Native#1647). The suite takes an in-process lock for plain `cargo
+# test`; nextest runs each test in its own process, so this group (one test at
+# a time) is what serializes them here. A new suite that creates its own device
+# joins the filter below.
+[test-groups]
+gpu-device = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(helio-presets) & binary(graph_parity)"
+test-group = "gpu-device"
