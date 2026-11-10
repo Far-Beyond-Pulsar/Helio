@@ -333,7 +333,11 @@ fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
         model: "absent",
         aa: Antialiasing::TemporalOrNone,
     });
-    for preset in [Preset::Deferred, Preset::DeferredFxaa, absent] {
+    // Every built-in preset (the forward one included: without the lights
+    // plugin its model is absent too) builds its graph on the stand-in.
+    let nodes = graphs::base_registry();
+    for preset in Preset::ALL.into_iter().chain([absent]) {
+        assert_eq!(preset.model(&nodes).id, model::UNLIT, "{}", preset.name());
         let graph = preset.build(fixtures.context());
         let unlit = passes(&graph)
             .into_iter()
