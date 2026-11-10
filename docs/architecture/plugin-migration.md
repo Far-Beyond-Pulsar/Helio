@@ -1039,6 +1039,16 @@ crate (helio-pass-light-cull, -shadow-matrix, -deferred-light, -hlfs,
     `graph_parity::without_a_lighting_model_the_gbuffer_is_drawn_unlit` pins
     it, and that a registered model replaces it;
     `a_model_brings_its_own_pipeline_and_reads` pins a model's own pipeline.
+    The fallback is not silent: `Preset::model` logs one warning per missing
+    id (`lighting model `<id>` is not registered ...`) the first time a graph
+    build resolves to the stand-in, and `a_missing_model_warns_once_naming_its_id`
+    pins it. A project that disables the lights plugin and selects Forward or
+    Deferred therefore gets an unlit scene (albedo + emissive, background
+    kept), not black or broken output; before the model registration the
+    forward preset without the lights had no lighting at all. Every built-in
+    preset builds on the stand-in with the lights absent (the same graph_parity
+    test runs `Preset::ALL`); a non-black render of it needs a mesh drawer, an
+    object kind's, so it is not asserted in Helio.
     How others do it: Bevy's deferred lighting node is `bevy_pbr`'s, not
     `core_pipeline`'s (a core pipeline without it shows no lit surfaces);
     Unity SRP's renderer asset brings forward or deferred with its passes;
@@ -2503,9 +2513,14 @@ issue (above); views are the next design item, not p17's.
   `AnimationComponent` has no pose to drive. Waits on: the animation
   runtime work (a pose without an animator).
 - Pulsar-Native (voxel, sky): **voxel and sky test failures**: `clouds_cost`
-  (perf), `foliage_on_voxels` (no blades near the eye) and
-  `voxel_pass_graph`'s chunk-pass settle fail as before p17; the chunks
-  suite needs `--release`. Waits on: the user's voxel and sky work.
+  (perf) fails as before p17 (it waits on the sky split); the chunks suite
+  needs `--release`. `foliage_on_voxels` is fixed (Plugin_Voxel PR #3).
+  `voxel_pass_graph`'s chunk-pass settle passes serially (9/9 with
+  `--test-threads=1`, `chunk_pass_builds_settles_and_resizes_in_the_deferred_graph`
+  settling in 112 frames; the old "settled still view asked for frame 0"
+  failure did not reproduce, #1627); the remaining failure mode is the
+  parallel crash on concurrent wgpu device creation (#1647). Waits on: the
+  sky split, and #1647.
 - Pulsar-Native (engine_fs and its users): **one asset-reference
   resolver**: texture, skeleton, image and skeletal-mesh references each
   resolve through the file index in their own crate. Waits on: asset
