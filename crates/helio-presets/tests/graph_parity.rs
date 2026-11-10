@@ -20,6 +20,19 @@ use helio_presets::Preset;
 use helio_presets::{features, graphs};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
+/// One test at a time may hold a wgpu device (Pulsar-Native#1647). Creating and
+/// using several devices on one adapter at once crashes some Windows drivers
+/// with STATUS_ACCESS_VIOLATION, and libtest runs tests in parallel; this makes
+/// `cargo test` safe without `--test-threads=1`. Each test takes it first.
+/// (nextest runs one test per process; `.config/nextest.toml` also serializes
+/// these suites in a `gpu-device` test group.)
+static GPU_DEVICE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn gpu_serial() -> std::sync::MutexGuard<'static, ()> {
+    // A test that panicked while holding the lock does not poison the rest.
+    GPU_DEVICE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn device() -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
@@ -142,6 +155,7 @@ fn wire(asset: &mut GraphAsset, from: &str, to: &str) {
 
 #[test]
 fn reflection_nodes_carry_the_platform_capability() {
+    let _gpu = gpu_serial();
     let registry = graphs::base_registry();
     for name in ["ssr", "planar_reflection"] {
         let descriptor = registry
@@ -167,6 +181,7 @@ fn reflection_nodes_carry_the_platform_capability() {
 
 #[test]
 fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
+    let _gpu = gpu_serial();
     if helio_core::REFLECTIONS_SUPPORTED {
         eprintln!("REFLECTIONS supported here; the capability path is Apple targets only");
         return;
@@ -189,6 +204,7 @@ fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
 
 #[test]
 fn the_template_builds_the_deferred_preset() {
+    let _gpu = gpu_serial();
     let Some(fixtures) = fixtures() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: deferred template");
         return;
@@ -231,6 +247,7 @@ fn has<T: helio_core::RenderPass + 'static>(graph: &helio_core::RenderGraph) -> 
 
 #[test]
 fn presets_follow_the_config() {
+    let _gpu = gpu_serial();
     let Some(mut fixtures) = fixtures() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: presets follow the config");
         return;
@@ -288,6 +305,7 @@ impl helio_feature_api::Feature for Model {
 /// phase runs and nothing resolves a G-buffer.
 #[test]
 fn the_forward_preset_runs_the_forward_phase_when_its_model_is_registered() {
+    let _gpu = gpu_serial();
     use helio_frame_api::lighting::{model, LightingModel, Shading};
     let Some(fixtures) = fixtures() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: forward model");
@@ -321,6 +339,7 @@ fn the_forward_preset_runs_the_forward_phase_when_its_model_is_registered() {
 /// that registers the chosen model takes its place.
 #[test]
 fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
+    let _gpu = gpu_serial();
     use helio_frame_api::lighting::{model, Antialiasing, LightingModel, ModelPipeline, Shading};
     let Some(fixtures) = fixtures() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: unlit stand-in");
@@ -369,6 +388,7 @@ fn without_a_lighting_model_the_gbuffer_is_drawn_unlit() {
 /// registration alone, with no preset of its own in Helio.
 #[test]
 fn a_model_brings_its_own_pipeline_and_reads() {
+    let _gpu = gpu_serial();
     use helio_frame_api::lighting::{
         Antialiasing, InputsOrder, LightingModel, ModelPipeline, Shading, SpecularLayers,
     };
@@ -416,6 +436,7 @@ fn a_model_brings_its_own_pipeline_and_reads() {
 
 #[test]
 fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
+    let _gpu = gpu_serial();
     let Some((device, queue)) = device() else {
         eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: TSR node configuration");
         return;
