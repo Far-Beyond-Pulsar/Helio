@@ -89,6 +89,8 @@ pub mod directives;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub mod hot;
 pub mod reflection;
+mod value_arrays;
+pub use value_arrays::value_array_copies;
 pub use directives::{parse as parse_directives, PipelineDirectives};
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use hot::ShaderFile;

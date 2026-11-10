@@ -193,6 +193,20 @@ fn every_wgsl_shader_parses_and_validates() {
                 rel.display(),
                 describe_location(&source, &format!("{e:?}"))
             ));
+            continue;
+        }
+
+        // A table indexed through a value is copied whole per invocation
+        // (`helio_core::shader::value_array_copies`).
+        match helio_core::shader::value_array_copies(&resolved) {
+            Ok(copies) if copies.is_empty() => {}
+            Ok(copies) => failures.push(format!(
+                "{}: indexes arrays through values, copying them per invocation \
+                 (read them through their binding):\n  {}",
+                rel.display(),
+                copies.join("\n  ")
+            )),
+            Err(e) => failures.push(format!("{}: {e}", rel.display())),
         }
     }
 
