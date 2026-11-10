@@ -413,6 +413,7 @@ pub mod scene_input;
 pub mod scene_liveness;
 pub mod shader;
 pub mod temporal;
+pub mod texture_mips;
 pub mod traits;
 pub mod upload;
 
@@ -508,6 +509,45 @@ pub const TEXTURE_TABLE_LIMIT: usize = 256;
     target_os = "android"
 ))]
 pub const TEXTURE_TABLE_LIMIT: usize = 16;
+
+/// Sampled-texture slots a stage that binds the texture table one binding per
+/// texture (no binding arrays) keeps for its own inputs: the most any reader
+/// needs, a G-buffer reader's five (depth and four G-buffer targets).
+pub const TEXTURE_TABLE_RESERVE: usize = 5;
+
+/// Whether a device binds the texture table as one indexed binding array
+/// ([`TEXTURE_BINDING_ARRAYS`]); otherwise one binding per texture. WebGPU
+/// in a browser never does.
+pub fn texture_table_uses_binding_arrays(features: wgpu::Features) -> bool {
+    !cfg!(target_arch = "wasm32") && features.contains(TEXTURE_BINDING_ARRAYS)
+}
+
+/// How many textures the texture table holds on a device with `features`
+/// and `limits`: every stage that binds it can address all of them. The
+/// scene's texture store is this big, and each reader's bindings are.
+///
+/// With binding arrays the table is one array, capped by the per-stage
+/// texture and sampler limits. Without, each texture takes a binding and a
+/// sampler beside the reader's own inputs ([`TEXTURE_TABLE_RESERVE`]), in
+/// one bind group (two bindings of which are the reader's).
+pub fn texture_table_capacity(features: wgpu::Features, limits: &wgpu::Limits) -> usize {
+    let sampled = limits.max_sampled_textures_per_shader_stage as usize;
+    let samplers = limits.max_samplers_per_shader_stage as usize;
+    let capacity = if texture_table_uses_binding_arrays(features) {
+        sampled.min(samplers)
+    } else {
+        sampled
+            .saturating_sub(TEXTURE_TABLE_RESERVE)
+            .min(samplers)
+            .min((limits.max_bindings_per_bind_group as usize).saturating_sub(2) / 2)
+    };
+    let capacity = TEXTURE_TABLE_LIMIT.min(capacity);
+    assert!(
+        capacity > 0,
+        "Helio requires at least one sampled texture and sampler binding"
+    );
+    capacity
+}
 pub use profiling::{GpuTimingAvailability, Profiler, RenderPassTiming, RenderTimingSnapshot};
 pub use scene_derivation::{
     run_scene_derivations, SceneDerivation, SceneDerivationContext, SceneDerivationFactory,

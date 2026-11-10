@@ -2524,10 +2524,12 @@ issue (above); views are the next design item, not p17's.
 - Pulsar-Native (engine_fs and its users): **one asset-reference
   resolver**: texture, skeleton, image and skeletal-mesh references each
   resolve through the file index in their own crate. Waits on: asset
-  categories as registered kinds (step 4).
+  categories as registered kinds. Still open after p20 (Pulsar-Native#1605
+  folded it in; its plan's section 12 says why).
 - Pulsar-Native (ui_types_common, pulsar_content, engine_fs): **asset
   categories** (`AssetKind::Mesh`/`Material`) are file vocabulary rather
-  than registered kinds. Waits on: step 4 of the split.
+  than registered kinds. Still open after p20 (most of Pulsar's kind-name
+  budget).
 - Plugin_Blueprints: **one prefab model**: the Blueprint editor keeps its
   own `PrefabAsset` beside `pulsar_class::prefab::PrefabAsset` (and reads
   `prefab.json` raw for animation events). Waits on: the Blueprint plugin
@@ -2592,8 +2594,8 @@ not run on submodules; clippy; nextest's `ci` profile). In Pulsar-Native:
   clone recursively.
 
 The asset viewer, the render graph editor (`render_bps`), `plugins/installed`
-and `plugins/trait_editor` stay in-tree (whether editor tools become modules
-of other plugins is Pulsar-Native#1605's decision).
+and `plugins/trait_editor` stay in-tree (decided in p20: the editor-tool
+plugins stay plugins of their own).
 
 **Helio is core only: the gate.** `scripts/architecture/check_layers.py`
 (`just arch`) fails when a crate outside the test host (`test_host = true`
@@ -2740,3 +2742,35 @@ Pulsar-Native#1608, `.agents/PLUGIN_API_REFACTOR_PLAN.md` there):
   read from `feature_nodes()`. The catalog's proof checks those node ids
   against the engine's graph registry (`helio_presets::graphs::
   registry_with(plugin_features())`) and the owning feature of each.
+
+As built, p20 (2026-11-09, branch `rewrite/p20-kernel` in Helio,
+Pulsar-Native and the plugin repos it touched; Pulsar-Native#1605, the
+kernel: section 12 of `.agents/PLUGIN_API_REFACTOR_PLAN.md` there):
+
+- **Helio's rule one level up.** Pulsar's core and editor know no kind,
+  subsystem or tool. Pulsar runs this repository's layer checker over its
+  own `architecture/layers.toml` (`--root`): the checker gained directory
+  layers (`[paths]`), dev-dependency checking, `[scan]` directories,
+  `#[path]` test modules and `--update` dropping kind names that are gone.
+  Helio's own run is unchanged.
+- **The texture table's capacity is the frame's.** `helio_core::
+  texture_table_capacity` and `texture_table_uses_binding_arrays` (with
+  `TEXTURE_TABLE_RESERVE`) decide how many textures the table holds on a
+  device; the materials' binding config and Pulsar's scene texture store
+  both read it, so the engine needs no kind's api for its store.
+- **Texture mips are core** (`helio_core::texture_mips`, from the
+  materials' api): colour, data and normal-map mip filtering is texture
+  data, cooked by the engine for every kind.
+- **Baked lighting's owner, decided**: a kind of its own, its own plugin
+  (like GI), with the G-buffer's lightmap-UV target leaving the frame through
+  a `GBufferContributor`. `kind-names.txt` says so on each baked-lighting
+  line; the move needs that plugin's repository and the frame change, and no
+  engine path bakes today (only the cathedral examples).
+- **Sublevel placements** (`SubLevelActorRow`, `SubLevelIndex`) left the
+  meshes' api for Pulsar's scene model (they define spaces, and no pass
+  reads them on the GPU); the portals' resolver reads them there.
+- Pulsar side: physics is the physics plugin's (its api crate is the
+  `.physasset` schema), the input plugin joins the game through a session
+  hook, the optional editor tools register through `ui_common::
+  editor_tools`, each plugin owns its closure-ledger rows, and the four
+  editor-tool plugins are workspace members.
