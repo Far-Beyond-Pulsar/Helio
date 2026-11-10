@@ -548,8 +548,8 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         None
     }
 
-    /// Declares the render pass this pass needs. Every pass **must** implement
-    /// this — there is no default. Returning `Some(descriptor)` is the preferred
+    /// Declares the render pass this pass needs. The default, `None`, is a
+    /// compute-only pass's. Returning `Some(descriptor)` is the preferred
     /// graphics path: the executor owns the render-pass lifetime and can apply
     /// subpass chaining, store-op patching, and tile-memory fusion.
     ///
@@ -559,9 +559,9 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// render-pass chaining.
     fn render_pass_descriptor<'a>(
         &'a self,
-        target: &'a wgpu::TextureView,
-        depth: &'a wgpu::TextureView,
-        resources: &'a crate::ResourceRegistry<'a>,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a crate::ResourceRegistry<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         None
     }

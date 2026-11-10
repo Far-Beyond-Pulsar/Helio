@@ -1308,10 +1308,10 @@ impl RenderGraph {
             writes: Vec::new(),
             scene_buffers: pass.scene_buffers().to_vec(),
         };
-        let mut push = |list: &mut Vec<DeclaredResource>,
-                        name: &'static str,
-                        kind: DeclaredKind,
-                        format: Option<crate::graph::ResourceFormat>| {
+        let push = |list: &mut Vec<DeclaredResource>,
+                    name: &'static str,
+                    kind: DeclaredKind,
+                    format: Option<crate::graph::ResourceFormat>| {
             match list.iter_mut().find(|existing| existing.name == name) {
                 // A precise kind beats the unknown one a bare name implies.
                 Some(existing) if existing.kind == DeclaredKind::Unknown => {
@@ -1717,7 +1717,6 @@ impl RenderGraph {
                         segment_passes.clear();
                         Vec::new()
                     };
-                    segment_recording = std::time::Duration::ZERO;
                     let index = graphics_segments.len();
                     graphics_segments.push(None);
                     if finish_breakdown {
@@ -1897,6 +1896,9 @@ impl RenderGraph {
                                 || pass_index + 1 == pass_count)))
                 {
                     cut_segment!();
+                    // The new segment has recorded nothing yet (an empty one
+                    // was never cut, and recorded nothing either).
+                    segment_recording = std::time::Duration::ZERO;
                 }
                 segment_passes.push(pass.name());
                 if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
