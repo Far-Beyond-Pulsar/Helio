@@ -22,6 +22,7 @@ Reads <root>/architecture/layers.toml and `cargo metadata`, and fails when:
   [scan] dirs lists the directories read (default: crates, src).
 
 Usage: python scripts/architecture/check_layers.py [--root DIR] [--update]
+       (just arch; Windows: see run.ps1)
 
 --update rewrites layer-violations.txt and drops kind-names.txt lines whose
 names are gone; it never adds a kind name.

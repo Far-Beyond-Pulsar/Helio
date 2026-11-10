@@ -22,7 +22,7 @@
 //! them (the renderer's own poll, when it owns the device, or the host's
 //! submits deliver them), as the engine's graphs always have.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use helio::{IntoGraph, PassBuildContext, RendererConfig};
 use helio_core::RenderGraph;
@@ -39,6 +39,21 @@ use helio_graph_asset::{
 use serde_json::Value;
 
 use crate::features::kind;
+
+/// Logs, once per `wanted` id, that no installed feature registered the
+/// lighting model and `fallback` is used instead.
+fn warn_model_missing_once(wanted: &'static str, fallback: &str) {
+    static WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut warned = WARNED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !warned.contains(&wanted) {
+        warned.push(wanted);
+        log::warn!(
+            "lighting model `{wanted}` is not registered (is the plugin that brings it disabled?);              rendering with the `{fallback}` stand-in"
+        );
+    }
+}
 
 /// One of Helio's shipped pipelines, or a pipeline a lighting model brings.
 /// A preset chooses its lighting model by id; what the model is, where its
@@ -90,8 +105,18 @@ impl Preset {
 
     /// The lighting model the preset gets from `registry`: the registered one
     /// it chose, or the spine's unlit stand-in when nobody registered it.
+    ///
+    /// The first fallback for each missing id logs one warning naming it, so
+    /// a project that disabled the lights plugin does not silently get an
+    /// unlit scene (the set is touched only on the fallback path, which a
+    /// graph build takes, never a frame).
     pub fn model(self, registry: &NodeRegistry) -> &LightingModel {
-        resolve_model(registry, self.model_id())
+        let wanted = self.model_id();
+        let resolved = resolve_model(registry, wanted);
+        if resolved.id != wanted {
+            warn_model_missing_once(wanted, resolved.id);
+        }
+        resolved
     }
 
     fn antialiasing(self) -> Antialiasing {
@@ -464,6 +489,43 @@ mod tests {
         // The forward preset has no model of its own either: it draws the
         // G-buffer unlit.
         assert!(Preset::Forward.phases(&registry).contains(&Phase::GBuffer));
+    }
+
+    /// Captures the warnings that name the test's own model id.
+    struct Capture(Mutex<Vec<String>>);
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            let message = record.args().to_string();
+            if message.contains("test.once.missing") {
+                self.0.lock().unwrap().push(message);
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    #[test]
+    fn a_missing_model_warns_once_naming_its_id() {
+        static CAPTURE: Capture = Capture(Mutex::new(Vec::new()));
+        log::set_logger(&CAPTURE).expect("this is the only test that installs a logger");
+        log::set_max_level(log::LevelFilter::Warn);
+        let registry = crate::graphs::base_registry();
+        let preset = Preset::Model(ModelPipeline {
+            id: "test.once",
+            label: "Once",
+            description: "",
+            model: "test.once.missing",
+            aa: Antialiasing::TemporalOrNone,
+        });
+        for _ in 0..3 {
+            assert_eq!(preset.model(&registry).id, model::UNLIT);
+        }
+        let warnings = CAPTURE.0.lock().unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("`test.once.missing`") && warnings[0].contains("`unlit`"));
     }
 
     #[test]
