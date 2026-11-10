@@ -2774,3 +2774,43 @@ kernel: section 12 of `.agents/PLUGIN_API_REFACTOR_PLAN.md` there):
   hook, the optional editor tools register through `ui_common::
   editor_tools`, each plugin owns its closure-ledger rows, and the four
   editor-tool plugins are workspace members.
+
+As built, VG forest (2026-11-10, branch `feat/vg-forest-demo` in
+Plugin_Meshes; the meshes plugin only, no Helio code change; the lighting
+fix that came out of its measurements is under layered-rewrite.md, "No
+per-invocation table copies"):
+
+- **The forest scene** of `vg_stress` (`--scene forest`): a procedural
+  terrain of classic tile meshes and up to 30,000 Poly Haven trees through
+  VG, with the sky's and GI's features added to the example's preset
+  (`helio_mesh_host::presets::with`). Described in the plugin's
+  `examples/VG_FOREST.md`.
+- **Sectioned tree assets** (example loader): a tree variant's parts become
+  one VG asset with one section per material slot when they share a node
+  transform; an instance takes one consecutive object row per section. A
+  merged asset whose root exceeds the pinned root budget (`RootTooLarge`) is
+  cooked as separate parts: the builder simplifies per material.
+- **Monotone feedback bits** (`helio-vg-stream`): the request, used and
+  urgent bits only accumulate between ordered readback/reset commands, so the
+  shader helpers read the bit and skip `atomicOr` when it is set; racing first
+  requesters still elect one request-list append from `atomicOr`'s old value.
+  The cull's history and hysteresis marks (`helio-pass-vg-cull`) do the same.
+- **Cull traversal** (`helio-pass-vg-cull`): refinement below the hold
+  threshold skips the history lookup; stats are summed per thread and flushed
+  once; a group's clusters are pushed as workgroup-stack jobs when the group
+  fits; a hierarchy node stops at `tau * TAU_HOLD * tile_scale_min`, the
+  smallest valve scale over its tiles (coverage-complete: no cluster below
+  can have a smaller scale). The valve defaults are now 8 triangles per
+  covered pixel and a 32x ceiling (were 16 and 4x).
+- **One persistent dispatch per phase** (`helio-pass-vg-cull`): workgroup
+  deques, a phase queue for sharing, and an outstanding-work counter for
+  termination replace the fixed rounds, whose last round drained whole
+  subtrees on a few workgroups. Last frame's marks and the valve scales are
+  read from a read-only snapshot (cached loads, not L2 atomics); bin slots
+  and tile estimates are reserved once per workgroup wave.
+- **Capture host**: keeps up to three frames in flight through
+  `Renderer::last_submission` instead of draining the GPU every frame.
+- Unchanged: buffer contracts, ownership, page residency and eviction, the
+  render graph, the geometric error tolerance.
+- Not yet measured as a whole: the persistent traversal with the sectioned
+  trees (see `VG_FOREST.md`, "Not yet re-measured").
