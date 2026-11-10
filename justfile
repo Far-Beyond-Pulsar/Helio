@@ -8,12 +8,24 @@ default:
 ci: fmt-check arch check clippy nextest
 
 # Layer gate (architecture/layers.toml); --update records fixed violations.
+# Needs Python 3.11+; on Windows `scripts/architecture/run.ps1` finds a working
+# interpreter (the Microsoft Store stub does not count) or says what to install.
+[windows]
 arch *args:
-    python scripts/architecture/check_layers.py {{args}}
+    ./scripts/architecture/run.ps1 scripts/architecture/check_layers.py {{args}}
+
+[unix]
+arch *args:
+    python3 scripts/architecture/check_layers.py {{args}}
 
 # How often a change to one unit also changed others (architecture/layers.toml units).
+[windows]
 co-change *args:
-    python scripts/architecture/co_change.py {{args}}
+    ./scripts/architecture/run.ps1 scripts/architecture/co_change.py {{args}}
+
+[unix]
+co-change *args:
+    python3 scripts/architecture/co_change.py {{args}}
 
 fmt:
     cargo fmt --all

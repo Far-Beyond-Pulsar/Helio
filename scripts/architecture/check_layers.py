@@ -11,7 +11,7 @@ Reads architecture/layers.toml and `cargo metadata`, and fails when:
   architecture/kind-names.txt does not record it, or a recorded name is gone
   (docs/architecture/plugin-migration.md, "C. Helio repo is core only").
 
-Usage: python scripts/architecture/check_layers.py [--update]
+Usage: python scripts/architecture/check_layers.py [--update]  (just arch; Windows: see run.ps1)
 """
 
 import json
