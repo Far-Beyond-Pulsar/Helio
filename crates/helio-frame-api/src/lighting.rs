@@ -353,7 +353,10 @@ pub mod sky {
 
     /// The sky over a surface anywhere in the atmosphere from the published
     /// sky table (`atmosphere_sky_table_eval`); with [`ATMOSPHERE_SNIPPET`],
-    /// for a shader binding the table as `atmosphere_sky_table`.
+    /// for a shader binding the frame as `atmosphere` and the table as
+    /// `atmosphere_sky_table`. It reads both through those bindings: a frame
+    /// passed by value would be copied whole into per-invocation memory on
+    /// every call, since its directional lights are indexed at run time.
     pub const ATMOSPHERE_SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
         ATMOSPHERE_SKY_TABLE_MARKER,
         "shaders/atmosphere_sky_table.wgsl"

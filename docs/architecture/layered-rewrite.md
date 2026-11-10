@@ -893,6 +893,13 @@ derivations and `engine_backend`.
 - **API purity test**: `*-api` crates have no statics (#1536 style).
 - **Contract layout tests**: each row ABI has a Rust/WGSL layout test in its
   `*-api` crate; each Pulsar component asserts it matches.
+- **No per-invocation table copies**: shared WGSL reads a per-frame table
+  (the atmosphere frame's directional lights, the sky table) through its
+  binding by name, never through a by-value argument: an array indexed at
+  run time through a value is copied whole into per-invocation memory (with
+  an `AtmosphereFrame` passed by value, deferred lighting wrote 3 KiB a pixel
+  and took 15 ms at 1080p for one sun). `helio_core::shader::value_array_copies` finds such indexes; the
+  WGSL validation walk and the hot passes' shader tests assert there are none.
 - **Test host** (`helio-test-host`): headless device + spine + chosen
   features + contract rows written by key; golden frames and GPU timings per
   feature. A feature PR runs its own suite + a spine smoke test; the preset

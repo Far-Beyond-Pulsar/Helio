@@ -1,7 +1,15 @@
 // The sky over a surface anywhere in the atmosphere, from the sky table
 // (`atmosphere_sky_table`, `SKY_TABLE_*` in atmosphere_common.wgsl). Needs
-// the `atmosphere` snippet and a binding named `atmosphere_sky_table`
-// (array<vec4<f32>>, uniform or storage).
+// the `atmosphere` snippet and two bindings by name: the frame as
+// `atmosphere` (AtmosphereFrame) and the table as `atmosphere_sky_table`
+// (array<vec4<f32>>), each uniform or storage.
+//
+// Both are read through their bindings, never passed in by value: the loop
+// below indexes the frame's directional lights by a runtime index, and an
+// array reached through a by-value argument cannot be indexed in place, so
+// the compiler copies all of it (1.5 KiB) into per-invocation memory on every
+// call. WGSL allows no uniform or storage pointer parameters, so the
+// bindings' names are the contract.
 
 // The table's harmonics at `from_camera` (km, relative to the camera)
 // evaluated along `n`, each band scaled by `bands` (1, 1, 1: irradiance /
@@ -9,30 +17,31 @@
 // undoing the cosine convolution). The result sums each directional light's
 // contribution; above the atmosphere the planet's glow falls with its solid
 // angle. Zero without an atmosphere.
-fn atmosphere_sky_table_eval(frame: AtmosphereFrame, from_camera: vec3<f32>, n: vec3<f32>, bands: vec3<f32>) -> vec3<f32> {
-    if frame.planet.w < 0.5 { return vec3<f32>(0.0); }
-    let bottom = frame.params.bottom_radius;
-    let top = frame.params.top_radius;
-    let pos = from_camera - frame.planet.xyz;
+fn atmosphere_sky_table_eval(from_camera: vec3<f32>, n: vec3<f32>, bands: vec3<f32>) -> vec3<f32> {
+    if atmosphere.planet.w < 0.5 { return vec3<f32>(0.0); }
+    let bottom = atmosphere.params.bottom_radius;
+    let top = atmosphere.params.top_radius;
+    let pos = from_camera - atmosphere.planet.xyz;
     let r = max(length(pos), bottom);
     let up = normalize(pos);
     let height = clamp((r - bottom) / (top - bottom), 0.0, 1.0);
+    let fr = sqrt(height) * f32(SKY_TABLE_R - 1u);
+    let r0 = min(u32(fr), SKY_TABLE_R - 2u);
+    let wr = fr - f32(r0);
     var result = vec3<f32>(0.0);
-    for (var i = 0u; i < frame.directional_light_count.x; i++) {
+    for (var i = 0u; i < atmosphere.directional_light_count.x; i++) {
         let base = i * 3u;
-        let sun = frame.directional_lights[base].xyz;
-        let energy = frame.directional_lights[base + 1u].rgb;
+        let sun = atmosphere.directional_lights[base].xyz;
+        let energy = atmosphere.directional_lights[base + 1u].rgb;
         let mu_s = dot(up, sun);
         var x = sun - up * mu_s;
         if dot(x, x) < 1e-8 { x = cross(up, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(up.x) > 0.9)); }
         x = normalize(x);
         let z = cross(x, up);
         let l = vec3<f32>(dot(n, x), dot(n, up), dot(n, z));
-        let fr = sqrt(height) * f32(SKY_TABLE_R - 1u);
         let fm = clamp((mu_s - SKY_TABLE_MU_LO) / (1.0 - SKY_TABLE_MU_LO), 0.0, 1.0) * f32(SKY_TABLE_MU - 1u);
-        let r0 = min(u32(fr), SKY_TABLE_R - 2u);
         let m0 = min(u32(fm), SKY_TABLE_MU - 2u);
-        let w = vec2<f32>(fr - f32(r0), fm - f32(m0));
+        let wm = fm - f32(m0);
         let basis = array<f32, 6>(
             0.282095 * bands.x,
             0.488603 * l.y * bands.y,
@@ -47,8 +56,8 @@ fn atmosphere_sky_table_eval(frame: AtmosphereFrame, from_camera: vec3<f32>, n: 
             let b = a + SKY_TABLE_COEFFS;
             let c = a + SKY_TABLE_MU * SKY_TABLE_COEFFS;
             let d = c + SKY_TABLE_COEFFS;
-            let v = mix(mix(atmosphere_sky_table[a].rgb, atmosphere_sky_table[b].rgb, w.y),
-                mix(atmosphere_sky_table[c].rgb, atmosphere_sky_table[d].rgb, w.y), w.x);
+            let v = mix(mix(atmosphere_sky_table[a].rgb, atmosphere_sky_table[b].rgb, wm),
+                mix(atmosphere_sky_table[c].rgb, atmosphere_sky_table[d].rgb, wm), wr);
             e += v * basis[k];
         }
         result += max(e, vec3<f32>(0.0)) * energy;
