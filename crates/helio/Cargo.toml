@@ -19,6 +19,8 @@ helio-settings = { workspace = true }
 helio-feature-api = { path = "../helio-feature-api" }
 helio-pass-postprocess = { workspace = true }
 helio-pass-tsr = { workspace = true }
+# The status screen's text pass (no pipeline, or an invalid one).
+helio-pass-debug-overlay = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }

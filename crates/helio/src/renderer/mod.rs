@@ -4,6 +4,8 @@ mod debug;
 mod fullscreen;
 mod input;
 mod pipeline;
+mod pipeline_control;
+mod pipeline_status;
 mod render;
 mod renderer_impl;
 mod resize;
@@ -11,6 +13,7 @@ mod settings;
 mod setup;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 mod shader_reload;
+mod status_screen;
 mod stereo_mirror;
 
 pub use builder::{PassBuildContext, PassGraphBuilderFn, RendererBuilder, SceneDbHandle};
@@ -26,6 +29,7 @@ pub use debug::{
 pub use pipeline::{
     IntoGraph, PipelineFactory, PipelineInfo, PipelineOrigin, RenderPipelineRegistry,
 };
+pub use pipeline_status::{NamedPipeline, PipelineFailure, PipelineStatus, UNNAMED_PIPELINE};
 pub use renderer_impl::{GraphRebuilder, Renderer};
 pub use settings::TsrSetting;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]

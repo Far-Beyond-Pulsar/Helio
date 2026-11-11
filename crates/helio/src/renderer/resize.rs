@@ -6,6 +6,7 @@ use web_time::Instant;
 use helio_core::RenderGraph;
 
 use super::config::RendererConfig;
+use super::pipeline_status::{PipelineFailure, PipelineStatus};
 use super::renderer_impl::Renderer;
 
 impl Renderer {
@@ -65,7 +66,8 @@ impl Renderer {
         // The graph resizes its textures in place and keeps every pass (and
         // its state); only a configuration change rebuilds it. A rebuild due
         // this frame builds at the new size, so the old graph is left alone.
-        if !self.pending_rebuild {
+        // (A pipeline change builds the same way.)
+        if !self.pending_rebuild && self.pending_pipeline.is_none() {
             self.graph.resize(helio_core::RenderSize::new(
                 [internal_w, internal_h],
                 [width, height],
@@ -82,9 +84,17 @@ impl Renderer {
     pub(crate) fn apply_rebuild_now(&mut self) {
         // One stored config, not a field per pass-specific flag, so no
         // setting can be dropped by a rebuild (Helio#254/#255).
-        if let Some(replacement) = self.build_replacement_graph(self.renderer_config()) {
-            self.install_replacement_graph(replacement);
-            self.clear_target_next_frame = true;
+        let config = self.renderer_config();
+        match self.guarded_build(|renderer| renderer.build_replacement_graph(config)) {
+            Some(Ok(replacement)) => {
+                self.install_replacement_graph(replacement);
+                self.clear_target_next_frame = true;
+            }
+            // The pipeline no longer builds (a plugin it needs was disabled, a
+            // shader broke): say so on the output instead of keeping a graph
+            // that is not what was asked for.
+            Some(Err(failure)) => self.fail_current_pipeline(failure),
+            None => {}
         }
     }
 
@@ -96,7 +106,10 @@ impl Renderer {
     /// Builds a fresh graph from `config` with the stored rebuilder, or `None`
     /// if the renderer has none. Shared by resize and shader hot reload; it
     /// does not touch the current graph.
-    pub(crate) fn build_replacement_graph(&self, config: RendererConfig) -> Option<RenderGraph> {
+    pub(crate) fn build_replacement_graph(
+        &self,
+        config: RendererConfig,
+    ) -> Option<Result<RenderGraph, PipelineFailure>> {
         let rebuilder = self.graph_rebuilder.clone()?;
         Some(rebuilder(
             &self.device,
@@ -112,6 +125,15 @@ impl Renderer {
     /// Swaps `replacement` in for the current graph, carrying over what a
     /// rebuild must not lose and reapplying application-owned settings.
     pub(crate) fn install_replacement_graph(&mut self, mut replacement: RenderGraph) {
+        if !self.pipeline_status.is_ready() {
+            // The pipeline builds again after failing: it is the pipeline now.
+            let rebuilder = self.graph_rebuilder.clone();
+            self.install_pipeline_graph(replacement, false);
+            // The rebuilder that made it stays the way to make it again.
+            self.graph_rebuilder = self.graph_rebuilder.take().or(rebuilder);
+            self.pipeline_status = PipelineStatus::Ready;
+            return;
+        }
         // Passes carry persistent state (voxel residency, histories)
         // into the rebuilt graph; replace_graph restores GI and bakes.
         replacement.inherit_persistent_state(&mut self.graph);

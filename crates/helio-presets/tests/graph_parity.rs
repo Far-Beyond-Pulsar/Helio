@@ -12,7 +12,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use helio::{DebugDrawState, PassBuildContext, RenderPipelineRegistry, RendererConfig};
+use helio::{DebugDrawState, IntoGraph, PassBuildContext, RenderPipelineRegistry, RendererConfig};
 use helio_core::{GpuCameraUniforms, PassDeclaration};
 use helio_graph_asset::{Connection, GraphAsset, NodeInstance, PinRef};
 use helio_presets::pipelines::{DEFAULT, DEFERRED_GRAPH};
@@ -202,43 +202,145 @@ fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
     assert!(!validation.has_errors());
 }
 
-#[test]
-fn the_template_builds_the_deferred_preset() {
-    let _gpu = gpu_serial();
-    let Some(fixtures) = fixtures() else {
-        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: deferred template");
-        return;
-    };
-
+/// The preset (`helio.deferred`) and the node graph (`helio.deferred_graph`)
+/// built for `fixtures`' config: the same passes with the same declarations in
+/// the same order, the same swap policy, size and host inputs.
+fn assert_template_matches_preset(fixtures: &Fixtures, what: &str) {
     let mut pipelines = RenderPipelineRegistry::new();
     helio_presets::pipelines::register_builtin_pipelines(&mut pipelines, &Default::default());
     let preset = pipelines
         .create(Some(DEFAULT))
         .expect("default pipeline registered")
-        .into_graph(fixtures.context());
+        .into_graph(fixtures.context())
+        .expect("the pipeline builds");
     let template = pipelines
         .create(Some(DEFERRED_GRAPH))
         .expect("template pipeline registered")
-        .into_graph(fixtures.context());
+        .into_graph(fixtures.context())
+        .expect("the pipeline builds");
 
     let policy = |g: &helio_core::RenderGraph| format!("{:?}", g.swap_policy());
     assert!(
         preset.swap_policy().is_some(),
         "the preset declares a policy"
     );
-    assert_eq!(policy(&preset), policy(&template), "swap policies differ");
+    assert_eq!(
+        policy(&preset),
+        policy(&template),
+        "{what}: swap policies differ"
+    );
     assert_eq!(preset.internal_size(), template.internal_size());
     let inputs = |g: &helio_core::RenderGraph| {
         let mut names = g.external_input_names();
         names.sort_unstable();
         names
     };
-    assert_eq!(inputs(&preset), inputs(&template), "host inputs differ");
+    assert_eq!(
+        inputs(&preset),
+        inputs(&template),
+        "{what}: host inputs differ"
+    );
     assert_eq!(
         passes(&preset),
         passes(&template),
-        "pass list or declarations differ (preset vs template)"
+        "{what}: pass list or declarations differ (preset vs template)"
     );
+}
+
+#[test]
+fn the_template_builds_the_deferred_preset() {
+    let _gpu = gpu_serial();
+    let Some(mut fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: deferred template");
+        return;
+    };
+    assert_template_matches_preset(&fixtures, "FXAA");
+
+    // Temporal resolve: the graph has the TSR node at the project's quality, as
+    // the preset does, not FXAA.
+    let base = fixtures.config.clone();
+    for quality in [helio::TsrQuality::Performance, helio::TsrQuality::Quality] {
+        fixtures.config = base.clone().with_tsr_quality(quality);
+        assert_template_matches_preset(&fixtures, &format!("TSR {quality:?}"));
+    }
+    let mut pipelines = RenderPipelineRegistry::new();
+    helio_presets::pipelines::register_builtin_pipelines(&mut pipelines, &Default::default());
+    let template = pipelines
+        .create(Some(DEFERRED_GRAPH))
+        .expect("template pipeline registered")
+        .into_graph(fixtures.context())
+        .expect("the pipeline builds");
+    assert!(has::<helio_pass_tsr::TsrPass>(&template));
+    assert!(!has::<helio_pass_fxaa::FxaaPass>(&template));
+
+    // The other config switches reach the graph the same way.
+    fixtures.config = base;
+    fixtures.config.enable_ssr = true;
+    assert_template_matches_preset(&fixtures, "SSR");
+}
+
+/// The graph carries what the preset used to insert in code (the lighting
+/// model's draw phases): with a forward model registered the graph's frame
+/// setup node gives the forward phase, so the forward drawer and the lit
+/// G-buffer are not both drawn.
+#[test]
+fn the_graph_sets_the_frame_from_its_frame_setup_node() {
+    let _gpu = gpu_serial();
+    use helio_frame_api::lighting::{model, LightingModel, Shading};
+    let Some(fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: frame setup");
+        return;
+    };
+    let features = helio_feature_api::FeatureSet::new().with(Model {
+        model: LightingModel::new(model::FORWARD, Shading::Forward),
+    });
+    let registry = Arc::new(graphs::registry_with(&features));
+    let asset = graphs::graph_asset(Preset::Forward, &registry, &fixtures.config);
+    let from_graph = helio_graph_asset::GraphAssetPipeline::new(
+        Arc::new(asset),
+        Arc::clone(&registry),
+    );
+    let from_graph = Box::new(from_graph).into_graph(fixtures.context())
+        .expect("the pipeline builds");
+    let from_preset = Preset::Forward
+        .with_registry(registry)
+        .build(fixtures.context());
+    assert_eq!(passes(&from_graph), passes(&from_preset));
+    assert!(!has::<helio_spine::UnlitPass>(&from_graph));
+}
+
+/// The shipped `.rendergraph` files build what the preset builds: a
+/// default-graphs plugin can ship them as the default pipeline.
+#[test]
+fn the_golden_graph_files_build_the_preset() {
+    let _gpu = gpu_serial();
+    let Some(mut fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: golden graphs");
+        return;
+    };
+    let registry = Arc::new(graphs::base_registry());
+    let base = fixtures.config.clone();
+    for (file, config) in [
+        ("deferred.rendergraph", base.clone()),
+        (
+            "deferred_tsr.rendergraph",
+            base.clone().with_tsr_quality(helio::TsrQuality::Quality),
+        ),
+    ] {
+        fixtures.config = config;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(file);
+        let asset = GraphAsset::from_json(&std::fs::read_to_string(path).unwrap()).expect("parses");
+        let pipeline = helio_graph_asset::GraphAssetPipeline::new(
+            Arc::new(asset),
+            Arc::clone(&registry),
+        );
+        let from_file = Box::new(pipeline).into_graph(fixtures.context())
+        .expect("the pipeline builds");
+        let from_preset = Preset::Deferred.build(fixtures.context());
+        assert_eq!(passes(&from_file), passes(&from_preset), "{file}");
+    }
 }
 
 fn has<T: helio_core::RenderPass + 'static>(graph: &helio_core::RenderGraph) -> bool {

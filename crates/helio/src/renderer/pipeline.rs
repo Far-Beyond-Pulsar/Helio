@@ -1,24 +1,30 @@
 //! What a renderer is built from: anything that turns a [`PassBuildContext`]
-//! into a [`RenderGraph`].
+//! into a [`RenderGraph`], or says why it cannot.
 //!
 //! [`IntoGraph`] is the one extension seam for render pipelines. Helio's
 //! built-in pipelines, a visual render-graph asset and a hand-written
 //! `fn(PassBuildContext) -> RenderGraph` all implement it, and
-//! [`RendererBuilder::with_graph`](super::RendererBuilder::with_graph) accepts
-//! any of them. [`RenderPipelineRegistry`] names them so a host can offer the
-//! set as a choice (the level editor's World Settings pipeline picker).
+//! [`RendererBuilder::with_graph`](super::RendererBuilder::with_graph) and
+//! [`Renderer::set_pipeline`](super::Renderer::set_pipeline) accept any of
+//! them. [`RenderPipelineRegistry`] names them so a host can offer the set as
+//! a choice (the level editor's World Settings pipeline picker).
+//!
+//! A pipeline that cannot build returns a [`PipelineFailure`]; the renderer
+//! keeps it as [`PipelineStatus::Invalid`](super::PipelineStatus) and draws the
+//! reason on the output. Nothing is substituted for it.
 //!
 //! A graph is rebuilt when graph-level configuration changes and on shader
 //! reload. An implementation owns that: it installs a
 //! [`GraphRebuilder`](super::GraphRebuilder) with
-//! `RenderGraph::set_graph_data`, as the built-in builders do.
+//! `RenderGraph::set_graph_data`, as the built-in builders do (or hands one to
+//! its [`PipelineFailure`] so a failed build can be retried).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use helio_core::RenderGraph;
 
-use super::PassBuildContext;
+use super::{PassBuildContext, PipelineFailure};
 
 /// A render pipeline that can produce its [`RenderGraph`].
 ///
@@ -26,15 +32,23 @@ use super::PassBuildContext;
 /// graph-level configuration change keeps what it needs in the rebuilder it
 /// installs on the graph.
 pub trait IntoGraph {
-    fn into_graph(self: Box<Self>, ctx: PassBuildContext<'_>) -> RenderGraph;
+    fn into_graph(
+        self: Box<Self>,
+        ctx: PassBuildContext<'_>,
+    ) -> Result<RenderGraph, PipelineFailure>;
 }
 
+/// A hand-written builder always produces its graph (one that cannot panics,
+/// and the renderer reports the panic as the pipeline's failure).
 impl<F> IntoGraph for F
 where
     F: for<'a> FnOnce(PassBuildContext<'a>) -> RenderGraph,
 {
-    fn into_graph(self: Box<Self>, ctx: PassBuildContext<'_>) -> RenderGraph {
-        (*self)(ctx)
+    fn into_graph(
+        self: Box<Self>,
+        ctx: PassBuildContext<'_>,
+    ) -> Result<RenderGraph, PipelineFailure> {
+        Ok((*self)(ctx))
     }
 }
 

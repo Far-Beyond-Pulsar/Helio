@@ -10,11 +10,14 @@ use helio_core::{RenderFrameInputs, RenderGraph, RenderPass};
 
 use super::builder::SceneDbHandle;
 use super::config::{RenderMode, RendererConfig};
+use super::pipeline_status::{PendingPipeline, PipelineFailure, PipelineStatus};
 #[cfg(not(target_arch = "wasm32"))]
 use super::stereo_mirror::StereoMirror;
 
 /// Closure that rebuilds the render graph when its configuration changes
-/// (and for shader hot reload); a resize keeps the graph.
+/// (and for shader hot reload); a resize keeps the graph. A rebuild that
+/// fails is the pipeline's failure ([`PipelineStatus::Invalid`]), not a
+/// reason to draw something else.
 pub type GraphRebuilder = Arc<
     dyn Fn(
             &Arc<wgpu::Device>,
@@ -24,7 +27,7 @@ pub type GraphRebuilder = Arc<
             &wgpu::Buffer,
             &wgpu::Buffer,
             &wgpu::Buffer,
-        ) -> RenderGraph
+        ) -> Result<RenderGraph, PipelineFailure>
         + Send
         + Sync,
 >;
@@ -144,6 +147,16 @@ pub struct Renderer {
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
     pub(crate) graph_rebuild_hook: Option<GraphRebuildHook>,
+    /// Whether the graph is a pipeline's, or the status screen's
+    /// ([`Renderer::pipeline_status`]).
+    pub(crate) pipeline_status: PipelineStatus,
+    /// The id of the pipeline the renderer was last given, whether it built or not.
+    pub(crate) pipeline_id: Option<String>,
+    /// A pipeline change waiting for the next frame boundary
+    /// ([`Renderer::set_pipeline`]).
+    pub(crate) pending_pipeline: Option<PendingPipeline>,
+    /// How a host says a pipeline is assigned, shown on the status screen.
+    pub(crate) status_hint: String,
     /// What the host published for the next frames' features to read
     /// ([`Self::set_scene_payloads`]).
     pub(crate) scene_payloads: helio_core::ScenePayloads,
@@ -567,6 +580,13 @@ impl Renderer {
         self.graph.untraced_geometry()
     }
 
+    /// What the graph's passes route to the presented output, from their
+    /// declarations (see [`RenderGraph::routing_issues`]). A host that knows
+    /// the pipeline's id logs these with it.
+    pub fn routing_issues(&self) -> Vec<helio_core::RoutingIssue> {
+        self.graph.routing_issues()
+    }
+
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
     }
@@ -643,14 +663,17 @@ impl Renderer {
         self.clear_color = color;
     }
 
-    pub fn set_graph(&mut self, mut graph: RenderGraph) {
-        // Extract rebuilder stored in the graph by the builder function
-        self.graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        self.replace_graph(graph);
+    /// Installs an already built graph as the pipeline (named
+    /// [`UNNAMED_PIPELINE`](super::UNNAMED_PIPELINE)), using the rebuilder the
+    /// builder stored on it.
+    pub fn set_graph(&mut self, graph: RenderGraph) {
+        self.install_pipeline_graph(graph, false);
+        self.pipeline_status = PipelineStatus::Ready;
+        self.pipeline_id = Some(super::UNNAMED_PIPELINE.to_owned());
     }
 
     pub fn set_graph_with_builder(&mut self, graph: RenderGraph, rebuilder: GraphRebuilder) {
-        self.replace_graph(graph);
+        self.set_graph(graph);
         self.graph_rebuilder = Some(rebuilder);
     }
 

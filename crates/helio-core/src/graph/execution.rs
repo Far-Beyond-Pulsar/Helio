@@ -186,6 +186,9 @@ pub struct PassDeclaration {
     pub writes: Vec<DeclaredResource>,
     /// SceneDB buffer keys the pass consumes ([`RenderPass::scene_buffers`]).
     pub scene_buffers: Vec<&'static str>,
+    /// The pass produces the frame's image in the presented target
+    /// ([`RenderPass::writes_target`]).
+    pub writes_target: bool,
 }
 
 pub struct RenderGraph {
@@ -1234,6 +1237,26 @@ impl RenderGraph {
         self.passes.len()
     }
 
+    /// What the graph's passes route to the presented output: every pass in
+    /// build order (scheduled or dormant) against the host-supplied inputs.
+    /// See [`check_routing`](crate::graph::check_routing).
+    pub fn routing_issues(&self) -> Vec<crate::graph::RoutingIssue> {
+        let units: Vec<crate::graph::RoutingUnit> = self
+            .build_order_declarations()
+            .into_iter()
+            .enumerate()
+            .map(|(index, (declaration, _))| {
+                crate::graph::RoutingUnit::from_declaration(index, &declaration)
+            })
+            .collect();
+        let host_inputs = self
+            .external_input_names()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        crate::graph::check_routing(&units, &host_inputs)
+    }
+
     /// The size passes are prepared and recorded at, set by
     /// [`lock`](Self::lock).
     pub fn internal_size(&self) -> (u32, u32) {
@@ -1307,6 +1330,7 @@ impl RenderGraph {
             reads: Vec::new(),
             writes: Vec::new(),
             scene_buffers: pass.scene_buffers().to_vec(),
+            writes_target: pass.writes_target(),
         };
         let push = |list: &mut Vec<DeclaredResource>,
                     name: &'static str,

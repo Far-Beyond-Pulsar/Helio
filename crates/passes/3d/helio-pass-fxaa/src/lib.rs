@@ -148,6 +148,10 @@ impl RenderPass for FxaaPass {
         "FXAA"
     }
 
+    fn writes_target(&self) -> bool {
+        true
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read(self.color_input);
         // The input may be a view of an earlier image

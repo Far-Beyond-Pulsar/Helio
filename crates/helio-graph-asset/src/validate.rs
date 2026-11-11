@@ -92,6 +92,12 @@ pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
     let expanded = crate::sections::expand(asset);
     let flattened = crate::buffers::flatten(&expanded.asset, registry);
     let mut validation = validate_flat(&flattened.asset, registry);
+    // Where the frame's result goes, once the graph is sound enough to order.
+    if let Some(plan) = &validation.plan {
+        validation.diagnostics.extend(crate::routing::diagnostics(
+            crate::routing::check_asset_routing(&flattened.asset, plan, registry),
+        ));
+    }
     validation.diagnostics.splice(
         0..0,
         expanded
@@ -155,7 +161,13 @@ fn validate_flat(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
                 pins.push(Some(node_pins));
             }
             None => {
-                error!(Some(&node.id), format!("unknown node kind `{}`", node.kind));
+                match registry.absence(&node.kind) {
+                    Some(reason) => error!(
+                        Some(&node.id),
+                        format!("missing node `{}` ({reason})", node.kind)
+                    ),
+                    None => error!(Some(&node.id), format!("unknown node kind `{}`", node.kind)),
+                }
                 pins.push(None);
             }
         }
@@ -531,6 +543,21 @@ mod tests {
             .diagnostics
             .iter()
             .all(|d| d.node.as_deref() != Some("caps")));
+    }
+
+    #[test]
+    fn a_node_of_an_absent_kind_names_why_it_is_missing() {
+        let mut asset = graph();
+        asset.nodes.push(node("gone", "plugin.pass.gone", None));
+        let mut registry = registry();
+        registry.mark_absent("plugin.pass.gone", "plugin pulsar.x disabled");
+        let result = validate(&asset, &registry);
+        let messages: Vec<_> = result.errors().map(|d| d.message.clone()).collect();
+        assert_eq!(
+            messages,
+            ["missing node `plugin.pass.gone` (plugin pulsar.x disabled)"]
+        );
+        assert!(result.plan.is_none(), "a missing node is an error, not a panic");
     }
 
     #[test]

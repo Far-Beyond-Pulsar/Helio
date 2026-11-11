@@ -4,7 +4,7 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use helio::{GraphRebuilder, IntoGraph, PassBuildContext};
+use helio::{GraphRebuilder, IntoGraph, PassBuildContext, PipelineFailure};
 use helio_core::RenderGraph;
 
 use crate::asset::{GraphAsset, NodeInstance};
@@ -113,9 +113,6 @@ pub(crate) fn build_graph(
     Ok(graph)
 }
 
-/// Builds the engine's own graph when an asset does not compile.
-pub type Fallback = fn(PassBuildContext<'_>) -> RenderGraph;
-
 /// Makes the asset a pipeline builds, from the build's environment (its
 /// renderer config is the [`helio::RendererConfig`] setting). It may add
 /// settings the asset's nodes read.
@@ -132,11 +129,11 @@ enum Source {
 
 /// A graph asset as a pipeline for [`helio::RendererBuilder::with_graph`].
 ///
-/// An authored asset that fails to build is logged and replaced by
-/// `fallback`, so a broken graph never leaves the viewport without a renderer;
-/// the editor reports the same diagnostics where they can be fixed. A made
-/// asset has no fallback: it is the engine's own graph, and one that does not
-/// build is a bug, reported with its diagnostics.
+/// An asset that fails to build is the pipeline's failure
+/// ([`PipelineFailure`]: the reason, every diagnostic, and a rebuilder so it can
+/// be tried again), which the renderer shows on its output and logs. No other
+/// graph is built in its place; the editor reports the same diagnostics where
+/// they can be fixed.
 ///
 /// `swap_policy` is what shader hot reload may swap on its own (see
 /// [`helio_core::SwapPolicy`]); a graph built only of pass nodes whose
@@ -146,16 +143,14 @@ enum Source {
 pub struct GraphAssetPipeline {
     source: Source,
     registry: Arc<NodeRegistry>,
-    fallback: Option<Fallback>,
     swap_policy: Option<helio_core::SwapPolicy>,
 }
 
 impl GraphAssetPipeline {
-    pub fn new(asset: Arc<GraphAsset>, registry: Arc<NodeRegistry>, fallback: Fallback) -> Self {
+    pub fn new(asset: Arc<GraphAsset>, registry: Arc<NodeRegistry>) -> Self {
         Self {
             source: Source::Fixed(asset),
             registry,
-            fallback: Some(fallback),
             swap_policy: None,
         }
     }
@@ -166,7 +161,6 @@ impl GraphAssetPipeline {
         Self {
             source: Source::Made(make),
             registry,
-            fallback: None,
             swap_policy: None,
         }
     }
@@ -180,7 +174,10 @@ impl GraphAssetPipeline {
 }
 
 impl IntoGraph for GraphAssetPipeline {
-    fn into_graph(self: Box<Self>, ctx: PassBuildContext<'_>) -> RenderGraph {
+    fn into_graph(
+        self: Box<Self>,
+        ctx: PassBuildContext<'_>,
+    ) -> Result<RenderGraph, PipelineFailure> {
         build(Arc::new(*self), ctx)
     }
 }
@@ -212,11 +209,61 @@ pub fn build_env<'e>(ctx: &PassBuildContext<'e>) -> BuildEnv<'e> {
     .with_setting(ctx.scene_db.clone())
 }
 
-fn build(pipeline: Arc<GraphAssetPipeline>, ctx: PassBuildContext<'_>) -> RenderGraph {
+/// What a pipeline's failure says about the diagnostics `asset` did not build
+/// with: the errors first, then the warnings (routing findings among them).
+fn failure(name: &str, diagnostics: &[Diagnostic], rebuilder: GraphRebuilder) -> PipelineFailure {
+    let errors = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .count();
+    let warnings = diagnostics.len() - errors;
+    let ordered = diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .chain(
+            diagnostics
+                .iter()
+                .filter(|d| d.severity == Severity::Warning),
+        );
+    PipelineFailure::new(format!(
+        "render graph `{name}` does not build ({errors} error(s), {warnings} warning(s))"
+    ))
+    .with_details(ordered.map(ToString::to_string))
+    .with_rebuilder(rebuilder)
+}
+
+fn build(
+    pipeline: Arc<GraphAssetPipeline>,
+    ctx: PassBuildContext<'_>,
+) -> Result<RenderGraph, PipelineFailure> {
     let mut env = build_env(&ctx);
     let asset = match &pipeline.source {
         Source::Fixed(asset) => Arc::clone(asset),
         Source::Made(make) => Arc::new(make(&pipeline.registry, &mut env)),
+    };
+    // Resize, shader reload and a retry after a failure rebuild the same way.
+    let owns_device = ctx.owns_device;
+    let scene_db = ctx.scene_db.clone();
+    let rebuilder: GraphRebuilder = {
+        let pipeline = Arc::clone(&pipeline);
+        Arc::new(
+            move |device, queue, config, debug_state, camera, debug_camera, cull_stats| {
+                build(
+                    Arc::clone(&pipeline),
+                    PassBuildContext {
+                        device,
+                        queue,
+                        config,
+                        debug_state,
+                        camera_buffer: camera,
+                        debug_camera_buffer: debug_camera,
+                        cull_stats_buffer: cull_stats,
+                        owns_device,
+                        scene_db: scene_db.clone(),
+                    },
+                )
+            },
+        )
     };
     match compile(&asset, &pipeline.registry, &mut env) {
         Ok(mut graph) => {
@@ -224,47 +271,9 @@ fn build(pipeline: Arc<GraphAssetPipeline>, ctx: PassBuildContext<'_>) -> Render
             if let Some(swap_policy) = &pipeline.swap_policy {
                 graph.set_swap_policy(swap_policy.clone().merged(pipeline.registry.swap_policy()));
             }
-            // Resize and shader reload rebuild the same way.
-            let owns_device = ctx.owns_device;
-            let scene_db = ctx.scene_db.clone();
-            let rebuilder: GraphRebuilder = Arc::new(
-                move |device, queue, config, debug_state, camera, debug_camera, cull_stats| {
-                    build(
-                        Arc::clone(&pipeline),
-                        PassBuildContext {
-                            device,
-                            queue,
-                            config,
-                            debug_state,
-                            camera_buffer: camera,
-                            debug_camera_buffer: debug_camera,
-                            cull_stats_buffer: cull_stats,
-                            owns_device,
-                            scene_db: scene_db.clone(),
-                        },
-                    )
-                },
-            );
             graph.set_graph_data(rebuilder);
-            graph
+            Ok(graph)
         }
-        Err(diagnostics) => {
-            let Some(fallback) = pipeline.fallback else {
-                let report = diagnostics
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                panic!("render graph `{}` does not build: {report}", asset.name);
-            };
-            for diagnostic in &diagnostics {
-                log::error!(
-                    "render graph `{}`: {diagnostic}; using the default pipeline",
-                    asset.name
-                );
-            }
-            drop(env);
-            fallback(ctx)
-        }
+        Err(diagnostics) => Err(failure(&asset.name, &diagnostics, rebuilder)),
     }
 }

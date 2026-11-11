@@ -9,6 +9,7 @@ use pulsar_scenedb::gpu::GpuMirrorHandle;
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
 use super::pipeline::IntoGraph;
+use super::pipeline_status::{NamedPipeline, UNNAMED_PIPELINE};
 use super::renderer_impl::Renderer;
 
 /// Shared construction inputs for passes and graph composition. New graph
@@ -43,10 +44,17 @@ pub type SceneDbHandle = GpuMirrorHandle;
 /// Builder for [`Renderer`] that eliminates the repetitive boilerplate of
 /// creating internal buffers, the scene, and debug state.
 ///
-/// You **must** provide a [`RenderGraph`] via one of:
+/// A pipeline is optional: a renderer built without one draws the status screen
+/// ("No render pipeline assigned") until the host assigns one with
+/// [`Renderer::set_pipeline`]. Give it one with:
 ///
+/// * [`with_graph`](Self::with_graph) / [`with_pipeline`](Self::with_pipeline) –
+///   anything that implements [`IntoGraph`];
 /// * [`with_pass_build_context`](Self::with_pass_build_context) – a closure
 ///   that builds the graph from one shared construction context.
+///
+/// A pipeline that does not build does not fail `build`: the renderer comes
+/// back with [`PipelineStatus::Invalid`](super::PipelineStatus) and draws why.
 ///
 /// # Example – default deferred graph
 ///
@@ -75,7 +83,8 @@ pub type SceneDbHandle = GpuMirrorHandle;
 /// ```
 pub struct RendererBuilder {
     config: RendererConfig,
-    pass_graph_fn: Option<PassGraphBuilderFn>,
+    pipeline: Option<NamedPipeline>,
+    status_hint: Option<String>,
     editor_mode: bool,
     scene_derivations: Vec<Box<dyn helio_core::SceneDerivation>>,
     clear_color: [f32; 4],
@@ -95,7 +104,8 @@ impl RendererBuilder {
     pub fn new(config: RendererConfig, scene_db: SceneDbHandle) -> Self {
         Self {
             config,
-            pass_graph_fn: None,
+            pipeline: None,
+            status_hint: None,
             editor_mode: false,
             scene_derivations: Vec::new(),
             clear_color: [0.02, 0.02, 0.03, 1.0],
@@ -105,8 +115,24 @@ impl RendererBuilder {
     }
 
     /// Provide a graph builder using a single shared construction context.
-    pub fn with_pass_build_context(mut self, f: PassGraphBuilderFn) -> Self {
-        self.pass_graph_fn = Some(f);
+    pub fn with_pass_build_context(self, f: PassGraphBuilderFn) -> Self {
+        self.with_pipeline(UNNAMED_PIPELINE, f)
+    }
+
+    /// Start with `pipeline`, known to the status screen and the host as `id`.
+    pub fn with_pipeline(
+        mut self,
+        id: impl Into<String>,
+        pipeline: impl IntoGraph + 'static,
+    ) -> Self {
+        self.pipeline = Some(NamedPipeline::new(id, pipeline));
+        self
+    }
+
+    /// What the status screen says about assigning a pipeline
+    /// ([`Renderer::set_status_hint`]).
+    pub fn with_status_hint(mut self, hint: impl Into<String>) -> Self {
+        self.status_hint = Some(hint.into());
         self
     }
 
@@ -142,8 +168,9 @@ impl RendererBuilder {
     }
 
     /// [`with_graph`](Self::with_graph) for an already boxed pipeline.
-    pub fn with_boxed_graph(self, pipeline: Box<dyn IntoGraph>) -> Self {
-        self.with_pass_build_context(Box::new(move |ctx| pipeline.into_graph(ctx)))
+    pub fn with_boxed_graph(mut self, pipeline: Box<dyn IntoGraph>) -> Self {
+        self.pipeline = Some(NamedPipeline::boxed(UNNAMED_PIPELINE, pipeline));
+        self
     }
 
     /// Mark the renderer as sharing a device created externally.
@@ -198,13 +225,10 @@ impl RendererBuilder {
 
     /// Build the [`Renderer`].
     ///
-    /// Creates the debug buffers and debug state internally, then calls the
-    /// closure registered via [`with_pass_build_context`](Self::with_pass_build_context)
-    /// to obtain the render graph, and finally constructs the renderer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `with_pass_build_context` was not called before `build`.
+    /// Creates the debug buffers and debug state internally, constructs the
+    /// renderer and builds the pipeline given to it, if any. With none, or one
+    /// that does not build, the renderer shows the status screen
+    /// ([`Renderer::pipeline_status`] says which).
     pub fn build(
         self,
         device: Arc<wgpu::Device>,
@@ -241,22 +265,6 @@ impl RendererBuilder {
         });
 
         let config = self.config;
-        let pass_graph_fn = self
-            .pass_graph_fn
-            .expect("RendererBuilder::build: call .with_pass_build_context() before .build()");
-        let graph = pass_graph_fn(PassBuildContext {
-            device: &device,
-            queue: &queue,
-            config: config.clone(),
-            debug_state: debug_state.clone(),
-            camera_buffer: &camera_buffer,
-            debug_camera_buffer: &debug_camera_buffer,
-            cull_stats_buffer: &cull_stats_buffer,
-            owns_device: self.owns_device,
-            scene_db: self.scene_db.clone(),
-        });
-
-        let scene_db = self.scene_db;
         let mut renderer = Renderer::construct(
             device,
             queue,
@@ -265,21 +273,26 @@ impl RendererBuilder {
             height,
             config.render_scale,
             config,
-            graph,
             debug_state,
             camera_buffer,
             debug_camera_buffer,
             cull_stats_buffer,
-            scene_db,
+            self.scene_db,
         );
 
         renderer.owns_device = self.owns_device;
         renderer.set_editor_mode(self.editor_mode);
-        // The host's derivations first, then the ones the features brought
-        // (made at construction), which may read what the host's published.
-        let features = std::mem::replace(&mut renderer.scene_derivations, self.scene_derivations);
-        renderer.scene_derivations.extend(features);
+        // The host's derivations first; the ones the pipeline's features bring
+        // join after them (below), and may read what the host's published.
+        renderer.scene_derivations = self.scene_derivations;
         renderer.set_clear_color(self.clear_color);
+        if let Some(hint) = self.status_hint {
+            renderer.status_hint = hint;
+        }
+        // The pipeline last: its features' derivations join the host's, and it
+        // builds with the renderer's own buffers, device ownership and config.
+        renderer.set_pipeline(self.pipeline);
+        renderer.apply_pending_pipeline();
 
         renderer
     }

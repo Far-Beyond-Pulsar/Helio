@@ -967,6 +967,7 @@ dependencies = [
  "helio-core",
  "helio-feature-api",
  "helio-frame-api",
+ "helio-pass-debug-overlay",
  "helio-pass-postprocess",
  "helio-pass-tsr",
  "helio-settings",

@@ -124,6 +124,9 @@ impl Renderer {
             helio_core::cpu_scope!("Helio: apply_resize_now");
             self.apply_resize_now(w, h);
         }
+        // After the resize (the pipeline builds at the new size), before the
+        // rebuild (a new pipeline is a rebuild already).
+        self.apply_pending_pipeline();
         if std::mem::take(&mut self.pending_rebuild) {
             helio_core::cpu_scope!("Helio: rebuild graph");
             self.apply_rebuild_now();
@@ -261,6 +264,9 @@ impl Renderer {
                 coordinate_spaces: &self.camera_buffer,
                 coordinate_spaces_prev: &self.camera_buffer,
             });
+        // Under the status screen the frame is cleared to its own colour.
+        let clear_color =
+            super::status_screen::clear_color(&self.pipeline_status).unwrap_or(self.clear_color);
         let ambient = self
             .graph_config
             .features
@@ -268,7 +274,7 @@ impl Renderer {
         resource_registry.write(
             helio_core::resource_keys::render_environment(),
             helio_core::RenderEnvironment {
-                clear_color: self.clear_color,
+                clear_color,
                 ambient_color: ambient.color,
                 ambient_intensity: ambient.intensity,
                 tlas: rays.as_deref().map(|rays| &rays.tlas),
@@ -352,10 +358,10 @@ impl Renderer {
         // (validation, fence work) — issuing two of them back-to-back for a
         // full-screen clear and a 32-byte buffer clear was pure overhead.
         let clear = wgpu::Color {
-            r: self.clear_color[0] as f64,
-            g: self.clear_color[1] as f64,
-            b: self.clear_color[2] as f64,
-            a: self.clear_color[3] as f64,
+            r: clear_color[0] as f64,
+            g: clear_color[1] as f64,
+            b: clear_color[2] as f64,
+            a: clear_color[3] as f64,
         };
         let mut clear_encoder =
             self.device
@@ -411,8 +417,12 @@ impl Renderer {
                 self.world_origin,
             );
             scene_input.set_payloads(self.scene_payloads.clone());
-            helio_core::cpu_scope!("Helio: scene derivations");
-            scene_input.run_derivations(&mut self.scene_derivations);
+            // The scene's derived buffers are for a pipeline's passes; the status
+            // screen reads none.
+            if self.pipeline_status.is_ready() {
+                helio_core::cpu_scope!("Helio: scene derivations");
+                scene_input.run_derivations(&mut self.scene_derivations);
+            }
             scene_input
         };
         {
@@ -504,6 +514,7 @@ impl Renderer {
             let _ = self.device.poll(wgpu::PollType::Poll);
         }
         self.poll_cull_stats_readback();
+        self.apply_pending_pipeline();
 
         let now = Instant::now();
         let dt = now

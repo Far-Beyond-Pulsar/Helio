@@ -15,8 +15,12 @@
 use std::sync::{Arc, Mutex};
 
 use helio::{DebugDrawState, RendererConfig};
-use helio_feature_api::{pass_node, Feature, FeatureRegistrar, FeatureSet};
-use helio_frame_api::{FrameNode, Phase, Slot};
+use helio_feature_api::{
+    pass_node, Feature, FeatureRegistrar, FeatureSet, NodeDescriptor, ParamDesc, PinDesc,
+};
+use helio_frame_api::color::ReactiveMask;
+use helio_frame_api::lighting::{model as model_ids, LightingModel, LightingModelId};
+use helio_frame_api::{FrameNode, Phase, PhaseList, Slot};
 
 pub use helio_feature_api::{pass_kind as kind, SceneColorFormat};
 pub use helio_frame_api::{host_kind, HOST_INPUTS};
@@ -35,6 +39,52 @@ pub fn default_features() -> FeatureSet {
         .with(helio_pass_buffer_view::BufferViewFeature)
         .with(helio_pass_perf_overlay::PerfOverlayFeature)
         .with(RendererNodes)
+}
+
+/// Kind of the frame setup node: the first node of every shipped graph.
+pub const FRAME_SETUP: &str = "helio.frame.setup";
+
+/// The frame setup node: which lighting model the graph resolves its lighting
+/// with, and so the draw phases it runs, how the indirect-specular layers are
+/// taken and where the lighting inputs run, as the settings the nodes after
+/// it read. A `reactive_mask` asks the temporal resolve for the reactive mask
+/// (transparency that a model leaves to TSR).
+///
+/// `models` are the lighting models the registry's features registered; a
+/// model nobody registered resolves to the spine's unlit stand-in, with one
+/// warning. It adds no pass, so it is the same data in a `.rendergraph` as in a
+/// preset.
+pub(crate) fn frame_setup_node(models: Vec<LightingModel>) -> NodeDescriptor {
+    NodeDescriptor::new(
+        FRAME_SETUP,
+        "Frame: Lighting Model",
+        "Passes: Scene Prep",
+        "Chooses the lighting model the frame resolves with (the draw phases, specular layers and lighting-input order follow it). Place it first.",
+        move |build| {
+            let wanted = build.text("model");
+            let model = models
+                .iter()
+                .find(|model| model.id == wanted)
+                .or_else(|| models.iter().find(|model| model.id == model_ids::UNLIT))
+                .ok_or_else(|| "the spine registers no unlit lighting model".to_string())?;
+            if model.id != wanted {
+                crate::presets::warn_model_missing_once(&wanted, model.id);
+            }
+            build.env.insert_setting(LightingModelId(model.id));
+            build
+                .env
+                .insert_setting(PhaseList(crate::presets::phases_for(model.shading)));
+            build.env.insert_setting(model.specular_layers);
+            build.env.insert_setting(model.inputs_order);
+            if build.boolean("reactive_mask") {
+                build.env.insert_setting(ReactiveMask);
+            }
+            Ok(())
+        },
+    )
+    .with_param(ParamDesc::text("model", "Lighting model", model_ids::DEFERRED))
+    .with_param(ParamDesc::boolean("reactive_mask", "Reactive mask", false))
+    .with_pins(vec![PinDesc::flow("in")], vec![PinDesc::flow("out")])
 }
 
 /// The renderer's nodes and the config bridge.

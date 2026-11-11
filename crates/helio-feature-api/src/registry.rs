@@ -468,6 +468,10 @@ pub struct NodeRegistry {
     /// A kind registered directly (the core nodes every graph has) has no
     /// entry: no feature owns it.
     owners: BTreeMap<String, &'static str>,
+    /// Kinds a host knows exist but did not register, with why (a plugin that
+    /// owns them is disabled). Validation names the reason instead of
+    /// reporting an unknown kind.
+    absent: BTreeMap<String, String>,
     pin_table: PinTable,
     marker: Option<MarkerFn>,
     preparers: Vec<PrepareFn>,
@@ -535,7 +539,23 @@ impl NodeRegistry {
         by_feature
     }
 
+    /// Records that node `kind` is not registered because of `reason` (a plugin
+    /// that owns it is disabled): a graph naming it reports the reason (see
+    /// [`Self::absence`]). A kind that is registered is not absent.
+    pub fn mark_absent(&mut self, kind: impl Into<String>, reason: impl Into<String>) {
+        let kind = kind.into();
+        if !self.nodes.contains_key(&kind) {
+            self.absent.insert(kind, reason.into());
+        }
+    }
+
+    /// Why node `kind` is not registered, when a host said ([`Self::mark_absent`]).
+    pub fn absence(&self, kind: &str) -> Option<&str> {
+        self.absent.get(kind).map(String::as_str)
+    }
+
     fn insert(&mut self, mut descriptor: NodeDescriptor) {
+        self.absent.remove(&descriptor.kind);
         if descriptor.generated {
             let table = Arc::clone(&self.pin_table);
             let kind = descriptor.kind.clone();

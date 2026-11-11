@@ -33,19 +33,31 @@ pub fn template_config() -> helio::RendererConfig {
     helio::RendererConfig::new(1920, 1080, wgpu::TextureFormat::Rgba8UnormSrgb)
 }
 
-/// The default pipeline's nodes in execution order, as (id, kind).
-fn deferred_nodes(registry: &NodeRegistry) -> Vec<(String, String)> {
-    crate::presets::Preset::Deferred
-        .nodes(registry, &template_config())
-        .into_iter()
-        .map(|node| (node.id, node.kind))
-        .collect()
+/// `config` with temporal super-resolution at `quality`: the template whose
+/// graph ends its scene-linear chain with the TSR node instead of FXAA.
+pub fn template_config_tsr(quality: helio::TsrQuality) -> helio::RendererConfig {
+    template_config().with_tsr_quality(quality)
+}
+
+/// The nodes of `preset` for `config` in execution order, with their parameters.
+fn preset_nodes(
+    registry: &NodeRegistry,
+    preset: crate::presets::Preset,
+    config: &helio::RendererConfig,
+) -> Vec<NodeInstance> {
+    preset.nodes(registry, config)
 }
 
 /// Core nodes plus everything `features` register.
 pub fn registry_for(features: &helio_feature_api::FeatureSet) -> NodeRegistry {
     let mut registry = helio_graph_asset::core_registry();
     features.register_into(&mut registry);
+    // The frame setup resolves the lighting models the features registered.
+    let models = helio_frame_api::lighting::registered_models(&registry)
+        .into_iter()
+        .cloned()
+        .collect();
+    registry.register(features::frame_setup_node(models));
     registry
 }
 
@@ -112,9 +124,10 @@ fn probe_asset(registry: &NodeRegistry) -> GraphAsset {
     add_node(&mut asset, "start", core_nodes::ON_FRAME_START);
     add_host_inputs(&mut asset, registry);
     let mut placed: Vec<String> = Vec::new();
-    for (id, kind) in deferred_nodes(registry) {
-        add_node(&mut asset, &id, &kind);
-        placed.push(kind);
+    let preset = crate::presets::Preset::Deferred;
+    for node in preset_nodes(registry, preset, &template_config()) {
+        placed.push(node.kind.clone());
+        asset.nodes.push(node);
     }
     let mut others = pass_kinds(registry);
     others.retain(|k| !placed.contains(k));
@@ -182,18 +195,50 @@ pub fn scenedb_kind(key: &str) -> String {
 /// the chain (and the host nodes, which declare what the renderer supplies), which
 /// builds the same pipeline.
 pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
+    graph_asset(
+        crate::presets::Preset::Deferred,
+        registry,
+        &template_config(),
+    )
+}
+
+/// [`deferred_graph_asset`] for `config`: the same graph, with the TSR node
+/// (at `config`'s quality) where `config` asks for temporal resolve and FXAA
+/// otherwise, exactly as the preset builds it.
+pub fn deferred_graph_asset_for(
+    registry: &NodeRegistry,
+    config: &helio::RendererConfig,
+) -> GraphAsset {
+    graph_asset(crate::presets::Preset::Deferred, registry, config)
+}
+
+/// `preset` for `config` as a laid-out graph (see [`deferred_graph_asset`]).
+///
+/// Every node comes from the preset's own node list, so the nodes that
+/// features placed at the frame's slots and draw phases (any plugin's, by
+/// `NodeDescriptor::at`/`in_slot`/`drawer`) are in the asset in their place, and
+/// [`auto_layout`] and `sectionize` put them in their lane by their category.
+pub fn graph_asset(
+    preset: crate::presets::Preset,
+    registry: &NodeRegistry,
+    config: &helio::RendererConfig,
+) -> GraphAsset {
     let wired = registry.has_generated_pins();
     let mut asset = GraphAsset {
-        name: "Deferred".into(),
+        name: preset.name().into(),
         description: "Helio's default deferred pipeline, one node per pass.".into(),
         ..Default::default()
     };
 
-    let nodes = deferred_nodes(registry);
+    // The preset's own instances, parameters included (TSR's quality, the frame
+    // setup's lighting model).
+    let instances = preset_nodes(registry, preset, config);
+    let nodes: Vec<(String, String)> = instances
+        .iter()
+        .map(|node| (node.id.clone(), node.kind.clone()))
+        .collect();
     add_node(&mut asset, "start", core_nodes::ON_FRAME_START);
-    for (id, kind) in &nodes {
-        add_node(&mut asset, id, kind);
-    }
+    asset.nodes.extend(instances);
     add_node(&mut asset, "output", core_nodes::OUTPUT);
 
     // The execution chain.
@@ -370,6 +415,200 @@ mod tests {
         );
     }
 
+    type Built = Vec<(String, String, helio_graph_asset::Params)>;
+
+    /// The executing nodes of an asset in the order the compiler builds them,
+    /// sections expanded.
+    fn built_order(asset: &GraphAsset, registry: &NodeRegistry) -> Built {
+        let validation = validate(asset, registry);
+        assert!(!validation.has_errors(), "{:?}", validation.diagnostics);
+        let flat = validation.flat.expect("expanded");
+        let plan = validation.plan.expect("valid");
+        plan.order
+            .iter()
+            .map(|i| &flat.nodes[*i])
+            .filter(|node| {
+                registry.get(&node.kind).is_some_and(|d| {
+                    let pins = d.pins(&node.params);
+                    pins.inputs
+                        .iter()
+                        .chain(&pins.outputs)
+                        .any(|pin| pin.ty.kind == PinKind::Flow)
+                })
+            })
+            .map(|node| (node.id.clone(), node.kind.clone(), node.params.clone()))
+            .collect()
+    }
+
+    /// The preset's chain: On Frame Start, the preset's nodes, the Output.
+    fn preset_order(
+        preset: crate::presets::Preset,
+        registry: &NodeRegistry,
+        config: &helio::RendererConfig,
+    ) -> Built {
+        let mut expected: Built = vec![(
+            "start".into(),
+            core_nodes::ON_FRAME_START.into(),
+            Default::default(),
+        )];
+        expected.extend(
+            preset
+                .nodes(registry, config)
+                .into_iter()
+                .map(|node| (node.id, node.kind, node.params)),
+        );
+        expected.push((
+            "output".into(),
+            core_nodes::OUTPUT.into(),
+            Default::default(),
+        ));
+        expected
+    }
+
+    /// The graph is the preset: for each shipped preset and anti-aliasing the
+    /// laid-out, sectioned asset builds its nodes in the preset's order with
+    /// the preset's parameters. (The `add_pass` builders this replaces are
+    /// gone; the preset's node list is the reference the graph is held to.)
+    #[test]
+    fn the_graph_builds_the_presets_nodes_in_the_presets_order() {
+        use crate::presets::Preset;
+        let registry = base_registry();
+        let tsr = template_config_tsr(helio::TsrQuality::Quality);
+        for preset in Preset::ALL {
+            for config in [template_config(), tsr.clone()] {
+                let asset = graph_asset(preset, &registry, &config);
+                assert_eq!(
+                    built_order(&asset, &registry),
+                    preset_order(preset, &registry, &config),
+                    "{}",
+                    preset.name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tsr_graph_has_the_tsr_node_at_the_configured_quality_and_no_fxaa() {
+        let registry = base_registry();
+        let has = |order: &Built, name: &str| order.iter().any(|(_, k, _)| *k == kind(name));
+        let fxaa = built_order(&deferred_graph_asset(&registry), &registry);
+        assert!(has(&fxaa, "fxaa") && !has(&fxaa, "tsr"));
+
+        let config = template_config_tsr(helio::TsrQuality::Performance);
+        let tsr = built_order(&deferred_graph_asset_for(&registry, &config), &registry);
+        assert!(has(&tsr, "tsr") && !has(&tsr, "fxaa"));
+        let at = |name: &str| tsr.iter().position(|(_, k, _)| *k == kind(name)).unwrap();
+        assert_eq!(tsr[at("tsr")].2["quality"], "performance");
+        // TSR takes FXAA's place: before the resolved colour chain.
+        assert!(at("tsr") < at("post_process"));
+    }
+
+    /// The frame setup leads the chain and carries the lighting model the
+    /// preset chose, by id, whether or not a plugin registered it.
+    #[test]
+    fn the_frame_setup_leads_the_chain() {
+        let registry = base_registry();
+        let order = built_order(&deferred_graph_asset(&registry), &registry);
+        assert_eq!(order[1].1, features::FRAME_SETUP, "{order:?}");
+        assert_eq!(order[1].2["model"], "deferred");
+        assert_eq!(order[1].2["reactive_mask"], false);
+    }
+
+    /// Nodes a plugin registered at the frame's slots and phases are in the
+    /// default graph, in their place, with no preset naming them: the seam is
+    /// `NodeDescriptor::in_slot` / `drawer` (`helio_frame_api::FrameNode`).
+    #[test]
+    fn a_node_placed_in_a_slot_joins_the_default_graph_and_a_section() {
+        use helio_feature_api::{pass_node, Feature, FeatureRegistrar, FeatureSet};
+        use helio_frame_api::{FrameNode, Slot};
+
+        struct Plugin;
+        impl Feature for Plugin {
+            fn id(&self) -> &'static str {
+                "test.slot_node"
+            }
+            fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+                registrar.node(
+                    pass_node(
+                        "slot_test",
+                        "Test: Slot node",
+                        "Passes: Geometry",
+                        "",
+                        |_| Ok(()),
+                    )
+                    .in_slot(Slot::Geometry, 0),
+                );
+            }
+        }
+
+        let registry = registry_with(&FeatureSet::new().with(Plugin));
+        let asset = deferred_graph_asset(&registry);
+        let order = built_order(&asset, &registry);
+        let at = |name: &str| order.iter().position(|(_, k, _)| *k == kind(name));
+        let placed = at("slot_test").expect("the node joined the default graph");
+        assert!(at("background").unwrap() < placed && placed < at("unlit").unwrap());
+        // It sits in a section of the sectioned graph, not loose on the main graph.
+        assert!(asset.nodes.iter().all(|n| n.kind != kind("slot_test")));
+        assert!(asset
+            .sections
+            .iter()
+            .any(|s| s.nodes.iter().any(|n| n.kind == kind("slot_test"))));
+    }
+
+    fn golden(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("assets")
+            .join(name)
+    }
+
+    /// The default graphs as the `.rendergraph` files a default-graphs plugin
+    /// ships: the sectioned, laid-out kernel graph for FXAA and for TSR.
+    /// Generated from code only to bootstrap them
+    /// (`regenerate_the_golden_graphs`); a test fails when they drift apart.
+    fn golden_graphs() -> [(&'static str, GraphAsset); 2] {
+        let registry = base_registry();
+        let tsr = template_config_tsr(helio::TsrQuality::Quality);
+        [
+            ("deferred.rendergraph", deferred_graph_asset(&registry)),
+            (
+                "deferred_tsr.rendergraph",
+                deferred_graph_asset_for(&registry, &tsr),
+            ),
+        ]
+    }
+
+    const REGENERATE: &str =
+        "cargo test -p helio-presets regenerate_the_golden_graphs -- --ignored";
+
+    #[test]
+    fn the_golden_default_graphs_match_the_code() {
+        let registry = base_registry();
+        for (file, expected) in golden_graphs() {
+            let text = std::fs::read_to_string(golden(file))
+                .unwrap_or_else(|e| panic!("{file}: {e}; run `{REGENERATE}`"));
+            let on_disk = GraphAsset::from_json(&text).expect("the golden graph parses");
+            assert_eq!(
+                on_disk, expected,
+                "{file} differs from the code; run `{REGENERATE}`"
+            );
+            let validation = validate(&on_disk, &registry);
+            assert!(
+                !validation.has_errors(),
+                "{file}: {:?}",
+                validation.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "writes assets/*.rendergraph; run to bless the default graphs"]
+    fn regenerate_the_golden_graphs() {
+        std::fs::create_dir_all(golden("")).unwrap();
+        for (file, asset) in golden_graphs() {
+            std::fs::write(golden(file), asset.to_json() + "\n").unwrap();
+        }
+    }
+
     fn pins(inputs: Vec<PinDesc>, outputs: Vec<PinDesc>) -> NodePins {
         let mut all_inputs = vec![PinDesc::flow("in")];
         all_inputs.extend(inputs);
@@ -458,7 +697,8 @@ mod tests {
         assert!(flat_has(("hiz", "out_hiz"), ("unlit", "hiz")));
         assert!(flat_has(("unlit", "out_depth"), ("hiz", "depth")));
         // The execution chain runs from On Frame Start through the sections.
-        assert!(flat_has(("start", "out"), ("background", "in")));
+        assert!(flat_has(("start", "out"), ("frame", "in")));
+        assert!(flat_has(("frame", "out"), ("background", "in")));
 
         // A Get sits left of the pass that reads it, a Set right of the pass that writes.
         let x = |id: &str| {

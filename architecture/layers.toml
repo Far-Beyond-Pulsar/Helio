@@ -80,13 +80,14 @@ helio-frame-api = { layer = "feature_api" }
 helio-pass-hiz = { layer = "spine" }
 helio-pass-tsr = { layer = "spine" }
 helio-pass-postprocess = { layer = "spine" }
+# On-screen text. The renderer's status screen (no pipeline, an invalid one) draws with it.
+helio-pass-debug-overlay = { layer = "spine" }
 helio-spine = { layer = "spine" }
 
 # features
 helio-pass-ssr = { layer = "feature", group = "reflections" }
 helio-pass-planar-reflection = { layer = "feature", group = "reflections" }
 helio-pass-fxaa = { layer = "feature", group = "post-aa" }
-helio-pass-debug-overlay = { layer = "feature", group = "debug" }
 helio-pass-perf-overlay = { layer = "feature", group = "debug" }
 helio-pass-buffer-view = { layer = "feature", group = "debug" }
 helio-bake = { layer = "feature", group = "bake" }

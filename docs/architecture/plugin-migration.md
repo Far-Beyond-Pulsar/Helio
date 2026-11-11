@@ -2831,3 +2831,61 @@ T5, recorded in Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 14):
   palette, VG instance, suppression and object structure/moved buffers, the
   portal chain's two.
 - Helio's own gate is unchanged (0 violations, 31 recorded kind names).
+
+As built, plugin nodes in graph assets (2026-11-11, Pulsar-Native; Helio side:
+`helio-feature-api`, `helio-graph-asset`):
+
+- **A plugin's passes are nodes already, through its feature.** A plugin's root
+  submits `RenderFeatureRegistration`; the feature's `register` adds each pass
+  as a `NodeDescriptor` (`registrar.node`, kind `helio.pass.<name>`, an `enabled`
+  parameter, generated pins, a frame slot or draw-phase placement). The engine's
+  node registry is the core nodes, Helio's features and every *enabled*
+  plugin's features; the probe derives pins from what the passes declare. There
+  is no second registration path: the raw `register_graph_node` was removed.
+- **The probe builds nodes with the plugins' settings** (`render_features::
+  configure`). A node that builds nothing without its feature's settings (the
+  voxel terrain's chunk pass) was probed as no pass and had no pins.
+- **A disabled plugin is absent, with the reason.** `NodeRegistry::mark_absent`
+  / `absence` (kind-agnostic: a host says why a kind is not registered);
+  validation reports `missing node `<kind>` (plugin <id> disabled)` instead of
+  `unknown node kind`. The engine marks the nodes of every disabled plugin's
+  features.
+- Helio still names no kind and no plugin: only a reason string.
+
+As built, routing validation (2026-11-11, Pulsar-Native; Helio side: `helio-core`
+`graph/routing.rs`, `helio-graph-asset` `routing.rs`):
+
+- **One check, two front ends.** `helio_core::check_routing` is pure over
+  `RoutingUnit`s (reads, writes, `writes_target`) and the host inputs. It lives in
+  core because the renderer's guard needs it and `helio-graph-asset` sits above
+  `helio`. `helio_graph_asset::routing` derives units from a flattened asset's pins
+  and `validate` reports them; `RenderGraph::routing_issues` derives them from
+  `PassDeclaration`s and `Renderer::construct` logs them for every graph, legacy
+  builders included.
+- **The presented target is declared.** `RenderPass::writes_target` (default
+  false) is on FXAA, TSR (unless intermediate) and PostProcess; it is carried in
+  `PassDeclaration`. No pass writing it is the hard error (the frame stays black).
+- Findings and rules: `.agents/RENDER_GRAPH.md`, "Routing validation".
+
+As built, the default graph as data (2026-11-11, `helio-presets`):
+
+- **No second builder to compare with.** The `add_pass` builders were already gone;
+  `helio.deferred` is `Preset::Deferred` (slots and phases). `helio.deferred_graph` was the
+  one that differed: a fixed FXAA asset (no TSR), and it never set the lighting model's
+  settings the preset inserted in code (`PhaseList`, `LightingModelId`, specular layers,
+  lighting-input order, `ReactiveMask`). Both are fixed.
+- **`graph_asset(preset, registry, config)`** takes `Preset::nodes` instances with their
+  parameters (the TSR node and its quality). `deferred_graph_asset_for(registry, config)`;
+  `helio.deferred_graph` is a made pipeline over it.
+- **`helio.frame.setup`** (Frame: Lighting Model, `features::FRAME_SETUP`) leads every
+  preset's chain and publishes those settings; `registry_for` snapshots the registered
+  lighting models into it. The pipeline closure inserts nothing now.
+- **Plugin nodes need no new seam.** The existing `NodeDescriptor::at` / `FrameNode::in_slot` /
+  `drawer` placement (an extension point plus order) already puts a plugin node in the
+  default graph; `graph_asset` places and `sectionize` lanes it by its category
+  (test: `a_node_placed_in_a_slot_joins_the_default_graph_and_a_section`).
+- **Golden `.rendergraph` files** (`helio-presets/assets/`, FXAA and TSR) with a drift test
+  and an ignored regenerate test; `graph_parity` builds them and compares the pass lists
+  with the preset. A default-graphs plugin can ship them.
+- Not done: the editor's wired (Get/Set) form on disk, a debug overlay node, deleting the
+  preset path as the engine default.

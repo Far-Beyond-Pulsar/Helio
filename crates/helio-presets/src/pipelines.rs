@@ -18,7 +18,8 @@ pub const DEFERRED_FXAA: &str = "helio.fxaa";
 pub const FORWARD_OPAQUE: &str = "helio.forward_opaque";
 pub const FORWARD_ONLY: &str = "helio.forward_only";
 /// The default deferred pipeline built from its node graph
-/// ([`crate::graphs::deferred_graph_asset`]) rather than from code.
+/// ([`crate::graphs::deferred_graph_asset_for`]): the same nodes and settings
+/// as [`DEFAULT`], laid out in sections.
 pub const DEFERRED_GRAPH: &str = "helio.deferred_graph";
 
 struct Spec {
@@ -107,11 +108,18 @@ pub fn register_builtin_pipelines(
             origin: PipelineOrigin::BuiltIn,
         },
         Arc::new(move || {
+            // Made for each build from the renderer's config, like the preset:
+            // the TSR node (at the project's quality) or FXAA.
             Box::new(
-                helio_graph_asset::GraphAssetPipeline::new(
-                    Arc::new(crate::graphs::deferred_graph_asset(&nodes)),
+                helio_graph_asset::GraphAssetPipeline::made(
+                    Arc::new(|registry, env| {
+                        let config = env
+                            .require::<helio::RendererConfig>()
+                            .expect("a renderer build supplies its config")
+                            .clone();
+                        crate::graphs::deferred_graph_asset_for(registry, &config)
+                    }),
                     Arc::clone(&nodes),
-                    crate::presets::deferred,
                 )
                 .with_swap_policy(crate::default_swap_policy()),
             ) as Box<dyn IntoGraph>

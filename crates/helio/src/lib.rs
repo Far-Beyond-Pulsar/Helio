@@ -21,7 +21,7 @@ pub use helio_core::wgpu_instance_descriptor;
 pub use helio_core::{
     Actor, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error,
     GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
-    RenderPassTiming, RenderTimingSnapshot, Result,
+    RenderPassTiming, RenderTimingSnapshot, Result, RoutingIssue, RoutingSeverity,
 };
 pub use helio_frame_api::lighting::AmbientLight;
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
@@ -32,9 +32,10 @@ pub use renderer::{
     ray_queries_usable, recommended_instance_flags, required_experimental_features,
     required_wgpu_features, required_wgpu_limits, usable_adapter_features, DebugBatch,
     DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GraphRebuilder, IntoGraph,
-    PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory, PipelineInfo,
-    PipelineOrigin, RenderMode, RenderPipelineRegistry, Renderer, RendererBuilder, RendererConfig,
-    SceneDbHandle, StereoMirror, TsrSetting, WorldPoint, WorldVertex, XrMirrorStats,
+    NamedPipeline, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory,
+    PipelineFailure, PipelineInfo, PipelineOrigin, PipelineStatus, RenderMode,
+    RenderPipelineRegistry, Renderer, RendererBuilder, RendererConfig, SceneDbHandle, StereoMirror,
+    TsrSetting, WorldPoint, WorldVertex, XrMirrorStats, UNNAMED_PIPELINE,
 };
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use renderer::{ReloadMode, ShaderReloadStatus};

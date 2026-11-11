@@ -1464,6 +1464,10 @@ impl RenderPass for PostProcessPass {
         "PostProcess"
     }
 
+    fn writes_target(&self) -> bool {
+        true
+    }
+
     fn set_debug_mode(&mut self, mode: u32) {
         self.debug_view = mode != 0;
     }

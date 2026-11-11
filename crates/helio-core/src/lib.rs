@@ -479,8 +479,8 @@ pub use graph::{
     BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, DeclaredKind, DeclaredResource,
     FinishSegment, FrameDebugData, GraphTimelineData, GraphTimelinePass, PassDeclaration,
     PassIdentity, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet, PipelineHandle,
-    PipelineRecipeBuilder, PipelineRegistry, RenderGraph, RenderSize, SceneContent, SwapPlan,
-    SwapPolicy,
+    PipelineRecipeBuilder, PipelineRegistry, RenderGraph, RenderSize, RoutingIssue, RoutingKind,
+    RoutingRead, RoutingSeverity, RoutingUnit, SceneContent, SwapPlan, SwapPolicy,check_routing,
 };
 pub use instance::wgpu_instance_descriptor;
 

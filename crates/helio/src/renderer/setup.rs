@@ -6,10 +6,11 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use helio_core::{PipelineFormatSet, RenderGraph};
+use helio_core::{PipelineFormatSet, RenderGraph, RenderSize};
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
+use super::pipeline_status::PipelineStatus;
 use super::renderer_impl::{CullStatsReadbackState, GraphRebuilder, Renderer};
 
 impl Renderer {
@@ -85,7 +86,57 @@ impl Renderer {
         (texture, view, layer0_view)
     }
 
-    /// Construct a [`Renderer`] with all dependencies provided explicitly.
+    /// Logs what [`RenderGraph::routing_issues`] finds, errors at `error` and
+    /// the rest at `warn`. Reads declarations only: no GPU work, no readback.
+    pub(crate) fn log_routing(graph: &RenderGraph) {
+        for issue in graph.routing_issues() {
+            match issue.severity {
+                helio_core::RoutingSeverity::Error => {
+                    log::error!(target: "helio::routing", "render graph routing: {issue}")
+                }
+                helio_core::RoutingSeverity::Warning => {
+                    log::warn!(target: "helio::routing", "render graph routing: {issue}")
+                }
+            }
+        }
+    }
+
+    /// Adds the renderer's presentation format to `graph`, logs what it routes
+    /// to the output, and installs it with the rebuilder it carries, the jitter
+    /// its passes need and the host's hook: what every pipeline's graph gets,
+    /// whoever made it. `inherit` carries persistent pass state over from the
+    /// graph it replaces (the same pipeline built again).
+    pub(crate) fn install_pipeline_graph(&mut self, mut graph: RenderGraph, inherit: bool) {
+        // The renderer is the host of the graph's presentation format. Feed
+        // it back into the graph even when a custom builder locked the graph
+        // before handing it to us; the cache will schedule any new variants
+        // without blocking the frame thread.
+        graph.add_pipeline_format(PipelineFormatSet::new(
+            [self.surface_format],
+            Some(wgpu::TextureFormat::Depth32Float),
+        ));
+        // Every graph reaches the renderer here, whether a graph asset made it or
+        // a legacy builder: say now if what its passes produce never reaches the
+        // output (a black frame), from the passes' declarations alone.
+        Self::log_routing(&graph);
+        self.graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
+        // Camera jitter is only valid when a temporal pass reconstructs it.
+        // Applying it to FXAA/non-temporal graphs shifts the final image every
+        // frame and presents as whole-scene shimmer.
+        self.enable_jitter = graph.requires_camera_jitter();
+        if inherit {
+            graph.inherit_persistent_state(&mut self.graph);
+        }
+        self.replace_graph(graph);
+        if let Some(hook) = &self.graph_rebuild_hook {
+            hook(&mut self.graph, &self.device);
+        }
+        self.clear_target_next_frame = true;
+    }
+
+    /// Construct a [`Renderer`] with all dependencies provided explicitly. It
+    /// has an empty graph; [`RendererBuilder`](super::builder::RendererBuilder)
+    /// gives it a pipeline or the status screen before returning it.
     ///
     /// Prefer [`RendererBuilder`](super::builder::RendererBuilder) for new code — it
     /// creates the scene, debug state, and internal buffers automatically.
@@ -98,21 +149,12 @@ impl Renderer {
         height: u32,
         render_scale: f32,
         config: RendererConfig,
-        mut graph: RenderGraph,
         debug_state: Arc<Mutex<DebugDrawState>>,
         camera_buffer: wgpu::Buffer,
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
         scene_db: super::builder::SceneDbHandle,
     ) -> Self {
-        // The renderer is the host of the graph's presentation format. Feed
-        // it back into the graph even when a custom builder locked the graph
-        // before handing it to us; the cache will schedule any new variants
-        // without blocking the frame thread.
-        graph.add_pipeline_format(PipelineFormatSet::new(
-            [surface_format],
-            Some(wgpu::TextureFormat::Depth32Float),
-        ));
         assert!(
             device
                 .features()
@@ -158,14 +200,10 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // Camera jitter is only valid when a temporal pass reconstructs it.
-        // Applying it to FXAA/non-temporal graphs shifts the final image every
-        // frame and presents as whole-scene shimmer.
-        let enable_jitter = graph.requires_camera_jitter();
+        let mut graph = RenderGraph::new_with_external_device(&device, &queue);
+        graph.lock_sized(RenderSize::new([internal_w, internal_h], [width, height]));
 
-        let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
-        let feature_derivations = graph.take_scene_derivations();
-        let mut renderer = Self {
+        Self {
             device,
             queue,
             graph,
@@ -203,7 +241,7 @@ impl Renderer {
             last_submission: None,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
-            enable_jitter,
+            enable_jitter: false,
             camera_jitter_override: None,
             frame_delta_override: None,
             frame_clock: 0.0,
@@ -215,8 +253,12 @@ impl Renderer {
             pending_rebuild: false,
             last_resize_ms: 0.0,
             cull_stats_buffer,
-            graph_rebuilder,
+            graph_rebuilder: None,
             graph_rebuild_hook: None,
+            pipeline_status: PipelineStatus::None,
+            pipeline_id: None,
+            pending_pipeline: None,
+            status_hint: super::status_screen::DEFAULT_HINT.to_owned(),
             scene_payloads: Default::default(),
             persistent_passes: Vec::new(),
             #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
@@ -247,8 +289,6 @@ impl Renderer {
             xr_mirror_format: None,
             #[cfg(not(target_arch = "wasm32"))]
             xr_mirror_size: [0, 0],
-        };
-        renderer.adopt_scene_derivations(feature_derivations);
-        renderer
+        }
     }
 }

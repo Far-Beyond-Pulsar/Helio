@@ -6,6 +6,7 @@ mod membership;
 mod pipeline_cache;
 mod resource;
 mod resource_lifetime;
+mod routing;
 mod scheduling;
 mod swap;
 
@@ -18,6 +19,9 @@ pub use executor::{
     FrameDebugData, GraphTimelineData, GraphTimelinePass, PassDeclaration, RenderGraph,
 };
 pub(crate) use membership::SceneRows;
+pub use routing::{
+    check_routing, RoutingIssue, RoutingKind, RoutingRead, RoutingSeverity, RoutingUnit,
+};
 pub use membership::{RenderSize, SceneContent};
 pub(crate) use pipeline_cache::driver_cache_for_device;
 pub use pipeline_cache::{

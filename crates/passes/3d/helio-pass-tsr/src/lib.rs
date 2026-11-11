@@ -1189,6 +1189,10 @@ impl RenderPass for TsrPass {
         "TSR"
     }
 
+    fn writes_target(&self) -> bool {
+        !self.intermediate_output
+    }
+
     fn writes(&self) -> &'static [&'static str] {
         &["tsr_color"]
     }

@@ -1,0 +1,621 @@
+{
+  "format_version": 1,
+  "name": "Deferred",
+  "description": "Helio's default deferred pipeline, one node per pass.",
+  "nodes": [
+    {
+      "id": "start",
+      "kind": "core.on_frame_start",
+      "params": {},
+      "position": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "id": "output",
+      "kind": "core.output",
+      "params": {},
+      "position": [
+        1764.0,
+        0.0
+      ]
+    },
+    {
+      "id": "node_section_0",
+      "kind": "section:section_0",
+      "params": {},
+      "position": [
+        294.0,
+        0.0
+      ]
+    },
+    {
+      "id": "node_section_1",
+      "kind": "section:section_1",
+      "params": {},
+      "position": [
+        588.0,
+        0.0
+      ]
+    },
+    {
+      "id": "node_section_2",
+      "kind": "section:section_2",
+      "params": {},
+      "position": [
+        882.0,
+        0.0
+      ]
+    },
+    {
+      "id": "node_section_3",
+      "kind": "section:section_3",
+      "params": {},
+      "position": [
+        1176.0,
+        0.0
+      ]
+    },
+    {
+      "id": "node_section_4",
+      "kind": "section:section_4",
+      "params": {},
+      "position": [
+        1470.0,
+        0.0
+      ]
+    },
+    {
+      "id": "node_section_5",
+      "kind": "section:section_5",
+      "params": {},
+      "position": [
+        2058.0,
+        0.0
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "from": {
+        "node": "start",
+        "pin": "out"
+      },
+      "to": {
+        "node": "node_section_0",
+        "pin": "in_frame_in"
+      }
+    },
+    {
+      "from": {
+        "node": "node_section_0",
+        "pin": "out_gbuffer_clear_out"
+      },
+      "to": {
+        "node": "node_section_1",
+        "pin": "in_ssr_in"
+      }
+    },
+    {
+      "from": {
+        "node": "node_section_1",
+        "pin": "out_ssr_composite_out"
+      },
+      "to": {
+        "node": "node_section_2",
+        "pin": "in_debug_draw_scene_in"
+      }
+    },
+    {
+      "from": {
+        "node": "node_section_2",
+        "pin": "out_debug_draw_scene_out"
+      },
+      "to": {
+        "node": "node_section_3",
+        "pin": "in_fxaa_in"
+      }
+    },
+    {
+      "from": {
+        "node": "node_section_3",
+        "pin": "out_post_process_out"
+      },
+      "to": {
+        "node": "node_section_4",
+        "pin": "in_buffer_view_in"
+      }
+    },
+    {
+      "from": {
+        "node": "node_section_4",
+        "pin": "out_debug_draw_out"
+      },
+      "to": {
+        "node": "output",
+        "pin": "in"
+      }
+    }
+  ],
+  "comments": [],
+  "sections": [
+    {
+      "id": "section_0",
+      "name": "Scene Prep",
+      "inputs": [
+        {
+          "name": "in_frame_in",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out_gbuffer_clear_out",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "nodes": [
+        {
+          "id": "frame",
+          "kind": "helio.frame.setup",
+          "params": {
+            "model": "deferred",
+            "reactive_mask": false
+          },
+          "position": [
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "id": "background",
+          "kind": "helio.pass.background",
+          "params": {},
+          "position": [
+            314.0,
+            0.0
+          ]
+        },
+        {
+          "id": "hiz",
+          "kind": "helio.pass.hiz",
+          "params": {},
+          "position": [
+            638.0,
+            0.0
+          ]
+        },
+        {
+          "id": "gbuffer_clear",
+          "kind": "helio.pass.gbuffer_clear",
+          "params": {},
+          "position": [
+            1012.0,
+            0.0
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "from": {
+            "node": "$entry",
+            "pin": "in_frame_in"
+          },
+          "to": {
+            "node": "frame",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "frame",
+            "pin": "out"
+          },
+          "to": {
+            "node": "background",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "background",
+            "pin": "out"
+          },
+          "to": {
+            "node": "hiz",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "hiz",
+            "pin": "out"
+          },
+          "to": {
+            "node": "gbuffer_clear",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "gbuffer_clear",
+            "pin": "out"
+          },
+          "to": {
+            "node": "$exit",
+            "pin": "out_gbuffer_clear_out"
+          }
+        }
+      ]
+    },
+    {
+      "id": "section_1",
+      "name": "Lighting",
+      "inputs": [
+        {
+          "name": "in_ssr_in",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out_ssr_composite_out",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "nodes": [
+        {
+          "id": "ssr",
+          "kind": "helio.pass.ssr",
+          "params": {},
+          "position": [
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "id": "planar_reflection",
+          "kind": "helio.pass.planar_reflection",
+          "params": {},
+          "position": [
+            344.0,
+            0.0
+          ]
+        },
+        {
+          "id": "unlit",
+          "kind": "helio.pass.unlit",
+          "params": {},
+          "position": [
+            638.0,
+            0.0
+          ]
+        },
+        {
+          "id": "ssr_composite",
+          "kind": "helio.pass.ssr_composite",
+          "params": {},
+          "position": [
+            1052.0,
+            0.0
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "from": {
+            "node": "$entry",
+            "pin": "in_ssr_in"
+          },
+          "to": {
+            "node": "ssr",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "ssr",
+            "pin": "out"
+          },
+          "to": {
+            "node": "planar_reflection",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "planar_reflection",
+            "pin": "out"
+          },
+          "to": {
+            "node": "unlit",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "unlit",
+            "pin": "out"
+          },
+          "to": {
+            "node": "ssr_composite",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "ssr_composite",
+            "pin": "out"
+          },
+          "to": {
+            "node": "$exit",
+            "pin": "out_ssr_composite_out"
+          }
+        }
+      ]
+    },
+    {
+      "id": "section_2",
+      "name": "Overlays",
+      "inputs": [
+        {
+          "name": "in_debug_draw_scene_in",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out_debug_draw_scene_out",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "nodes": [
+        {
+          "id": "debug_draw_scene",
+          "kind": "helio.pass.debug_draw_scene",
+          "params": {},
+          "position": [
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "from": {
+            "node": "$entry",
+            "pin": "in_debug_draw_scene_in"
+          },
+          "to": {
+            "node": "debug_draw_scene",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "debug_draw_scene",
+            "pin": "out"
+          },
+          "to": {
+            "node": "$exit",
+            "pin": "out_debug_draw_scene_out"
+          }
+        }
+      ]
+    },
+    {
+      "id": "section_3",
+      "name": "Post",
+      "inputs": [
+        {
+          "name": "in_fxaa_in",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out_post_process_out",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "nodes": [
+        {
+          "id": "fxaa",
+          "kind": "helio.pass.fxaa",
+          "params": {},
+          "position": [
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "id": "post_process",
+          "kind": "helio.pass.post_process",
+          "params": {},
+          "position": [
+            294.0,
+            0.0
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "from": {
+            "node": "$entry",
+            "pin": "in_fxaa_in"
+          },
+          "to": {
+            "node": "fxaa",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "fxaa",
+            "pin": "out"
+          },
+          "to": {
+            "node": "post_process",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "post_process",
+            "pin": "out"
+          },
+          "to": {
+            "node": "$exit",
+            "pin": "out_post_process_out"
+          }
+        }
+      ]
+    },
+    {
+      "id": "section_4",
+      "name": "Output",
+      "inputs": [
+        {
+          "name": "in_buffer_view_in",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "outputs": [
+        {
+          "name": "out_debug_draw_out",
+          "ty": {
+            "kind": "flow",
+            "persistent": false
+          },
+          "resource": ""
+        }
+      ],
+      "nodes": [
+        {
+          "id": "buffer_view",
+          "kind": "helio.pass.buffer_view",
+          "params": {},
+          "position": [
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "id": "perf_overlay",
+          "kind": "helio.pass.perf_overlay",
+          "params": {},
+          "position": [
+            344.0,
+            0.0
+          ]
+        },
+        {
+          "id": "debug_draw",
+          "kind": "helio.pass.debug_draw",
+          "params": {},
+          "position": [
+            698.0,
+            0.0
+          ]
+        }
+      ],
+      "connections": [
+        {
+          "from": {
+            "node": "$entry",
+            "pin": "in_buffer_view_in"
+          },
+          "to": {
+            "node": "buffer_view",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "buffer_view",
+            "pin": "out"
+          },
+          "to": {
+            "node": "perf_overlay",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "perf_overlay",
+            "pin": "out"
+          },
+          "to": {
+            "node": "debug_draw",
+            "pin": "in"
+          }
+        },
+        {
+          "from": {
+            "node": "debug_draw",
+            "pin": "out"
+          },
+          "to": {
+            "node": "$exit",
+            "pin": "out_debug_draw_out"
+          }
+        }
+      ]
+    },
+    {
+      "id": "section_5",
+      "name": "Host Inputs",
+      "inputs": [],
+      "outputs": [],
+      "nodes": [
+        {
+          "id": "host_render_environment",
+          "kind": "host.render_environment",
+          "params": {},
+          "position": [
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "connections": []
+    }
+  ]
+}

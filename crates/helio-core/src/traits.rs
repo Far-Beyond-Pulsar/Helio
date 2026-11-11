@@ -494,6 +494,19 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         false
     }
 
+    /// Whether this pass produces the frame's image in `ctx.target` (the
+    /// presented output): the final resolve, anti-aliasing or tone-mapping
+    /// pass, not an overlay drawn over what is already there.
+    ///
+    /// The target is not a named graph resource, so a pass's `execute` writing
+    /// it is invisible to `reads()`/`writes()`. Declaring it lets routing
+    /// validation (see [`crate::graph::check_routing`]) tell a graph whose
+    /// output no pass produces, which presents black, from a healthy one.
+    /// Default `false`.
+    fn writes_target(&self) -> bool {
+        false
+    }
+
     /// Publishes a declared [`ResourceBuilder::write_group`] bundle into this
     /// pass's own compound `ResourceRegistry` field.
     ///

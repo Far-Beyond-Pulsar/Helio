@@ -149,7 +149,11 @@ impl Renderer {
         let gpu_error = pollster::block_on(scope.pop());
 
         let replacement = match built {
-            Ok(Some(replacement)) => replacement,
+            Ok(Some(Ok(replacement))) => replacement,
+            Ok(Some(Err(failure))) => {
+                self.reject_reload(&batch, format!("the pipeline does not build: {failure}"));
+                return;
+            }
             Ok(None) => return,
             Err(payload) => {
                 let reason = payload
@@ -196,7 +200,13 @@ impl Renderer {
         mut replacement: RenderGraph,
         changed: &[std::path::PathBuf],
     ) -> ReloadMode {
-        match self.try_selective_swap(&mut replacement, changed) {
+        // A status screen has no passes of the pipeline to swap.
+        let selective = if self.pipeline_status.is_ready() {
+            self.try_selective_swap(&mut replacement, changed)
+        } else {
+            Err("the pipeline is not rendering".to_owned())
+        };
+        match selective {
             Ok(passes) => ReloadMode::Selective { passes },
             Err(reason) => {
                 // A fresh `PipelineFormatCache` comes with the new graph, so

@@ -24,14 +24,13 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use helio::{IntoGraph, PassBuildContext, RendererConfig};
+use helio::{IntoGraph, PassBuildContext, PipelineFailure, RendererConfig};
 use helio_core::RenderGraph;
 use helio_feature_api::ExtensionPoint;
-use helio_frame_api::color::ReactiveMask;
 use helio_frame_api::lighting::{
-    model, resolve_model, Antialiasing, LightingModel, LightingModelId, ModelPipeline, Shading,
+    model, resolve_model, Antialiasing, LightingModel, ModelPipeline, Shading,
 };
-use helio_frame_api::{Phase, PhaseList, Slot, HOST_INPUTS};
+use helio_frame_api::{Phase, Slot, HOST_INPUTS};
 use helio_graph_asset::{
     core_nodes, Connection, GraphAsset, GraphAssetPipeline, NodeInstance, NodeRegistry, Params,
     PinRef,
@@ -42,13 +41,13 @@ use crate::features::kind;
 
 /// Logs, once per `wanted` id, that no installed feature registered the
 /// lighting model and `fallback` is used instead.
-fn warn_model_missing_once(wanted: &'static str, fallback: &str) {
-    static WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+pub(crate) fn warn_model_missing_once(wanted: &str, fallback: &str) {
+    static WARNED: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let mut warned = WARNED
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !warned.contains(&wanted) {
-        warned.push(wanted);
+    if !warned.iter().any(|known| known == wanted) {
+        warned.push(wanted.to_string());
         log::warn!(
             "lighting model `{wanted}` is not registered (is the plugin that brings it disabled?);              rendering with the `{fallback}` stand-in"
         );
@@ -71,6 +70,26 @@ pub enum Preset {
     /// A pipeline a registered lighting model brings
     /// ([`helio_frame_api::lighting::LightingModel::pipelines`]).
     Model(ModelPipeline),
+}
+
+/// The draw phases a frame runs for a lighting model that shades `shading`,
+/// in frame order. The frame setup node publishes them as the graph's
+/// [`PhaseList`].
+pub(crate) fn phases_for(shading: Shading) -> Vec<Phase> {
+    match shading {
+        Shading::Forward => vec![
+            Phase::ShadowCasters,
+            Phase::Forward,
+            Phase::Overlay,
+            Phase::Transparent,
+        ],
+        Shading::GBuffer => vec![
+            Phase::ShadowCasters,
+            Phase::GBuffer,
+            Phase::Overlay,
+            Phase::Transparent,
+        ],
+    }
 }
 
 /// The anti-aliasing a preset ends its scene-linear chain with.
@@ -140,20 +159,7 @@ impl Preset {
     /// The draw phases the preset runs with `registry`'s models, in frame
     /// order.
     pub fn phases(self, registry: &NodeRegistry) -> Vec<Phase> {
-        match self.model(registry).shading {
-            Shading::Forward => vec![
-                Phase::ShadowCasters,
-                Phase::Forward,
-                Phase::Overlay,
-                Phase::Transparent,
-            ],
-            Shading::GBuffer => vec![
-                Phase::ShadowCasters,
-                Phase::GBuffer,
-                Phase::Overlay,
-                Phase::Transparent,
-            ],
-        }
+        phases_for(self.model(registry).shading)
     }
 
     /// The preset's nodes for `config`, in execution order: the spine's
@@ -166,6 +172,22 @@ impl Preset {
         };
         let aa = self.aa(config);
         let model = self.model(registry);
+
+        // What the frame is: the lighting model (and so the draw phases, the
+        // specular layers, where the lighting inputs run) and whether the
+        // temporal resolve reads a reactive mask. A node, so a `.rendergraph`
+        // states the same thing as data.
+        nodes.raw(
+            "frame",
+            crate::features::FRAME_SETUP,
+            [
+                ("model", Value::from(self.model_id())),
+                (
+                    "reactive_mask",
+                    Value::from(model.reactive_transparency && aa == Aa::Tsr),
+                ),
+            ],
+        );
 
         // Scene prep: per-frame tables (an object kind's batches first), the
         // shadow views and what casts into them (the phase's compute and
@@ -256,14 +278,6 @@ impl Preset {
                     .require::<RendererConfig>()
                     .expect("a renderer build supplies its config")
                     .clone();
-                let model = self.model(registry);
-                env.insert_setting(LightingModelId(model.id));
-                env.insert_setting(PhaseList(self.phases(registry)));
-                env.insert_setting(model.specular_layers);
-                env.insert_setting(model.inputs_order);
-                if model.reactive_transparency && self.aa(&config) == Aa::Tsr {
-                    env.insert_setting(ReactiveMask);
-                }
                 self.asset(registry, &config)
             }),
             registry,
@@ -291,16 +305,25 @@ impl Preset {
         }
     }
 
-    /// Builds the preset's graph for `ctx`.
-    pub fn build(self, mut ctx: PassBuildContext<'_>) -> RenderGraph {
-        ctx.owns_device = false;
-        Box::new(self.pipeline()).into_graph(ctx)
+    /// Builds the preset's graph for `ctx`. A preset is the engine's own graph:
+    /// one that does not build is a bug, so this panics with the failure (a
+    /// renderer reports the panic as the pipeline's failure; the
+    /// [`IntoGraph`] impl returns it).
+    pub fn build(self, ctx: PassBuildContext<'_>) -> RenderGraph {
+        let name = self.name();
+        Box::new(self)
+            .into_graph(ctx)
+            .unwrap_or_else(|failure| panic!("preset `{name}` does not build: {failure}"))
     }
 }
 
 impl IntoGraph for Preset {
-    fn into_graph(self: Box<Self>, ctx: PassBuildContext<'_>) -> RenderGraph {
-        self.build(ctx)
+    fn into_graph(
+        self: Box<Self>,
+        mut ctx: PassBuildContext<'_>,
+    ) -> Result<RenderGraph, PipelineFailure> {
+        ctx.owns_device = false;
+        Box::new(self.pipeline()).into_graph(ctx)
     }
 }
 
@@ -319,12 +342,18 @@ impl PresetGraph {
     /// Builds the preset's graph for `ctx` ([`Preset::build`] over these
     /// features).
     pub fn build(self, ctx: PassBuildContext<'_>) -> RenderGraph {
-        Box::new(self).into_graph(ctx)
+        let name = self.preset.name();
+        Box::new(self)
+            .into_graph(ctx)
+            .unwrap_or_else(|failure| panic!("preset `{name}` does not build: {failure}"))
     }
 }
 
 impl IntoGraph for PresetGraph {
-    fn into_graph(self: Box<Self>, mut ctx: PassBuildContext<'_>) -> RenderGraph {
+    fn into_graph(
+        self: Box<Self>,
+        mut ctx: PassBuildContext<'_>,
+    ) -> Result<RenderGraph, PipelineFailure> {
         ctx.owns_device = false;
         Box::new(self.preset.pipeline_with(self.registry)).into_graph(ctx)
     }
@@ -379,7 +408,12 @@ impl Nodes<'_> {
     }
 
     fn with<const N: usize>(&mut self, name: &str, params: [(&str, Value); N]) {
-        let mut instance = node(name, &kind(name));
+        self.raw(name, &kind(name), params);
+    }
+
+    /// A node of any `kind` (not a pass node), with `params`.
+    fn raw<const N: usize>(&mut self, id: &str, kind: &str, params: [(&str, Value); N]) {
+        let mut instance = node(id, kind);
         for (key, value) in params {
             instance.params.insert(key.to_string(), value);
         }

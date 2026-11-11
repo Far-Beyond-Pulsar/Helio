@@ -18,6 +18,7 @@ pub mod core_nodes;
 pub mod layout;
 mod probe;
 pub mod resources;
+pub mod routing;
 pub mod sections;
 mod validate;
 
@@ -27,7 +28,7 @@ pub use asset::{
     SECTION_PREFIX,
 };
 pub use compile::build_env;
-pub use compile::{compile, Fallback, GraphAssetPipeline, MakeAsset};
+pub use compile::{compile, GraphAssetPipeline, MakeAsset};
 pub use helio_feature_api::{PinDesc, PinKind, PinShape, PinType};
 pub use layout::{auto_layout, LANE_PREFIX};
 pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};
