@@ -34,6 +34,18 @@ mod phase;
 pub mod rays;
 
 pub use host::{host_input, host_kind, HOST_INPUTS};
+
+/// The scene buffers the frame defines, by key: any feature may read them,
+/// whoever produces them (the renderer's entity generations and camera, a
+/// lighting input's probe rows, a portal's view remaps). A host's catalog
+/// links a feature's read of one of these to the frame rather than to a
+/// kind's contract.
+pub const FRAME_BUFFERS: &[&str] = &[
+    helio_core::ENTITY_GENERATIONS_KEY.as_str(),
+    helio_core::CAMERA_BUFFER_KEY.as_str(),
+    lighting::ENVIRONMENT_PROBES,
+    lighting::VIEW_REMAPS,
+];
 pub use phase::{
     phase_settings, Attachment, AttachmentFormat, FrameNode, Phase, PhaseList, PhaseViews, Slot,
 };

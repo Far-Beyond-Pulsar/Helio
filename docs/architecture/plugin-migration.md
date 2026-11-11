@@ -2814,3 +2814,20 @@ per-invocation table copies"):
   render graph, the geometric error tolerance.
 - Not yet measured as a whole: the persistent traversal with the sectioned
   trees (see `VG_FOREST.md`, "Not yet re-measured").
+
+As built, p22 (2026-11-11, branch `rewrite/p22-plugin-contracts` in Helio,
+Pulsar-Native and the plugin repositories; Pulsar-Native#1608 phases 2-5 and
+T5, recorded in Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 14):
+
+- **Buffer contracts link to their provider.** Every plugin feature declares
+  each scene buffer its passes read with `FeatureRegistrar::consumes` (the
+  owner's `BufferContract` const; a repeat is recorded once), and each plugin
+  descriptor lists the `buffer` contracts it provides by key. Pulsar's plugin
+  catalog links every read to the plugin whose contract covers the key, or
+  to the frame: `helio_frame_api::FRAME_BUFFERS` lists the buffers the frame
+  defines (entity generations, the camera, environment probes, view remaps).
+  New contract consts where a key had only a string (in the plugins' api
+  crates): the lights' directional light rows, the meshes' skin, bone
+  palette, VG instance, suppression and object structure/moved buffers, the
+  portal chain's two.
+- Helio's own gate is unchanged (0 violations, 31 recorded kind names).
