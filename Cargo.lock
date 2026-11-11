@@ -1106,6 +1106,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-core",
+ "helio-feature-api",
  "wgpu",
 ]
 

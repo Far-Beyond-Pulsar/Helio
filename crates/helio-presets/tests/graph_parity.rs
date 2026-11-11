@@ -596,3 +596,60 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
         );
     }
 }
+
+#[test]
+fn the_debug_overlay_is_a_node_with_no_default_placement() {
+    let registry = graphs::base_registry();
+    let node = registry
+        .get(helio_pass_debug_overlay::DEBUG_OVERLAY_NODE)
+        .expect("the debug overlay is a registered node");
+    assert_eq!(node.kind, features::kind("debug_overlay"));
+    assert!(node.params.iter().any(|p| p.key == "enabled"));
+    assert!(node.params.iter().any(|p| p.key == "visible"));
+    assert!(
+        node.placement.is_none(),
+        "no shipped pipeline draws the overlay"
+    );
+}
+
+#[test]
+fn a_graph_with_the_debug_overlay_node_builds_it_over_the_hosts_state() {
+    let _gpu = gpu_serial();
+    let Some(fixtures) = fixtures() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: debug overlay node");
+        return;
+    };
+    let host = helio_pass_debug_overlay::DebugOverlayState::new();
+    let mut config = fixtures.config.clone();
+    config = config.with_feature(helio_pass_debug_overlay::DebugOverlayHost(host.clone()));
+    let ctx = PassBuildContext {
+        config,
+        ..fixtures.context()
+    };
+    let mut env = helio_graph_asset::build_env(&ctx);
+
+    let registry = graphs::base_registry();
+    let mut asset = GraphAsset::default();
+    asset.nodes.push(chain("overlay"));
+    asset.nodes.last_mut().unwrap().kind = helio_pass_debug_overlay::DEBUG_OVERLAY_NODE.into();
+    asset
+        .nodes
+        .last_mut()
+        .unwrap()
+        .params
+        .insert("visible".into(), serde_json::json!(true));
+    start_and_output(&mut asset);
+    wire(&mut asset, "start", "overlay");
+    wire(&mut asset, "overlay", "out");
+
+    let graph =
+        helio_graph_asset::compile(&asset, &registry, &mut env).expect("the graph compiles");
+    let pass = graph
+        .find_pass::<helio_pass_debug_overlay::DebugOverlayPass>()
+        .expect("the node builds the overlay pass");
+    assert!(
+        Arc::ptr_eq(pass.shared(), &host),
+        "the pass draws the host's state"
+    );
+    assert!(host.lock().unwrap().enabled, "the visible parameter shows it");
+}

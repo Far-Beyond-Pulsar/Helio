@@ -6,6 +6,7 @@ authors = ["Helio Contributors"]
 description = "On-screen textual debug overlay (Minecraft F3-style) for Helio renderer"
 
 [dependencies]
+helio-feature-api = { path = "../../../helio-feature-api" }
 bytemuck = { workspace = true, features = ["derive"] }
 helio-core = { path = "../../../helio-core" }
 wgpu = { workspace = true }

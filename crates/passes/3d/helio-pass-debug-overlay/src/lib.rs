@@ -1,3 +1,6 @@
+pub mod feature;
+pub use feature::{DebugOverlayFeature, DebugOverlayHost, DEBUG_OVERLAY_NODE};
+
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::{Arc, Mutex};
 

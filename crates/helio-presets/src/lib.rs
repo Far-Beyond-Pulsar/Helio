@@ -17,7 +17,6 @@ pub mod pipelines;
 pub mod presets;
 pub use presets::{deferred, deferred_fxaa, forward, registry, Preset, PresetGraph};
 
-use helio_pass_debug_overlay::DebugOverlayPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass,
@@ -61,7 +60,6 @@ pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
         .independent::<helio_pass_ssr::SsrCompositePass>()
         .independent::<PlanarReflectionPass>()
         .independent::<helio::DebugDrawPass>()
-        .independent::<DebugOverlayPass>()
         .independent::<TsrPass>()
         .independent::<FxaaPass>()
         .independent::<PostProcessPass>()
