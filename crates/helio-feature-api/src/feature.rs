@@ -118,11 +118,23 @@ impl FeatureRegistrar<'_> {
     }
 
     /// Records that the feature's passes read `contract`, so an engine can
-    /// check it produces every buffer its features consume.
+    /// check it produces every buffer its features consume and link each
+    /// read to whoever provides it (Pulsar's plugin catalog names the plugin
+    /// whose contract covers the key). Every feature declares each scene
+    /// buffer its passes read here, through the owner's contract constant;
+    /// a repeat of the same key is recorded once.
     pub fn consumes<R: 'static>(&mut self, contract: BufferContract<R>) {
+        let key = contract.name();
+        if self
+            .contracts
+            .iter()
+            .any(|used| used.feature == self.feature && used.key == key)
+        {
+            return;
+        }
         self.contracts.push(ContractUse {
             feature: self.feature,
-            key: contract.name(),
+            key,
             row_bytes: BufferContract::<R>::ROW_BYTES,
         });
     }
@@ -195,6 +207,8 @@ mod tests {
 
         fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
             registrar.node(NodeDescriptor::new(self.1, "Probe", "Test", "", |_| Ok(())));
+            registrar.consumes(BufferContract::<[f32; 4]>::new("probe_rows"));
+            // A second pass reading the same buffer: recorded once.
             registrar.consumes(BufferContract::<[f32; 4]>::new("probe_rows"));
         }
     }
