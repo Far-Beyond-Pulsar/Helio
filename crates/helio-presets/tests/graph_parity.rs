@@ -208,9 +208,12 @@ fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
 fn template(fixtures: &Fixtures) -> helio_core::RenderGraph {
     let registry = Arc::new(graphs::base_registry());
     let asset = graphs::deferred_graph_asset(&registry);
-    Box::new(helio_graph_asset::GraphAssetPipeline::new(Arc::new(asset), registry))
-        .into_graph(fixtures.context())
-        .expect("the pipeline builds")
+    Box::new(helio_graph_asset::GraphAssetPipeline::new(
+        Arc::new(asset),
+        registry,
+    ))
+    .into_graph(fixtures.context())
+    .expect("the pipeline builds")
 }
 
 fn assert_template_matches_preset(fixtures: &Fixtures, what: &str) {
@@ -288,11 +291,10 @@ fn the_graph_sets_the_frame_from_its_frame_setup_node() {
     });
     let registry = Arc::new(graphs::registry_with(&features));
     let asset = graphs::graph_asset(Preset::Forward, &registry);
-    let from_graph = helio_graph_asset::GraphAssetPipeline::new(
-        Arc::new(asset),
-        Arc::clone(&registry),
-    );
-    let from_graph = Box::new(from_graph).into_graph(fixtures.context())
+    let from_graph =
+        helio_graph_asset::GraphAssetPipeline::new(Arc::new(asset), Arc::clone(&registry));
+    let from_graph = Box::new(from_graph)
+        .into_graph(fixtures.context())
         .expect("the pipeline builds");
     let from_preset = Preset::Forward
         .with_registry(registry)
@@ -612,5 +614,8 @@ fn a_graph_with_the_debug_overlay_node_builds_it_over_the_hosts_state() {
         Arc::ptr_eq(pass.shared(), &host),
         "the pass draws the host's state"
     );
-    assert!(host.lock().unwrap().enabled, "the visible parameter shows it");
+    assert!(
+        host.lock().unwrap().enabled,
+        "the visible parameter shows it"
+    );
 }

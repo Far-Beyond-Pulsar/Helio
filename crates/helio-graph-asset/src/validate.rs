@@ -569,7 +569,10 @@ mod tests {
             messages,
             ["missing node `plugin.pass.gone` (plugin pulsar.x disabled)"]
         );
-        assert!(result.plan.is_none(), "a missing node is an error, not a panic");
+        assert!(
+            result.plan.is_none(),
+            "a missing node is an error, not a panic"
+        );
     }
 
     #[test]
