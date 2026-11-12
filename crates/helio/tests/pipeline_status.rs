@@ -20,18 +20,6 @@ use helio_core::RenderGraph;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 use pulsar_scenedb::gpu::GpuMirrorHandle;
 
-/// `Box<dyn IntoGraph>` as an `IntoGraph` for `with_pipeline`.
-struct BoxedPipeline(Box<dyn IntoGraph>);
-
-impl IntoGraph for BoxedPipeline {
-    fn into_graph(
-        self: Box<Self>,
-        ctx: PassBuildContext<'_>,
-    ) -> Result<RenderGraph, PipelineFailure> {
-        self.0.into_graph(ctx)
-    }
-}
-
 /// A pipeline that draws `text` with the overlay pass over the clear colour.
 /// Counts its builds, and its graph's drops through `alive`.
 struct TextPipeline {

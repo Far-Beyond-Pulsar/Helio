@@ -5,7 +5,11 @@
 use std::sync::{Arc, Mutex};
 
 use glam::Vec3;
-use helio::{Camera, NamedPipeline, Renderer, RendererBuilder, RendererConfig};
+use helio::{
+    Camera, IntoGraph, NamedPipeline, PassBuildContext, PipelineFailure, Renderer,
+    RendererBuilder, RendererConfig,
+};
+use helio_core::RenderGraph;
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
 
 pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -198,6 +202,18 @@ impl Frame {
 
     pub fn corner(&self) -> [u8; 4] {
         self.at(self.width - 1, self.height - 1)
+    }
+}
+
+/// `Box<dyn IntoGraph>` as an `IntoGraph` for `with_pipeline`.
+pub struct BoxedPipeline(pub Box<dyn IntoGraph>);
+
+impl IntoGraph for BoxedPipeline {
+    fn into_graph(
+        self: Box<Self>,
+        ctx: PassBuildContext<'_>,
+    ) -> Result<RenderGraph, PipelineFailure> {
+        self.0.into_graph(ctx)
     }
 }
 
