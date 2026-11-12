@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+use helio_pass_status_screen::Severity;
+
 use super::pipeline::IntoGraph;
 use super::renderer_impl::GraphRebuilder;
 
@@ -22,7 +24,10 @@ pub const UNNAMED_PIPELINE: &str = "(unnamed pipeline)";
 pub struct PipelineFailure {
     /// One line: what went wrong.
     pub reason: String,
-    /// The lines behind the reason, in the order they were found.
+    /// The lines behind the reason, in the order they were found. A line
+    /// may start with `error:`, `warning:` or `note:` to say how serious it
+    /// is (a graph diagnostic prints that way); the status screen marks it
+    /// and drops the word. A line with no marker is a note.
     pub details: Vec<String>,
     /// How to try again (a graph that did not compile can be rebuilt once a
     /// shader or plugin changes). The renderer keeps it for
@@ -43,6 +48,29 @@ impl PipelineFailure {
     pub fn with_details(mut self, details: impl IntoIterator<Item = String>) -> Self {
         self.details.extend(details);
         self
+    }
+
+    /// [`with_details`](Self::with_details) for lines that are errors.
+    pub fn with_errors(self, lines: impl IntoIterator<Item = String>) -> Self {
+        self.with_marked(Severity::Error, lines)
+    }
+
+    /// [`with_details`](Self::with_details) for lines that are warnings.
+    pub fn with_warnings(self, lines: impl IntoIterator<Item = String>) -> Self {
+        self.with_marked(Severity::Warning, lines)
+    }
+
+    /// [`with_details`](Self::with_details) for lines that are notes.
+    pub fn with_notes(self, lines: impl IntoIterator<Item = String>) -> Self {
+        self.with_marked(Severity::Note, lines)
+    }
+
+    fn with_marked(self, severity: Severity, lines: impl IntoIterator<Item = String>) -> Self {
+        self.with_details(
+            lines
+                .into_iter()
+                .map(|line| format!("{} {line}", severity.marker())),
+        )
     }
 
     pub fn with_rebuilder(mut self, rebuilder: GraphRebuilder) -> Self {

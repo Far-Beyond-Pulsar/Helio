@@ -969,6 +969,7 @@ dependencies = [
  "helio-frame-api",
  "helio-pass-debug-overlay",
  "helio-pass-postprocess",
+ "helio-pass-status-screen",
  "helio-pass-tsr",
  "helio-settings",
  "helio-xr",
@@ -1182,6 +1183,17 @@ dependencies = [
  "log",
  "naga",
  "pollster 0.4.0",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-status-screen"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-pass-debug-overlay",
+ "naga",
  "wgpu",
 ]
 

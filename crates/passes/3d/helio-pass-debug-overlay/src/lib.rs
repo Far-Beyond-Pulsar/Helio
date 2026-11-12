@@ -736,7 +736,18 @@ impl RenderPass for DebugOverlayPass {
     }
 }
 
-fn create_font_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
+/// The first character the atlas holds (space); the last is `~`.
+pub const FONT_FIRST_GLYPH: u32 = 32;
+/// Glyph cells per atlas row.
+pub const FONT_ATLAS_COLUMNS: u32 = 16;
+/// Texels on a side of one glyph cell.
+pub const FONT_GLYPH_TEXELS: u32 = 8;
+
+/// The engine's one on-screen font as a texture: printable ASCII, one 8x8
+/// glyph per cell, white on transparent, `FONT_ATLAS_COLUMNS` cells per row
+/// from `FONT_FIRST_GLYPH`. Other text passes (the status screen) sample it
+/// instead of carrying a font of their own.
+pub fn create_font_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
     let tex_w: u32 = 128;
     let tex_h: u32 = 64;
     let mut pixels = vec![0u8; (tex_w * tex_h * 4) as usize];

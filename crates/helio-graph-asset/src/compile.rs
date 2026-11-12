@@ -227,6 +227,9 @@ pub fn build_env<'e>(ctx: &PassBuildContext<'e>) -> BuildEnv<'e> {
 
 /// What a pipeline's failure says about the diagnostics `asset` did not build
 /// with: the errors first, then the warnings (routing findings among them).
+/// A diagnostic prints as `error: ...` or `warning: ...`, the severity marker
+/// the status screen reads from a detail line
+/// (`helio_pass_status_screen::Severity`).
 fn failure(name: &str, diagnostics: &[Diagnostic], rebuilder: GraphRebuilder) -> PipelineFailure {
     let errors = diagnostics
         .iter()

@@ -264,9 +264,7 @@ impl Renderer {
                 coordinate_spaces: &self.camera_buffer,
                 coordinate_spaces_prev: &self.camera_buffer,
             });
-        // Under the status screen the frame is cleared to its own colour.
-        let clear_color =
-            super::status_screen::clear_color(&self.pipeline_status).unwrap_or(self.clear_color);
+        let clear_color = self.clear_color;
         let ambient = self
             .graph_config
             .features

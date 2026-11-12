@@ -108,6 +108,12 @@ impl Renderer {
         // next batch. Dropping the batch commits it.
         let batch = hot::begin_reload();
 
+        // A status screen is a graph of its own, built from its own shader:
+        // build it again so it draws with the edit, whatever becomes of the
+        // pipeline below.
+        let showing_status = !self.pipeline_status.is_ready();
+        self.redraw_status_screen();
+
         if self.pending_rebuild {
             // The pending rebuild builds the graph from the latest sources
             // anyway (the override table is global); don't build twice.
@@ -120,6 +126,16 @@ impl Renderer {
             return;
         }
         if self.graph_rebuilder.is_none() {
+            if showing_status {
+                // No pipeline to rebuild: the screen is all there is.
+                self.shader_reload.generation = generation;
+                self.shader_reload.rebuild_error = None;
+                self.shader_reload.last_reload = Some(Instant::now());
+                self.shader_reload.last_mode = Some(ReloadMode::Full {
+                    reason: "the status screen was built again".to_owned(),
+                });
+                return;
+            }
             if !self.shader_reload.warned_no_rebuilder {
                 self.shader_reload.warned_no_rebuilder = true;
                 log::warn!(
@@ -150,6 +166,14 @@ impl Renderer {
 
         let replacement = match built {
             Ok(Some(Ok(replacement))) => replacement,
+            Ok(Some(Err(failure))) if showing_status => {
+                // Still not building: the screen says why, and the edit that
+                // was applied to it stays.
+                self.fail_current_pipeline(failure);
+                self.shader_reload.generation = generation;
+                self.shader_reload.last_reload = Some(Instant::now());
+                return;
+            }
             Ok(Some(Err(failure))) => {
                 self.reject_reload(&batch, format!("the pipeline does not build: {failure}"));
                 return;

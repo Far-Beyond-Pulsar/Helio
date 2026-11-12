@@ -80,8 +80,10 @@ helio-frame-api = { layer = "feature_api" }
 helio-pass-hiz = { layer = "spine" }
 helio-pass-tsr = { layer = "spine" }
 helio-pass-postprocess = { layer = "spine" }
-# On-screen text. The renderer's status screen (no pipeline, an invalid one) draws with it.
+# On-screen text, and the glyph atlas the status screen samples.
 helio-pass-debug-overlay = { layer = "spine" }
+# What the renderer draws with no pipeline or an invalid one (kernel; names no kind).
+helio-pass-status-screen = { layer = "spine" }
 helio-spine = { layer = "spine" }
 
 # features

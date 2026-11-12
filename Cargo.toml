@@ -78,6 +78,7 @@ wasm-bindgen = "0.2"
 helio-pass-tsr = { path = "crates/passes/3d/helio-pass-tsr" }
 helio-pass-postprocess = { path = "crates/passes/3d/helio-pass-postprocess" }
 helio-pass-debug-overlay = { path = "crates/passes/3d/helio-pass-debug-overlay" }
+helio-pass-status-screen = { path = "crates/passes/3d/helio-pass-status-screen" }
 helio = { path = "crates/helio" }
 helio-xr = { path = "crates/helio-xr" }
 helio-pass-fxaa = { path = "crates/passes/3d/helio-pass-fxaa" }
