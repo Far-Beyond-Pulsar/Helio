@@ -25,6 +25,11 @@ impl Feature for PlanarReflectionFeature {
     }
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        // Shader hot reload may swap these alone: they take only
+        // renderer-owned handles (camera, debug camera and cull-stats buffers,
+        // debug-draw state, SceneDB) and plain configuration, the same objects
+        // in the live and the replacement graph (`helio_core::SwapPolicy`).
+        registrar.swappable::<PlanarReflectionPass>();
         registrar.node(
             pass_node(
                 "planar_reflection",

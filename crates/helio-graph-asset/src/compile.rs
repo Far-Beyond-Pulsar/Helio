@@ -151,15 +151,15 @@ enum Source {
 /// graph is built in its place; the editor reports the same diagnostics where
 /// they can be fixed.
 ///
-/// `swap_policy` is what shader hot reload may swap on its own (see
-/// [`helio_core::SwapPolicy`]); a graph built only of pass nodes whose
-/// constructors share builder-created resources the same way carries the
-/// shipped graphs' policy. None leaves the graph unswappable (the host
-/// rebuilds it whole on a shader reload).
+/// The built graph reports the registry's [`helio_core::SwapPolicy`] to shader
+/// hot reload: each feature declares which of its pass types may be swapped
+/// alone or must be swapped together (`FeatureRegistrar::swappable`,
+/// `swap_group`, `swap_shares`). Independence is a property of a pass's node
+/// constructor, not of the graph it is in, so every graph of those nodes gets
+/// it; a pass no feature vouches for rebuilds the graph whole.
 pub struct GraphAssetPipeline {
     source: Source,
     registry: Arc<NodeRegistry>,
-    swap_policy: Option<helio_core::SwapPolicy>,
 }
 
 impl GraphAssetPipeline {
@@ -167,7 +167,6 @@ impl GraphAssetPipeline {
         Self {
             source: Source::Fixed(asset),
             registry,
-            swap_policy: None,
         }
     }
 
@@ -177,15 +176,7 @@ impl GraphAssetPipeline {
         Self {
             source: Source::Made(make),
             registry,
-            swap_policy: None,
         }
-    }
-
-    /// Stores the [`helio_core::SwapPolicy`] the built graph reports to shader
-    /// hot reload.
-    pub fn with_swap_policy(mut self, swap_policy: helio_core::SwapPolicy) -> Self {
-        self.swap_policy = Some(swap_policy);
-        self
     }
 }
 
@@ -286,10 +277,8 @@ fn build(
     };
     match compile(&asset, &pipeline.registry, &mut env) {
         Ok(mut graph) => {
-            // The preset's own passes and what its features declared.
-            if let Some(swap_policy) = &pipeline.swap_policy {
-                graph.set_swap_policy(swap_policy.clone().merged(pipeline.registry.swap_policy()));
-            }
+            // What the features declared of their passes.
+            graph.set_swap_policy(pipeline.registry.swap_policy().clone());
             graph.set_graph_data(rebuilder);
             Ok(graph)
         }

@@ -835,7 +835,7 @@ the Helio repo keeps no voxel crate.
   `Preset::with_features(&FeatureSet)` / `with_registry(Arc<NodeRegistry>)`
   make a `PresetGraph` and `graphs::registry_with(extra)` the node registry
   (`FeatureSet::extended`). Since p23 Helio registers no pipeline: the
-  engine's shipped pipelines are Pulsar's `pulsar.render_pipelines` plugin's
+  engine's shipped pipelines are Pulsar's `pulsar.default_pipelines` plugin's
   `.rendergraph` files, made with `graphs::graph_asset` over that registry. The voxel settings
   group is `helio_pass_voxel_planet::settings::VOXEL_RESIDENCY`;
   `helio_settings::GROUPS` is the renderer's alone.

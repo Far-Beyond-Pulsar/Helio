@@ -8,7 +8,7 @@
 //!   probe.
 //!
 //! Helio registers no pipeline and has no default one: a host decides what it
-//! offers. Pulsar's `pulsar.render_pipelines` plugin makes its `.rendergraph`
+//! offers. Pulsar's `pulsar.default_pipelines` plugin makes its `.rendergraph`
 //! assets from these presets ([`graphs::graph_asset`]) for the plugins a project
 //! enables.
 //!
@@ -20,59 +20,6 @@ pub mod features;
 pub mod graphs;
 pub mod presets;
 pub use presets::{deferred, deferred_fxaa, forward, registry, Preset, PresetGraph};
-
-use helio_pass_fxaa::FxaaPass;
-use helio_pass_perf_overlay::{
-    PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass,
-};
-use helio_pass_planar_reflection::PlanarReflectionPass;
-use helio_pass_postprocess::PostProcessPass;
-use helio_pass_ssr::SsrPass;
-use helio_pass_tsr::TsrPass;
-use helio_spine::BackgroundPass;
-
-/// Which of this crate's passes shader hot reload may swap on their own
-/// (see [`helio_core::SwapPolicy`] for what a swap does and why a policy is
-/// needed).
-///
-/// Derived by auditing every node constructor (the spine's and each
-/// feature's) for handles the nodes create and share between passes. Those passes form a group and
-/// are swapped together:
-///
-/// * every perf-overlay pass (one shared `PerfOverlayShared`)
-///
-/// Everything else listed as independent takes only renderer-owned handles
-/// (camera, debug camera and cull-stats buffers, debug-draw state, SceneDB,
-/// the debug-overlay state) and plain configuration; those are the same objects
-/// in the live and the replacement graph. Left out, so an edit to them
-/// rebuilds the whole graph: the shadow views' `ShadowMatrixPass` (its light
-/// dirty flags are shared with what casts into the views) and the Hi-Z
-/// pyramid (its sampler is shared with an object kind's occlusion culling),
-/// and every pass an engine's features add (an object kind's batches,
-/// culling and drawers), which this crate cannot vouch for.
-///
-/// Dropping the replacement's unswapped passes has no side effects beyond the
-/// ones a resize already has: none of these constructors spawns a thread,
-/// registers into a global or shared registry, or writes a file, and the
-/// replacement graph's pipeline cache has no persistence path.
-pub(crate) fn default_swap_policy() -> helio_core::SwapPolicy {
-    use helio_core::graph::type_name_of as name;
-    helio_core::SwapPolicy::new()
-        .independent::<BackgroundPass>()
-        .independent::<helio_spine::UnlitPass>()
-        .independent::<SsrPass>()
-        .independent::<helio_pass_ssr::SsrCompositePass>()
-        .independent::<PlanarReflectionPass>()
-        .independent::<helio::DebugDrawPass>()
-        .independent::<TsrPass>()
-        .independent::<FxaaPass>()
-        .independent::<PostProcessPass>()
-        .group_types(&[
-            name::<PerfOverlayAnalyzerPass>(),
-            name::<PerfOverlayCostAnalyzerPass>(),
-            name::<PerfOverlayPass>(),
-        ])
-}
 
 pub(crate) fn convert_perf_mode(
     mode: helio::PerfOverlayMode,

@@ -2899,7 +2899,7 @@ Pulsar-Native; Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 15):
   `.rendergraph` files are deleted; `RenderPipelineRegistry` lost its default
   (`set_default`, `default_id`, `resolve`; `create(id)` makes nothing for an id
   it does not hold) and `PipelineOrigin`. The engine's shipped pipelines are
-  Pulsar's `pulsar.render_pipelines` plugin's `.rendergraph` files, made with
+  Pulsar's `pulsar.default_pipelines` plugin's `.rendergraph` files, made with
   `graphs::graph_asset` over the enabled plugins' nodes.
 - **Presets are config-free data.** `Preset::nodes(registry)`,
   `Preset::asset(registry)` and `graphs::graph_asset(preset, registry)` take no
@@ -2919,10 +2919,27 @@ Pulsar-Native; Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 15):
   function whose end is reachable. The editor (wgpui on D3D12) panicked building
   its first renderer and every viewport stayed black, while Vulkan (the Helio
   examples, the headless tests) drew. Pulsar's
-  `plugins/installed/tests/render_pipelines.rs` builds and draws the editor's
+  `plugins/installed/tests/default_pipelines.rs` builds and draws the editor's
   renderer on every backend the machine has.
 - **`Renderer::graph_texture_bytes`** (`RenderGraph::texture_bytes`): the
   graph's transient texture estimate, which the engine's Renderers view lists
   per runtime.
 - The engine owns every renderer it runs (Pulsar `render_runtimes`); Helio
   stays a library with no thread, task or plugin of its own.
+- **A graph asset records its pins.** `GraphAsset::pins` holds the probed pins
+  of the generated node kinds it uses (`GraphAsset::cache_pins`, written by
+  `graph_asset` and by the render graph editor's save); `validate`/`compile`
+  read the registry through `NodeRegistry::with_pin_fallback`, so a wired graph
+  validates and builds where nothing has probed (a game), and probed pins win
+  (a stale wire is an error). UE's graphs serialise node pins the same way.
+  `Validation::build_key` hashes what a graph builds (executing nodes in build
+  order, ids, parameters), so a host rebuilds a renderer only when that
+  changes, not for layout, comments, the pin record or order-keeping wires.
+- **Swap policy belongs to the features.** `default_swap_policy` (a list in
+  `helio-presets` naming the spine's, SSR's, planar reflections', FXAA's, the
+  perf overlay's and debug draw's passes) and
+  `GraphAssetPipeline::with_swap_policy` are deleted: each feature declares its
+  own pass types (`FeatureRegistrar::swappable`, `swap_group`), and every
+  `GraphAssetPipeline` reports the registry's policy, so a project's graph and
+  the shipped files hot-reload like the presets did (before, only a preset's
+  pipeline had a policy, and the shipped files rebuilt whole on a shader edit).

@@ -290,6 +290,9 @@ pub fn graph_asset(preset: crate::presets::Preset, registry: &NodeRegistry) -> G
     // section: a collapsed node holding its passes and the buffers around them.
     auto_layout(&mut asset, registry);
     helio_graph_asset::sections::sectionize(&mut asset, registry);
+    // The pins the wires were made from, so the file validates where nothing
+    // has probed (a game reading it).
+    asset.cache_pins(registry);
     asset
 }
 
@@ -532,8 +535,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn probed_pins_become_buffer_nodes_beside_each_pass() {
+    /// The base registry with probed pins for Hi-Z and the unlit pass.
+    fn probed_registry() -> NodeRegistry {
         use helio_graph_asset::output_pin;
         let mut registry = base_registry();
         let mut probe = Probe::default();
@@ -558,7 +561,12 @@ mod tests {
         );
         probe.scene_buffers = vec!["rows".into()];
         apply_probe(&mut registry, &probe);
+        registry
+    }
 
+    #[test]
+    fn probed_pins_become_buffer_nodes_beside_each_pass() {
+        let registry = probed_registry();
         let asset = deferred_graph_asset(&registry);
         // The wiring inside the sections, which is where the buffers are.
         let all: Vec<&Connection> = asset
@@ -624,5 +632,81 @@ mod tests {
         };
         assert!(x("get:scenedb.rows@unlit") < x("unlit"));
         assert!(x("set:depth@unlit") > x("unlit"));
+    }
+
+    #[test]
+    fn a_wired_graph_carries_its_pins_and_builds_what_the_chain_builds() {
+        let probed = probed_registry();
+        let wired = deferred_graph_asset(&probed);
+        // The record holds the probed kinds the graph uses, nothing else.
+        assert_eq!(
+            wired.pins.keys().cloned().collect::<Vec<_>>(),
+            vec![kind("hiz"), kind("unlit")]
+        );
+        assert_eq!(
+            wired.pins[&kind("hiz")],
+            probed.get(&kind("hiz")).unwrap().pins(&Default::default())
+        );
+
+        // Where nothing has probed (a game), the record makes the wires valid...
+        let unprobed = base_registry();
+        let validation = validate(&wired, &unprobed);
+        assert!(!validation.has_errors(), "{:?}", validation.diagnostics);
+        // ...and without it they are not.
+        let mut bare = wired.clone();
+        bare.pins.clear();
+        assert!(validate(&bare, &unprobed).has_errors());
+        // The view leaves the registry itself unprobed.
+        assert!(!unprobed.has_pins(&kind("hiz")));
+
+        // Probed pins win over the record: a wire the passes no longer declare
+        // is reported.
+        let mut stale = wired.clone();
+        stale
+            .pins
+            .get_mut(&kind("unlit"))
+            .unwrap()
+            .outputs
+            .push(helio_graph_asset::output_pin(PinType::TEXTURE, "gone"));
+        let gone = |asset: &mut GraphAsset| {
+            let section = asset
+                .sections
+                .iter_mut()
+                .find(|s| s.nodes.iter().any(|n| n.id == "unlit"))
+                .unwrap();
+            section.connections.push(Connection {
+                from: PinRef::new("unlit", "out_gone"),
+                to: PinRef::new("unlit", "hiz"),
+            });
+        };
+        gone(&mut stale);
+        assert!(validate(&stale, &probed).has_errors());
+
+        // The chain form and the wired form build the same passes in the same
+        // order with the same parameters: one build key.
+        let chain = deferred_graph_asset(&unprobed);
+        assert!(chain.pins.is_empty());
+        let chain_key = validate(&chain, &unprobed).build_key(&unprobed);
+        let wired_key = validate(&wired, &probed).build_key(&probed);
+        assert!(chain_key.is_some());
+        assert_eq!(chain_key, wired_key);
+        // Moving a node changes nothing it builds; switching one off does.
+        let mut moved = wired.clone();
+        moved.nodes[0].position[0] += 100.0;
+        assert_eq!(validate(&moved, &probed).build_key(&probed), wired_key);
+        let mut off = wired.clone();
+        let hiz = off
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.nodes.iter_mut())
+            .find(|n| n.kind == kind("hiz"))
+            .unwrap();
+        hiz.params
+            .insert("enabled".into(), serde_json::Value::Bool(false));
+        assert_ne!(validate(&off, &probed).build_key(&probed), wired_key);
+
+        // The record survives the file.
+        let reread = GraphAsset::from_json(&wired.to_json()).unwrap();
+        assert_eq!(reread.pins, wired.pins);
     }
 }

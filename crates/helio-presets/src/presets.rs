@@ -258,7 +258,7 @@ impl Preset {
     /// The preset as a pipeline over `registry`'s nodes.
     pub fn pipeline_with(self, registry: Arc<NodeRegistry>) -> GraphAssetPipeline {
         let asset = Arc::new(self.asset(&registry));
-        GraphAssetPipeline::new(asset, registry).with_swap_policy(crate::default_swap_policy())
+        GraphAssetPipeline::new(asset, registry)
     }
 
     /// The preset as a pipeline over the default features' nodes.

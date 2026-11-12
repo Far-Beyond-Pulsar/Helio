@@ -110,8 +110,9 @@ impl PinType {
     }
 }
 
-/// A pin on a node type.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A pin on a node type. Serialisable, so a graph asset can keep the pins its
+/// generated nodes had when it was written (`GraphAsset::pins`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PinDesc {
     /// Id within the node; unique per direction.
     pub name: String,
@@ -119,13 +120,16 @@ pub struct PinDesc {
     /// The Helio resource name this pin binds, empty for [`PinKind::Flow`].
     /// Helio resolves resources by name, so two pins connect only when they
     /// carry the same name.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub resource: String,
     /// An input that reads the value from the previous frame (temporal feedback:
     /// Hi-Z reading last frame's depth). It connects to the resource's producer
     /// like any input, but does not order the graph, so it cannot form a cycle.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub history: bool,
     /// An input nothing in the graph has to supply: the pass binds a fallback
     /// when it is absent. Unconnected, it is not a problem.
+    #[serde(default, skip_serializing_if = "is_default")]
     pub optional: bool,
 }
 
@@ -195,4 +199,8 @@ mod tests {
         assert!(!a.connects_to(&PinDesc::resource(PinType::PERSISTENT_TEXTURE, "pre_aa")));
         assert!(PinDesc::flow("out").connects_to(&PinDesc::flow("in")));
     }
+}
+
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
 }

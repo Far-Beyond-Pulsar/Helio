@@ -202,7 +202,7 @@ fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
 }
 
 /// The preset and the graph asset made from it for `fixtures`' config (what
-/// Pulsar's render pipelines plugin writes as its `.rendergraph` file), built
+/// Pulsar's default pipelines plugin writes as its `.rendergraph` file), built
 /// as a fixed asset: the same passes with the same declarations in the same
 /// order, the same swap policy, size and host inputs.
 fn template(fixtures: &Fixtures) -> helio_core::RenderGraph {
