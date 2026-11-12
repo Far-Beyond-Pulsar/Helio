@@ -282,12 +282,9 @@ fn invalid(renderer: &Renderer) -> (&str, &str, &[String]) {
     }
 }
 
-fn status_clear(status: &PipelineStatus) -> [f32; 4] {
-    match status {
-        PipelineStatus::None => [0.03, 0.04, 0.08, 1.0],
-        PipelineStatus::Invalid { .. } => [0.10, 0.03, 0.03, 1.0],
-        PipelineStatus::Ready => PIPELINE_CLEAR,
-    }
+/// The status screen's field: near-black, with its vignette and grain.
+fn is_void(pixel: [u8; 4]) -> bool {
+    pixel[..3].iter().all(|&c| c <= 12)
 }
 
 #[test]
@@ -306,10 +303,13 @@ fn a_node_of_a_disabled_plugin_names_the_plugin() {
     );
     let frame = gpu.frame(&mut renderer);
     assert!(frame.text_pixels() > 200);
-    assert!(near(
-        frame.corner(),
-        status_clear(renderer.pipeline_status())
-    ));
+    assert!(is_void(frame.corner()), "{:?}", frame.corner());
+    // A graph diagnostic carries the severity the status screen marks.
+    let (_, _, details) = invalid(&renderer);
+    assert!(
+        details.iter().any(|d| d.starts_with("error: ")),
+        "{details:?}"
+    );
 }
 
 #[test]
@@ -364,10 +364,7 @@ fn an_asset_swaps_with_failing_ones_and_none_with_no_stand_in() {
         } else {
             assert!(!renderer.pipeline_status().is_ready());
             assert!(frame.text_pixels() > 200, "the reason is on the frame");
-            assert!(near(
-                frame.corner(),
-                status_clear(renderer.pipeline_status())
-            ));
+            assert!(is_void(frame.corner()), "{:?}", frame.corner());
         }
     }
 }

@@ -131,6 +131,23 @@ pub fn compute(content: &StatusContent, width: u32, height: u32) -> Layout {
                 high = mid - 1;
             }
         }
+        // Not even one detail fits beside everything else: shorten the other
+        // blocks, the least important first, before dropping them all.
+        if best.is_none() {
+            let mut shrunk = Budget {
+                details: 1,
+                ..budget.clone()
+            };
+            for step in Budget::steps().into_iter().take(Budget::KEEP_DETAIL_STEPS) {
+                step(&mut shrunk);
+                let trial = compose(content, screen, unit, &shrunk);
+                if fits(&trial) {
+                    best = trial.map(|t| (1, t));
+                    budget = shrunk;
+                    break;
+                }
+            }
+        }
         budget.details = best.as_ref().map_or(0, |(count, _)| *count);
         composed = match best {
             Some((_, best)) => Some(best),
@@ -230,6 +247,9 @@ impl Budget {
             rebuilds: false,
         }
     }
+
+    /// The first steps that keep the details (the rest drop blocks).
+    const KEEP_DETAIL_STEPS: usize = 6;
 
     #[allow(clippy::type_complexity)]
     fn steps() -> [fn(&mut Budget); 10] {

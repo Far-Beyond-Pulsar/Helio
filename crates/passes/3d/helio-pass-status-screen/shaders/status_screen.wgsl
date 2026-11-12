@@ -125,7 +125,9 @@ fn text_alpha(p: vec2<f32>, line: Line) -> f32 {
     // pixel is in texels.
     let texel_px = f32(params.glyphs.z) / min(width, height);
     let threshold = select(params.text.y, params.text.z, (line.text.z & 1u) != 0u);
-    let w = max(0.5 * texel_px, 0.05);
+    // The edge never reaches empty (0) or full (1) coverage, so the blank
+    // cells of a small run stay blank.
+    let w = clamp(0.5 * texel_px, 0.05, 0.9 * threshold);
     return smoothstep(threshold - w, threshold + w, c);
 }
 

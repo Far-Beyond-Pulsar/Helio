@@ -164,8 +164,9 @@ fn assert_design(frame: &Frame, label: &str) -> [u32; 4] {
         .chunks_exact(4)
         .filter(|p| is_void([p[0], p[1], p[2], p[3]]))
         .count();
+    // (The dialog may take up to 81% of the frame.)
     assert!(
-        black as f32 > 0.4 * (w * h) as f32,
+        black as f32 > 0.15 * (w * h) as f32,
         "{label}: only {black} of {} pixels are black",
         w * h
     );
@@ -220,6 +221,10 @@ fn every_state_is_a_red_dialog_on_black_at_1280_by_720() {
     // the stress list, which is the tallest the frame allows.
     let height = |n: &str| heights.iter().find(|(name, _)| *name == n).unwrap().1;
     assert!(height("none") < height("nodes_missing"));
+    assert!(
+        height("none") as f32 * 2.0 < 720.0,
+        "the short message leaves most of the frame black"
+    );
     assert!(height("nodes_missing") < height("stress_46"));
     assert!(height("stress_46") as f32 <= 0.9 * 720.0 + 2.0);
 }
