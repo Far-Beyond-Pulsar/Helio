@@ -63,6 +63,12 @@ impl Renderer {
         }
         self.status_hint = hint;
         // A screen being shown says the old hint: draw it again.
+        self.redraw_status_screen();
+    }
+
+    /// Builds the status screen being shown again (a new hint, an edited
+    /// status screen shader). Does nothing while a pipeline renders.
+    pub(crate) fn redraw_status_screen(&mut self) {
         if !self.pipeline_status.is_ready() {
             let status = self.pipeline_status.clone();
             let rebuilder = self.graph_rebuilder.clone();
@@ -156,18 +162,14 @@ impl Renderer {
                     .map(|s| (*s).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_owned());
-                Some(Err(PipelineFailure::new(
-                    "the pipeline panicked while building",
-                )
-                .with_details([message])))
+                Some(Err(PipelineFailure::new(status_screen::REASON_PANIC)
+                    .with_errors([message])))
             }
             Ok(Some(Ok(mut graph))) => match gpu_error {
                 None => Some(Ok(graph)),
                 Some(error) => {
-                    let mut failure = PipelineFailure::new(
-                        "the GPU rejected what the pipeline built (an invalid shader or pipeline state)",
-                    )
-                    .with_details([error.to_string()]);
+                    let mut failure = PipelineFailure::new(status_screen::REASON_GPU)
+                        .with_errors([error.to_string()]);
                     failure.rebuilder = graph.take_graph_data::<GraphRebuilder>();
                     Some(Err(failure))
                 }
@@ -197,7 +199,9 @@ impl Renderer {
     /// Replaces the graph with the status screen for `status` (not `Ready`),
     /// keeping `rebuilder` so the pipeline can be tried again. Logs a change.
     fn show_status(&mut self, status: PipelineStatus, rebuilder: Option<GraphRebuilder>) {
-        let Some(text) = status_screen::text_for(&status, &self.status_hint) else {
+        let Some(content) =
+            status_screen::content_for(&status, &self.status_hint, rebuilder.is_some())
+        else {
             return;
         };
         if self.pipeline_status != status {
@@ -228,7 +232,7 @@ impl Renderer {
             self.owns_device,
             self.surface_format,
             RenderSize::new(internal, [self.output_width, self.output_height]),
-            text,
+            content,
         );
         // The old graph, the pipeline's persistent state and host passes with
         // it, is dropped here.

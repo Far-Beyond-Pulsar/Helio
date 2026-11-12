@@ -1,194 +1,24 @@
 //! A renderer needs no pipeline, swaps pipelines at a frame boundary, and
 //! shows why when it has none or the one it has does not build. The checks
-//! read the output frame back (in tests only): the status screen is drawn text,
-//! so its pixels exist, and no other graph stands in for a failed pipeline.
+//! read the output frame back (in tests only): the status screen is drawn, so
+//! its pixels exist, and no other graph stands in for a failed pipeline.
 //!
 //! Needs a GPU device; without one the tests skip.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+#[macro_use]
+mod common;
 
-use glam::Vec3;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use common::{gpu, gpu_serial, is_void, near, Gpu, FORMAT, PIPELINE_CLEAR};
 use helio::{
-    Camera, GraphRebuilder, IntoGraph, NamedPipeline, PassBuildContext, PipelineFailure,
-    PipelineStatus, Renderer, RendererBuilder, RendererConfig,
+    GraphRebuilder, IntoGraph, NamedPipeline, PassBuildContext, PipelineFailure, PipelineStatus,
+    Renderer,
 };
 use helio_core::RenderGraph;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
-use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
-
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// The renderer's own clear colour (what a rendering pipeline's frame starts as).
-const PIPELINE_CLEAR: [f32; 4] = [0.0, 0.2, 0.0, 1.0];
-
-/// One test at a time may hold a device (see Pulsar-Native#1647).
-static GPU_DEVICE: Mutex<()> = Mutex::new(());
-
-fn gpu_serial() -> std::sync::MutexGuard<'static, ()> {
-    GPU_DEVICE.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-struct Gpu {
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
-}
-
-fn gpu() -> Option<Gpu> {
-    pollster::block_on(async {
-        let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
-        let adapter = instance.request_adapter(&Default::default()).await.ok()?;
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_features: helio::required_wgpu_features(adapter.features()),
-                required_limits: helio::required_wgpu_limits(adapter.limits()),
-                experimental_features: helio::required_experimental_features(adapter.features()),
-                ..Default::default()
-            })
-            .await
-            .ok()?;
-        Some(Gpu {
-            device: Arc::new(device),
-            queue: Arc::new(queue),
-        })
-    })
-}
-
-impl Gpu {
-    fn mirror(&self) -> GpuMirrorHandle {
-        let context = EngineGpuContext::new(Arc::clone(&self.device), Arc::clone(&self.queue));
-        let store = SceneGpuStore::new(
-            &context,
-            SceneGpuConfig {
-                classes: Vec::new(),
-                tombstone_headroom: 0,
-                max_cells_metadata: 0,
-            },
-        );
-        GpuMirrorHandle::new(Arc::new(store), Arc::clone(&self.queue))
-    }
-
-    /// A renderer with the pipeline the builder is given (or none).
-    fn renderer(&self, size: [u32; 2], pipeline: Option<NamedPipeline>) -> Renderer {
-        let mut builder =
-            RendererBuilder::new(RendererConfig::new(size[0], size[1], FORMAT), self.mirror())
-                .with_external_device()
-                .with_clear_color(PIPELINE_CLEAR);
-        if let Some(NamedPipeline { id, pipeline }) = pipeline {
-            builder = builder.with_pipeline(id, BoxedPipeline(pipeline));
-        }
-        builder.build(
-            Arc::clone(&self.device),
-            Arc::clone(&self.queue),
-            size[0],
-            size[1],
-            FORMAT,
-        )
-    }
-
-    /// Renders one frame and reads it back as RGBA8.
-    fn frame(&self, renderer: &mut Renderer) -> Frame {
-        let (width, height) = (renderer.output_width(), renderer.output_height());
-        let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("test target"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let view = target.create_view(&Default::default());
-        let camera = Camera::perspective_look_at(
-            Vec3::new(0.0, 2.0, 5.0),
-            Vec3::ZERO,
-            Vec3::Y,
-            1.0,
-            width as f32 / height as f32,
-            0.1,
-            100.0,
-        );
-        renderer.render(&camera, &view).expect("the frame renders");
-
-        let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("test readback"),
-            size: u64::from(row * height),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            target.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: Some(height),
-                },
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.queue.submit([encoder.finish()]);
-        readback
-            .slice(..)
-            .map_async(wgpu::MapMode::Read, |r| r.unwrap());
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
-        let mapped = readback.slice(..).get_mapped_range().unwrap();
-        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
-        for y in 0..height {
-            let start = (y * row) as usize;
-            pixels.extend_from_slice(&mapped[start..start + (width * 4) as usize]);
-        }
-        drop(mapped);
-        readback.unmap();
-        Frame {
-            width,
-            height,
-            pixels,
-        }
-    }
-}
-
-struct Frame {
-    width: u32,
-    height: u32,
-    pixels: Vec<u8>,
-}
-
-impl Frame {
-    fn at(&self, x: u32, y: u32) -> [u8; 4] {
-        let i = ((y * self.width + x) * 4) as usize;
-        self.pixels[i..i + 4].try_into().unwrap()
-    }
-
-    /// Pixels the text drew: bright, in any channel.
-    fn text_pixels(&self) -> usize {
-        self.pixels
-            .chunks_exact(4)
-            .filter(|p| p[0] > 150 && p[1] > 150 && p[2] > 150)
-            .count()
-    }
-
-    fn corner(&self) -> [u8; 4] {
-        self.at(self.width - 1, self.height - 1)
-    }
-}
-
-fn near(pixel: [u8; 4], color: [f32; 4]) -> bool {
-    (0..3).all(|c| (i32::from(pixel[c]) - (color[c] * 255.0).round() as i32).abs() <= 2)
-}
+use pulsar_scenedb::gpu::GpuMirrorHandle;
 
 /// `Box<dyn IntoGraph>` as an `IntoGraph` for `with_pipeline`.
 struct BoxedPipeline(Box<dyn IntoGraph>);
@@ -263,26 +93,6 @@ impl IntoGraph for FailingPipeline {
     }
 }
 
-fn status_clear(status: &PipelineStatus) -> [f32; 4] {
-    match status {
-        PipelineStatus::None => [0.03, 0.04, 0.08, 1.0],
-        PipelineStatus::Invalid { .. } => [0.10, 0.03, 0.03, 1.0],
-        PipelineStatus::Ready => PIPELINE_CLEAR,
-    }
-}
-
-macro_rules! gpu_or_skip {
-    ($name:literal) => {{
-        match gpu() {
-            Some(gpu) => gpu,
-            None => {
-                eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: {}", $name);
-                return;
-            }
-        }
-    }};
-}
-
 #[test]
 fn a_renderer_with_no_pipeline_builds_and_says_so() {
     let _serial = gpu_serial();
@@ -297,8 +107,9 @@ fn a_renderer_with_no_pipeline_builds_and_says_so() {
         "the status screen is drawn text, not a black frame ({} text pixels)",
         frame.text_pixels()
     );
-    // The frame is the status screen's colour, not the pipeline's clear colour.
-    assert!(near(frame.corner(), status_clear(&PipelineStatus::None)));
+    // The frame is the status screen's near-black field, not the pipeline's
+    // clear colour.
+    assert!(is_void(frame.corner()), "{:?}", frame.corner());
 }
 
 #[test]
@@ -306,11 +117,14 @@ fn the_hint_the_host_gives_is_on_the_screen_text() {
     let _serial = gpu_serial();
     let gpu = gpu_or_skip!("status hint");
     let mut renderer = gpu.renderer([640, 360], None);
-    let before = gpu.frame(&mut renderer).text_pixels();
+    let before = gpu.frame(&mut renderer);
     renderer
         .set_status_hint("Choose one under World Settings, Render Pipeline, in the level editor.");
-    let after = gpu.frame(&mut renderer).text_pixels();
-    assert_ne!(before, after, "a screen already showing is drawn again");
+    let after = gpu.frame(&mut renderer);
+    assert_ne!(
+        before.pixels, after.pixels,
+        "a screen already showing is drawn again"
+    );
 }
 
 #[test]
@@ -337,13 +151,13 @@ fn an_invalid_pipeline_shows_its_reason_and_is_in_the_status() {
 
     let frame = gpu.frame(&mut renderer);
     assert!(frame.text_pixels() > 200, "{}", frame.text_pixels());
-    assert!(near(
-        frame.corner(),
-        status_clear(renderer.pipeline_status())
-    ));
-    // The accent bar is the error colour.
-    let accent = frame.at(2, 200);
-    assert!(accent[0] > 200 && accent[1] < 100, "accent {accent:?}");
+    assert!(is_void(frame.corner()), "{:?}", frame.corner());
+    // The dialog is red around the centre of the frame.
+    let centre = frame.at(frame.width / 2, frame.height / 2);
+    assert!(
+        centre[0] > 15 && centre[0] > 2 * centre[1].max(centre[2]),
+        "centre {centre:?}"
+    );
 }
 
 #[test]
@@ -399,7 +213,7 @@ fn pipelines_swap_at_the_frame_boundary_through_none_and_back() {
     let frame = gpu.frame(&mut renderer);
     assert_eq!(renderer.pipeline_status(), &PipelineStatus::None);
     assert_eq!(renderer.pipeline_id(), None);
-    assert!(near(frame.corner(), status_clear(&PipelineStatus::None)));
+    assert!(is_void(frame.corner()), "{:?}", frame.corner());
     assert!(frame.text_pixels() > 200);
 
     // none -> A again, a new instance built from scratch.
@@ -486,10 +300,7 @@ fn resize_keeps_working_in_every_state() {
     let frame = gpu.frame(&mut renderer);
     assert_eq!((frame.width, frame.height), (512, 288));
     assert!(frame.text_pixels() > 100, "invalid, resized");
-    assert!(near(
-        frame.corner(),
-        status_clear(renderer.pipeline_status())
-    ));
+    assert!(is_void(frame.corner()), "{:?}", frame.corner());
 
     let (a, _) = text_pipeline("a", "PIPELINE A");
     renderer.set_pipeline(Some(a));
@@ -573,10 +384,7 @@ fn a_rebuild_retries_a_failure_and_reports_a_new_one() {
         renderer.pipeline_status(),
         PipelineStatus::Invalid { reason, .. } if reason == "the plugin is still disabled"
     ));
-    assert!(near(
-        frame.corner(),
-        status_clear(renderer.pipeline_status())
-    ));
+    assert!(is_void(frame.corner()), "{:?}", frame.corner());
 }
 
 #[test]
@@ -617,3 +425,4 @@ fn scene_db_for(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> GpuMirr
     }
     .mirror()
 }
+

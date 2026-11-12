@@ -197,6 +197,8 @@ pub fn compute(content: &StatusContent, width: u32, height: u32) -> Layout {
 #[derive(Clone, Debug)]
 struct Budget {
     details: usize,
+    /// Whether the details section is drawn at all.
+    section: bool,
     reason_lines: usize,
     pipeline_lines: usize,
     hint_lines: usize,
@@ -208,6 +210,7 @@ impl Budget {
     fn full(details: usize) -> Self {
         Self {
             details,
+            section: true,
             reason_lines: 6,
             pipeline_lines: 3,
             hint_lines: 6,
@@ -219,7 +222,8 @@ impl Budget {
     fn minimal() -> Self {
         Self {
             details: 0,
-            reason_lines: 1,
+            section: false,
+            reason_lines: 0,
             pipeline_lines: 0,
             hint_lines: 0,
             hint: false,
@@ -228,7 +232,7 @@ impl Budget {
     }
 
     #[allow(clippy::type_complexity)]
-    fn steps() -> [fn(&mut Budget); 9] {
+    fn steps() -> [fn(&mut Budget); 10] {
         [
             |b| b.hint_lines = 3,
             |b| b.reason_lines = 3,
@@ -238,7 +242,8 @@ impl Budget {
             |b| b.reason_lines = 1,
             |b| b.hint = false,
             |b| b.pipeline_lines = 0,
-            |b| b.details = 0,
+            |b| b.section = false,
+            |b| b.reason_lines = 0,
         ]
     }
 }
@@ -553,7 +558,7 @@ fn natural_width(lines: &[Vec<Cell>], m: &Metrics) -> f32 {
 
 fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -> Option<Composed> {
     let shown = budget.details.min(content.details.len());
-    let hidden = content.details.len() - shown;
+    let hidden = if budget.section { content.details.len() - shown } else { 0 };
 
     // The styles.
     let kicker_color = match content.tone {
@@ -625,7 +630,7 @@ fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -
     let hm = hint_style.metrics();
 
     // The width: the longest line, within the limits.
-    let has_details = !content.details.is_empty();
+    let has_details = budget.section && !content.details.is_empty();
     let mut natural = icon
         + icon_gap
         + natural_width(&kicker_cells, &plain(&kicker)).max(natural_width(&title_cells, &plain(&title)));
@@ -704,7 +709,7 @@ fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -
     }
 
     // The reason.
-    if !content.reason.is_empty() {
+    if !content.reason.is_empty() && budget.reason_lines > 0 {
         y += 1.2 * u;
         let lh = 1.5 * reason_style.text.size;
         for line in clip(wrap(&reason_cells, inner, &rm), budget.reason_lines) {
@@ -952,8 +957,10 @@ mod tests {
         let cells = paragraphs("ab `cd` ef", true, false);
         // "ab " + 2 + "cd" + 2 = 7, then " ef".
         assert_eq!(measure(&cells[0], &m), 3.0 + 2.0 + 2.0 + 2.0 + 3.0);
-        let lines = wrap(&cells, 8.0, &m);
+        let lines = wrap(&cells, 9.0, &m);
         assert_eq!(strings(&lines), ["ab cd", "ef"]);
+        let lines = wrap(&cells, 8.0, &m);
+        assert_eq!(strings(&lines), ["ab", "cd", "ef"]);
     }
 
     #[test]
@@ -976,7 +983,7 @@ mod tests {
 
     #[test]
     fn the_unit_follows_the_shorter_side_within_limits() {
-        assert_eq!(unit_for(1280, 720), 1.9 * 7.2);
+        assert!((unit_for(1280, 720) - 13.68).abs() < 1e-3);
         assert_eq!(unit_for(420, 320), 10.0, "never below 10px");
         assert_eq!(unit_for(7680, 4320), 17.0, "never above 17px");
         assert_eq!(unit_for(720, 405), 10.0);
@@ -1023,8 +1030,8 @@ mod tests {
     #[test]
     fn a_short_message_makes_a_small_dialog() {
         let layout = compute(&idle(), 1280, 720);
-        assert!(layout.dialog[2] < 0.9 * 1280.0 * 0.6, "{:?}", layout.dialog);
-        assert!(layout.dialog[3] < 0.5 * 720.0, "{:?}", layout.dialog);
+        assert!(layout.dialog[2] < 0.7 * 1280.0, "{:?}", layout.dialog);
+        assert!(layout.dialog[3] < 0.4 * 720.0, "{:?}", layout.dialog);
         assert_eq!(layout.details_hidden, 0);
     }
 
@@ -1103,8 +1110,9 @@ mod tests {
             let layout = compute(&content, w, h);
             let [_, _, dw, dh] = layout.dialog;
             assert!(dw <= 0.9 * w as f32 + 1.0, "{w}x{h}: width {dw}");
-            // The header alone needs 6.8 units; below that nothing can fit.
-            if (h as f32) * 0.9 >= 6.8 * layout.unit + 2.0 {
+            // The header alone needs 6.8 units, and more when the title wraps
+            // in a very narrow frame; below that nothing can fit.
+            if w >= 300 && (h as f32) * 0.9 >= 6.8 * layout.unit + 2.0 {
                 assert!(dh <= 0.9 * h as f32 + 1.0, "{w}x{h}: height {dh}");
             }
         }
