@@ -2889,3 +2889,40 @@ As built, the default graph as data (2026-11-11, `helio-presets`):
   with the preset. A default-graphs plugin can ship them.
 - Not done: the editor's wired (Get/Set) form on disk, a debug overlay node, deleting the
   preset path as the engine default.
+
+As built, p23 (2026-11-11, branch `rewrite/p23-render-runtimes` in Helio and
+Pulsar-Native; Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 15):
+
+- **Helio registers no pipeline and has no default.** `helio-presets`'
+  `pipelines` module (`register_builtin_pipelines`, the `helio.deferred` /
+  `helio.fxaa` / `helio.forward_*` / `helio.deferred_graph` ids) and the golden
+  `.rendergraph` files are deleted; `RenderPipelineRegistry` lost its default
+  (`set_default`, `default_id`, `resolve`; `create(id)` makes nothing for an id
+  it does not hold) and `PipelineOrigin`. The engine's shipped pipelines are
+  Pulsar's `pulsar.render_pipelines` plugin's `.rendergraph` files, made with
+  `graphs::graph_asset` over the enabled plugins' nodes.
+- **Presets are config-free data.** `Preset::nodes(registry)`,
+  `Preset::asset(registry)` and `graphs::graph_asset(preset, registry)` take no
+  renderer config: where a preset follows the project's anti-aliasing it names
+  the **anti-aliasing node** (`helio.pass.antialiasing`, "Anti-Aliasing: Project
+  Setting", `features::ANTIALIASING`), which runs the TSR node's constructor at
+  the config's quality when the project enables TSR and its `fallback` (the FXAA
+  node, or none) otherwise; the frame setup's `reactive_mask` applies only when
+  the frame resolves temporally. One asset is the pipeline for every project
+  setting. `deferred_graph_asset_for` and `template_config(_tsr)` are deleted.
+- **The pin probe is not a pipeline.** It builds a set of nodes with no output,
+  so `helio-graph-asset` checks its structure only (`compile::Purpose::Probe`,
+  `validate_structure`); routing validation had failed it ("the final output is
+  never written"), leaving every node without pins.
+- **The status screen's text shader compiles on D3D12.** `debug_overlay.wgsl`'s
+  fragment ended in `discard;` with no return; DXC rejects a non-void HLSL
+  function whose end is reachable. The editor (wgpui on D3D12) panicked building
+  its first renderer and every viewport stayed black, while Vulkan (the Helio
+  examples, the headless tests) drew. Pulsar's
+  `plugins/installed/tests/render_pipelines.rs` builds and draws the editor's
+  renderer on every backend the machine has.
+- **`Renderer::graph_texture_bytes`** (`RenderGraph::texture_bytes`): the
+  graph's transient texture estimate, which the engine's Renderers view lists
+  per runtime.
+- The engine owns every renderer it runs (Pulsar `render_runtimes`); Helio
+  stays a library with no thread, task or plugin of its own.

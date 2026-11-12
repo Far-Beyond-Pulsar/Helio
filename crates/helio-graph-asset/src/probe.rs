@@ -25,7 +25,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use helio_core::{DeclaredKind, PassDeclaration};
 
 use crate::asset::GraphAsset;
-use crate::compile::build_graph;
+use crate::compile::{build_graph, Purpose};
 use crate::validate::Diagnostic;
 use helio_feature_api::{BuildEnv, NodePins, NodeRegistry};
 use helio_feature_api::{PinDesc, PinType};
@@ -81,7 +81,7 @@ pub fn probe(
     env: &mut BuildEnv<'_>,
 ) -> Result<Probe, Vec<Diagnostic>> {
     let mut observed: Vec<(String, std::ops::Range<usize>, HashSet<&'static str>)> = Vec::new();
-    let graph = build_graph(asset, registry, env, false, &mut |node, graph, range| {
+    let graph = build_graph(asset, registry, env, Purpose::Probe, &mut |node, graph, range| {
         let externals = graph.external_input_names().into_iter().collect();
         observed.push((node.kind.clone(), range, externals));
     })?;

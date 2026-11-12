@@ -86,14 +86,26 @@ pub fn is_disabled(node: &NodeInstance) -> bool {
     matches!(node.params.get("enabled"), Some(Value::Bool(false)))
 }
 
-/// Checks `asset`: first its sections are expanded and its buffer nodes flattened away, then the resulting graph
-/// is checked and ordered.
+/// Checks `asset` as a pipeline: first its sections are expanded and its buffer
+/// nodes flattened away, then the resulting graph is checked and ordered, and
+/// where its passes' results go is checked against the output (routing).
 pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
+    validate_with(asset, registry, true)
+}
+
+/// [`validate`] without the routing check: the graph's structure only (node
+/// kinds, wires, order). For a graph that is a set of nodes rather than a
+/// pipeline, such as the pin probe's, which has no output.
+pub(crate) fn validate_structure(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
+    validate_with(asset, registry, false)
+}
+
+fn validate_with(asset: &GraphAsset, registry: &NodeRegistry, routing: bool) -> Validation {
     let expanded = crate::sections::expand(asset);
     let flattened = crate::buffers::flatten(&expanded.asset, registry);
     let mut validation = validate_flat(&flattened.asset, registry);
     // Where the frame's result goes, once the graph is sound enough to order.
-    if let Some(plan) = &validation.plan {
+    if let Some(plan) = validation.plan.as_ref().filter(|_| routing) {
         validation.diagnostics.extend(crate::routing::diagnostics(
             crate::routing::check_asset_routing(&flattened.asset, plan, registry),
         ));

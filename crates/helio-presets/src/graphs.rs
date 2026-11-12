@@ -27,6 +27,70 @@ use helio_frame_api::HOST_INPUTS;
 
 use crate::features;
 
+/// Core nodes plus everything `features` register.
+pub fn registry_for(features: &helio_feature_api::FeatureSet) -> NodeRegistry {
+    let mut registry = helio_graph_asset::core_registry();
+    features.register_into(&mut registry);
+    // The frame setup resolves the lighting models the features registered.
+    let models = helio_frame_api::lighting::registered_models(&registry)
+        .into_iter()
+        .cloned()
+        .collect();
+    registry.register(features::frame_setup_node(models));
+    registry
+}
+
+/// Core nodes, the default features and an engine's `extra` features.
+pub fn registry_with(extra: &helio_feature_api::FeatureSet) -> NodeRegistry {
+    registry_for(&features::default_features().extended(extra))
+}
+
+/// Core nodes and the default features ([`features::default_features`]).
+pub fn base_registry() -> NodeRegistry {
+    registry_for(&features::default_features())
+}
+
+fn pass_kinds(registry: &NodeRegistry) -> Vec<String> {
+    registry
+        .list()
+        .into_iter()
+        .map(|descriptor| descriptor.kind.clone())
+        .filter(|kind| kind.starts_with("helio.pass."))
+        .collect()
+}
+
+fn add_node(asset: &mut GraphAsset, id: &str, kind: &str) {
+    asset.nodes.push(NodeInstance {
+        id: id.into(),
+        kind: kind.into(),
+        params: Default::default(),
+        position: [0.0, 0.0],
+    });
+}
+
+fn add_buffer_node(asset: &mut GraphAsset, id: &str, kind: &str, buffer: &str) {
+    asset.nodes.push(NodeInstance {
+        id: id.into(),
+        kind: kind.into(),
+        params: [("buffer".to_string(), serde_json::Value::from(buffer))].into(),
+        position: [0.0, 0.0],
+    });
+}
+
+/// A node for every host input the registry's features declared.
+fn add_host_inputs(asset: &mut GraphAsset, registry: &NodeRegistry) {
+    for descriptor in registry.placed(HOST_INPUTS) {
+        add_node(asset, &descriptor.kind.replace('.', "_"), &descriptor.kind);
+    }
+}
+
+fn connect(asset: &mut GraphAsset, from: (&str, &str), to: (&str, &str)) {
+    asset.connections.push(Connection {
+        from: PinRef::new(from.0, from.1),
+        to: PinRef::new(to.0, to.1),
+    });
+}
+
 /// The graph a probe builds: On Frame Start, the host inputs, the default
 /// pipeline's passes in order, then every other registered pass, then the output.
 /// It has no wires; nodes build in this order. Every pass is in it, so every pass
