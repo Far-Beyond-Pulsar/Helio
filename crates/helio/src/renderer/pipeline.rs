@@ -52,24 +52,13 @@ where
     }
 }
 
-/// Where a registered pipeline came from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum PipelineOrigin {
-    /// Ships with Helio.
-    BuiltIn,
-    /// Authored in a project, e.g. a render-graph asset.
-    Project,
-}
-
 /// A pipeline the host can offer for selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PipelineInfo {
-    /// Stable identifier persisted in level settings: `fxaa`, or a
-    /// project-relative asset path.
+    /// Stable identifier persisted in level settings, e.g. an asset path.
     pub id: String,
     pub label: String,
     pub description: String,
-    pub origin: PipelineOrigin,
 }
 
 /// Makes a fresh pipeline each time one is selected or the renderer restarts.
@@ -80,11 +69,12 @@ struct Entry {
     factory: PipelineFactory,
 }
 
-/// Named [`IntoGraph`] factories. Ordered by id so listings are stable.
+/// Named [`IntoGraph`] factories, for a host that offers pipelines by id. It
+/// has no default: an id that is not registered makes nothing (the renderer
+/// shows why on its status screen). Ordered by id so listings are stable.
 #[derive(Default, Clone)]
 pub struct RenderPipelineRegistry {
     entries: BTreeMap<String, Arc<Entry>>,
-    default_id: Option<String>,
 }
 
 impl RenderPipelineRegistry {
@@ -108,20 +98,6 @@ impl RenderPipelineRegistry {
         self.entries.remove(id);
     }
 
-    /// Removes every pipeline of `origin` (a project reload drops its assets).
-    pub fn clear_origin(&mut self, origin: PipelineOrigin) {
-        self.entries.retain(|_, entry| entry.info.origin != origin);
-    }
-
-    /// The pipeline used when a level names none, or one that no longer exists.
-    pub fn set_default(&mut self, id: impl Into<String>) {
-        self.default_id = Some(id.into());
-    }
-
-    pub fn default_id(&self) -> Option<&str> {
-        self.default_id.as_deref()
-    }
-
     pub fn contains(&self, id: &str) -> bool {
         self.entries.contains_key(id)
     }
@@ -130,26 +106,13 @@ impl RenderPipelineRegistry {
         self.entries.get(id).map(|entry| &entry.info)
     }
 
-    /// Built-ins first, then project pipelines, each ordered by id.
+    /// Every registered pipeline, ordered by id.
     pub fn list(&self) -> Vec<PipelineInfo> {
-        let mut infos: Vec<_> = self.entries.values().map(|e| e.info.clone()).collect();
-        infos.sort_by(|a, b| (a.origin, &a.id).cmp(&(b.origin, &b.id)));
-        infos
+        self.entries.values().map(|e| e.info.clone()).collect()
     }
 
-    /// A new pipeline for `id`, or the default when `id` is `None` or unknown.
-    pub fn create(&self, id: Option<&str>) -> Option<Box<dyn IntoGraph>> {
-        let entry = id.and_then(|id| self.entries.get(id)).or_else(|| {
-            self.default_id
-                .as_deref()
-                .and_then(|id| self.entries.get(id))
-        })?;
-        Some((entry.factory)())
-    }
-
-    /// The id [`create`](Self::create) resolves `id` to.
-    pub fn resolve<'a>(&'a self, id: Option<&'a str>) -> Option<&'a str> {
-        id.filter(|id| self.entries.contains_key(*id))
-            .or(self.default_id.as_deref())
+    /// A new instance of the pipeline `id`; `None` when it is not registered.
+    pub fn create(&self, id: &str) -> Option<Box<dyn IntoGraph>> {
+        self.entries.get(id).map(|entry| (entry.factory)())
     }
 }

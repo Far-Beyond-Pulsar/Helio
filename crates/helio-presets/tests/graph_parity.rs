@@ -12,10 +12,9 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use helio::{DebugDrawState, IntoGraph, PassBuildContext, RenderPipelineRegistry, RendererConfig};
+use helio::{DebugDrawState, IntoGraph, PassBuildContext, RendererConfig};
 use helio_core::{GpuCameraUniforms, PassDeclaration};
 use helio_graph_asset::{Connection, GraphAsset, NodeInstance, PinRef};
-use helio_presets::pipelines::{DEFAULT, DEFERRED_GRAPH};
 use helio_presets::Preset;
 use helio_presets::{features, graphs};
 use pulsar_scenedb::gpu::{EngineGpuContext, GpuMirrorHandle, SceneGpuConfig, SceneGpuStore};
@@ -202,22 +201,21 @@ fn nodes_of_a_capability_the_platform_lacks_are_reported_at_validation() {
     assert!(!validation.has_errors());
 }
 
-/// The preset (`helio.deferred`) and the node graph (`helio.deferred_graph`)
-/// built for `fixtures`' config: the same passes with the same declarations in
-/// the same order, the same swap policy, size and host inputs.
+/// The preset and the graph asset made from it for `fixtures`' config (what
+/// Pulsar's render pipelines plugin writes as its `.rendergraph` file), built
+/// as a fixed asset: the same passes with the same declarations in the same
+/// order, the same swap policy, size and host inputs.
+fn template(fixtures: &Fixtures) -> helio_core::RenderGraph {
+    let registry = Arc::new(graphs::base_registry());
+    let asset = graphs::deferred_graph_asset(&registry);
+    Box::new(helio_graph_asset::GraphAssetPipeline::new(Arc::new(asset), registry))
+        .into_graph(fixtures.context())
+        .expect("the pipeline builds")
+}
+
 fn assert_template_matches_preset(fixtures: &Fixtures, what: &str) {
-    let mut pipelines = RenderPipelineRegistry::new();
-    helio_presets::pipelines::register_builtin_pipelines(&mut pipelines, &Default::default());
-    let preset = pipelines
-        .create(Some(DEFAULT))
-        .expect("default pipeline registered")
-        .into_graph(fixtures.context())
-        .expect("the pipeline builds");
-    let template = pipelines
-        .create(Some(DEFERRED_GRAPH))
-        .expect("template pipeline registered")
-        .into_graph(fixtures.context())
-        .expect("the pipeline builds");
+    let preset = Preset::Deferred.build(fixtures.context());
+    let template = template(fixtures);
 
     let policy = |g: &helio_core::RenderGraph| format!("{:?}", g.swap_policy());
     assert!(
@@ -263,13 +261,7 @@ fn the_template_builds_the_deferred_preset() {
         fixtures.config = base.clone().with_tsr_quality(quality);
         assert_template_matches_preset(&fixtures, &format!("TSR {quality:?}"));
     }
-    let mut pipelines = RenderPipelineRegistry::new();
-    helio_presets::pipelines::register_builtin_pipelines(&mut pipelines, &Default::default());
-    let template = pipelines
-        .create(Some(DEFERRED_GRAPH))
-        .expect("template pipeline registered")
-        .into_graph(fixtures.context())
-        .expect("the pipeline builds");
+    let template = template(&fixtures);
     assert!(has::<helio_pass_tsr::TsrPass>(&template));
     assert!(!has::<helio_pass_fxaa::FxaaPass>(&template));
 
@@ -295,7 +287,7 @@ fn the_graph_sets_the_frame_from_its_frame_setup_node() {
         model: LightingModel::new(model::FORWARD, Shading::Forward),
     });
     let registry = Arc::new(graphs::registry_with(&features));
-    let asset = graphs::graph_asset(Preset::Forward, &registry, &fixtures.config);
+    let asset = graphs::graph_asset(Preset::Forward, &registry);
     let from_graph = helio_graph_asset::GraphAssetPipeline::new(
         Arc::new(asset),
         Arc::clone(&registry),
@@ -307,40 +299,6 @@ fn the_graph_sets_the_frame_from_its_frame_setup_node() {
         .build(fixtures.context());
     assert_eq!(passes(&from_graph), passes(&from_preset));
     assert!(!has::<helio_spine::UnlitPass>(&from_graph));
-}
-
-/// The shipped `.rendergraph` files build what the preset builds: a
-/// default-graphs plugin can ship them as the default pipeline.
-#[test]
-fn the_golden_graph_files_build_the_preset() {
-    let _gpu = gpu_serial();
-    let Some(mut fixtures) = fixtures() else {
-        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: golden graphs");
-        return;
-    };
-    let registry = Arc::new(graphs::base_registry());
-    let base = fixtures.config.clone();
-    for (file, config) in [
-        ("deferred.rendergraph", base.clone()),
-        (
-            "deferred_tsr.rendergraph",
-            base.clone().with_tsr_quality(helio::TsrQuality::Quality),
-        ),
-    ] {
-        fixtures.config = config;
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(file);
-        let asset = GraphAsset::from_json(&std::fs::read_to_string(path).unwrap()).expect("parses");
-        let pipeline = helio_graph_asset::GraphAssetPipeline::new(
-            Arc::new(asset),
-            Arc::clone(&registry),
-        );
-        let from_file = Box::new(pipeline).into_graph(fixtures.context())
-        .expect("the pipeline builds");
-        let from_preset = Preset::Deferred.build(fixtures.context());
-        assert_eq!(passes(&from_file), passes(&from_preset), "{file}");
-    }
 }
 
 fn has<T: helio_core::RenderPass + 'static>(graph: &helio_core::RenderGraph) -> bool {
@@ -513,10 +471,13 @@ fn a_model_brings_its_own_pipeline_and_reads() {
     let pipeline = registered.pipelines[0];
     let features = helio_feature_api::FeatureSet::new().with(Model { model: registered });
 
-    // Its pipeline is listed in a host's registry.
-    let mut listed = RenderPipelineRegistry::new();
-    helio_presets::pipelines::register_builtin_pipelines(&mut listed, &features);
-    assert_eq!(listed.resolve(Some("test.pipeline")), Some("test.pipeline"));
+    // A host finds its pipeline among the registered models' (the render
+    // pipelines plugin makes an asset of each).
+    let registry = graphs::registry_with(&features);
+    assert!(helio_frame_api::lighting::registered_models(&registry)
+        .iter()
+        .flat_map(|model| model.pipelines.iter())
+        .any(|listed| listed.id == "test.pipeline"));
 
     // Under TSR it resolves temporally; without, it is not anti-aliased.
     fixtures.config = fixtures

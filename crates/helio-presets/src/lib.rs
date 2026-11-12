@@ -4,8 +4,13 @@
 //!   config ([`presets`]): `deferred`, `forward`, and the pipelines lighting models bring.
 //! - [`features`]: the feature list they build from (the spine and every
 //!   feature crate's nodes), the renderer's own nodes and the config bridge.
-//! - [`graphs`]: node registries, the editor's template, the pin probe.
-//! - [`pipelines`]: the presets as named pipelines for a host's registry.
+//! - [`graphs`]: node registries, a preset as a laid-out graph asset, the pin
+//!   probe.
+//!
+//! Helio registers no pipeline and has no default one: a host decides what it
+//! offers. Pulsar's `pulsar.render_pipelines` plugin makes its `.rendergraph`
+//! assets from these presets ([`graphs::graph_asset`]) for the plugins a project
+//! enables.
 //!
 //! The presets name no feature beyond the feature list: each feature declares
 //! what it needs of the others (GI's terrain tracer, TSR's stochastic mask)
@@ -13,7 +18,6 @@
 
 pub mod features;
 pub mod graphs;
-pub mod pipelines;
 pub mod presets;
 pub use presets::{deferred, deferred_fxaa, forward, registry, Preset, PresetGraph};
 

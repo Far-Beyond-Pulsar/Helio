@@ -27,7 +27,7 @@ pub use debug::{
     WorldVertex,
 };
 pub use pipeline::{
-    IntoGraph, PipelineFactory, PipelineInfo, PipelineOrigin, RenderPipelineRegistry,
+    IntoGraph, PipelineFactory, PipelineInfo, RenderPipelineRegistry,
 };
 pub use pipeline_status::{NamedPipeline, PipelineFailure, PipelineStatus, UNNAMED_PIPELINE};
 pub use renderer_impl::{GraphRebuilder, Renderer};

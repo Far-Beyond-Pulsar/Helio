@@ -580,6 +580,12 @@ impl Renderer {
         self.graph.untraced_geometry()
     }
 
+    /// Estimated bytes of the textures the current graph allocates
+    /// ([`RenderGraph::texture_bytes`]): what a host's renderer list shows.
+    pub fn graph_texture_bytes(&self) -> u64 {
+        self.graph.texture_bytes()
+    }
+
     /// What the graph's passes route to the presented output, from their
     /// declarations (see [`RenderGraph::routing_issues`]). A host that knows
     /// the pipeline's id logs these with it.

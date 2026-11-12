@@ -16,7 +16,8 @@ use std::sync::{Arc, Mutex};
 
 use helio::{DebugDrawState, RendererConfig};
 use helio_feature_api::{
-    pass_node, Feature, FeatureRegistrar, FeatureSet, NodeDescriptor, ParamDesc, PinDesc,
+    pass_node, Feature, FeatureRegistrar, FeatureSet, NodeBuild, NodeDescriptor, NodeRegistry,
+    ParamDesc, Params, PinDesc,
 };
 use helio_frame_api::color::ReactiveMask;
 use helio_frame_api::lighting::{model as model_ids, LightingModel, LightingModelId};
@@ -49,7 +50,7 @@ pub const FRAME_SETUP: &str = "helio.frame.setup";
 /// with, and so the draw phases it runs, how the indirect-specular layers are
 /// taken and where the lighting inputs run, as the settings the nodes after
 /// it read. A `reactive_mask` asks the temporal resolve for the reactive mask
-/// (transparency that a model leaves to TSR).
+/// (transparency that a model leaves to TSR) when the frame resolves temporally.
 ///
 /// `models` are the lighting models the registry's features registered; a
 /// model nobody registered resolves to the spine's unlit stand-in, with one
@@ -77,7 +78,13 @@ pub(crate) fn frame_setup_node(models: Vec<LightingModel>) -> NodeDescriptor {
                 .insert_setting(PhaseList(crate::presets::phases_for(model.shading)));
             build.env.insert_setting(model.specular_layers);
             build.env.insert_setting(model.inputs_order);
-            if build.boolean("reactive_mask") {
+            // The mask is for the temporal resolve: a frame that does not
+            // resolve temporally (the project's TSR is off) has no reader for it.
+            let temporal = build
+                .env
+                .setting::<RendererConfig>()
+                .is_some_and(|config| config.tsr_quality.is_some());
+            if build.boolean("reactive_mask") && temporal {
                 build.env.insert_setting(ReactiveMask);
             }
             Ok(())
@@ -86,6 +93,71 @@ pub(crate) fn frame_setup_node(models: Vec<LightingModel>) -> NodeDescriptor {
     .with_param(ParamDesc::text("model", "Lighting model", model_ids::DEFERRED))
     .with_param(ParamDesc::boolean("reactive_mask", "Reactive mask", false))
     .with_pins(vec![PinDesc::flow("in")], vec![PinDesc::flow("out")])
+}
+
+/// Kind of the anti-aliasing node that follows the project's setting.
+pub const ANTIALIASING: &str = "helio.pass.antialiasing";
+
+/// The scene-linear chain's anti-aliasing as the renderer's config chooses it:
+/// the TSR node at the config's quality when the project resolves temporally,
+/// otherwise its `fallback` (the FXAA node, or nothing). It runs the TSR and
+/// FXAA nodes' own constructors, so a graph that names it is the same data
+/// whatever the project's setting, and follows the setting as a preset does.
+fn antialiasing_node() -> NodeDescriptor {
+    // The nodes it chooses between, as their owners register them.
+    let mut owners = NodeRegistry::new();
+    FeatureSet::new()
+        .with(helio_spine::SpineFeature)
+        .with(helio_pass_fxaa::FxaaFeature)
+        .register_into(&mut owners);
+    let tsr = owners.get(&kind("tsr")).cloned();
+    let fxaa = owners.get(&kind("fxaa")).cloned();
+    pass_node(
+        "antialiasing",
+        "Anti-Aliasing: Project Setting",
+        "Passes: Post",
+        "TSR at the project's quality when the project enables temporal resolve, otherwise the fallback (FXAA or none).",
+        move |build| {
+            let quality = build
+                .env
+                .setting::<RendererConfig>()
+                .and_then(|config| config.tsr_quality)
+                .map(crate::presets::tsr_quality_name);
+            let (node, params) = match quality {
+                Some(quality) => {
+                    let mut params = Params::default();
+                    params.insert("quality".into(), quality.into());
+                    params.insert(
+                        "transparency_reactivity".into(),
+                        build.boolean("transparency_reactivity").into(),
+                    );
+                    (tsr.as_ref(), params)
+                }
+                None if build.text("fallback") == "fxaa" => (fxaa.as_ref(), Params::default()),
+                None => return Ok(()),
+            };
+            let node = node.ok_or("the TSR or FXAA node is not registered")?;
+            let params = node.effective_params(&params);
+            let mut chosen = NodeBuild {
+                graph: &mut *build.graph,
+                env: &mut *build.env,
+                params: &params,
+                node_id: build.node_id,
+            };
+            node.run(&mut chosen)
+        },
+    )
+    .with_param(ParamDesc::choice(
+        "fallback",
+        "Without TSR",
+        &["fxaa", "none"],
+        "fxaa",
+    ))
+    .with_param(ParamDesc::boolean(
+        "transparency_reactivity",
+        "Transparency reactivity",
+        false,
+    ))
 }
 
 /// The renderer's nodes and the config bridge.
@@ -116,6 +188,8 @@ impl Feature for RendererNodes {
             });
             env.insert_setting(crate::convert_perf_mode(config.perf_overlay_mode));
         }));
+
+        registrar.node(antialiasing_node());
 
         registrar.node(
             pass_node(
