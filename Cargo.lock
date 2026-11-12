@@ -1186,6 +1186,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-status-screen"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "helio-pass-debug-overlay",
+ "naga",
+ "wgpu",
+]
+
+[[package]]
 name = "helio-pass-tsr"
 version = "0.1.0"
 dependencies = [
