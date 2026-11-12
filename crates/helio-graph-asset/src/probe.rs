@@ -130,8 +130,14 @@ pub fn probe(
             .flat_map(|declaration| declaration.writes.iter().map(|write| write.name))
             .collect();
 
-        // A node that adds no pass only supplies data, and does not execute.
-        let executes = !range.is_empty();
+        // A data node (host inputs, resources) does not execute. A pass node
+        // always does, even one that added no pass here because the probe's
+        // config turns it off (SSR, GI's mesh rays): it keeps its flow pins, or
+        // a graph that chains it would stop validating once pins are probed.
+        let executes = !range.is_empty()
+            || registry
+                .get(&kind)
+                .is_some_and(|descriptor| !descriptor.data_only);
         let mut inputs = if executes {
             vec![PinDesc::flow("in")]
         } else {
