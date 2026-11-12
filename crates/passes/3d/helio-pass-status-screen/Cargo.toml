@@ -1,0 +1,17 @@
+[package]
+name = "helio-pass-status-screen"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helio Contributors"]
+description = "The status screen: what a renderer draws when it has no pipeline or its pipeline is invalid (one fullscreen WGSL pass over a rounded-rectangle signed distance field)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+# The engine's one on-screen font (its glyph atlas); no font of our own.
+helio-pass-debug-overlay = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }
