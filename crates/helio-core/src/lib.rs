@@ -388,7 +388,6 @@ pub const REFLECTIONS_SUPPORTED: bool = false;
 pub const REFLECTIONS_SUPPORTED: bool = true;
 
 pub mod acceleration;
-pub mod actor;
 pub mod camera;
 pub mod cmd;
 pub mod context;
@@ -467,7 +466,6 @@ pub use crate::acceleration::{
     AccelerationError, BlasGeometry, BlasManager, TlasInstanceInput, TlasManager,
 };
 // Re-export core types
-pub use actor::Actor;
 pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};

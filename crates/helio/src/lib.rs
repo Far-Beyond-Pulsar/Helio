@@ -19,9 +19,9 @@ pub use graphics_context::{
 };
 pub use helio_core::wgpu_instance_descriptor;
 pub use helio_core::{
-    Actor, DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error,
-    GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
-    RenderPassTiming, RenderTimingSnapshot, Result, RoutingIssue, RoutingSeverity,
+    DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error, GpuCameraUniforms,
+    GpuTimingAvailability, Movability, RenderGraph, RenderPass, RenderPassTiming,
+    RenderTimingSnapshot, Result, RoutingIssue, RoutingSeverity,
 };
 pub use helio_frame_api::lighting::AmbientLight;
 pub use helio_pass_postprocess::{HdrOutputMode, TonemapOperator};
