@@ -958,9 +958,14 @@ pub fn start_watcher(extra_roots: Vec<PathBuf>) -> bool {
     if !enabled() || WATCHER_STARTED.swap(true, Ordering::AcqRel) {
         return false;
     }
-    let spawned = std::thread::Builder::new()
-        .name("helio-shader-watch".into())
-        .spawn(move || watch_loop(extra_roots));
+    // It waits on the file system for as long as the process runs.
+    let spawned = helio_tasks::spawn_service(
+        helio_tasks::ServiceSpec::new("Helio shader watcher", "helio-shader-watch")
+            .owner("helio")
+            .role(helio_tasks::Role::Io)
+            .no_heartbeat(),
+        move |_| watch_loop(extra_roots),
+    );
     match spawned {
         Ok(_) => true,
         Err(error) => {

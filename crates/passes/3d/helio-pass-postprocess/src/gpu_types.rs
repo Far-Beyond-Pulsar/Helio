@@ -159,44 +159,17 @@ pub struct GpuPostProcessUniforms {
     pub lut_intensity: f32,            // 356 — blend 0-1 between graded and ungraded
     pub lut_platform: u32,             // 360 — 0=none, 1=16x16x16, 2=32x32x32
     pub pad_grading_end: f32,          // 364
-
-    // Lens flare: appended 96-byte block (24 words); shared with the optics
-    // pass. Camera optics (f-number, focal length, sensor, iris) are not here:
-    // they belong to the camera's `LensRow` (the lens plugin's `helio-pass-lens`).
-    pub lens_enabled: u32,          // 368
-    pub lens_quality: u32,          // 372
-    pub lens_profile: u32,          // 376
-    pub lens_ghost_count: u32,      // 380
-    pub lens_intensity: f32,        // 384
-    pub lens_threshold: f32,        // 388
-    pub lens_soft_knee: f32,        // 392
-    pub lens_ghost_intensity: f32,  // 396
-    pub lens_halo_intensity: f32,   // 400
-    pub lens_glare_intensity: f32,  // 404
-    pub lens_streak_intensity: f32, // 408
-    pub lens_dispersion: f32,       // 412
-    /// Reserved: natural cos^4 falloff is the lens plugin's (`helio-pass-lens`).
-    pub reserved_lens_vignette: f32, // 416
-    pub lens_starburst_intensity: f32, // 420
-    pub lens_starburst_length: f32, // 424
-    pub lens_coating_strength: f32, // 428
-    pub lens_ghost_rim: f32,        // 432
-    pub lens_dirt_intensity: f32,   // 436
-    pub lens_light_sources: u32,    // 440
-    pub lens_light_intensity: f32,  // 444
-    pub lens_field_margin: f32,     // 448
-    /// Temporal response time constant in seconds (0 = instantaneous).
-    pub lens_response_time: f32, // 452
-    pub pad_lens: [f32; 2],         // 456..464
 }
 
-// Total: 464 bytes (29 uniform slots); the lens block starts at 368. (The fog
-// block that sat at 272 left: fog is the fog plugin's media, not a post setting.)
+// Total: 368 bytes (23 uniform slots). (The fog block that sat at 272 and the
+// lens block that followed the grading words left: fog is the fog plugin's
+// media, the lens's settings are the lens plugin's, a post-process volume
+// reaches them through the lens's overrides contract.)
 //
 // This struct is mirrored by hand in shaders/post_settings.wgsl (the snippet every
 // reader includes, a post plugin's volume rows embed it). A field added here without
 // updating that mirror misreads the buffer silently.
-const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 464);
+const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 368);
 const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() % 16 == 0);
 
 // ── Defaults ───────────────────────────────────────────────────────────────────
@@ -294,29 +267,6 @@ impl Default for GpuPostProcessUniforms {
             lut_intensity: 1.0,
             lut_platform: 0,
             pad_grading_end: 0.0,
-            lens_enabled: 0,
-            lens_quality: 0,
-            lens_profile: 0,
-            lens_ghost_count: 4,
-            lens_intensity: 0.3,
-            lens_threshold: 2.0,
-            lens_soft_knee: 1.0,
-            lens_ghost_intensity: 1.0,
-            lens_halo_intensity: 0.5,
-            lens_glare_intensity: 0.3,
-            lens_streak_intensity: 0.5,
-            lens_dispersion: 0.01,
-            reserved_lens_vignette: 0.0,
-            lens_starburst_intensity: 0.3,
-            lens_starburst_length: 0.25,
-            lens_coating_strength: 0.8,
-            lens_ghost_rim: 0.5,
-            lens_dirt_intensity: 0.0,
-            lens_light_sources: 1,
-            lens_light_intensity: 1.0,
-            lens_field_margin: 0.35,
-            lens_response_time: 0.06,
-            pad_lens: [0.0; 2],
         }
     }
 }
@@ -328,7 +278,6 @@ impl Default for GpuPostProcessUniforms {
 
 #[derive(Clone, Debug)]
 pub struct PostProcessSettings {
-    pub lens_flare: LensFlareSettings,
     // Exposure
     pub exposure_mode: ExposureMode,
     pub exposure_compensation: f32,
@@ -500,29 +449,6 @@ impl PostProcessSettings {
             lut_intensity: self.lut_intensity,
             lut_platform: self.lut_platform,
             pad_grading_end: 0.0,
-            lens_enabled: self.lens_flare.enabled as u32,
-            lens_quality: self.lens_flare.quality,
-            lens_profile: self.lens_flare.profile,
-            lens_ghost_count: self.lens_flare.ghost_count,
-            lens_intensity: self.lens_flare.intensity,
-            lens_threshold: self.lens_flare.threshold,
-            lens_soft_knee: self.lens_flare.soft_knee,
-            lens_ghost_intensity: self.lens_flare.ghost_intensity,
-            lens_halo_intensity: self.lens_flare.halo_intensity,
-            lens_glare_intensity: self.lens_flare.glare_intensity,
-            lens_streak_intensity: self.lens_flare.streak_intensity,
-            lens_dispersion: self.lens_flare.dispersion,
-            reserved_lens_vignette: 0.0,
-            lens_starburst_intensity: self.lens_flare.starburst_intensity,
-            lens_starburst_length: self.lens_flare.starburst_length,
-            lens_coating_strength: self.lens_flare.coating_strength,
-            lens_ghost_rim: self.lens_flare.ghost_rim,
-            lens_dirt_intensity: self.lens_flare.dirt_intensity,
-            lens_light_sources: self.lens_flare.light_sources as u32,
-            lens_light_intensity: self.lens_flare.light_intensity,
-            lens_field_margin: self.lens_flare.field_margin,
-            lens_response_time: self.lens_flare.response_time,
-            pad_lens: [0.0; 2],
         }
     }
 }
@@ -530,7 +456,6 @@ impl PostProcessSettings {
 impl Default for PostProcessSettings {
     fn default() -> Self {
         Self {
-            lens_flare: LensFlareSettings::default(),
             exposure_mode: ExposureMode::Manual,
             exposure_compensation: 0.0,
             exposure_min: -4.0,
@@ -604,78 +529,6 @@ impl Default for PostProcessSettings {
     }
 }
 
-/// Shared lens authoring settings. Quality: 0 cheap, 1 high; profile: 0 spherical, 1 anamorphic.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct LensFlareSettings {
-    pub enabled: bool,
-    pub quality: u32,
-    pub profile: u32,
-    pub ghost_count: u32,
-    pub intensity: f32,
-    pub threshold: f32,
-    pub soft_knee: f32,
-    pub ghost_intensity: f32,
-    pub halo_intensity: f32,
-    pub glare_intensity: f32,
-    pub streak_intensity: f32,
-    pub dispersion: f32,
-    /// Diffraction spikes from the iris blades. Gain and length (fraction of width).
-    pub starburst_intensity: f32,
-    pub starburst_length: f32,
-    /// 0 = neutral grey ghosts; 1 = full anti-reflection coating tints.
-    pub coating_strength: f32,
-    /// Brighter, chromatically fringed ghost edges (0 = flat disks).
-    pub ghost_rim: f32,
-    /// Lens dirt modulating light scattered off the front element.
-    pub dirt_intensity: f32,
-    /// Analytic lens sources from scene lights: flares persist and fade
-    /// physically when a light leaves the frame, with shadow-map visibility.
-    pub light_sources: bool,
-    pub light_intensity: f32,
-    /// How far past the frame edge (fraction of the half-frame) light still
-    /// reaches the front element before the lens barrel blocks it.
-    pub field_margin: f32,
-    /// Seconds for the lens response to settle after a change (occlusion,
-    /// entering the frame, enabling). Fades instead of popping; 0 = instant.
-    pub response_time: f32,
-}
-impl Default for LensFlareSettings {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            quality: 0,
-            profile: 0,
-            ghost_count: 4,
-            intensity: 0.3,
-            // Full soft knee: a smooth ramp from 0 to 2x threshold, so sources
-            // never switch at a cutoff, while dim extended areas (a lit floor)
-            // do not form recognisable ghost images. 0/0 is fully linear.
-            threshold: 2.0,
-            soft_knee: 1.0,
-            ghost_intensity: 1.0,
-            halo_intensity: 0.5,
-            glare_intensity: 0.3,
-            streak_intensity: 0.5,
-            dispersion: 0.01,
-            starburst_intensity: 0.3,
-            starburst_length: 0.25,
-            coating_strength: 0.8,
-            ghost_rim: 0.5,
-            dirt_intensity: 0.0,
-            light_sources: true,
-            light_intensity: 1.0,
-            field_margin: 0.35,
-            response_time: 0.06,
-        }
-    }
-}
-
-impl GpuPostProcessUniforms {
-    pub const LENS_BLOCK_OFFSET: u64 = 368;
-    pub const LENS_BLOCK_SIZE: u64 = 96;
-}
-const _: () = assert!(std::mem::offset_of!(GpuPostProcessUniforms, lens_enabled) == 368);
-
 /// Override bit indices, in non-padding, non-reserved GPU declaration order, with later
 /// additions appended (saved masks keep their meaning). Vector colors use one bit.
 /// ALL is the default for authored volumes; a zero mask overrides nothing.
@@ -726,7 +579,7 @@ impl PostProcessProperty {
     pub const BLEND_WEIGHT_EXPOSURE: usize = 39;
     // 40..=49 were the fog block's (retired: fog is the fog plugin's media);
     // the numbers are not reused, so saved masks keep their meaning.
-    pub const RETIRED: std::ops::RangeInclusive<usize> = 40..=49;
+    pub const RETIRED: [std::ops::RangeInclusive<usize>; 2] = [40..=49, 63..=83];
     pub const HDR_OUTPUT_MODE: usize = 50;
     pub const HDR_MAX_NITS: usize = 51;
     pub const HDR_UI_BRIGHTNESS: usize = 52;
@@ -740,27 +593,9 @@ impl PostProcessProperty {
     pub const LUT_GENERATION: usize = 60;
     pub const LUT_INTENSITY: usize = 61;
     pub const LUT_PLATFORM: usize = 62;
-    pub const LENS_ENABLED: usize = 63;
-    pub const LENS_QUALITY: usize = 64;
-    pub const LENS_PROFILE: usize = 65;
-    pub const LENS_GHOST_COUNT: usize = 66;
-    pub const LENS_INTENSITY: usize = 67;
-    pub const LENS_THRESHOLD: usize = 68;
-    pub const LENS_SOFT_KNEE: usize = 69;
-    pub const LENS_GHOST_INTENSITY: usize = 70;
-    pub const LENS_HALO_INTENSITY: usize = 71;
-    pub const LENS_GLARE_INTENSITY: usize = 72;
-    pub const LENS_STREAK_INTENSITY: usize = 73;
-    pub const LENS_DISPERSION: usize = 74;
-    pub const LENS_STARBURST_INTENSITY: usize = 75;
-    pub const LENS_STARBURST_LENGTH: usize = 76;
-    pub const LENS_COATING_STRENGTH: usize = 77;
-    pub const LENS_GHOST_RIM: usize = 78;
-    pub const LENS_DIRT_INTENSITY: usize = 79;
-    pub const LENS_LIGHT_SOURCES: usize = 80;
-    pub const LENS_LIGHT_INTENSITY: usize = 81;
-    pub const LENS_FIELD_MARGIN: usize = 82;
-    pub const LENS_RESPONSE_TIME: usize = 83;
+    // 63..=83 were the optics block's (retired with it: those settings are their
+    // plugin's, and a volume reaches its blendable parameters through that
+    // plugin's overrides contract); also in `RETIRED`.
     pub const LOCAL_EXPOSURE_HIGHLIGHT_CONTRAST: usize = 84;
     pub const LOCAL_EXPOSURE_SHADOW_CONTRAST: usize = 85;
     pub const LOCAL_EXPOSURE_DETAIL_STRENGTH: usize = 86;

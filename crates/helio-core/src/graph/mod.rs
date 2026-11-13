@@ -19,18 +19,15 @@ pub use executor::{
     FrameDebugData, GraphTimelineData, GraphTimelinePass, PassDeclaration, RenderGraph,
 };
 pub(crate) use membership::SceneRows;
-pub use routing::{
-    check_routing, RoutingIssue, RoutingKind, RoutingRead, RoutingSeverity, RoutingUnit,
-};
 pub use membership::{RenderSize, SceneContent};
 pub(crate) use pipeline_cache::driver_cache_for_device;
-pub use pipeline_cache::{
-    BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
-    PipelineHandle, PipelineRecipeBuilder, PipelineRegistry,
-};
+pub use pipeline_cache::{BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey};
 pub use resource::{
     GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,
     ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize, TextureDescriptor,
+};
+pub use routing::{
+    check_routing, RoutingIssue, RoutingKind, RoutingRead, RoutingSeverity, RoutingUnit,
 };
 pub use swap::{
     align_pass_sequences, plan_selective_swap, type_in_crate, type_name_of, PassIdentity, SwapPlan,

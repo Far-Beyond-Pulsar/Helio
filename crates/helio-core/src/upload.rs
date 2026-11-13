@@ -12,12 +12,13 @@ static REPORTER: OnceLock<mpsc::Sender<u64>> = OnceLock::new();
 fn reporter() -> &'static mpsc::Sender<u64> {
     REPORTER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<u64>();
-        std::thread::Builder::new()
-            .name("helio-upload-reporter".to_string())
-            .spawn(move || {
+        helio_tasks::spawn_service(
+            helio_tasks::ServiceSpec::new("Helio upload reporter", "helio-upload-reporter")
+                .owner("helio"),
+            move |ctx| {
                 let mut frames_since_print = 0u64;
                 let mut bytes_since_print = 0u64;
-                while let Ok(frame_bytes) = rx.recv() {
+                while let Ok(frame_bytes) = ctx.wait(|| rx.recv()) {
                     frames_since_print += 1;
                     bytes_since_print += frame_bytes;
                     if frames_since_print >= 100 {
@@ -33,8 +34,9 @@ fn reporter() -> &'static mpsc::Sender<u64> {
                         bytes_since_print = 0;
                     }
                 }
-            })
-            .expect("failed to spawn helio upload reporter thread");
+            },
+        )
+        .expect("failed to spawn helio upload reporter thread");
         tx
     })
 }

@@ -119,15 +119,20 @@ pub struct RoutingUnit {
 
 impl RoutingUnit {
     /// The unit of pass `index` (its position in build order), from what it
-    /// declares. A declaration carries no optionality, so every read is
-    /// required.
+    /// declares (optional reads stay optional).
     pub fn from_declaration(index: usize, declaration: &PassDeclaration) -> Self {
         Self {
             id: format!("{} (pass {index})", declaration.pass),
             reads: declaration
                 .reads
                 .iter()
-                .map(|read| RoutingRead::required(read.name))
+                .map(|read| {
+                    if read.optional {
+                        RoutingRead::optional(read.name)
+                    } else {
+                        RoutingRead::required(read.name)
+                    }
+                })
                 .collect(),
             writes: declaration
                 .writes

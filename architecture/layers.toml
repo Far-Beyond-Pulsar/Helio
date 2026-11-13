@@ -62,6 +62,8 @@ may_use = ["host", "preset", "renderer", "feature", "spine", "api", "feature_api
 [crates]
 # leaf
 helio-settings = { layer = "leaf" }
+# Threads and jobs Helio-layer code starts, run by the host's task system.
+helio-tasks = { layer = "leaf" }
 helio-bake-types = { layer = "leaf" }
 scenedb-inspector-agent = { layer = "leaf" }
 helio-passes = { layer = "leaf" }

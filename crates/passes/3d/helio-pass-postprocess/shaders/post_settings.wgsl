@@ -78,29 +78,5 @@ struct GpuPostProcessUniforms {
     lut_intensity:             f32,   // 356
     lut_platform:              u32,   // 360
     _pad_grading_end:          f32,   // 364
-    lens_enabled: u32,             // 368
-    lens_quality: u32,             // 372
-    lens_profile: u32,             // 376
-    lens_ghost_count: u32,         // 380
-    lens_intensity: f32,           // 384
-    lens_threshold: f32,           // 388
-    lens_soft_knee: f32,           // 392
-    lens_ghost_intensity: f32,     // 396
-    lens_halo_intensity: f32,      // 400
-    lens_glare_intensity: f32,     // 404
-    lens_streak_intensity: f32,    // 408
-    lens_dispersion: f32,          // 412
-    _reserved_lens_vignette: f32,  // 416
-    lens_starburst_intensity: f32, // 420
-    lens_starburst_length: f32,    // 424
-    lens_coating_strength: f32,    // 428
-    lens_ghost_rim: f32,           // 432
-    lens_dirt_intensity: f32,      // 436
-    lens_light_sources: u32,       // 440
-    lens_light_intensity: f32,     // 444
-    lens_field_margin: f32,        // 448
-    lens_response_time: f32,       // 452
-    _pad_lens0: f32,               // 456
-    _pad_lens1: f32,               // 460 → struct ends at 464
 }
 

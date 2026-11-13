@@ -203,20 +203,14 @@ impl Preset {
             Antialiasing::Fxaa => nodes.pass("fxaa"),
             Antialiasing::TemporalOrFxaa | Antialiasing::TemporalOrNone => nodes.with(
                 "antialiasing",
-                [
-                    (
-                        "fallback",
-                        Value::from(if aa == Antialiasing::TemporalOrFxaa {
-                            "fxaa"
-                        } else {
-                            "none"
-                        }),
-                    ),
-                    (
-                        "transparency_reactivity",
-                        Value::from(model.reactive_transparency),
-                    ),
-                ],
+                [(
+                    "fallback",
+                    Value::from(if aa == Antialiasing::TemporalOrFxaa {
+                        "fxaa"
+                    } else {
+                        "none"
+                    }),
+                )],
             ),
         }
         nodes.slot(Slot::Resolved);

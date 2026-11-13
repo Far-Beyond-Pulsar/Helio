@@ -376,10 +376,17 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     previous.position_near[..3].copy_from_slice(&eye);
                 }
                 previous.jitter_frame = [0.0; 4];
-                pass.set_transparency_reactivity(flags & 2 != 0);
                 pass.set_reactivity(reactivity);
                 let scene_buffers = helio_core::SceneBufferProjection::empty();
-                let registry = helio_core::ResourceRegistry::empty();
+                // A frame whose transparency wrote the reactive mask.
+                let mut registry = helio_core::ResourceRegistry::empty();
+                if flags & 2 != 0 {
+                    registry.write(
+                        helio_core::ResourceKey::new(helio_frame_api::color::REACTIVE_MASK),
+                        &coverage_view,
+                        "test",
+                    );
+                }
                 pass.prepare(&PrepareContext {
                     device: &device,
                     queue: &queue,

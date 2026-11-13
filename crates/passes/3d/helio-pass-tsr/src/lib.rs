@@ -19,10 +19,11 @@
 //! ## Producer masks
 //!
 //! Like FSR 2's reactive and composition masks, passes can tell the resolve
-//! about their shading: `transparency_reactivity` (coverage that must not
-//! accumulate, [`TsrPass::with_transparency_reactivity`]) and
-//! [`STOCHASTIC_MASK`] (shading sampled stochastically per frame that relies
-//! on accumulation, [`TsrPass::with_stochastic_mask`]). The G-buffer's motion vectors
+//! about their shading: the frame's reactive mask
+//! (`helio_frame_api::color::REACTIVE_MASK`: coverage that must not
+//! accumulate, read in the frames a pass wrote it) and [`STOCHASTIC_MASK`]
+//! (shading sampled stochastically per frame that relies on accumulation,
+//! [`TsrPass::with_stochastic_mask`]). The G-buffer's motion vectors
 //! (`helio_frame_api::gbuffer::VELOCITY`) give each texel's motion, so moving objects reproject with themselves
 //! ([`TsrPass::with_motion_vectors`]); without them the camera's motion is
 //! used for every texel.
@@ -365,7 +366,6 @@ pub struct TsrPass {
     bind_group_key: Option<ResolveKey>,
     _reactivity_fallback: wgpu::Texture,
     reactivity_fallback_view: wgpu::TextureView,
-    transparency_reactivity: bool,
     /// Read [`STOCHASTIC_MASK`] (zero when off).
     stochastic_mask: bool,
     /// Read the G-buffer's motion vectors (`helio_frame_api::gbuffer::VELOCITY`) (none when off: the camera's motion).
@@ -444,16 +444,6 @@ impl TsrPass {
         self.intermediate_output = true;
         if let Some(right) = &mut self.xr_right {
             right.intermediate_output = true;
-        }
-        self
-    }
-
-    /// Opt in to R8 transparency coverage and retain it in history alpha.
-    /// The resolved RGB is unchanged for zero current/previous coverage.
-    pub fn with_transparency_reactivity(mut self) -> Self {
-        self.transparency_reactivity = true;
-        if let Some(right) = &mut self.xr_right {
-            right.transparency_reactivity = true;
         }
         self
     }
@@ -728,7 +718,6 @@ impl TsrPass {
             bind_group_key: None,
             _reactivity_fallback: reactivity_fallback,
             reactivity_fallback_view,
-            transparency_reactivity: false,
             stochastic_mask: false,
             motion_vectors: false,
             flags: 0,
@@ -830,19 +819,6 @@ impl TsrPass {
             right.motion_vectors = true;
         }
         self
-    }
-
-    /// Enable coverage history for a graph providing `transparency_reactivity`.
-    /// Changing modes resets history because its alpha channel changes meaning.
-    pub fn set_transparency_reactivity(&mut self, enabled: bool) {
-        if self.transparency_reactivity != enabled {
-            self.transparency_reactivity = enabled;
-            self.reset_history();
-            self.bind_group_key = None;
-            if let Some(right) = &mut self.xr_right {
-                right.set_transparency_reactivity(enabled);
-            }
-        }
     }
 
     /// Set a per-frame reactivity bias.
@@ -1234,11 +1210,11 @@ impl RenderPass for TsrPass {
         if let Some(alias) = self.color_alias {
             builder.read(alias);
         }
-        if self.transparency_reactivity {
-            builder.read(helio_frame_api::color::REACTIVE_MASK);
-        }
+        // Both masks exist only in frames whose writers have content (water,
+        // transparency a lighting model leaves to TSR, stochastic shading).
+        builder.read_optional(helio_frame_api::color::REACTIVE_MASK);
         if self.stochastic_mask {
-            builder.read(STOCHASTIC_MASK);
+            builder.read_optional(STOCHASTIC_MASK);
         }
         if self.motion_vectors {
             builder.read(helio_frame_api::gbuffer::VELOCITY);
@@ -1301,7 +1277,6 @@ impl RenderPass for TsrPass {
                 right.color_input = self.color_input;
                 right.color_alias = self.color_alias;
                 right.intermediate_output = self.intermediate_output;
-                right.transparency_reactivity = self.transparency_reactivity;
                 right.stochastic_mask = self.stochastic_mask;
                 right.motion_vectors = self.motion_vectors;
                 right.reactivity = self.reactivity;
@@ -1327,6 +1302,17 @@ impl RenderPass for TsrPass {
             .previous_view_id
             .is_some_and(|previous| previous != view_id);
         let reset = u32::from(self.first_frame || view_changed);
+        // Coverage that must not accumulate, where a pass of this frame wrote
+        // the reactive mask (passes run in order: its writers are done). A
+        // frame without one skips the coverage path; history alpha holds the
+        // coverage either way (zero without), so the mask coming and going
+        // keeps the history.
+        let coverage = ctx
+            .registry
+            .texture_view(helio_core::ResourceKey::new(
+                helio_frame_api::color::REACTIVE_MASK,
+            ))
+            .is_some();
         self.first_frame = false;
         let previous_view = if reset != 0 {
             ctx.camera_data.view
@@ -1347,7 +1333,7 @@ impl RenderPass for TsrPass {
         let u = TsrUniform {
             jitter_offset: jitter,
             reactivity: self.reactivity,
-            flags: reset | (u32::from(self.transparency_reactivity) << 1),
+            flags: reset | (u32::from(coverage) << 1),
             previous_jitter_uv: self.previous_jitter_uv,
             _pad: [0.0; 2],
             reprojection: Reprojection::new(
@@ -1390,20 +1376,13 @@ impl RenderPass for TsrPass {
                 )
             })?;
 
-        let reactive_view = if self.transparency_reactivity {
-            ctx.registry
-                .read_texture_view(
-                    helio_core::ResourceKey::new(helio_frame_api::color::REACTIVE_MASK),
-                    "TSR",
-                )
-                .ok_or_else(|| {
-                    helio_core::Error::InvalidPassConfig(
-                        "TSR coverage mode requires transparency_reactivity".into(),
-                    )
-                })?
-        } else {
-            &self.reactivity_fallback_view
-        };
+        // An optional input: absent in frames whose writers have no content.
+        let reactive_view = ctx
+            .registry
+            .texture_view(helio_core::ResourceKey::new(
+                helio_frame_api::color::REACTIVE_MASK,
+            ))
+            .unwrap_or(&self.reactivity_fallback_view);
         // A frame no pass published the mask for (its writer has nothing
         // drawn yet) reads zero: deterministic shading.
         let stochastic_view = if self.stochastic_mask {

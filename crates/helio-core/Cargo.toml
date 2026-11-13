@@ -14,15 +14,20 @@ thiserror = { workspace = true }
 smallvec = "1.15.1"
 pulsar_scenedb = { workspace = true }
 naga = { version = "30.0.0", features = ["wgsl-in"] }
+# Its threads and background compiles run on the host's task system.
+helio-tasks = { workspace = true }
+# A compile job's failure (`compile`) is logged.
+log = { workspace = true }
 
 # Pulsar-Profiling fork scopes (same instrumentation the engine flamegraph
 # collects). The fork is std-only, so it is excluded on wasm targets. The
 # module code gates every `profiling::profile_scope!` site with the same cfg.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# A compile job waits for its error scope (`compile`).
+pollster = { workspace = true }
 profiling = { workspace = true, optional = true }
 # Shader hot reload: native only (the watcher reads the source tree).
 notify = { workspace = true, optional = true }
-log = { workspace = true, optional = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
@@ -40,4 +45,4 @@ profiling = ["dep:profiling"]
 # default: steady state costs one atomic load per frame, and a binary with no
 # source tree on disk (or `HELIO_SHADER_HOT_RELOAD=0`) never starts the watcher.
 # Compiled out on wasm32.
-shader-hot-reload = ["dep:notify", "dep:log"]
+shader-hot-reload = ["dep:notify"]

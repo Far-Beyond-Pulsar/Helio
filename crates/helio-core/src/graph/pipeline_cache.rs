@@ -17,9 +17,10 @@
 //!
 //! The cache uses a reader/writer lock because independent passes may record
 //! concurrently. Hits take a shared read lock; misses publish under the write
-//! lock. Phase 10 prewarming keeps the normal frame path on the hit branch.
+//! lock. Pipelines that must not be built in a frame at all are compiled off
+//! it ([`crate::compile`]).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 struct DriverCacheRecord {
@@ -99,33 +100,6 @@ pub(crate) fn driver_cache_for_device(device: &wgpu::Device) -> Option<Arc<wgpu:
     shared_driver_cache(device, path).0
 }
 
-/// Pass-local opaque identifier for an executor-owned pipeline recipe.
-///
-/// Handles deliberately have no renderer-wide meaning. A pass may use any
-/// stable values it owns, and the executor keeps one registry per pass.
-pub type PipelineHandle = u32;
-
-/// One host-declared attachment format combination that a graph may reach.
-/// The executor never guesses formats from adapter capabilities; the host
-/// owns this small, explicit enumeration.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PipelineFormatSet {
-    pub color_formats: Vec<wgpu::TextureFormat>,
-    pub depth_format: Option<wgpu::TextureFormat>,
-}
-
-impl PipelineFormatSet {
-    pub fn new(
-        color_formats: impl Into<Vec<wgpu::TextureFormat>>,
-        depth_format: Option<wgpu::TextureFormat>,
-    ) -> Self {
-        Self {
-            color_formats: color_formats.into(),
-            depth_format,
-        }
-    }
-}
-
 /// Explicit shader-variable to resource-name override used by reflected
 /// binding generation. Normal bindings use the shader variable name directly.
 #[derive(Clone, Default)]
@@ -163,9 +137,7 @@ impl BindingOverrideBuilder {
 
 #[cfg(test)]
 mod binding_tests {
-    use super::{
-        BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey, PipelineFormatSet,
-    };
+    use super::{BindingOverrideBuilder, PipelineFormatCache};
 
     fn assert_sync<T: Sync>() {}
 
@@ -179,132 +151,8 @@ mod binding_tests {
     }
 
     #[test]
-    fn invalidating_a_pass_cancels_its_pending_builds_only() {
-        let cache = PipelineFormatCache::new();
-        let mine = PipelineFormatKey::new("swapped_pass", [wgpu::TextureFormat::Rgba8Unorm], None);
-        let other = PipelineFormatKey::new("other_pass", [wgpu::TextureFormat::Rgba8Unorm], None);
-        cache.pending.lock().unwrap().insert(mine.clone());
-        cache.pending.lock().unwrap().insert(other.clone());
-        assert_eq!(super::pass_epoch(&cache.pass_epochs, "swapped_pass"), 0);
-
-        assert_eq!(cache.invalidate_pass("swapped_pass"), 0);
-        assert!(!cache.is_pending(&mine));
-        assert!(cache.is_pending(&other));
-        assert_eq!(super::pass_epoch(&cache.pass_epochs, "swapped_pass"), 1);
-        assert_eq!(super::pass_epoch(&cache.pass_epochs, "other_pass"), 0);
-    }
-
-    #[test]
     fn pipeline_cache_is_safe_to_share_with_recording_workers() {
         assert_sync::<PipelineFormatCache>();
-    }
-
-    #[test]
-    fn host_format_sets_replace_only_attachment_formats() {
-        let key = PipelineFormatKey::new(
-            "pass",
-            [wgpu::TextureFormat::Rgba8Unorm],
-            Some(wgpu::TextureFormat::Depth32Float),
-        )
-        .with_variant(9);
-        let set = PipelineFormatSet::new(
-            [wgpu::TextureFormat::Rgba16Float],
-            Some(wgpu::TextureFormat::Depth24Plus),
-        );
-        let variant = key.with_formats(&set);
-        assert_eq!(variant.pass, key.pass);
-        assert_eq!(variant.variant, 9);
-        assert_eq!(variant.color_formats, set.color_formats);
-        assert_eq!(variant.depth_format, set.depth_format);
-    }
-}
-
-/// A pipeline recipe declared by a render pass and consumed by the executor.
-pub struct PipelineRecipe {
-    pub handle: PipelineHandle,
-    pub key: PipelineFormatKey,
-    pub build: Arc<
-        dyn Fn(
-                &wgpu::Device,
-                &PipelineFormatKey,
-                Option<&wgpu::PipelineCache>,
-            ) -> wgpu::RenderPipeline
-            + Send
-            + Sync,
-    >,
-}
-
-/// Collects the pipelines a pass wants the executor to build before execute.
-#[derive(Default)]
-pub struct PipelineRecipeBuilder {
-    recipes: Vec<PipelineRecipe>,
-}
-
-impl PipelineRecipeBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add a format-keyed pipeline recipe. The closure runs only on a cache
-    /// miss, never in the pass's per-frame execute path.
-    pub fn add(
-        &mut self,
-        handle: PipelineHandle,
-        key: PipelineFormatKey,
-        build: impl Fn(
-                &wgpu::Device,
-                &PipelineFormatKey,
-                Option<&wgpu::PipelineCache>,
-            ) -> wgpu::RenderPipeline
-            + Send
-            + Sync
-            + 'static,
-    ) {
-        self.recipes.push(PipelineRecipe {
-            handle,
-            key,
-            build: Arc::new(build),
-        });
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.recipes.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.recipes.len()
-    }
-
-    pub(crate) fn into_recipes(self) -> Vec<PipelineRecipe> {
-        self.recipes
-    }
-}
-
-/// Pipelines resolved for one pass before that pass executes.
-#[derive(Default)]
-pub struct PipelineRegistry {
-    entries: HashMap<PipelineHandle, Arc<wgpu::RenderPipeline>>,
-}
-
-impl PipelineRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn insert(&mut self, handle: PipelineHandle, pipeline: Arc<wgpu::RenderPipeline>) {
-        assert!(
-            self.entries.insert(handle, pipeline).is_none(),
-            "duplicate pipeline handle {handle} in one render pass"
-        );
-    }
-
-    /// Returns the ready pipeline for a pass-local handle.
-    pub fn get(&self, handle: PipelineHandle) -> Option<&wgpu::RenderPipeline> {
-        self.entries.get(&handle).map(Arc::as_ref)
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
     }
 }
 
@@ -351,15 +199,6 @@ impl PipelineFormatKey {
         self.variant = variant;
         self
     }
-
-    pub fn with_formats(&self, formats: &PipelineFormatSet) -> Self {
-        Self {
-            pass: self.pass,
-            color_formats: formats.color_formats.clone(),
-            depth_format: formats.depth_format,
-            variant: self.variant,
-        }
-    }
 }
 
 /// Executor-owned cache mapping [`PipelineFormatKey`] to a built pipeline.
@@ -370,28 +209,12 @@ pub struct PipelineFormatCache {
     /// the second lookup after acquiring it guarantees one build per key even
     /// when independent recording workers request the same variant together.
     build_lock: Arc<Mutex<()>>,
-    pending: Arc<Mutex<HashSet<PipelineFormatKey>>>,
-    /// Bumped by [`PipelineFormatCache::invalidate_pass`]. A background build
-    /// remembers the epoch it was scheduled under and discards its result if
-    /// the pass was invalidated meanwhile, so a stale pipeline never lands.
-    pass_epochs: Arc<Mutex<HashMap<&'static str, u64>>>,
-    workers: Mutex<Vec<std::thread::JoinHandle<()>>>,
     driver_cache: Option<Arc<wgpu::PipelineCache>>,
     persistent_path: Option<std::path::PathBuf>,
     persist_lock: Option<Arc<Mutex<()>>>,
 }
 
-fn pass_epoch(epochs: &Mutex<HashMap<&'static str, u64>>, pass: &'static str) -> u64 {
-    epochs
-        .lock()
-        .expect("pipeline epoch lock poisoned")
-        .get(pass)
-        .copied()
-        .unwrap_or(0)
-}
-
 const MAX_PIPELINE_VARIANTS: usize = 512;
-const MAX_PENDING_PIPELINES: usize = 512;
 
 fn trim_pipeline_entries(
     entries: &mut HashMap<PipelineFormatKey, Arc<wgpu::RenderPipeline>>,
@@ -422,9 +245,6 @@ impl PipelineFormatCache {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
             build_lock: Arc::new(Mutex::new(())),
-            pending: Arc::new(Mutex::new(HashSet::new())),
-            pass_epochs: Arc::new(Mutex::new(HashMap::new())),
-            workers: Mutex::new(Vec::new()),
             driver_cache,
             persistent_path,
             persist_lock,
@@ -486,173 +306,25 @@ impl PipelineFormatCache {
         result
     }
 
-    /// Recipe-aware variant that supplies the optional driver cache to the
-    /// pipeline constructor. Existing manual callers should continue using
-    /// [`Self::get_or_create`].
-    pub fn get_or_create_with_driver_cache(
-        &self,
-        key: PipelineFormatKey,
-        build: impl FnOnce(Option<&wgpu::PipelineCache>) -> wgpu::RenderPipeline,
-    ) -> Arc<wgpu::RenderPipeline> {
-        if let Some(existing) = self
-            .entries
-            .read()
-            .expect("pipeline cache poisoned")
-            .get(&key)
-        {
-            return existing.clone();
-        }
-        let _build_guard = self
-            .build_lock
-            .lock()
-            .expect("pipeline build lock poisoned");
-        if let Some(existing) = self
-            .entries
-            .read()
-            .expect("pipeline cache poisoned")
-            .get(&key)
-        {
-            return existing.clone();
-        }
-        let pipeline = Arc::new(build(self.driver_cache.as_deref()));
-        let mut entries = self.entries.write().expect("pipeline cache poisoned");
-        let result = entries
-            .entry(key.clone())
-            .or_insert_with(|| pipeline.clone())
-            .clone();
-        trim_pipeline_entries(&mut entries, &key);
-        result
-    }
-
-    /// Returns a ready pipeline immediately, or schedules construction on a
-    /// background worker and returns `None`. Pending keys are published before
-    /// spawning the worker, so concurrent recording workers cannot enqueue
-    /// duplicate builds and the frame thread never waits for a miss.
-    pub fn try_get_or_schedule<F>(
-        &self,
-        key: PipelineFormatKey,
-        build: F,
-    ) -> Option<Arc<wgpu::RenderPipeline>>
-    where
-        F: FnOnce(Option<&wgpu::PipelineCache>) -> wgpu::RenderPipeline + Send + 'static,
-    {
-        // Join completed workers before adding another handle.  JoinHandles
-        // themselves are small, but retaining one per miss made this cache
-        // grow for the lifetime of a long-running editor session.
-        self.reap_finished_workers();
-        if let Some(existing) = self
-            .entries
-            .read()
-            .expect("pipeline cache poisoned")
-            .get(&key)
-        {
-            return Some(existing.clone());
-        }
-        {
-            let mut pending = self.pending.lock().expect("pipeline pending lock poisoned");
-            if pending.contains(&key) || pending.len() >= MAX_PENDING_PIPELINES {
-                return None;
-            }
-            pending.insert(key.clone());
-        }
-        let entries = Arc::clone(&self.entries);
-        let build_lock = Arc::clone(&self.build_lock);
-        let pending = Arc::clone(&self.pending);
-        let epochs = Arc::clone(&self.pass_epochs);
-        let driver_cache = self.driver_cache.clone();
-        let pass_name = key.pass;
-        let epoch = pass_epoch(&epochs, pass_name);
-        let worker = std::thread::spawn(move || {
-            let _build_guard = build_lock.lock().expect("pipeline build lock poisoned");
-            let is_stale = || pass_epoch(&epochs, pass_name) != epoch;
-            if !is_stale()
-                && !entries
-                    .read()
-                    .expect("pipeline cache poisoned")
-                    .contains_key(&key)
-            {
-                let pipeline = Arc::new(build(driver_cache.as_deref()));
-                let mut entries = entries.write().expect("pipeline cache poisoned");
-                // Checked under the write lock: `invalidate_pass` bumps the
-                // epoch before it takes this lock to purge, so a build either
-                // sees the new epoch here or is purged right after inserting.
-                if !is_stale() {
-                    entries.insert(key.clone(), pipeline);
-                    trim_pipeline_entries(&mut entries, &key);
-                }
-            }
-            // After an invalidation the pending marker was already cleared
-            // (and may belong to a newer build of the same key).
-            if !is_stale() {
-                pending
-                    .lock()
-                    .expect("pipeline pending lock poisoned")
-                    .remove(&key);
-            }
-        });
-        self.workers
-            .lock()
-            .expect("pipeline worker lock poisoned")
-            .push(worker);
-        eprintln!(
-            "Helio pipeline cache miss scheduled in background: {}",
-            pass_name
-        );
-        None
-    }
-
-    fn reap_finished_workers(&self) {
-        let mut workers = self.workers.lock().expect("pipeline worker lock poisoned");
-        let mut i = 0;
-        while i < workers.len() {
-            if workers[i].is_finished() {
-                let worker = workers.swap_remove(i);
-                let _ = worker.join();
-            } else {
-                i += 1;
-            }
-        }
-    }
-
-    pub fn is_pending(&self, key: &PipelineFormatKey) -> bool {
-        self.pending
-            .lock()
-            .expect("pipeline pending lock poisoned")
-            .contains(key)
-    }
-
     /// Drops every cached pipeline. The executor does *not* call this on
     /// resize (resizing changes extents, not formats) — only call it
     /// yourself after a shader/layout hot-reload invalidates pipelines out
     /// from under their format keys.
     pub fn clear(&self) {
-        self.reap_finished_workers();
         self.entries
             .write()
             .expect("pipeline cache poisoned")
             .clear();
     }
 
-    /// Drops every cached pipeline owned by the pass named `name` and makes
-    /// builds of it that are still pending discard their result, so the next
-    /// request builds from the pass's current recipe. Other passes' entries are
-    /// untouched. Returns how many cached pipelines were removed.
+    /// Drops every cached pipeline owned by the pass named `name`, so the next
+    /// request builds from the pass's current recipe. Other passes' entries
+    /// are untouched. Returns how many cached pipelines were removed.
     ///
     /// For a pass swapped in place (shader hot reload): its pipelines are keyed
     /// by pass name, so without this the new instance would be handed the old
     /// instance's pipelines.
     pub fn invalidate_pass(&self, name: &'static str) -> usize {
-        // Bump first: see the epoch check in `try_get_or_schedule`.
-        *self
-            .pass_epochs
-            .lock()
-            .expect("pipeline epoch lock poisoned")
-            .entry(name)
-            .or_insert(0) += 1;
-        self.pending
-            .lock()
-            .expect("pipeline pending lock poisoned")
-            .retain(|key| key.pass != name);
         let mut entries = self.entries.write().expect("pipeline cache poisoned");
         let before = entries.len();
         entries.retain(|key, _| key.pass != name);
@@ -697,11 +369,6 @@ impl PipelineFormatCache {
 
 impl Drop for PipelineFormatCache {
     fn drop(&mut self) {
-        if let Ok(workers) = self.workers.get_mut() {
-            for worker in workers.drain(..) {
-                let _ = worker.join();
-            }
-        }
         let _ = self.persist();
     }
 }

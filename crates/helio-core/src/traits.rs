@@ -110,7 +110,7 @@ pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T> MaybeSync for T {}
 
-use crate::graph::{BindingOverrideBuilder, PipelineRecipeBuilder, ResourceBuilder};
+use crate::graph::{BindingOverrideBuilder, ResourceBuilder};
 use crate::shader::ReflectedShader;
 use crate::{PassContext, PrepareContext, RenderFrameInputs, ResourceRegistry, Result};
 
@@ -802,13 +802,6 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// `ResourceSlot`-based [`reads`](Self::reads) / [`writes`](Self::writes)
     /// methods for backward compatibility.
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
-
-    /// Declares pipelines that the executor must resolve before `execute`.
-    ///
-    /// The recipe closure owns pipeline construction, while the executor owns
-    /// cache lifetime and invokes it only for a missing format key. Handles
-    /// are local to this pass and are read from `PassContext::pipelines`.
-    fn declare_pipelines(&self, _declare: &mut PipelineRecipeBuilder) {}
 
     /// Declares explicit shader-variable to resource-name overrides for
     /// reflected bindings. The default contract is name matching.
