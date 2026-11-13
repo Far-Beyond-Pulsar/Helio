@@ -2959,3 +2959,166 @@ Pulsar-Native; Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 15):
   `GraphAssetPipeline` reports the registry's policy, so a project's graph and
   the shipped files hot-reload like the presets did (before, only a preset's
   pipeline had a policy, and the shipped files rebuilt whole on a shader edit).
+
+As built, p24 (2026-11-13, branch `rewrite/p24-frame-owners` in Helio,
+Pulsar-Native and the plugin repos it touches): p23's open findings and
+Helio#393's frame owners.
+
+- **Threads Helio-layer code starts go through the host (`helio-tasks`, a new
+  leaf crate).** `helio_tasks::spawn_service` (a loop: `ctx.wait(..)` while it
+  waits for work, `heartbeat`, `set_phase`, `stop_requested`) and
+  `helio_tasks::submit` (one blocking job) run on the installed `TaskHost`;
+  the engine installs `editor_task_queue::helio::install()` at startup beside
+  rayon's pool, so each such thread is a persistent task in the Tasks window
+  and each job a blocking task. A process that installs nothing (Helio's
+  examples and tests, games) runs them on named std threads. One host per
+  process, like rayon's pool and tracing's subscriber: threads are a process
+  resource, and the code that starts them (a voxel world's query workers) often
+  runs outside any renderer. UE5 creates every engine thread through
+  `FRunnableThread::Create` the same way. Moved onto it: the voxel residency
+  and sun-pages planners, the component's world builder, WorldQueries'
+  workers, helio-core's encoder-finish pool, its shader watcher and its debug
+  upload reporter, and as jobs the sky texture's decode, virtual geometry's
+  proxy builds and the lens's bundled traces; Helio now starts no thread of
+  its own (its opt-in SceneDB inspector agent aside). Pulsar's raw-thread
+  gate checked a file only up to its first `#[cfg(test)]` (how the residency
+  and sun-pages threads escaped it) and matched `ScriptRuntime::new(` as
+  `Runtime::new(`: it now skips `#[cfg(test)]` items only and matches calls as
+  written; five allow-list lines are gone.
+- **Pipelines compile off the frame (`helio_core::compile`).** `Compiling<T>`
+  builds a bundle (shader modules and pipelines) as a `helio_tasks` job, inside
+  its own validation error scope (scopes are per thread in our wgpu fork) and
+  `catch_unwind`, so a shader the backend rejects is the bundle's `failed()`
+  reason; the frame asks `ready()`, never waits; `compile::in_flight()` counts
+  jobs process-wide; `wait()` is for tests and offline tools. The voxel world
+  starts its compiles when content arrives (a volume's form and terrain
+  program; the cross-volume passes once a second volume is held: UE5's PSO
+  precaching at proxy creation) and neither generates nor draws until they are
+  ready (`ChunkWorld::pipelines_ready`); `settled()` is false and the pass
+  wants frames meanwhile, so tests and on-demand hosts wait on the real
+  signal. A world made outside a frame (`ChunkWorld::of_planet`, tests) waits
+  (`wait_for_pipelines`). Deleted with it: the executor's unused async recipe
+  path (`RenderPass::declare_pipelines`, `PipelineRecipe(Builder)`,
+  `PipelineRegistry`, `PassContext::pipelines`, `PipelineFormatSet`,
+  `set_pipeline_formats`/`add_pipeline_format`, `PipelineHandle`,
+  `PipelineFormatCache::try_get_or_schedule` with its per-miss raw threads,
+  pending set and epochs, `get_or_create_with_driver_cache`); no pass declared
+  a recipe. Not changed: pass constructors still build their pipelines when a
+  graph builds (pipeline assignment, a load-time event); building the next
+  graph on a worker while the current one draws is the renderer facade's next
+  step.
+- **The reactive mask follows content.** Water no longer asks every graph for
+  it at build time (its `prepare` hook is deleted). The frame setup says
+  whether the frame resolves temporally (`color::TemporalResolve`) and whether
+  the lighting model leaves transparency to the resolve (`color::ReactiveMask`).
+  The mask's writers allocate it only while they are members: transparent
+  drawers under `ReactiveMask` (clear, then write), water's reactivity pass
+  while the scene holds water (first writer: allocate and clear; after
+  transparency: load). TSR reads it as an optional input
+  (`ResourceBuilder::read_optional`, new: the routing check no longer reports
+  a read whose writer may be absent; UE's RDG binds a dummy the same way) and
+  runs its coverage path only in frames where a member wrote it. History alpha
+  holds the coverage in every frame (zero without a mask), so water coming and
+  going keeps the history. Deleted: `TsrPass::with_transparency_reactivity` /
+  `set_transparency_reactivity`, the TSR and anti-aliasing nodes'
+  `transparency_reactivity` parameter, hlfs_capture's
+  `HLFS_NO_TRANSPARENCY_REACTIVITY` knob.
+- **The frame's sky is the medium, the sky's radiance and the suns
+  (Helio#393 item 2).** The frame's contract is named for the frame (the gate
+  counts "atmosphere" and "cloud" as the sky kind's words): `SkyMedium`
+  (Rayleigh, Mie, ozone, the planet; 112 bytes), `SkyFrame` (the medium,
+  planet, reference sun, eye, irradiance, packed directional lights;
+  `SKY_FRAME_BYTES` 1872, was 2144), keys `sky_frame`, `sky_table`,
+  `sky_view`, snippets `//!use frame_sky` (`frame_sky.wgsl`) and
+  `//!use sky_table` (`sky_table.wgsl`, bindings `sky_frame` and `sky_table`),
+  functions `sky_*`. Clouds, the planet's weather, the night sky, the panorama
+  and the clouds' wind offsets are the sky plugin's own block
+  (`helio_pass_sky::SKY_LAYERS`, `SkyLayersFrame` in `sky_layers.wgsl`,
+  `//!use sky_layers`), resolved by its kernel from the same row
+  (`AtmosphereRow` = the medium then `SkyLayers`, byte for byte as before) and
+  read only by its passes. Unreal splits SkyAtmosphere and VolumetricCloud the
+  same way. Layout tests: `helio-frame-api` `the_sky_frame_has_its_contract_size`,
+  `helio-pass-sky` `the_atmosphere_row_is_the_medium_then_the_layers`. The
+  voxel feature's private `"atmosphere_frame"` key copy is gone. Snippet
+  markers are matched by `contains`, so no marker may prefix another
+  (`//!use atmosphere` prefixed `//!use atmosphere_sky_table`); the new names
+  avoid that. Four `kind-names.txt` lines are deleted.
+- **The shading-cost view is the materials plugin's (Helio#393 item 4).** `compute_shader_cost.wgsl`,
+  `profile_material.wgsl`, the cost analyzer pass and `MaterialProfiler` left
+  `helio-pass-perf-overlay`; the overlay keeps the kind-agnostic views (pass
+  overdraw, tile counts) and no cost model. `pulsar.materials` registers the
+  node `helio.pass.shading_cost` (`Slot::Display`, order 19, before the overlay's
+  20): `helio_pass_materials::cost::ShadingCostPass`. It is the view of the
+  overlay mode `PerfOverlayMode::ShaderComplexity` (the enum now lives in
+  `helio_frame_api::diagnostics`, re-exported by the overlay; the overlay
+  does not draw that mode) and a debug view (`SHADING_COST_VIEW` = 60, category
+  "Materials", with a legend). It measures instead of modelling: one
+  submission times the materials' test patch (`SURFACE_PROBE` through
+  `pbr_eval`) over roughness x metallic x {4,16,32} lights with GPU
+  timestamps (median of 3), the readback maps the next frame and is read
+  when the map completes (no `device.poll(Wait)`), and the fragment shader
+  looks each pixel up (nearest roughness/metallic cell, linear in the tile's
+  light count from the `TileCounter` the lighting model offers), normalised by
+  the costliest measured entry. The old heuristic constants and the
+  mis-strided timing table (20-byte writes read at a 16-byte stride) are
+  gone. Without the materials plugin, or without a lighting model's tile
+  counter, or without timestamp-in-encoder support, the mode shows nothing:
+  no fallback copy. The frame's heatmap ramp and scale bar are one snippet
+  (`diagnostics::HEATMAP_SNIPPET`) used by the overlay and the view.
+  `diagnostics::SurfaceProbe`, `offer_surface_probe`, `surface_probe` and
+  `TileCounter::after_node` (the overlay's cost-analyzer marker ordering) were
+  deleted with the overlay's Lambert stand-in; the overlay's tile aggregation no
+  longer reads the G-buffer (its roughness+metallic "complexity" heuristic was
+  unused by the views). Unlike UE's shader-complexity view and Unity's
+  overdraw view (a fixed instruction-count model in the renderer), it
+  measures the real BRDF on the device, owned by the kind that knows its
+  light loop; one-off ~108 tiny draws, then a full-screen pass. The issue
+  asked the overlay to read cost through the `SurfaceProbe` offer; the view
+  lives wholly in the materials plugin, so the offer had no reader and was
+  deleted. Five `kind-names.txt` lines are deleted.
+- **Lens settings leave the post settings (Helio#393 item 5).** The post-settings ABI (`GpuPostProcessUniforms`) is 368 bytes (23 slots): the
+  96-byte lens block (368..464) is gone with the tone map's lens input
+  (`lens_enabled`). The tone map composites the frame's glare
+  (`helio_frame_api::color::glare`) unconditionally; without a published glare it
+  binds its 1x1 black stand-in and adds nothing, so an absent lens plugin is an
+  absent glare, with no private copy. Override bits 63..=83 are retired
+  (`PostProcessProperty::RETIRED` is now `[40..=49, 63..=83]`, numbers not reused);
+  `COUNT` stays 87, so the local-exposure bits 84..=86 keep their meaning.
+  The lens plugin owns the replacement, in a new api crate
+  `plugins/vendor/lens/api` (`helio-lens-api`):
+  - Flare settings: `GpuLensFlare` (96 bytes) + `FLARE_SNIPPET` (`//!use lens_flare`).
+    Authored on the camera's lens (`CameraLensComponent.flare`, moved from the
+    post component's `LensFlareProps`), carried in `LensRow::flare` (the row is
+    192 bytes), resolved with the lens by `cs_resolve` into `ResolvedLens::flare`
+    (216 bytes with the overrides) and published by the lens pass as the
+    `lens_flare_settings` uniform (`FLARE_SETTINGS`) that the flare pass reads.
+    Per camera; never blended. A view with no lens has an all-zero block: no flare.
+  - Blendable overrides: `LENS_OVERRIDES` (`lens_overrides`, `GpuLensOverrides`,
+    32 bytes) + `OVERRIDES_SNIPPET` (`//!use lens_overrides`). A volume may
+    override only focus distance, vignette strength (the `NATURAL_VIGNETTE`
+    elements' amount) and chromatic aberration amount (the `LATERAL_CA` elements'
+    first-order coefficient). The blended result is affine in the camera's value
+    (`keep * base + add`), so the post-process volume blend never reads the lens;
+    the lens pass applies it in `cs_resolve` (focus) and through `element_at`
+    (elements). Without a publisher the lens uses its own values (identity
+    stand-in). The prescription (optics, elements, flare) stays per camera.
+  - Post-process volumes: the volume row gained `lens: GpuLensVolumeOverrides`
+    (16 bytes, row 448 bytes); `cs_volume_blend` blends it with the lens
+    snippet's `lens_overrides_blend` in the same order and weights as the post
+    settings and publishes `lens_overrides`. `PostProcessVolumeComponent` gained
+    the `LensOverridesProps` switches and values; `override_lens_flare` and
+    `lens_flare` are gone from volumes and camera baselines.
+  - Record migration (`post.lens_flare_to_lens`, registered by the post plugin
+    through `pulsar_class::records::RecordMigrationRegistration`): a camera
+    baseline's saved `lens_flare` moves to the object's `CameraLensComponent.flare`
+    (a flare-only lens, f/64 with the circle of confusion capped at one pixel,
+    when the baseline had an enabled flare and the object no lens); a volume's
+    `lens_flare` and `override_lens_flare` are dropped. Override masks are not
+    saved (they derive from the switches each load), so there is nothing else to
+    rewrite. Idempotent; tested in `post_component::records`.
+  Unreal blends depth of field, vignette and chromatic aberration in volumes
+  and keeps the physical camera on the camera; this is that split. Four
+  `kind-names.txt` lines are deleted.
+- **Lighting models are registered (Helio#393 item 3):** verified complete
+  (`RegisterLightingModel`; the lights plugin registers `deferred`, `forward`
+  and the light field, the spine its unlit stand-in, presets choose by id).

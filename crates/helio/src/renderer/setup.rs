@@ -6,7 +6,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
-use helio_core::{PipelineFormatSet, RenderGraph, RenderSize};
+use helio_core::{RenderGraph, RenderSize};
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
@@ -107,14 +107,6 @@ impl Renderer {
     /// whoever made it. `inherit` carries persistent pass state over from the
     /// graph it replaces (the same pipeline built again).
     pub(crate) fn install_pipeline_graph(&mut self, mut graph: RenderGraph, inherit: bool) {
-        // The renderer is the host of the graph's presentation format. Feed
-        // it back into the graph even when a custom builder locked the graph
-        // before handing it to us; the cache will schedule any new variants
-        // without blocking the frame thread.
-        graph.add_pipeline_format(PipelineFormatSet::new(
-            [self.surface_format],
-            Some(wgpu::TextureFormat::Depth32Float),
-        ));
         // Every graph reaches the renderer here, whether a graph asset made it or
         // a legacy builder: say now if what its passes produce never reaches the
         // output (a black frame), from the passes' declarations alone.

@@ -180,8 +180,14 @@ fn assert_design(frame: &Frame, label: &str) -> [u32; 4] {
     );
     // Inside the frame, inside 90%, centred.
     let (dw, dh) = (r - l + 1, b - t + 1);
-    assert!(dw as f32 <= 0.9 * w as f32 + 2.0, "{label}: width {dw} of {w}");
-    assert!(dh as f32 <= 0.9 * h as f32 + 2.0, "{label}: height {dh} of {h}");
+    assert!(
+        dw as f32 <= 0.9 * w as f32 + 2.0,
+        "{label}: width {dw} of {w}"
+    );
+    assert!(
+        dh as f32 <= 0.9 * h as f32 + 2.0,
+        "{label}: height {dh} of {h}"
+    );
     let (cx, cy) = ((l + r) as f32 / 2.0, (t + b) as f32 / 2.0);
     assert!(
         (cx - (w - 1) as f32 / 2.0).abs() <= 2.0 && (cy - (h - 1) as f32 / 2.0).abs() <= 2.0,
@@ -246,7 +252,12 @@ fn the_stress_list_fits_smaller_frames() {
 fn an_srgb_target_looks_the_same_as_a_linear_one() {
     let _serial = gpu_serial();
     let gpu = gpu_or_skip!("status screen sRGB");
-    let linear = render(&gpu, State::NodesMissing, [640, 360], wgpu::TextureFormat::Rgba8Unorm);
+    let linear = render(
+        &gpu,
+        State::NodesMissing,
+        [640, 360],
+        wgpu::TextureFormat::Rgba8Unorm,
+    );
     for format in [
         wgpu::TextureFormat::Rgba8UnormSrgb,
         wgpu::TextureFormat::Bgra8UnormSrgb,
@@ -275,7 +286,10 @@ fn the_frame_is_drawn_whatever_was_in_the_target() {
     let mut renderer = gpu.renderer([320, 180], None);
     let first = gpu.frame(&mut renderer);
     let second = gpu.frame(&mut renderer);
-    assert_eq!(first.pixels, second.pixels, "the same screen, frame after frame");
+    assert_eq!(
+        first.pixels, second.pixels,
+        "the same screen, frame after frame"
+    );
     // A pipeline in between does not leave its clear colour behind.
     renderer.set_pipeline(Some(NamedPipeline::new(
         "a",
@@ -288,5 +302,8 @@ fn the_frame_is_drawn_whatever_was_in_the_target() {
     gpu.frame(&mut renderer);
     renderer.set_pipeline(None);
     let third = gpu.frame(&mut renderer);
-    assert_eq!(first.pixels, third.pixels, "none, then a pipeline, then none");
+    assert_eq!(
+        first.pixels, third.pixels,
+        "none, then a pipeline, then none"
+    );
 }

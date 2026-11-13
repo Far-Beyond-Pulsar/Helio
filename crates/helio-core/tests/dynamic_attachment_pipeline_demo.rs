@@ -173,11 +173,9 @@ impl RenderPass for DemoPass {
         let shader = Arc::clone(&self.shader);
         let device = ctx.device.clone();
         let build_key = key.clone();
-        let Some(pipeline) = ctx.pipeline_cache.try_get_or_schedule(key, move |_| {
+        let pipeline = ctx.pipeline_cache.get_or_create(key, move || {
             DemoPass::build_pipeline(&device, &layout, &shader, build_key.color_formats[0])
-        }) else {
-            return Ok(()); // background miss: preserve the frame, skip this draw
-        };
+        });
 
         let Some(mut rp) = ctx.render_cmds() else {
             return Ok(()); // no open render pass this frame — nothing to draw into

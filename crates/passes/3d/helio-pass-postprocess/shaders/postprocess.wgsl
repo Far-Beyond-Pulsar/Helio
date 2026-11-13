@@ -75,7 +75,7 @@ override DEBUG_VIEW: bool = false;
 // scene-linear optical response, usually at reduced resolution from the same
 // pre-exposure image. Participating media are already composited into
 // hdr_input. Bound to a 1x1 black fallback when nothing published glare.
-@group(0) @binding(17) var                     lens_input:   texture_2d<f32>;
+@group(0) @binding(17) var                     glare_input:  texture_2d<f32>;
 // Local exposure's bilateral grid: (sum of EV, weight) per screen cell and
 // luminance bin as gathered (cs_local_exposure_grid) and blurred
 // (cs_local_exposure_blur), then each cell's tone curve as a gain in EV per
@@ -229,7 +229,7 @@ fn cs_exposure_adapt() {
     avg_luminance[1] = current + (measured - current) * t;
 }
 
-// Scene-linear exposure multiplier, shared by the image, bloom and lens so a
+// Scene-linear exposure multiplier, shared by the image, bloom and glare so a
 // single exposure is applied once. Auto mode targets middle grey (0.18) from
 // the adapted log2 mean, limited to [exposure_min, exposure_max] EV.
 fn exposure_scale() -> f32 {
@@ -804,7 +804,7 @@ fn apply_motion_blur(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f
 
 // Cubic B-spline reconstruction of a reduced-resolution image in 4 bilinear
 // taps (each tap resolves a 2x2 weighted footprint). Bilinear magnification
-// of bloom mips and the quarter-res lens response shows each source texel
+// of bloom mips and the quarter-res glare shows each source texel
 // as a hard block around very bright sources; the B-spline is C2-smooth and
 // radially near-isotropic, so glows stay round at any upscale factor.
 fn sample_bspline(tex: texture_2d<f32>, uv: vec2<f32>) -> vec3<f32> {
@@ -837,7 +837,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
 
     // hdr_input is scene-linear and already contains participating media:
     // FogCompositePass applied transmittance and in-scattering at each
-    // surface's depth before transparency and AA, so metering, bloom and lens
+    // surface's depth before transparency and AA, so metering, bloom and glare
     // extraction below all see scattered light.
     let source = textureSampleLevel(hdr_input, linear_samp, uv, 0.0);
     var color = source.rgb;
@@ -847,7 +847,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
 
     //%P0
 
-    // 1. Exposure — one scene-linear multiplier for image, bloom and lens;
+    // 1. Exposure — one scene-linear multiplier for image, bloom and glare;
     // the image also takes its local exposure.
     let exposure = exposure_scale();
     color *= exposure * local_exposure_scale(color, uv);
@@ -862,13 +862,12 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
         color += bloom * (exposure / 5.0);
     }
 
-    // 2b. Lens response: optical ghosts/halo/glare/streaks are light the lens
-    // scattered, in the same scene-linear units, so they are exposed like the
-    // image and tone mapped once with it. B-spline upsampled from quarter
-    // resolution so compact glare around small sources stays round.
-    if postprocess.lens_enabled != 0u {
-        color += max(sample_bspline(lens_input, uv), vec3<f32>(0.0)) * exposure;
-    }
+    // 2b. Glare: optical light the frame's glare publisher scattered, in the
+    // same scene-linear units, so it is exposed like the image and tone mapped
+    // once with it. B-spline upsampled from reduced resolution so compact glare
+    // around small sources stays round. Without a publisher the texture is the
+    // 1x1 black stand-in and adds nothing.
+    color += max(sample_bspline(glare_input, uv), vec3<f32>(0.0)) * exposure;
 
     // 3. Color grading
     color = color_grade(color);

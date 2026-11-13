@@ -10,3 +10,7 @@ license = "MIT OR Apache-2.0"
 helio-core = { workspace = true }
 helio-feature-api = { path = "../helio-feature-api" }
 wgpu = { workspace = true }
+
+[dev-dependencies]
+# The contracts' WGSL layouts, measured (`tests/layouts.rs`).
+naga = { version = "30.0.0", features = ["wgsl-in"] }

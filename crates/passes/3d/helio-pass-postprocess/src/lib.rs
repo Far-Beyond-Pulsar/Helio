@@ -12,7 +12,7 @@
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
 //!   3b. `cs_bloom_upsample`    — progressive upsample-and-add, mip 3 → mip 0 (compute)
-//!   4. `fs_uber`               — global and local exposure, bloom + lens composite, grade, tonemap, vignette, grain (render)
+//!   4. `fs_uber`               — global and local exposure, bloom + glare composite, grade, tonemap, vignette, grain (render)
 //!
 //! Bind groups:
 //!   Main BGLs (group 0): uniforms, samplers, hdr/depth, bloom, noise, custom, volumes, blend output
@@ -318,7 +318,7 @@ pub struct PostProcessPass {
     noise_view: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
     /// 1x1 black stand-in bound at b17 when nothing published glare.
-    fallback_lens_view: wgpu::TextureView,
+    fallback_glare_view: wgpu::TextureView,
     /// 1x1 (0,0) stand-in bound at b18 when the graph has no velocity pass.
     fallback_velocity_view: wgpu::TextureView,
     /// 1x1x1 identity LUT bound at b19 when no LUT is loaded.
@@ -634,7 +634,7 @@ impl PostProcessPass {
                 sampled_tex_entry(12, fv, false),
                 sampler_entry(13, fv, false),
                 storage_ro_entry(14, fv),
-                // Reduced-resolution scene-linear lens response.
+                // Reduced-resolution scene-linear glare.
                 sampled_tex_entry(17, fv, false),
                 // Velocity buffer (Rg16Float) for per-pixel motion blur
                 wgpu::BindGroupLayoutEntry {
@@ -879,9 +879,9 @@ impl PostProcessPass {
         });
         // Stand-in for the glare when nothing published one.
         // Textures are zero-initialised, and black adds nothing.
-        let fallback_lens_view = device
+        let fallback_glare_view = device
             .create_texture(&wgpu::TextureDescriptor {
-                label: Some("PostProcess Lens Fallback"),
+                label: Some("PostProcess Glare Fallback"),
                 size: wgpu::Extent3d {
                     width: 1,
                     height: 1,
@@ -1044,7 +1044,7 @@ impl PostProcessPass {
             noise_texture,
             noise_view,
             noise_sampler,
-            fallback_lens_view,
+            fallback_glare_view,
             fallback_velocity_view,
             fallback_lut_view,
             color_grading_lut: None,
@@ -1292,11 +1292,11 @@ impl PostProcessPass {
         pre_aa_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         camera_buf: &wgpu::Buffer,
-        lens_view: Option<&wgpu::TextureView>,
+        glare_view: Option<&wgpu::TextureView>,
         velocity_view: Option<&wgpu::TextureView>,
         lut_view: Option<&wgpu::TextureView>,
     ) {
-        let lens_view = lens_view.unwrap_or(&self.fallback_lens_view);
+        let glare_view = glare_view.unwrap_or(&self.fallback_glare_view);
         self.compute_main_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PostProcess Compute Main BG"),
             layout: &self.compute_main_bgl,
@@ -1433,7 +1433,7 @@ impl PostProcessPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 17,
-                    resource: wgpu::BindingResource::TextureView(lens_view),
+                    resource: wgpu::BindingResource::TextureView(glare_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 18,
@@ -1638,7 +1638,7 @@ impl PostProcessPass {
         // binds the 1x1 black fallback. Part of the key so that a glare pass
         // being added, removed, or resized rebuilds the group instead of
         // leaving b17 pointing at a stale view.
-        let lens_view = self.glare.and_then(|glare| {
+        let glare_view = self.glare.and_then(|glare| {
             ctx.registry
                 .get::<&wgpu::TextureView>(helio_core::ResourceKey::new(glare))
         });
@@ -1655,7 +1655,7 @@ impl PostProcessPass {
             ctx.depth.clone(),
             camera_buf.clone(),
             postprocess_buf.clone(),
-            lens_view.cloned(),
+            glare_view.cloned(),
             velocity_view.cloned(),
             lut_view.cloned(),
         );
@@ -1666,7 +1666,7 @@ impl PostProcessPass {
                 pre_aa_view,
                 ctx.depth,
                 camera_buf,
-                lens_view,
+                glare_view,
                 velocity_view,
                 lut_view,
             );

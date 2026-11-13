@@ -1,6 +1,6 @@
 use crate::graph::executor::{format_bpp, format_name};
 use crate::graph::resource::GraphTexturePool;
-use crate::graph::{PipelineFormatCache, PipelineFormatSet, PipelineRegistry};
+use crate::graph::PipelineFormatCache;
 use crate::{
     PassContext, PrepareContext, Profiler, RenderFrameStorage, RenderPass, Result, SceneInput,
 };
@@ -84,7 +84,7 @@ struct FinishJob {
 #[cfg(not(target_arch = "wasm32"))]
 struct EncoderFinishPool {
     jobs: Option<mpsc::Sender<FinishJob>>,
-    workers: Vec<std::thread::JoinHandle<()>>,
+    workers: Vec<helio_tasks::Service>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -100,11 +100,17 @@ impl EncoderFinishPool {
         let workers = (0..count)
             .map(|i| {
                 let jobs_rx = Arc::clone(&jobs_rx);
-                std::thread::Builder::new()
-                    .name(format!("helio-encoder-finish-{i}"))
-                    .spawn(move || loop {
+                helio_tasks::spawn_service(
+                    helio_tasks::ServiceSpec::new(
+                        format!("Helio encoder finish {i}"),
+                        format!("helio-encoder-finish-{i}"),
+                    )
+                    .owner("helio")
+                    .role(helio_tasks::Role::Compute)
+                    .pool("helio-encoder-finish"),
+                    move |ctx| loop {
                         let job = match jobs_rx.lock() {
-                            Ok(rx) => rx.recv(),
+                            Ok(rx) => ctx.wait(|| rx.recv()),
                             Err(_) => break,
                         };
                         let Ok(job) = job else { break };
@@ -117,8 +123,9 @@ impl EncoderFinishPool {
                                 job.encoder.finish()
                             }));
                         let _ = job.reply.send((job.index, finished));
-                    })
-                    .expect("failed to spawn helio encoder-finish thread")
+                    },
+                )
+                .expect("failed to spawn helio encoder-finish thread")
             })
             .collect();
         Self {
@@ -174,6 +181,9 @@ pub struct DeclaredResource {
     /// The texture format a write declares (`None` for reads, buffers and
     /// bare names).
     pub format: Option<crate::graph::ResourceFormat>,
+    /// A read the pass does without when nothing writes it
+    /// ([`ResourceBuilder::read_optional`](crate::graph::ResourceBuilder::read_optional)).
+    pub optional: bool,
 }
 
 /// What one pass declares, see [`RenderGraph::pass_declaration`].
@@ -215,10 +225,6 @@ pub struct RenderGraph {
     /// [`PipelineFormatCache`] for why a `RefCell` here doesn't violate the
     /// "zero locks in the render path" guarantee.
     pub(crate) pipeline_cache: PipelineFormatCache,
-    /// Explicit host-owned formats reachable by this graph. An empty list
-    /// means only the formats declared by each recipe are prepared.
-    pipeline_formats: Vec<PipelineFormatSet>,
-    pub(crate) pipeline_registries: Vec<PipelineRegistry>,
     pub(crate) reflected_pipelines: Vec<Option<crate::shader::ReflectedPipeline>>,
     pub(crate) resources: HashMap<String, ResourceLifetime>,
     /// `write_group` membership in declaration order: `(owning_pass_index,
@@ -403,8 +409,6 @@ impl RenderGraph {
             profiler: Profiler::new(device, queue),
             pool: GraphTexturePool::new(),
             pipeline_cache: PipelineFormatCache::with_device(device),
-            pipeline_formats: Vec::new(),
-            pipeline_registries: Vec::new(),
             reflected_pipelines: Vec::new(),
             resources: HashMap::new(),
             resource_groups: Vec::new(),
@@ -527,28 +531,6 @@ impl RenderGraph {
     /// point or during an orderly shutdown.
     pub fn persist_pipeline_cache(&self) -> std::io::Result<()> {
         self.pipeline_cache.persist()
-    }
-
-    /// Sets the host's complete, explicit enumeration of reachable attachment
-    /// formats. If the graph is already locked, newly configured variants are
-    /// scheduled immediately and become available without stalling recording.
-    pub fn set_pipeline_formats(&mut self, formats: Vec<PipelineFormatSet>) {
-        self.pipeline_formats = formats;
-        if self.locked {
-            self.prepare_pipeline_registries();
-        }
-    }
-
-    /// Adds one host-reachable format combination without discarding formats
-    /// supplied by a graph builder. This is used by renderer hosts to wire the
-    /// presentation format into custom graphs.
-    pub fn add_pipeline_format(&mut self, format: PipelineFormatSet) {
-        if !self.pipeline_formats.contains(&format) {
-            self.pipeline_formats.push(format);
-            if self.locked {
-                self.prepare_pipeline_registries();
-            }
-        }
     }
 
     pub fn with_xr_mode(&mut self, active: bool) -> &mut Self {
@@ -711,7 +693,6 @@ impl RenderGraph {
         let (writes, reads, _) = self.chain_read_write_sets();
         self.parallel_layers = compute_parallel_layers(&writes, &reads);
         self.allocate_textures();
-        self.prepare_pipeline_registries();
         self.detect_subpass_chains();
         self.resources_allocated = true;
         self.rebuild_gpu_render_bundles();
@@ -1053,7 +1034,6 @@ impl RenderGraph {
             return Err("the graph has prebuilt render bundles".into());
         }
         if self.pass_cache.len() != self.passes.len()
-            || self.pipeline_registries.len() != self.passes.len()
             || self.reflected_pipelines.len() != self.passes.len()
             || replacement.reflected_pipelines.len() != replacement.passes.len()
         {
@@ -1129,7 +1109,6 @@ impl RenderGraph {
             self.pipeline_cache
                 .invalidate_pass(self.passes[live].name());
             self.passes[live] = fresh;
-            self.pipeline_registries[live] = self.pipeline_registry_for(&*self.passes[live]);
             self.reflected_pipelines[live] = replacement.reflected_pipelines[new].take();
             if let Some(cache) = self.reflected_group_cache.get_mut(live) {
                 // Keyed by layout, which the new pipeline owns.
@@ -1342,22 +1321,43 @@ impl RenderGraph {
         let push = |list: &mut Vec<DeclaredResource>,
                     name: &'static str,
                     kind: DeclaredKind,
-                    format: Option<crate::graph::ResourceFormat>| {
+                    format: Option<crate::graph::ResourceFormat>,
+                    optional: bool| {
             match list.iter_mut().find(|existing| existing.name == name) {
-                // A precise kind beats the unknown one a bare name implies.
-                Some(existing) if existing.kind == DeclaredKind::Unknown => {
-                    existing.kind = kind;
-                    existing.format = format;
+                Some(existing) => {
+                    // A precise kind beats the unknown one a bare name implies.
+                    if existing.kind == DeclaredKind::Unknown {
+                        existing.kind = kind;
+                        existing.format = format;
+                    }
+                    // Required by any declaration is required.
+                    existing.optional &= optional;
                 }
-                Some(_) => {}
-                None => list.push(DeclaredResource { name, kind, format }),
+                None => list.push(DeclaredResource {
+                    name,
+                    kind,
+                    format,
+                    optional,
+                }),
             }
         };
         for &name in pass.reads() {
-            push(&mut declaration.reads, name, DeclaredKind::Unknown, None);
+            push(
+                &mut declaration.reads,
+                name,
+                DeclaredKind::Unknown,
+                None,
+                false,
+            );
         }
         for &name in pass.writes() {
-            push(&mut declaration.writes, name, DeclaredKind::Unknown, None);
+            push(
+                &mut declaration.writes,
+                name,
+                DeclaredKind::Unknown,
+                None,
+                false,
+            );
         }
         let mut builder = crate::graph::ResourceBuilder::new();
         pass.declare_resources(&mut builder);
@@ -1368,6 +1368,7 @@ impl RenderGraph {
                     resource.name,
                     DeclaredKind::Unknown,
                     None,
+                    resource.optional,
                 ),
                 crate::graph::ResourceAccess::Write => {
                     let kind = match resource.format {
@@ -1382,6 +1383,7 @@ impl RenderGraph {
                         resource.group.unwrap_or(resource.name),
                         kind,
                         resource.format,
+                        false,
                     );
                 }
             }
@@ -1977,7 +1979,6 @@ impl RenderGraph {
                             active_render_pass: None,
                             active_compute_pass: None,
                             pipeline_cache: &self.pipeline_cache,
-                            pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
                             reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
                             uploads: &self.uploads,
@@ -2101,7 +2102,6 @@ impl RenderGraph {
                                 .map(|rp| &mut **rp as *mut _ as *mut _),
                             active_compute_pass: None,
                             pipeline_cache: &self.pipeline_cache,
-                            pipelines: &self.pipeline_registries[pass_index],
                             reflected_bind_groups: &reflected_groups[pass_index],
                             reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
                             uploads: &self.uploads,
@@ -2176,7 +2176,6 @@ impl RenderGraph {
                                 active_render_pass: Some(&mut rp as *mut _ as *mut _),
                                 active_compute_pass: None,
                                 pipeline_cache: &self.pipeline_cache,
-                                pipelines: &self.pipeline_registries[pass_index],
                                 reflected_bind_groups: &reflected_groups[pass_index],
                                 reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
                                 uploads: &self.uploads,
@@ -2237,7 +2236,6 @@ impl RenderGraph {
                         active_render_pass: None,
                         active_compute_pass: None,
                         pipeline_cache: &self.pipeline_cache,
-                        pipelines: &self.pipeline_registries[pass_index],
                         reflected_bind_groups: &reflected_groups[pass_index],
                         reflected_pipeline: self.reflected_pipelines[pass_index].as_ref(),
                         uploads: &self.uploads,
@@ -2390,53 +2388,6 @@ impl RenderGraph {
         self.resize_pending = false;
 
         Ok(submission_index)
-    }
-
-    /// Finalize the graph after all passes have been added.
-    fn prepare_pipeline_registries(&mut self) {
-        let registries: Vec<PipelineRegistry> = self
-            .passes
-            .iter()
-            .map(|pass| self.pipeline_registry_for(&**pass))
-            .collect();
-        self.pipeline_registries = registries;
-    }
-
-    /// Declares `pass`'s pipeline recipes, schedules every format variant the
-    /// host enumerated, and returns the registry of the ones that are ready.
-    fn pipeline_registry_for(&self, pass: &dyn RenderPass) -> PipelineRegistry {
-        let device = self.device.clone();
-        let mut declarations = crate::graph::PipelineRecipeBuilder::new();
-        pass.declare_pipelines(&mut declarations);
-        let mut registry = PipelineRegistry::new();
-        for recipe in declarations.into_recipes() {
-            let key_for_builder = recipe.key.clone();
-            let build = Arc::clone(&recipe.build);
-            for formats in &self.pipeline_formats {
-                if formats.color_formats.len() != recipe.key.color_formats.len() {
-                    continue;
-                }
-                let variant_key = recipe.key.with_formats(formats);
-                let variant_for_builder = variant_key.clone();
-                let build = Arc::clone(&build);
-                let device = device.clone();
-                self.pipeline_cache
-                    .try_get_or_schedule(variant_key, move |driver_cache| {
-                        build(&device, &variant_for_builder, driver_cache)
-                    });
-            }
-            let build = Arc::clone(&build);
-            let device = device.clone();
-            if let Some(pipeline) = self
-                .pipeline_cache
-                .try_get_or_schedule(recipe.key, move |driver_cache| {
-                    build(&device, &key_for_builder, driver_cache)
-                })
-            {
-                registry.insert(recipe.handle, pipeline);
-            }
-        }
-        registry
     }
 
     /// [`lock_sized`](Self::lock_sized) with both resolutions `width` x `height`.
@@ -2604,8 +2555,6 @@ impl RenderGraph {
 
         // Phase 1: first texture allocation (no alias groups).
         self.allocate_textures();
-
-        self.prepare_pipeline_registries();
 
         // Build a "canon" `ResourceRegistry` for the attachment probe below by
         // replaying the exact same pre-pass routing the real per-frame loop

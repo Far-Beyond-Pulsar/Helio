@@ -76,12 +76,25 @@ pub fn glare(env: &mut BuildEnv<'_>) -> Option<&'static str> {
     env.shared(|| Glare(None)).0
 }
 
-/// Set by a preset whose anti-aliasing wants a reactive mask from what draws
-/// over the scene colour after lighting (transparency under a light-field model and TSR).
+/// Set by the frame setup when the frame resolves temporally: what draws
+/// over the scene colour with no motion vectors of its own (water's animated
+/// surface) tells the resolve where, through [`REACTIVE_MASK`].
+#[derive(Clone, Copy, Debug)]
+pub struct TemporalResolve;
+
+/// Set by the frame setup when the lighting model leaves transparency to the
+/// temporal resolve (a light-field model): transparent drawers write their
+/// coverage into [`REACTIVE_MASK`] every frame. Implies [`TemporalResolve`].
 #[derive(Clone, Copy, Debug)]
 pub struct ReactiveMask;
 
 /// The reactive mask's graph key: per-pixel coverage (`R8Unorm`, 1 = do not
 /// accumulate) that what draws over the scene colour after lighting writes
-/// and the anti-aliasing reads. Present while [`ReactiveMask`] is set.
+/// and the temporal resolve reads.
+///
+/// A frame has it only while one of its writers is a member: transparent
+/// drawers under [`ReactiveMask`], water while the scene holds water. The
+/// first writer of a frame allocates (`write_color_raw`, `R8Unorm`,
+/// `MatchSurface`) and clears it, later ones load it; the resolve reads it
+/// optionally and does no coverage work in frames without it.
 pub const REACTIVE_MASK: &str = "transparency_reactivity";

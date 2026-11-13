@@ -413,4 +413,3 @@ fn scene_db_for(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>) -> GpuMirr
     }
     .mirror()
 }
-

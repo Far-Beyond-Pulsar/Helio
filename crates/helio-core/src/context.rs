@@ -102,7 +102,6 @@
 //! ```
 
 use crate::cmd::{CommandRecorder, ComputeCmds, RenderCmds};
-use crate::graph::PipelineRegistry;
 use crate::GpuCameraUniforms;
 use crate::{Profiler, SceneBufferProjection};
 
@@ -290,19 +289,14 @@ pub struct PassContext<'a> {
     /// Dynamic-rendering pipeline cache, keyed by runtime attachment
     /// formats (see [`crate::graph::PipelineFormatCache`]). Passes that
     /// bind a format-dependent pipeline should look it up here every frame
-    /// via `ctx.pipeline_cache.try_get_or_schedule(key, build_pipeline)`
-    /// rather than rebuilding — the cache only pays the build cost once per
-    /// distinct format combination, not once per frame. A `None` result is a
-    /// typed, frame-local fallback: skip the draw and try again next frame.
+    /// via `ctx.pipeline_cache.get_or_create(key, build_pipeline)` rather
+    /// than rebuilding — the cache only pays the build cost once per distinct
+    /// format combination, not once per frame.
     /// One instance lives on the executor and is threaded into every pass's
     /// context, so a resize/reformat of a named transient is picked up
     /// automatically the next time a pass computes its key via
     /// [`crate::graph::attachment_format`].
     pub pipeline_cache: &'a crate::graph::PipelineFormatCache,
-
-    /// Pipelines declared by this pass and resolved by the executor before
-    /// `execute()` begins.
-    pub pipelines: &'a PipelineRegistry,
 
     /// Bind groups created by the executor from the pass's reflected shader.
     /// Empty for legacy/manual passes. Groups are ordered by WGSL group index.

@@ -1,0 +1,9 @@
+[package]
+name = "helio-tasks"
+version = "0.1.0"
+edition = "2021"
+workspace = "../../"
+description = "Threads and background jobs Helio-layer code starts, through the host's task system (the engine installs it; std threads without one)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

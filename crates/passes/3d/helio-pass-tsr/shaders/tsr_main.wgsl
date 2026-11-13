@@ -696,8 +696,10 @@ fn resolve(pixel: vec2<u32>, tile_origin: vec2<i32>) -> TsrOutput {
     if use_coverage {
         coverage = clamp(textureSampleLevel(transparency_reactivity, linear_sampler, cur_uv, 0.0).r, 0.0, 1.0);
     }
-    // History alpha holds coverage only in the opt-in transparency path.
-    let output_alpha = select(1.0, coverage, use_coverage);
+    // History alpha holds the coverage (zero in frames without a reactive
+    // mask, so the mask coming and going keeps the history). The frame's
+    // output is opaque whatever it holds (`fs_sharpen`).
+    let output_alpha = coverage;
 
     let n = gather(in_pos, tile_origin);
     let current_depth = vec2<f32>(view_depth(n.nearest_depth), view_depth(n.centre_depth));

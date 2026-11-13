@@ -19,7 +19,7 @@ use helio_feature_api::{
     pass_node, Feature, FeatureRegistrar, FeatureSet, NodeBuild, NodeDescriptor, NodeRegistry,
     ParamDesc, Params, PinDesc,
 };
-use helio_frame_api::color::ReactiveMask;
+use helio_frame_api::color::{ReactiveMask, TemporalResolve};
 use helio_frame_api::lighting::{model as model_ids, LightingModel, LightingModelId};
 use helio_frame_api::{FrameNode, Phase, PhaseList, Slot};
 
@@ -84,8 +84,11 @@ pub(crate) fn frame_setup_node(models: Vec<LightingModel>) -> NodeDescriptor {
                 .env
                 .setting::<RendererConfig>()
                 .is_some_and(|config| config.tsr_quality.is_some());
-            if build.boolean("reactive_mask") && temporal {
-                build.env.insert_setting(ReactiveMask);
+            if temporal {
+                build.env.insert_setting(TemporalResolve);
+                if build.boolean("reactive_mask") {
+                    build.env.insert_setting(ReactiveMask);
+                }
             }
             Ok(())
         },
@@ -127,10 +130,6 @@ fn antialiasing_node() -> NodeDescriptor {
                 Some(quality) => {
                     let mut params = Params::default();
                     params.insert("quality".into(), quality.into());
-                    params.insert(
-                        "transparency_reactivity".into(),
-                        build.boolean("transparency_reactivity").into(),
-                    );
                     (tsr.as_ref(), params)
                 }
                 None if build.text("fallback") == "fxaa" => (fxaa.as_ref(), Params::default()),
@@ -152,11 +151,6 @@ fn antialiasing_node() -> NodeDescriptor {
         "Without TSR",
         &["fxaa", "none"],
         "fxaa",
-    ))
-    .with_param(ParamDesc::boolean(
-        "transparency_reactivity",
-        "Transparency reactivity",
-        false,
     ))
 }
 

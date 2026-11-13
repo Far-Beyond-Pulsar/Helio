@@ -7,7 +7,7 @@
 //! whole value into a fresh function variable and indexes that, and the HLSL
 //! and MSL writers index a local copy. For a per-frame table that is
 //! kilobytes written to per-invocation memory on every call, which a
-//! full-screen pass pays at every pixel: an `AtmosphereFrame` passed by value
+//! full-screen pass pays at every pixel: an `SkyFrame` passed by value
 //! with its 96 directional-light rows indexed in a loop made the deferred
 //! lighting pass write two 1.5 KiB copies a pixel. WGSL has no uniform or
 //! storage pointer parameters, so a shared WGSL function that indexes such a
@@ -88,7 +88,10 @@ mod tests {
         );
         let found = value_array_copies(&source).unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
-        assert!(found[0].contains("`sum`") && found[0].contains("1024-byte"), "{found:?}");
+        assert!(
+            found[0].contains("`sum`") && found[0].contains("1024-byte"),
+            "{found:?}"
+        );
     }
 
     #[test]

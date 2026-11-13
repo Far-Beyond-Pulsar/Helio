@@ -1048,6 +1048,7 @@ dependencies = [
  "helio-pass-postprocess",
  "helio-scene-derivations",
  "helio-scene-join",
+ "helio-tasks",
  "log",
  "naga",
  "notify",
@@ -1075,6 +1076,7 @@ version = "0.1.0"
 dependencies = [
  "helio-core",
  "helio-feature-api",
+ "naga",
  "wgpu",
 ]
 
@@ -1284,6 +1286,10 @@ dependencies = [
  "helio-pass-tsr",
  "wgpu",
 ]
+
+[[package]]
+name = "helio-tasks"
+version = "0.1.0"
 
 [[package]]
 name = "helio-wasm"
@@ -2584,7 +2590,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=017252c3c84331a29e53eaa627185597954a3241#017252c3c84331a29e53eaa627185597954a3241"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f6769f61518e1e68475bb9b6191fa26a29cc09f6#f6769f61518e1e68475bb9b6191fa26a29cc09f6"
 dependencies = [
  "ahash",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling?rev=12424a5f75166332f9f1d2741281f6fc4847b44d)",
@@ -2600,7 +2606,7 @@ dependencies = [
 [[package]]
 name = "pulsar_scenedb_derive"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=017252c3c84331a29e53eaa627185597954a3241#017252c3c84331a29e53eaa627185597954a3241"
+source = "git+https://github.com/Far-Beyond-Pulsar/SceneDB?rev=f6769f61518e1e68475bb9b6191fa26a29cc09f6#f6769f61518e1e68475bb9b6191fa26a29cc09f6"
 dependencies = [
  "proc-macro2",
  "pulsar_reflection_codegen",

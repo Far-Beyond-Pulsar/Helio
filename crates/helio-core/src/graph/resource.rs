@@ -123,6 +123,9 @@ pub struct ResourceDecl {
     /// over arity — see `docs/helio_3_0_spec.md` §5. `None` for every
     /// ordinary single-view declaration.
     pub group: Option<&'static str>,
+    /// A read the pass does without when no pass of the frame writes it
+    /// ([`ResourceBuilder::read_optional`]).
+    pub optional: bool,
 }
 
 /// Resource dependency builder — used in `RenderPass::declare_resources()`.
@@ -141,6 +144,20 @@ impl ResourceBuilder {
 
     /// Read a resource written by an earlier pass.
     pub fn read(&mut self, name: &'static str) {
+        self.push_read(name, false);
+    }
+
+    /// Read a resource that only some frames have: written by a pass whose
+    /// content may be absent (a member only while the scene holds it), or
+    /// by no pass of this graph. The pass reads it when the frame's registry
+    /// holds it and binds its own stand-in otherwise, as UE's render graph
+    /// binds a dummy for an optional texture nobody produced. The routing
+    /// check does not report it as unwritten.
+    pub fn read_optional(&mut self, name: &'static str) {
+        self.push_read(name, true);
+    }
+
+    fn push_read(&mut self, name: &'static str, optional: bool) {
         self.declarations.push(ResourceDecl {
             name,
             format: None,
@@ -149,6 +166,7 @@ impl ResourceBuilder {
             layers: 1,
             extra_usage: wgpu::TextureUsages::empty(),
             group: None,
+            optional,
         });
     }
 
@@ -177,6 +195,7 @@ impl ResourceBuilder {
             layers: 1,
             extra_usage: wgpu::TextureUsages::empty(),
             group,
+            optional: false,
         });
     }
 
@@ -261,6 +280,7 @@ impl ResourceBuilder {
             layers: 1,
             extra_usage: wgpu::TextureUsages::empty(),
             group: None,
+            optional: false,
         });
     }
 

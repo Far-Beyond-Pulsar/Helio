@@ -162,8 +162,9 @@ impl Renderer {
                     .map(|s| (*s).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_owned());
-                Some(Err(PipelineFailure::new(status_screen::REASON_PANIC)
-                    .with_errors([message])))
+                Some(Err(
+                    PipelineFailure::new(status_screen::REASON_PANIC).with_errors([message])
+                ))
             }
             Ok(Some(Ok(mut graph))) => match gpu_error {
                 None => Some(Ok(graph)),

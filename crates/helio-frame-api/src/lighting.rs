@@ -10,7 +10,7 @@
 //! | [`SUN_VISIBILITY`] / [`DIRECTIONAL_VISIBILITY`] | rgba16f, full res | clouds / terrain | fully visible |
 //! | [`sun_transmittance`] | world-space map along the sun + frame | clouds | fully lit |
 //! | [`TRANSMISSION`] | rgba16f, internal res | water caustics | nothing added |
-//! | [`sky`] | atmosphere frame + sky table | the atmosphere | no atmosphere |
+//! | [`sky`] | sky frame (medium, suns) + sky table | the sky | no sky |
 //! | [`VIEW_REMAPS`] | SceneDB `mat4` per chain + G-buffer tag | portals | no remap |
 //!
 //! A lighting model binds every contract it uses, the stand-in where it is
@@ -319,48 +319,50 @@ pub const VIEW_REMAP_CHAINS: u64 = 256;
 pub const VIEW_REMAPS_BYTES: u64 = VIEW_REMAP_CHAINS * 64;
 
 /// The sky: what lights a surface from the air above it and what the air
-/// takes from the sun on its way. Published by an atmosphere; read by
-/// lighting, GI, fog, water, terrain.
+/// takes from the sun on its way, as other kinds read it: the participating
+/// medium (Rayleigh, Mie, ozone; aerial perspective, terrain and water read
+/// it), the sky's radiance (the sky-view LUT, the sky table, its irradiance)
+/// and the suns (the lights' directional lights, packed). Published by the
+/// sky plugin, which keeps what only it draws (clouds, stars, a panorama) in
+/// a block of its own; read by lighting, GI, fog, water, terrain.
 pub mod sky {
-    /// Graph key of the per-frame atmosphere buffer (`AtmosphereFrame`).
-    pub const ATMOSPHERE_FRAME: &str = "atmosphere_frame";
+    /// Graph key of the per-frame sky buffer (`SkyFrame` in `frame_sky.wgsl`).
+    pub const SKY_FRAME: &str = "sky_frame";
     /// Graph key of the sky-view LUT.
-    pub const ATMOSPHERE_SKY_VIEW: &str = "atmosphere_sky_view";
-    /// Bytes of `AtmosphereFrame`. The buffer is usable as a uniform as well
+    pub const SKY_VIEW: &str = "sky_view";
+    /// Bytes of `SkyFrame`. The buffer is usable as a uniform as well
     /// as storage: consumers already at the per-stage storage-buffer limit
     /// (the deferred lighting pass) bind it as a uniform.
-    pub const ATMOSPHERE_FRAME_BYTES: u64 = 2144;
+    pub const SKY_FRAME_BYTES: u64 = 1872;
     /// Graph key of the sky's irradiance table (`SKY_TABLE_*` in
-    /// `atmosphere_common.wgsl`): the sky over a surface anywhere in the air,
-    /// by its altitude and sun angle. Usable as a uniform.
-    pub const ATMOSPHERE_SKY_TABLE: &str = "atmosphere_sky_table";
+    /// `frame_sky.wgsl`): the sky over a surface anywhere in the air, by its
+    /// altitude and sun angle. Usable as a uniform.
+    pub const SKY_TABLE: &str = "sky_table";
     /// Entries of the sky table: 16 altitudes by 24 sun cosines, six vec4s
     /// each.
     pub const SKY_TABLE_ENTRIES: u64 = 16 * 24;
-    pub const ATMOSPHERE_SKY_TABLE_BYTES: u64 = SKY_TABLE_ENTRIES * 6 * 16;
+    pub const SKY_TABLE_BYTES: u64 = SKY_TABLE_ENTRIES * 6 * 16;
 
-    /// Marker opting a shader into the shared atmosphere WGSL.
-    pub const ATMOSPHERE_MARKER: &str = "//!use atmosphere";
+    /// Marker opting a shader into the frame's sky WGSL.
+    pub const SKY_MARKER: &str = "//!use frame_sky";
 
-    /// The atmosphere's shared WGSL (`AtmosphereFrame`, the medium, the LUT
-    /// parameterisations) as a snippet: any pass reading the published
-    /// `atmosphere_frame` opts in with [`ATMOSPHERE_MARKER`].
-    pub const ATMOSPHERE_SNIPPET: helio_core::shader::ShaderSnippet =
-        helio_core::wgsl_snippet!(ATMOSPHERE_MARKER, "shaders/atmosphere_common.wgsl");
+    /// The frame's sky WGSL (`SkyFrame`, `SkyMedium`, the LUT
+    /// parameterisations, transmittance and integration) as a snippet: any
+    /// pass reading the published [`SKY_FRAME`] opts in with [`SKY_MARKER`].
+    pub const SKY_SNIPPET: helio_core::shader::ShaderSnippet =
+        helio_core::wgsl_snippet!(SKY_MARKER, "shaders/frame_sky.wgsl");
 
-    /// Marker opting a shader into [`ATMOSPHERE_SKY_TABLE_SNIPPET`].
-    pub const ATMOSPHERE_SKY_TABLE_MARKER: &str = "//!use atmosphere_sky_table";
+    /// Marker opting a shader into [`SKY_TABLE_SNIPPET`].
+    pub const SKY_TABLE_MARKER: &str = "//!use sky_table";
 
-    /// The sky over a surface anywhere in the atmosphere from the published
-    /// sky table (`atmosphere_sky_table_eval`); with [`ATMOSPHERE_SNIPPET`],
-    /// for a shader binding the frame as `atmosphere` and the table as
-    /// `atmosphere_sky_table`. It reads both through those bindings: a frame
+    /// The sky over a surface anywhere in the air from the published sky
+    /// table (`sky_table_eval`); with [`SKY_SNIPPET`], for a shader binding
+    /// the frame as `sky_frame` and the table as `sky_table`. It reads both
+    /// through those bindings: a frame
     /// passed by value would be copied whole into per-invocation memory on
     /// every call, since its directional lights are indexed at run time.
-    pub const ATMOSPHERE_SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet = helio_core::wgsl_snippet!(
-        ATMOSPHERE_SKY_TABLE_MARKER,
-        "shaders/atmosphere_sky_table.wgsl"
-    );
+    pub const SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet =
+        helio_core::wgsl_snippet!(SKY_TABLE_MARKER, "shaders/sky_table.wgsl");
 }
 
 /// The sun's transmittance through the media above the scene at any point,

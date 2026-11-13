@@ -544,10 +544,6 @@ impl Fixture {
             view_formats: &[],
         });
         self.coverage_view = Some(coverage.create_view(&Default::default()));
-        self.graph
-            .find_pass_mut::<TsrPass>()
-            .unwrap()
-            .set_transparency_reactivity(true);
         self
     }
 

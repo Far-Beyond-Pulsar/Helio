@@ -190,18 +190,6 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
                 } else {
                     tsr
                 };
-                // A feature asks for the mask too (`color::ReactiveMask`: water, whose
-                // animated surface has no motion vectors).
-                let tsr = if build.boolean("transparency_reactivity")
-                    || build
-                        .env
-                        .setting::<helio_frame_api::color::ReactiveMask>()
-                        .is_some()
-                {
-                    tsr.with_transparency_reactivity()
-                } else {
-                    tsr
-                };
                 build.graph.add_pass(Box::new(tsr));
                 color::advance(build.env, helio_pass_tsr::TSR_COLOR);
                 Ok(())
@@ -216,11 +204,6 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
         .with_param(ParamDesc::boolean(
             "stochastic_mask",
             "Stochastic mask",
-            false,
-        ))
-        .with_param(ParamDesc::boolean(
-            "transparency_reactivity",
-            "Transparency reactivity",
             false,
         )),
     );
