@@ -1237,6 +1237,13 @@ impl RenderGraph {
         self.passes.len()
     }
 
+    /// Estimated bytes of the textures the graph allocates for its passes
+    /// (aliased views counted once). A host lists it per renderer; it walks
+    /// the pool, so read it now and then, not per frame.
+    pub fn texture_bytes(&self) -> u64 {
+        self.pool.physical_vram_bytes()
+    }
+
     /// What the graph's passes route to the presented output: every pass in
     /// build order (scheduled or dormant) against the host-supplied inputs.
     /// See [`check_routing`](crate::graph::check_routing).

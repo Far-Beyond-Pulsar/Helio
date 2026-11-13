@@ -73,9 +73,11 @@ impl ParamDesc {
 }
 
 /// The pins a node instance has, which can depend on its parameters.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NodePins {
+    #[serde(default)]
     pub inputs: Vec<PinDesc>,
+    #[serde(default)]
     pub outputs: Vec<PinDesc>,
 }
 
@@ -486,6 +488,39 @@ pub struct NodeRegistry {
 /// probe result reaches every descriptor without re-registering them.
 pub type PinTable = Arc<std::sync::RwLock<HashMap<String, NodePins>>>;
 
+/// The pins of a generated node: its kind's entry in `table` (flow pins until
+/// a probe filled it, none for a data-only node), plus the alternative inputs
+/// it can take.
+fn generated_pins(table: &PinTable, descriptor: &NodeDescriptor) -> PinsFn {
+    let table = Arc::clone(table);
+    let kind = descriptor.kind.clone();
+    let alternatives = descriptor.alternative_inputs.clone();
+    let data_only = descriptor.data_only;
+    Arc::new(move |_| {
+        let mut pins = table
+            .read()
+            .ok()
+            .and_then(|table| table.get(&kind).cloned())
+            .unwrap_or_else(|| {
+                if data_only {
+                    NodePins::default()
+                } else {
+                    NodePins {
+                        inputs: vec![PinDesc::flow("in")],
+                        outputs: vec![PinDesc::flow("out")],
+                    }
+                }
+            });
+        for (name, ty) in &alternatives {
+            if !pins.inputs.iter().any(|pin| pin.resource == *name) {
+                pins.inputs
+                    .push(PinDesc::resource(*ty, name.clone()).optional());
+            }
+        }
+        pins
+    })
+}
+
 /// Adds a performance marker after a node that asked for one; the second
 /// argument is the node's kind.
 pub type MarkerFn = Arc<dyn Fn(&mut NodeBuild<'_, '_>, &str) + Send + Sync>;
@@ -557,36 +592,70 @@ impl NodeRegistry {
     fn insert(&mut self, mut descriptor: NodeDescriptor) {
         self.absent.remove(&descriptor.kind);
         if descriptor.generated {
-            let table = Arc::clone(&self.pin_table);
-            let kind = descriptor.kind.clone();
-            let alternatives = descriptor.alternative_inputs.clone();
-            let data_only = descriptor.data_only;
-            descriptor.pins = Arc::new(move |_| {
-                let mut pins = table
-                    .read()
-                    .ok()
-                    .and_then(|table| table.get(&kind).cloned())
-                    .unwrap_or_else(|| {
-                        if data_only {
-                            NodePins::default()
-                        } else {
-                            NodePins {
-                                inputs: vec![PinDesc::flow("in")],
-                                outputs: vec![PinDesc::flow("out")],
-                            }
-                        }
-                    });
-                for (name, ty) in &alternatives {
-                    if !pins.inputs.iter().any(|pin| pin.resource == *name) {
-                        pins.inputs
-                            .push(PinDesc::resource(*ty, name.clone()).optional());
-                    }
-                }
-                pins
-            });
+            descriptor.pins = generated_pins(&self.pin_table, &descriptor);
         }
         self.nodes
             .insert(descriptor.kind.clone(), Arc::new(descriptor));
+    }
+
+    /// Whether a probe has given the generated node of `kind` its pins.
+    pub fn has_pins(&self, kind: &str) -> bool {
+        self.pin_table
+            .read()
+            .is_ok_and(|table| table.contains_key(kind))
+    }
+
+    /// This registry, except that a generated node whose kind no probe has
+    /// given pins takes them from `cached` (a graph asset's record of the pins
+    /// its nodes had when it was written), so a wired graph validates and
+    /// builds where nothing has probed, as in a game. Probed pins win, so a
+    /// wire the passes no longer declare is still reported. A plain clone when
+    /// `cached` adds nothing.
+    pub fn with_pin_fallback(&self, cached: &BTreeMap<String, NodePins>) -> Self {
+        let missing: Vec<(&String, &NodePins)> = cached
+            .iter()
+            .filter(|(kind, _)| {
+                self.nodes.get(*kind).is_some_and(|node| node.generated) && !self.has_pins(kind)
+            })
+            .collect();
+        if missing.is_empty() {
+            return self.clone();
+        }
+        let mut table = self
+            .pin_table
+            .read()
+            .map(|table| table.clone())
+            .unwrap_or_default();
+        for (kind, pins) in missing {
+            table.insert(kind.clone(), pins.clone());
+        }
+        let mut view = self.clone();
+        view.pin_table = Arc::new(std::sync::RwLock::new(table));
+        for node in view.nodes.values_mut() {
+            if node.generated {
+                let mut descriptor = NodeDescriptor::clone(node);
+                descriptor.pins = generated_pins(&view.pin_table, &descriptor);
+                *node = Arc::new(descriptor);
+            }
+        }
+        view
+    }
+
+    /// The probed pins of each generated kind of `kinds`: what a graph asset
+    /// records of its nodes (`GraphAsset::pins`). Kinds no probe has given
+    /// pins are left out.
+    pub fn probed_pins<'k>(
+        &self,
+        kinds: impl IntoIterator<Item = &'k str>,
+    ) -> BTreeMap<String, NodePins> {
+        let Ok(table) = self.pin_table.read() else {
+            return BTreeMap::new();
+        };
+        kinds
+            .into_iter()
+            .filter(|kind| self.nodes.get(*kind).is_some_and(|node| node.generated))
+            .filter_map(|kind| Some((kind.to_owned(), table.get(kind)?.clone())))
+            .collect()
     }
 
     /// Sets the pins of the generated node of `kind`.

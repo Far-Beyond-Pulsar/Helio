@@ -40,6 +40,16 @@ impl Feature for PerfOverlayFeature {
     }
 
     fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        // The overlay's passes share one `PerfOverlayShared`: shader hot
+        // reload swaps them together (`helio_core::SwapPolicy`).
+        {
+            use helio_core::graph::type_name_of as name;
+            registrar.swap_group(&[
+                name::<PerfOverlayAnalyzerPass>(),
+                name::<PerfOverlayCostAnalyzerPass>(),
+                name::<PerfOverlayPass>(),
+            ]);
+        }
         // After a node that ends a phase, the overlay's analyzer times it. The
         // graph does not contain them; the compiler adds them. After the node
         // that writes the offered tile counts (a lighting model's light

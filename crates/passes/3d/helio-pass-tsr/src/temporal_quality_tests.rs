@@ -327,6 +327,9 @@ struct Fixture {
     color_view: wgpu::TextureView,
     /// The stochastic mask the fixture publishes (`STOCHASTIC_MASK`).
     mask_view: wgpu::TextureView,
+    /// The transparency coverage it publishes when TSR keeps coverage
+    /// (`helio_frame_api::color::REACTIVE_MASK`; [`Fixture::with_transparency_coverage`]).
+    coverage_view: Option<wgpu::TextureView>,
     /// The motion vectors it publishes (`helio_frame_api::gbuffer::VELOCITY`), and the reference
     /// draw's (unused).
     motion_view: wgpu::TextureView,
@@ -504,6 +507,7 @@ impl Fixture {
             output,
             color_view: color.create_view(&Default::default()),
             mask_view: mask.create_view(&Default::default()),
+            coverage_view: None,
             motion_view: motion.create_view(&Default::default()),
             reference_motion_view: reference_motion.create_view(&Default::default()),
             color,
@@ -520,6 +524,37 @@ impl Fixture {
             previous_bar: None,
             bar_shift_override: None,
         })
+    }
+
+    /// TSR keeping transparency coverage (a graph whose transparent passes
+    /// mark what they cover, as water does), with nothing covered.
+    fn with_transparency_coverage(mut self) -> Self {
+        let coverage = self.device().create_texture(&wgpu::TextureDescriptor {
+            label: Some("TSR fixture coverage"),
+            size: wgpu::Extent3d {
+                width: self.internal[0],
+                height: self.internal[1],
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.coverage_view = Some(coverage.create_view(&Default::default()));
+        self.graph
+            .find_pass_mut::<TsrPass>()
+            .unwrap()
+            .set_transparency_reactivity(true);
+        self
+    }
+
+    /// TSR's output as RGBA.
+    fn output_rgba(&self) -> Vec<[f32; 4]> {
+        let output = &self.graph.find_pass::<TsrPass>().unwrap().output_texture;
+        self.read(output)
     }
 
     fn device(&self) -> &wgpu::Device {
@@ -713,6 +748,13 @@ impl Fixture {
             &self.motion_view,
             "Fixture",
         );
+        if let Some(coverage) = &self.coverage_view {
+            registry.write(
+                helio_core::ResourceKey::new(helio_frame_api::color::REACTIVE_MASK),
+                coverage,
+                "Fixture",
+            );
+        }
         self.graph
             .execute_with_registry(
                 &self.input,
@@ -1310,4 +1352,36 @@ fn a_non_finite_frame_does_not_stick() {
         difference < 0.01,
         "mean difference from a clean run {difference}"
     );
+}
+
+/// TSR's output is opaque, with and without transparency coverage. Coverage
+/// is TSR's own bookkeeping in its history's alpha; passed on, it made an
+/// opaque scene all transparent, and the editor's viewport, which a UI
+/// composites by alpha, showed the UI's background wherever a graph asked TSR
+/// for coverage (the voxel planet's water did): frames published, a blank
+/// viewport (Pulsar-Native, 2026-11-12).
+#[test]
+fn the_output_is_opaque_with_transparency_coverage() {
+    for coverage in [false, true] {
+        let Some(fixture) = Fixture::new(TsrQuality::Balanced, [128, 128]) else {
+            return;
+        };
+        let mut fixture = if coverage {
+            fixture.with_transparency_coverage()
+        } else {
+            fixture
+        };
+        for _ in 0..8 {
+            fixture.frame(Content::DETAIL);
+        }
+        let not_opaque = fixture
+            .output_rgba()
+            .iter()
+            .filter(|pixel| (pixel[3] - 1.0).abs() > 1.0e-3)
+            .count();
+        assert_eq!(
+            not_opaque, 0,
+            "coverage {coverage}: {not_opaque} output pixels are not opaque"
+        );
+    }
 }

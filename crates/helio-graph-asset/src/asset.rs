@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// File extension of a render-graph asset.
 pub const EXTENSION: &str = "rendergraph";
@@ -154,6 +153,15 @@ pub struct GraphAsset {
     /// Groups of nodes shown as single nodes; each is placed by a `section:<id>` node.
     #[serde(default)]
     pub sections: Vec<GraphSection>,
+    /// The pins each generated node kind of the graph had when it was written
+    /// ([`Self::cache_pins`]). A generated node's pins come from what its
+    /// passes declare, which takes a device to find (the pin probe); with this
+    /// record a wired graph validates and builds where nothing has probed (a
+    /// game, a tool), and an editor shows its wires before its probe ends.
+    /// Probed pins win over it (`NodeRegistry::with_pin_fallback`), so a wire
+    /// the passes no longer declare is reported, not trusted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pins: BTreeMap<String, helio_feature_api::NodePins>,
 }
 
 impl Default for GraphAsset {
@@ -167,6 +175,7 @@ impl Default for GraphAsset {
             comments: Vec::new(),
             zip_ties: Vec::new(),
             sections: Vec::new(),
+            pins: BTreeMap::new(),
         }
     }
 }
@@ -180,6 +189,30 @@ impl GraphAsset {
     pub fn section_of(&self, node: &NodeInstance) -> Option<&GraphSection> {
         let id = node.kind.strip_prefix(SECTION_PREFIX)?;
         self.sections.iter().find(|section| section.id == id)
+    }
+
+    /// Every node kind the graph uses, its sections' included.
+    pub fn kinds(&self) -> std::collections::BTreeSet<&str> {
+        self.nodes
+            .iter()
+            .chain(self.sections.iter().flat_map(|section| &section.nodes))
+            .map(|node| node.kind.as_str())
+            .collect()
+    }
+
+    /// Records the probed pins of the generated node kinds the graph uses
+    /// ([`Self::pins`]), replacing the previous record. Kinds `registry` has
+    /// not probed keep what the record had, so saving a graph before its
+    /// editor's probe ends does not lose it.
+    pub fn cache_pins(&mut self, registry: &helio_feature_api::NodeRegistry) {
+        let kinds = self.kinds();
+        let mut pins = registry.probed_pins(kinds.iter().copied());
+        for (kind, cached) in &self.pins {
+            if kinds.contains(kind.as_str()) && !pins.contains_key(kind) {
+                pins.insert(kind.clone(), cached.clone());
+            }
+        }
+        self.pins = pins;
     }
 
     /// An id not used by any node, `prefix` followed by a number.

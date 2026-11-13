@@ -1,18 +1,15 @@
 //! Helio's shipped pipelines, as node graphs.
 //!
 //! A preset is a graph of the spine's passes and the frame's slots and draw
-//! phases (`helio_frame_api`), made for the renderer config it is built
-//! with: the config picks the anti-aliasing (TSR when `tsr_quality` is set)
-//! and the TSR node's settings; the preset chooses a lighting model by id (a
-//! plugin registers it; the spine's unlit stand-in is used when it is
-//! absent). Every
-//! other node joins where its feature placed it (a slot, or a phase's
-//! drawers and the compute before them), so a feature (meshes, GI, the
-//! clouds, an engine's object kinds) joins
-//! every preset without a preset naming it, and builds nothing when its own
-//! settings turn it off. Every build,
-//! resizes and shader reloads included, makes the graph again from the
-//! renderer's current config.
+//! phases (`helio_frame_api`). It is the same data for every renderer config:
+//! where it follows the project's anti-aliasing it names the anti-aliasing
+//! node (`features::ANTIALIASING`), which builds TSR at the config's quality or
+//! the fallback when the graph builds. The preset chooses a lighting model by
+//! id (a plugin registers it; the spine's unlit stand-in is used when it is
+//! absent). Every other node joins where its feature placed it (a slot, or a
+//! phase's drawers and the compute before them), so a feature (meshes, GI, the
+//! clouds, an engine's object kinds) joins every preset without a preset
+//! naming it, and builds nothing when its own settings turn it off.
 //!
 //! A host builds a renderer with one by function (`presets::deferred`) or by
 //! value (`with_graph(Preset::Deferred)`). Project-authored graphs are fixed
@@ -24,7 +21,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use helio::{IntoGraph, PassBuildContext, PipelineFailure, RendererConfig};
+use helio::{IntoGraph, PassBuildContext, PipelineFailure};
 use helio_core::RenderGraph;
 use helio_feature_api::ExtensionPoint;
 use helio_frame_api::lighting::{
@@ -60,7 +57,7 @@ pub(crate) fn warn_model_missing_once(wanted: &str, fallback: &str) {
 /// ([`resolve_model`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Preset {
-    /// The `deferred` model; TSR when the config asks for it, FXAA otherwise.
+    /// The `deferred` model; TSR when the project enables it, FXAA otherwise.
     Deferred,
     /// The `deferred` model with FXAA, never TSR.
     DeferredFxaa,
@@ -90,14 +87,6 @@ pub(crate) fn phases_for(shading: Shading) -> Vec<Phase> {
             Phase::Transparent,
         ],
     }
-}
-
-/// The anti-aliasing a preset ends its scene-linear chain with.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Aa {
-    Tsr,
-    Fxaa,
-    None,
 }
 
 impl Preset {
@@ -146,31 +135,23 @@ impl Preset {
         }
     }
 
-    fn aa(self, config: &RendererConfig) -> Aa {
-        let tsr = config.tsr_quality.is_some();
-        match self.antialiasing() {
-            Antialiasing::TemporalOrFxaa if tsr => Aa::Tsr,
-            Antialiasing::TemporalOrNone if tsr => Aa::Tsr,
-            Antialiasing::TemporalOrNone => Aa::None,
-            Antialiasing::TemporalOrFxaa | Antialiasing::Fxaa => Aa::Fxaa,
-        }
-    }
-
     /// The draw phases the preset runs with `registry`'s models, in frame
     /// order.
     pub fn phases(self, registry: &NodeRegistry) -> Vec<Phase> {
         phases_for(self.model(registry).shading)
     }
 
-    /// The preset's nodes for `config`, in execution order: the spine's
-    /// passes it names, and the frame's slots and draw phases, each expanded
-    /// to the nodes the registry holds there.
-    pub fn nodes(self, registry: &NodeRegistry, config: &RendererConfig) -> Vec<NodeInstance> {
+    /// The preset's nodes, in execution order: the spine's passes it names,
+    /// and the frame's slots and draw phases, each expanded to the nodes the
+    /// registry holds there. They are the same for every renderer config:
+    /// where the preset follows the project's anti-aliasing it names the
+    /// anti-aliasing node, which chooses when the graph builds.
+    pub fn nodes(self, registry: &NodeRegistry) -> Vec<NodeInstance> {
         let mut nodes = Nodes {
             registry,
             list: Vec::new(),
         };
-        let aa = self.aa(config);
+        let aa = self.antialiasing();
         let model = self.model(registry);
 
         // What the frame is: the lighting model (and so the draw phases, the
@@ -184,7 +165,7 @@ impl Preset {
                 ("model", Value::from(self.model_id())),
                 (
                     "reactive_mask",
-                    Value::from(model.reactive_transparency && aa == Aa::Tsr),
+                    Value::from(model.reactive_transparency && aa != Antialiasing::Fxaa),
                 ),
             ],
         );
@@ -216,23 +197,27 @@ impl Preset {
         nodes.phase(Phase::Overlay);
         nodes.slot(Slot::Media);
         nodes.phase(Phase::Transparent);
+        // Features that rotate samples over pixels ask TSR for its
+        // stochastic mask themselves (`helio_pass_tsr::StochasticSamples`).
         match aa {
-            Aa::Tsr => {
-                // Features that rotate samples over pixels ask TSR for its
-                // stochastic mask themselves (`helio_pass_tsr::StochasticSamples`).
-                nodes.with(
-                    "tsr",
-                    [
-                        ("quality", Value::from(tsr_quality(config))),
-                        (
-                            "transparency_reactivity",
-                            Value::from(model.reactive_transparency),
-                        ),
-                    ],
-                );
-            }
-            Aa::Fxaa => nodes.pass("fxaa"),
-            Aa::None => {}
+            Antialiasing::Fxaa => nodes.pass("fxaa"),
+            Antialiasing::TemporalOrFxaa | Antialiasing::TemporalOrNone => nodes.with(
+                "antialiasing",
+                [
+                    (
+                        "fallback",
+                        Value::from(if aa == Antialiasing::TemporalOrFxaa {
+                            "fxaa"
+                        } else {
+                            "none"
+                        }),
+                    ),
+                    (
+                        "transparency_reactivity",
+                        Value::from(model.reactive_transparency),
+                    ),
+                ],
+            ),
         }
         nodes.slot(Slot::Resolved);
         nodes.pass("post_process");
@@ -243,15 +228,15 @@ impl Preset {
         nodes.list
     }
 
-    /// The preset for `config` as a graph: On Frame Start, its nodes on one
-    /// execution chain, the Output, and the host inputs it reads.
-    pub fn asset(self, registry: &NodeRegistry, config: &RendererConfig) -> GraphAsset {
+    /// The preset as a graph: On Frame Start, its nodes on one execution
+    /// chain, the Output, and the host inputs it reads.
+    pub fn asset(self, registry: &NodeRegistry) -> GraphAsset {
         let mut asset = GraphAsset {
             name: self.name().into(),
             ..Default::default()
         };
         asset.nodes.push(node("start", core_nodes::ON_FRAME_START));
-        let chain = self.nodes(registry, config);
+        let chain = self.nodes(registry);
         let ids: Vec<String> = chain.iter().map(|node| node.id.clone()).collect();
         asset.nodes.extend(chain);
         asset.nodes.push(node("output", core_nodes::OUTPUT));
@@ -272,17 +257,8 @@ impl Preset {
 
     /// The preset as a pipeline over `registry`'s nodes.
     pub fn pipeline_with(self, registry: Arc<NodeRegistry>) -> GraphAssetPipeline {
-        let pipeline = GraphAssetPipeline::made(
-            Arc::new(move |registry, env| {
-                let config = env
-                    .require::<RendererConfig>()
-                    .expect("a renderer build supplies its config")
-                    .clone();
-                self.asset(registry, &config)
-            }),
-            registry,
-        );
-        pipeline.with_swap_policy(crate::default_swap_policy())
+        let asset = Arc::new(self.asset(&registry));
+        GraphAssetPipeline::new(asset, registry)
     }
 
     /// The preset as a pipeline over the default features' nodes.
@@ -377,9 +353,10 @@ pub fn forward(ctx: PassBuildContext<'_>) -> RenderGraph {
     Preset::Forward.build(ctx)
 }
 
-fn tsr_quality(config: &RendererConfig) -> &'static str {
+/// The TSR node's `quality` parameter for `quality`.
+pub(crate) fn tsr_quality_name(quality: helio::TsrQuality) -> &'static str {
     use helio::TsrQuality;
-    match config.tsr_quality.unwrap_or_default() {
+    match quality {
         TsrQuality::Performance => "performance",
         TsrQuality::Balanced => "balanced",
         TsrQuality::Quality => "quality",
@@ -501,7 +478,7 @@ mod tests {
     fn kinds(preset: Preset, features: &FeatureSet) -> Vec<String> {
         let registry = crate::graphs::registry_with(features);
         preset
-            .nodes(&registry, &crate::graphs::template_config())
+            .nodes(&registry)
             .into_iter()
             .map(|node| node.kind)
             .collect()

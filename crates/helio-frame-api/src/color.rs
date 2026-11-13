@@ -7,6 +7,16 @@
 //! build in execution order, so the chain is the order the preset placed
 //! them in. Names stay `&'static str` (graph resources are), and each pass
 //! still owns its output texture.
+//!
+//! **Alpha.** The chain's alpha is the scene's coverage and nothing else:
+//! 1 wherever anything is drawn, the background colour's alpha elsewhere
+//! (opaque unless a host clears to a transparent background on purpose). So
+//! the frame's output is opaque by default, and a host that composites it by
+//! alpha (the editor's viewport) shows exactly the frame. A pass on the chain
+//! forwards the alpha it read or writes 1; it never puts a mask or its own
+//! bookkeeping there (TSR keeps its transparency coverage in its history,
+//! not in its output). A pass that put a mask in alpha once made every frame
+//! transparent: the editor's viewport showed the UI behind it.
 
 use helio_feature_api::BuildEnv;
 

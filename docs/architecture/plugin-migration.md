@@ -2889,3 +2889,73 @@ As built, the default graph as data (2026-11-11, `helio-presets`):
   with the preset. A default-graphs plugin can ship them.
 - Not done: the editor's wired (Get/Set) form on disk, a debug overlay node, deleting the
   preset path as the engine default.
+
+As built, p23 (2026-11-11, branch `rewrite/p23-render-runtimes` in Helio and
+Pulsar-Native; Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 15):
+
+- **Helio registers no pipeline and has no default.** `helio-presets`'
+  `pipelines` module (`register_builtin_pipelines`, the `helio.deferred` /
+  `helio.fxaa` / `helio.forward_*` / `helio.deferred_graph` ids) and the golden
+  `.rendergraph` files are deleted; `RenderPipelineRegistry` lost its default
+  (`set_default`, `default_id`, `resolve`; `create(id)` makes nothing for an id
+  it does not hold) and `PipelineOrigin`. The engine's shipped pipelines are
+  Pulsar's `pulsar.default_pipelines` plugin's `.rendergraph` files, made with
+  `graphs::graph_asset` over the enabled plugins' nodes.
+- **Presets are config-free data.** `Preset::nodes(registry)`,
+  `Preset::asset(registry)` and `graphs::graph_asset(preset, registry)` take no
+  renderer config: where a preset follows the project's anti-aliasing it names
+  the **anti-aliasing node** (`helio.pass.antialiasing`, "Anti-Aliasing: Project
+  Setting", `features::ANTIALIASING`), which runs the TSR node's constructor at
+  the config's quality when the project enables TSR and its `fallback` (the FXAA
+  node, or none) otherwise; the frame setup's `reactive_mask` applies only when
+  the frame resolves temporally. One asset is the pipeline for every project
+  setting. `deferred_graph_asset_for` and `template_config(_tsr)` are deleted.
+- **The pin probe is not a pipeline.** It builds a set of nodes with no output,
+  so `helio-graph-asset` checks its structure only (`compile::Purpose::Probe`,
+  `validate_structure`); routing validation had failed it ("the final output is
+  never written"), leaving every node without pins.
+- **The status screen's text shader compiles on D3D12.** `debug_overlay.wgsl`'s
+  fragment ended in `discard;` with no return; DXC rejects a non-void HLSL
+  function whose end is reachable. The editor (wgpui on D3D12) panicked building
+  its first renderer and every viewport stayed black, while Vulkan (the Helio
+  examples, the headless tests) drew. Pulsar's
+  `plugins/installed/tests/default_pipelines.rs` builds and draws the editor's
+  renderer on every backend the machine has.
+- **`Renderer::graph_texture_bytes`** (`RenderGraph::texture_bytes`): the
+  graph's transient texture estimate, which the engine's Renderers view lists
+  per runtime.
+- The engine owns every renderer it runs (Pulsar `render_runtimes`); Helio
+  stays a library with no thread, task or plugin of its own.
+- **A graph asset records its pins.** `GraphAsset::pins` holds the probed pins
+  of the generated node kinds it uses (`GraphAsset::cache_pins`, written by
+  `graph_asset` and by the render graph editor's save); `validate`/`compile`
+  read the registry through `NodeRegistry::with_pin_fallback`, so a wired graph
+  validates and builds where nothing has probed (a game), and probed pins win
+  (a stale wire is an error). UE's graphs serialise node pins the same way.
+  `Validation::build_key` hashes what a graph builds (executing nodes in build
+  order, ids, parameters), so a host rebuilds a renderer only when that
+  changes, not for layout, comments, the pin record or order-keeping wires.
+- **The frame's output is opaque (the editor's black voxel viewports).** TSR's
+  opt-in transparency coverage path wrote the coverage mask into its output's
+  alpha (`tsr_main.wgsl`, `output_alpha = coverage`, forwarded by the sharpen
+  and the tone map), so every frame of a graph whose TSR kept coverage had
+  alpha ~0. The editor composites its viewport by alpha and showed the UI's
+  background while the runtime published frames; a game's opaque swapchain
+  and the parity tests (RGB only) did not see it. It reached the editor on
+  2026-11-06, when water started asking every graph for the reactive mask
+  (Plugin_Water `c3ba51e`) and the spine's TSR node started honouring that
+  request (Helio `1c1258b1`), and only in voxel scenes, because TSR's
+  "Automatic" setting resolves to TSR where the scene prefers it (the voxel
+  terrain's stochastic sun samples). TSR's output alpha is now 1 (coverage
+  stays in its history), `helio_frame_api::color` states the chain's alpha
+  contract (the scene's coverage only: no mask, no bookkeeping), and
+  `helio-pass-tsr`'s `the_output_is_opaque_with_transparency_coverage` and
+  Pulsar's `voxel_render_parity` (every editor and game frame opaque) cover it.
+- **Swap policy belongs to the features.** `default_swap_policy` (a list in
+  `helio-presets` naming the spine's, SSR's, planar reflections', FXAA's, the
+  perf overlay's and debug draw's passes) and
+  `GraphAssetPipeline::with_swap_policy` are deleted: each feature declares its
+  own pass types (`FeatureRegistrar::swappable`, `swap_group`), and every
+  `GraphAssetPipeline` reports the registry's policy, so a project's graph and
+  the shipped files hot-reload like the presets did (before, only a preset's
+  pipeline had a policy, and the shipped files rebuilt whole on a shader edit).

@@ -33,9 +33,9 @@ pub use renderer::{
     required_wgpu_features, required_wgpu_limits, usable_adapter_features, DebugBatch,
     DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, GraphRebuilder, IntoGraph,
     NamedPipeline, PassBuildContext, PassGraphBuilderFn, PerfOverlayMode, PipelineFactory,
-    PipelineFailure, PipelineInfo, PipelineOrigin, PipelineStatus, RenderMode,
-    RenderPipelineRegistry, Renderer, RendererBuilder, RendererConfig, SceneDbHandle, StereoMirror,
-    TsrSetting, WorldPoint, WorldVertex, XrMirrorStats, UNNAMED_PIPELINE,
+    PipelineFailure, PipelineInfo, PipelineStatus, RenderMode, RenderPipelineRegistry, Renderer,
+    RendererBuilder, RendererConfig, SceneDbHandle, StereoMirror, TsrSetting, WorldPoint,
+    WorldVertex, XrMirrorStats, UNNAMED_PIPELINE,
 };
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use renderer::{ReloadMode, ShaderReloadStatus};

@@ -25,7 +25,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use helio_core::{DeclaredKind, PassDeclaration};
 
 use crate::asset::GraphAsset;
-use crate::compile::build_graph;
+use crate::compile::{build_graph, Purpose};
 use crate::validate::Diagnostic;
 use helio_feature_api::{BuildEnv, NodePins, NodeRegistry};
 use helio_feature_api::{PinDesc, PinType};
@@ -81,10 +81,16 @@ pub fn probe(
     env: &mut BuildEnv<'_>,
 ) -> Result<Probe, Vec<Diagnostic>> {
     let mut observed: Vec<(String, std::ops::Range<usize>, HashSet<&'static str>)> = Vec::new();
-    let graph = build_graph(asset, registry, env, false, &mut |node, graph, range| {
-        let externals = graph.external_input_names().into_iter().collect();
-        observed.push((node.kind.clone(), range, externals));
-    })?;
+    let graph = build_graph(
+        asset,
+        registry,
+        env,
+        Purpose::Probe,
+        &mut |node, graph, range| {
+            let externals = graph.external_input_names().into_iter().collect();
+            observed.push((node.kind.clone(), range, externals));
+        },
+    )?;
 
     let declarations: Vec<PassDeclaration> = (0..graph.pass_count())
         .filter_map(|index| graph.pass_declaration(index))
@@ -130,8 +136,14 @@ pub fn probe(
             .flat_map(|declaration| declaration.writes.iter().map(|write| write.name))
             .collect();
 
-        // A node that adds no pass only supplies data, and does not execute.
-        let executes = !range.is_empty();
+        // A data node (host inputs, resources) does not execute. A pass node
+        // always does, even one that added no pass here because the probe's
+        // config turns it off (SSR, GI's mesh rays): it keeps its flow pins, or
+        // a graph that chains it would stop validating once pins are probed.
+        let executes = !range.is_empty()
+            || registry
+                .get(&kind)
+                .is_some_and(|descriptor| !descriptor.data_only);
         let mut inputs = if executes {
             vec![PinDesc::flow("in")]
         } else {

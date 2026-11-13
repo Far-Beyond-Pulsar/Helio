@@ -1,7 +1,7 @@
 //! Helio's default pipelines as node graphs.
 //!
 //! The shipped pipelines are graphs of the pass nodes in [`crate::features`]
-//! ([`crate::presets`] makes them for a renderer config). This module has the
+//! ([`crate::presets`]). This module has the
 //! registry that holds those nodes and the editor's laid-out template of the
 //! default deferred pipeline.
 //!
@@ -26,27 +26,6 @@ use helio_graph_asset::{
 use helio_frame_api::HOST_INPUTS;
 
 use crate::features;
-
-/// The config the editor's template and the pin probe use: the renderer's
-/// defaults (FXAA on, no screen-space or planar reflections).
-pub fn template_config() -> helio::RendererConfig {
-    helio::RendererConfig::new(1920, 1080, wgpu::TextureFormat::Rgba8UnormSrgb)
-}
-
-/// `config` with temporal super-resolution at `quality`: the template whose
-/// graph ends its scene-linear chain with the TSR node instead of FXAA.
-pub fn template_config_tsr(quality: helio::TsrQuality) -> helio::RendererConfig {
-    template_config().with_tsr_quality(quality)
-}
-
-/// The nodes of `preset` for `config` in execution order, with their parameters.
-fn preset_nodes(
-    registry: &NodeRegistry,
-    preset: crate::presets::Preset,
-    config: &helio::RendererConfig,
-) -> Vec<NodeInstance> {
-    preset.nodes(registry, config)
-}
 
 /// Core nodes plus everything `features` register.
 pub fn registry_for(features: &helio_feature_api::FeatureSet) -> NodeRegistry {
@@ -125,7 +104,7 @@ fn probe_asset(registry: &NodeRegistry) -> GraphAsset {
     add_host_inputs(&mut asset, registry);
     let mut placed: Vec<String> = Vec::new();
     let preset = crate::presets::Preset::Deferred;
-    for node in preset_nodes(registry, preset, &template_config()) {
+    for node in preset.nodes(registry) {
         placed.push(node.kind.clone());
         asset.nodes.push(node);
     }
@@ -195,44 +174,31 @@ pub fn scenedb_kind(key: &str) -> String {
 /// the chain (and the host nodes, which declare what the renderer supplies), which
 /// builds the same pipeline.
 pub fn deferred_graph_asset(registry: &NodeRegistry) -> GraphAsset {
-    graph_asset(
-        crate::presets::Preset::Deferred,
-        registry,
-        &template_config(),
-    )
+    graph_asset(crate::presets::Preset::Deferred, registry)
 }
 
-/// [`deferred_graph_asset`] for `config`: the same graph, with the TSR node
-/// (at `config`'s quality) where `config` asks for temporal resolve and FXAA
-/// otherwise, exactly as the preset builds it.
-pub fn deferred_graph_asset_for(
-    registry: &NodeRegistry,
-    config: &helio::RendererConfig,
-) -> GraphAsset {
-    graph_asset(crate::presets::Preset::Deferred, registry, config)
-}
-
-/// `preset` for `config` as a laid-out graph (see [`deferred_graph_asset`]).
+/// `preset` as a laid-out graph (see [`deferred_graph_asset`]). The same for
+/// every renderer config: the anti-aliasing node follows the project's setting
+/// when the graph builds.
 ///
 /// Every node comes from the preset's own node list, so the nodes that
 /// features placed at the frame's slots and draw phases (any plugin's, by
 /// `NodeDescriptor::at`/`in_slot`/`drawer`) are in the asset in their place, and
 /// [`auto_layout`] and `sectionize` put them in their lane by their category.
-pub fn graph_asset(
-    preset: crate::presets::Preset,
-    registry: &NodeRegistry,
-    config: &helio::RendererConfig,
-) -> GraphAsset {
+pub fn graph_asset(preset: crate::presets::Preset, registry: &NodeRegistry) -> GraphAsset {
     let wired = registry.has_generated_pins();
     let mut asset = GraphAsset {
         name: preset.name().into(),
-        description: "Helio's default deferred pipeline, one node per pass.".into(),
+        description: format!(
+            "{}: the frame's slots and draw phases with every installed node, one node per pass.",
+            preset.name()
+        ),
         ..Default::default()
     };
 
     // The preset's own instances, parameters included (TSR's quality, the frame
     // setup's lighting model).
-    let instances = preset_nodes(registry, preset, config);
+    let instances = preset.nodes(registry);
     let nodes: Vec<(String, String)> = instances
         .iter()
         .map(|node| (node.id.clone(), node.kind.clone()))
@@ -324,6 +290,9 @@ pub fn graph_asset(
     // section: a collapsed node holding its passes and the buffers around them.
     auto_layout(&mut asset, registry);
     helio_graph_asset::sections::sectionize(&mut asset, registry);
+    // The pins the wires were made from, so the file validates where nothing
+    // has probed (a game reading it).
+    asset.cache_pins(registry);
     asset
 }
 
@@ -337,9 +306,8 @@ mod tests {
     #[test]
     fn every_default_pass_is_registered() {
         let registry = base_registry();
-        let config = template_config();
         for preset in crate::presets::Preset::ALL {
-            for node in preset.nodes(&registry, &config) {
+            for node in preset.nodes(&registry) {
                 assert!(
                     registry.get(&node.kind).is_some(),
                     "{}: no node for `{}`",
@@ -441,11 +409,7 @@ mod tests {
     }
 
     /// The preset's chain: On Frame Start, the preset's nodes, the Output.
-    fn preset_order(
-        preset: crate::presets::Preset,
-        registry: &NodeRegistry,
-        config: &helio::RendererConfig,
-    ) -> Built {
+    fn preset_order(preset: crate::presets::Preset, registry: &NodeRegistry) -> Built {
         let mut expected: Built = vec![(
             "start".into(),
             core_nodes::ON_FRAME_START.into(),
@@ -453,7 +417,7 @@ mod tests {
         )];
         expected.extend(
             preset
-                .nodes(registry, config)
+                .nodes(registry)
                 .into_iter()
                 .map(|node| (node.id, node.kind, node.params)),
         );
@@ -465,42 +429,46 @@ mod tests {
         expected
     }
 
-    /// The graph is the preset: for each shipped preset and anti-aliasing the
-    /// laid-out, sectioned asset builds its nodes in the preset's order with
-    /// the preset's parameters. (The `add_pass` builders this replaces are
+    /// The graph is the preset: for each shipped preset the laid-out,
+    /// sectioned asset builds its nodes in the preset's order with the
+    /// preset's parameters. (The `add_pass` builders this replaces are
     /// gone; the preset's node list is the reference the graph is held to.)
     #[test]
     fn the_graph_builds_the_presets_nodes_in_the_presets_order() {
         use crate::presets::Preset;
         let registry = base_registry();
-        let tsr = template_config_tsr(helio::TsrQuality::Quality);
         for preset in Preset::ALL {
-            for config in [template_config(), tsr.clone()] {
-                let asset = graph_asset(preset, &registry, &config);
-                assert_eq!(
-                    built_order(&asset, &registry),
-                    preset_order(preset, &registry, &config),
-                    "{}",
-                    preset.name()
-                );
-            }
+            let asset = graph_asset(preset, &registry);
+            assert_eq!(
+                built_order(&asset, &registry),
+                preset_order(preset, &registry),
+                "{}",
+                preset.name()
+            );
         }
     }
 
+    /// The deferred graph follows the project's anti-aliasing through one
+    /// node, so the same asset is TSR under a TSR config and FXAA without; a
+    /// preset that never resolves temporally names FXAA itself.
     #[test]
-    fn the_tsr_graph_has_the_tsr_node_at_the_configured_quality_and_no_fxaa() {
+    fn the_deferred_graph_names_the_antialiasing_node_and_no_tsr_or_fxaa() {
+        use crate::presets::Preset;
         let registry = base_registry();
         let has = |order: &Built, name: &str| order.iter().any(|(_, k, _)| *k == kind(name));
-        let fxaa = built_order(&deferred_graph_asset(&registry), &registry);
-        assert!(has(&fxaa, "fxaa") && !has(&fxaa, "tsr"));
-
-        let config = template_config_tsr(helio::TsrQuality::Performance);
-        let tsr = built_order(&deferred_graph_asset_for(&registry, &config), &registry);
-        assert!(has(&tsr, "tsr") && !has(&tsr, "fxaa"));
-        let at = |name: &str| tsr.iter().position(|(_, k, _)| *k == kind(name)).unwrap();
-        assert_eq!(tsr[at("tsr")].2["quality"], "performance");
-        // TSR takes FXAA's place: before the resolved colour chain.
-        assert!(at("tsr") < at("post_process"));
+        let deferred = built_order(&deferred_graph_asset(&registry), &registry);
+        assert!(has(&deferred, "antialiasing"));
+        assert!(!has(&deferred, "tsr") && !has(&deferred, "fxaa"));
+        let at = |name: &str| {
+            deferred
+                .iter()
+                .position(|(_, k, _)| *k == kind(name))
+                .unwrap()
+        };
+        assert_eq!(deferred[at("antialiasing")].2["fallback"], "fxaa");
+        assert!(at("antialiasing") < at("post_process"));
+        let fxaa = built_order(&graph_asset(Preset::DeferredFxaa, &registry), &registry);
+        assert!(has(&fxaa, "fxaa") && !has(&fxaa, "antialiasing"));
     }
 
     /// The frame setup leads the chain and carries the lighting model the
@@ -511,6 +479,7 @@ mod tests {
         let order = built_order(&deferred_graph_asset(&registry), &registry);
         assert_eq!(order[1].1, features::FRAME_SETUP, "{order:?}");
         assert_eq!(order[1].2["model"], "deferred");
+        // The unlit stand-in leaves no transparency to TSR.
         assert_eq!(order[1].2["reactive_mask"], false);
     }
 
@@ -555,60 +524,6 @@ mod tests {
             .any(|s| s.nodes.iter().any(|n| n.kind == kind("slot_test"))));
     }
 
-    fn golden(name: &str) -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("assets")
-            .join(name)
-    }
-
-    /// The default graphs as the `.rendergraph` files a default-graphs plugin
-    /// ships: the sectioned, laid-out kernel graph for FXAA and for TSR.
-    /// Generated from code only to bootstrap them
-    /// (`regenerate_the_golden_graphs`); a test fails when they drift apart.
-    fn golden_graphs() -> [(&'static str, GraphAsset); 2] {
-        let registry = base_registry();
-        let tsr = template_config_tsr(helio::TsrQuality::Quality);
-        [
-            ("deferred.rendergraph", deferred_graph_asset(&registry)),
-            (
-                "deferred_tsr.rendergraph",
-                deferred_graph_asset_for(&registry, &tsr),
-            ),
-        ]
-    }
-
-    const REGENERATE: &str =
-        "cargo test -p helio-presets regenerate_the_golden_graphs -- --ignored";
-
-    #[test]
-    fn the_golden_default_graphs_match_the_code() {
-        let registry = base_registry();
-        for (file, expected) in golden_graphs() {
-            let text = std::fs::read_to_string(golden(file))
-                .unwrap_or_else(|e| panic!("{file}: {e}; run `{REGENERATE}`"));
-            let on_disk = GraphAsset::from_json(&text).expect("the golden graph parses");
-            assert_eq!(
-                on_disk, expected,
-                "{file} differs from the code; run `{REGENERATE}`"
-            );
-            let validation = validate(&on_disk, &registry);
-            assert!(
-                !validation.has_errors(),
-                "{file}: {:?}",
-                validation.diagnostics
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "writes assets/*.rendergraph; run to bless the default graphs"]
-    fn regenerate_the_golden_graphs() {
-        std::fs::create_dir_all(golden("")).unwrap();
-        for (file, asset) in golden_graphs() {
-            std::fs::write(golden(file), asset.to_json() + "\n").unwrap();
-        }
-    }
-
     fn pins(inputs: Vec<PinDesc>, outputs: Vec<PinDesc>) -> NodePins {
         let mut all_inputs = vec![PinDesc::flow("in")];
         all_inputs.extend(inputs);
@@ -620,8 +535,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn probed_pins_become_buffer_nodes_beside_each_pass() {
+    /// The base registry with probed pins for Hi-Z and the unlit pass.
+    fn probed_registry() -> NodeRegistry {
         use helio_graph_asset::output_pin;
         let mut registry = base_registry();
         let mut probe = Probe::default();
@@ -646,7 +561,12 @@ mod tests {
         );
         probe.scene_buffers = vec!["rows".into()];
         apply_probe(&mut registry, &probe);
+        registry
+    }
 
+    #[test]
+    fn probed_pins_become_buffer_nodes_beside_each_pass() {
+        let registry = probed_registry();
         let asset = deferred_graph_asset(&registry);
         // The wiring inside the sections, which is where the buffers are.
         let all: Vec<&Connection> = asset
@@ -712,5 +632,81 @@ mod tests {
         };
         assert!(x("get:scenedb.rows@unlit") < x("unlit"));
         assert!(x("set:depth@unlit") > x("unlit"));
+    }
+
+    #[test]
+    fn a_wired_graph_carries_its_pins_and_builds_what_the_chain_builds() {
+        let probed = probed_registry();
+        let wired = deferred_graph_asset(&probed);
+        // The record holds the probed kinds the graph uses, nothing else.
+        assert_eq!(
+            wired.pins.keys().cloned().collect::<Vec<_>>(),
+            vec![kind("hiz"), kind("unlit")]
+        );
+        assert_eq!(
+            wired.pins[&kind("hiz")],
+            probed.get(&kind("hiz")).unwrap().pins(&Default::default())
+        );
+
+        // Where nothing has probed (a game), the record makes the wires valid...
+        let unprobed = base_registry();
+        let validation = validate(&wired, &unprobed);
+        assert!(!validation.has_errors(), "{:?}", validation.diagnostics);
+        // ...and without it they are not.
+        let mut bare = wired.clone();
+        bare.pins.clear();
+        assert!(validate(&bare, &unprobed).has_errors());
+        // The view leaves the registry itself unprobed.
+        assert!(!unprobed.has_pins(&kind("hiz")));
+
+        // Probed pins win over the record: a wire the passes no longer declare
+        // is reported.
+        let mut stale = wired.clone();
+        stale
+            .pins
+            .get_mut(&kind("unlit"))
+            .unwrap()
+            .outputs
+            .push(helio_graph_asset::output_pin(PinType::TEXTURE, "gone"));
+        let gone = |asset: &mut GraphAsset| {
+            let section = asset
+                .sections
+                .iter_mut()
+                .find(|s| s.nodes.iter().any(|n| n.id == "unlit"))
+                .unwrap();
+            section.connections.push(Connection {
+                from: PinRef::new("unlit", "out_gone"),
+                to: PinRef::new("unlit", "hiz"),
+            });
+        };
+        gone(&mut stale);
+        assert!(validate(&stale, &probed).has_errors());
+
+        // The chain form and the wired form build the same passes in the same
+        // order with the same parameters: one build key.
+        let chain = deferred_graph_asset(&unprobed);
+        assert!(chain.pins.is_empty());
+        let chain_key = validate(&chain, &unprobed).build_key(&unprobed);
+        let wired_key = validate(&wired, &probed).build_key(&probed);
+        assert!(chain_key.is_some());
+        assert_eq!(chain_key, wired_key);
+        // Moving a node changes nothing it builds; switching one off does.
+        let mut moved = wired.clone();
+        moved.nodes[0].position[0] += 100.0;
+        assert_eq!(validate(&moved, &probed).build_key(&probed), wired_key);
+        let mut off = wired.clone();
+        let hiz = off
+            .sections
+            .iter_mut()
+            .flat_map(|s| s.nodes.iter_mut())
+            .find(|n| n.kind == kind("hiz"))
+            .unwrap();
+        hiz.params
+            .insert("enabled".into(), serde_json::Value::Bool(false));
+        assert_ne!(validate(&off, &probed).build_key(&probed), wired_key);
+
+        // The record survives the file.
+        let reread = GraphAsset::from_json(&wired.to_json()).unwrap();
+        assert_eq!(reread.pins, wired.pins);
     }
 }

@@ -79,6 +79,34 @@ impl Validation {
     pub fn has_errors(&self) -> bool {
         self.errors().next().is_some()
     }
+
+    /// What the graph builds, as a hash: the nodes that execute, in build
+    /// order, with their ids and parameters. Layout, comments, sections, the
+    /// pin record and data-only source nodes are not in it, nor are wires
+    /// that leave the order as it is, so two files with one key build the
+    /// same pipeline (a host rebuilds a renderer only when the key changes).
+    /// `None` when the graph does not validate.
+    pub fn build_key(&self, registry: &NodeRegistry) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let plan = self.plan.as_ref()?;
+        let flat = self.flat.as_ref()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for &index in &plan.order {
+            let node = &flat.nodes[index];
+            let Some(descriptor) = registry.get(&node.kind) else {
+                continue;
+            };
+            if descriptor.data_only {
+                continue;
+            }
+            node.id.hash(&mut hasher);
+            node.kind.hash(&mut hasher);
+            serde_json::to_string(&descriptor.effective_params(&node.params))
+                .unwrap_or_default()
+                .hash(&mut hasher);
+        }
+        Some(hasher.finish())
+    }
 }
 
 /// Whether a node is bypassed.
@@ -86,14 +114,35 @@ pub fn is_disabled(node: &NodeInstance) -> bool {
     matches!(node.params.get("enabled"), Some(Value::Bool(false)))
 }
 
-/// Checks `asset`: first its sections are expanded and its buffer nodes flattened away, then the resulting graph
-/// is checked and ordered.
+/// Checks `asset` as a pipeline: first its sections are expanded and its buffer
+/// nodes flattened away, then the resulting graph is checked and ordered, and
+/// where its passes' results go is checked against the output (routing).
 pub fn validate(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
+    validate_with(asset, registry, true)
+}
+
+/// [`validate`] without the routing check: the graph's structure only (node
+/// kinds, wires, order). For a graph that is a set of nodes rather than a
+/// pipeline, such as the pin probe's, which has no output.
+pub(crate) fn validate_structure(asset: &GraphAsset, registry: &NodeRegistry) -> Validation {
+    validate_with(asset, registry, false)
+}
+
+fn validate_with(asset: &GraphAsset, registry: &NodeRegistry, routing: bool) -> Validation {
+    // The asset's record of its generated nodes' pins, for kinds no probe has
+    // given pins.
+    let with_cached_pins;
+    let registry = if asset.pins.is_empty() {
+        registry
+    } else {
+        with_cached_pins = registry.with_pin_fallback(&asset.pins);
+        &with_cached_pins
+    };
     let expanded = crate::sections::expand(asset);
     let flattened = crate::buffers::flatten(&expanded.asset, registry);
     let mut validation = validate_flat(&flattened.asset, registry);
     // Where the frame's result goes, once the graph is sound enough to order.
-    if let Some(plan) = &validation.plan {
+    if let Some(plan) = validation.plan.as_ref().filter(|_| routing) {
         validation.diagnostics.extend(crate::routing::diagnostics(
             crate::routing::check_asset_routing(&flattened.asset, plan, registry),
         ));
@@ -557,7 +606,10 @@ mod tests {
             messages,
             ["missing node `plugin.pass.gone` (plugin pulsar.x disabled)"]
         );
-        assert!(result.plan.is_none(), "a missing node is an error, not a panic");
+        assert!(
+            result.plan.is_none(),
+            "a missing node is an error, not a panic"
+        );
     }
 
     #[test]

@@ -150,7 +150,12 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     let sm = render_small(ux, uy);
     if sm.a > 0.0 { return sm; }
 
+    // Nothing here: drop the fragment. The function still ends in a return
+    // because `discard` demotes the invocation instead of leaving it, and HLSL
+    // (DXC, the D3D12 backend the editor runs on) rejects a non-void function
+    // whose end is reachable.
     discard;
+    return vec4f(0.0);
 }
 
 struct VertexOutput {

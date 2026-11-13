@@ -26,9 +26,7 @@ pub use debug::{
     DebugBatch, DebugCameraUniform, DebugDrawPass, DebugDrawState, DebugVertex, WorldPoint,
     WorldVertex,
 };
-pub use pipeline::{
-    IntoGraph, PipelineFactory, PipelineInfo, PipelineOrigin, RenderPipelineRegistry,
-};
+pub use pipeline::{IntoGraph, PipelineFactory, PipelineInfo, RenderPipelineRegistry};
 pub use pipeline_status::{NamedPipeline, PipelineFailure, PipelineStatus, UNNAMED_PIPELINE};
 pub use renderer_impl::{GraphRebuilder, Renderer};
 pub use settings::TsrSetting;
