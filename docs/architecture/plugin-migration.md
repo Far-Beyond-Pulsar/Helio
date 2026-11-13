@@ -2935,6 +2935,22 @@ Pulsar-Native; Pulsar's `.agents/PLUGIN_API_REFACTOR_PLAN.md` section 15):
   `Validation::build_key` hashes what a graph builds (executing nodes in build
   order, ids, parameters), so a host rebuilds a renderer only when that
   changes, not for layout, comments, the pin record or order-keeping wires.
+- **The frame's output is opaque (the editor's black voxel viewports).** TSR's
+  opt-in transparency coverage path wrote the coverage mask into its output's
+  alpha (`tsr_main.wgsl`, `output_alpha = coverage`, forwarded by the sharpen
+  and the tone map), so every frame of a graph whose TSR kept coverage had
+  alpha ~0. The editor composites its viewport by alpha and showed the UI's
+  background while the runtime published frames; a game's opaque swapchain
+  and the parity tests (RGB only) did not see it. It reached the editor on
+  2026-11-06, when water started asking every graph for the reactive mask
+  (Plugin_Water `c3ba51e`) and the spine's TSR node started honouring that
+  request (Helio `1c1258b1`), and only in voxel scenes, because TSR's
+  "Automatic" setting resolves to TSR where the scene prefers it (the voxel
+  terrain's stochastic sun samples). TSR's output alpha is now 1 (coverage
+  stays in its history), `helio_frame_api::color` states the chain's alpha
+  contract (the scene's coverage only: no mask, no bookkeeping), and
+  `helio-pass-tsr`'s `the_output_is_opaque_with_transparency_coverage` and
+  Pulsar's `voxel_render_parity` (every editor and game frame opaque) cover it.
 - **Swap policy belongs to the features.** `default_swap_policy` (a list in
   `helio-presets` naming the spine's, SSR's, planar reflections', FXAA's, the
   perf overlay's and debug draw's passes) and

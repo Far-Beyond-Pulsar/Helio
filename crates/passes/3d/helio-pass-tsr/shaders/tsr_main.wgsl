@@ -895,5 +895,9 @@ fn fs_sharpen(in: VertexOutput) -> @location(0) vec4<f32> {
     // infinitely bright, so also keep it inside the cross's own range: no
     // overshoot can turn a bright edge into a firefly.
     let limited = clamp(sharpened, min(lo, e), max(hi, e));
-    return vec4<f32>(reverse_tonemap(limited), centre.a);
+    // Opaque. The resolve's alpha is TSR's own bookkeeping (transparency
+    // coverage in the opt-in path, kept in history for the next frame), not
+    // the frame's: passed on, an opaque scene came out all transparent, and a
+    // UI that composites the frame by its alpha showed what was behind it.
+    return vec4<f32>(reverse_tonemap(limited), 1.0);
 }
