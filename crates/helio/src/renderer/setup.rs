@@ -244,7 +244,6 @@ impl Renderer {
             pending_pipeline: None,
             status_hint: super::status_screen::DEFAULT_HINT.to_owned(),
             scene_payloads: Default::default(),
-            persistent_passes: Vec::new(),
             #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
             shader_reload: Default::default(),
             scene_db,

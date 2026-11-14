@@ -6,7 +6,9 @@ struct GBufferOutput {
     @location(1) normal:      vec4<f32>,
     @location(2) orm:         vec4<f32>,
     @location(3) emissive:    vec4<f32>,
-    @location(4) lightmap_uv: vec2<f32>,
+    // The surface channel: a tag (x < 0) or the requested payload
+    // (`helio_frame_api::gbuffer::SURFACE`).
+    @location(4) surface:     vec2<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
     // Motion vectors: motion.xy, view-depth residual z, flags w
@@ -21,7 +23,9 @@ struct GBufferDepthOutput {
     @location(1) normal:      vec4<f32>,
     @location(2) orm:         vec4<f32>,
     @location(3) emissive:    vec4<f32>,
-    @location(4) lightmap_uv: vec2<f32>,
+    // The surface channel: a tag (x < 0) or the requested payload
+    // (`helio_frame_api::gbuffer::SURFACE`).
+    @location(4) surface:     vec2<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
     @location(7) velocity:    vec4<f32>,

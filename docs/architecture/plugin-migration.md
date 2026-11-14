@@ -1399,7 +1399,7 @@ names were compared with every owner's key consts. The check that keeps it
 |---|---|---|
 | Camera (`GpuCameraUniforms`) | frame: prelude `Camera` | 24 private structs (`Camera`, `CameraUniforms`, `CameraUniform`, `VgCamera`; most named the inverse `inv_view_proj`, light cull's forward `direction_far`): decals, billboards, light cull, shadow matrices, forward/G-buffer/transparent programs, indirect dispatch, VG raster/resolve/debug, four portal shaders, sky LUTs, corona x2, post volume blend, the engine's authored LOD, Helio's tone map, SDF x2, simple cube; the unused `planar_reflection.wgsl`. VG raster/shade, voxel draw and the authored LOD now build through the prelude (`helio_core::shader::module`). Sprites' 2D view is its own (`SpriteCamera`). |
 | G-buffer targets (order, formats) | frame: `gbuffer::{TARGETS, TARGET_FORMATS, color_targets, GROUP_MEMBERS, *_FORMAT}` | voxel's `GBUFFER_FORMATS`, foliage's `GBUFFER_TARGET_FORMATS` (its "duplicated rather than imported" note), the meshes' and portals' 8-entry colour-target lists, the meshes' group/target declarations, VG shade's storage formats |
-| G-buffer surface tags (lightmap-UV channel) | frame: prelude `GBUFFER_TAG_UNLIGHTMAPPED/OWN_OCCLUSION/TRACED`, `gbuffer_tag_view_remap`, `gbuffer_has_lightmap`, `gbuffer_tagged`, `gbuffer_own_occlusion`, `view_remap_of` | raw `(-1,-2)`/`(-1,-1.5)`/`(-1,-1)`/`(-1,-3-c)` in voxel, foliage, portals, meshes, VG shade; the deferred lighting's `is_stored_voxel`/`is_foliage` (the lighting named two kinds) and the dead VG sentinel `is_vg` (nothing wrote `(-2,-2)`); frame-api's `VIEW_REMAP_SNIPPET` (the chain tag is a G-buffer tag) |
+| G-buffer surface tags (the surface channel, `gbuffer::SURFACE` since p24) | frame: prelude `GBUFFER_TAG_PLAIN/OWN_OCCLUSION/TRACED`, `gbuffer_tag_view_remap`, `gbuffer_has_payload`, `gbuffer_tagged`, `gbuffer_own_occlusion`, `view_remap_of` | raw `(-1,-2)`/`(-1,-1.5)`/`(-1,-1)`/`(-1,-3-c)` in voxel, foliage, portals, meshes, VG shade; the deferred lighting's `is_stored_voxel`/`is_foliage` (the lighting named two kinds) and the dead VG sentinel `is_vg` (nothing wrote `(-2,-2)`); frame-api's `VIEW_REMAP_SNIPPET` (the chain tag is a G-buffer tag) |
 | Motion vectors | frame: `gbuffer::VELOCITY` (the encoding documented there) | TSR's `MOTION_VECTORS` |
 | Depth names | frame: `resource_keys::DEPTH` (what the executor resolves), `depth::{FULL_RES_DEPTH, HIZ, HIZ_NEAREST, HIZ_SAMPLER}` | literals in the spine, Hi-Z, SSR, planar, SDF, simple cube, decals, foliage, occlusion culling, billboards, corona, portal overlay, transparency, the facade |
 | Scene colour, G-buffer, render environment, ray transmission, environment probes/cubes, sun visibility, ... (every frame key) | frame consts | about 300 literal uses across Helio's own crates, the plugins and the engine |
@@ -3122,3 +3122,82 @@ Helio#393's frame owners.
 - **Lighting models are registered (Helio#393 item 3):** verified complete
   (`RegisterLightingModel`; the lights plugin registers `deferred`, `forward`
   and the light field, the spine its unlit stand-in, presets choose by id).
+- **Baked lighting is its own plugin, `pulsar.bake` (Plugin_Bake, Helio#393
+  item 1).** `crates/helio-bake` (now `plugins/vendor/bake/feature`, still
+  `helio-bake`), `crates/helio-bake-types` (replaced by the plugin's api crate
+  `helio-bake-api`) and `vendor/nebula` (now `plugins/vendor/bake/vendor/nebula`,
+  excluded from Pulsar's workspace like graphy) left Helio; Helio has no bake
+  code, no `install_persistent_pass` (its only user) and no lightmap anywhere.
+  Lightmaps had been inert since V4: nothing published atlas regions or set a
+  draw's lightmap index, so every surface took the "no lightmap" path. They
+  now render, through the frame's contracts:
+  - **The G-buffer's lightmap-UV target is the frame's surface channel**
+    (`gbuffer::SURFACE`, Rg16Float, location 4). The p23 plan was a
+    `GBufferContributor` for the bake's own target, but the G-buffer already
+    has WebGPU's maximum of eight colour targets, and the channel's `x < 0`
+    half was already the frame's tags (plain, own occlusion, traced, view
+    remap). So the frame keeps the channel and its tags, and its `x >= 0`
+    half is a payload one feature per graph requests
+    (`gbuffer::request_payload(env, SurfacePayload)` in its prepare hook; a
+    second, different request panics the build: the channel has one owner). Drawers that can write it ask
+    `gbuffer::payload(env)` when they build. Unreal's GBuffer custom data is
+    the same idea: shading models share channels under a declared owner
+    instead of adding targets. The openers clear the channel to the plain tag
+    (`gbuffer::SURFACE_CLEAR`); a zero clear read as payload (0, 0) on the
+    background. The prelude's tag names lost their lightmap words
+    (`GBUFFER_TAG_PLAIN`, `gbuffer_has_payload`).
+  - **Regions are per object row.** `DrawRow::lightmap_index` became
+    `object_row` (the `static_objects` row, the entity's index), which the
+    object batch now fills; the meshes' G-buffer drawer reads the bake's
+    `LIGHTMAP_REGIONS` buffer at that row (`//!use lightmap_regions`:
+    `LightmapRegion`, `lightmap_atlas_uv`) when the graph requested
+    `helio_bake_api::LIGHTMAP_UV` (a pipeline override; no cost otherwise).
+    The bake keys each baked mesh by its object's row (`bake_mesh_id`), not
+    the mesh asset's slot, so instances of one mesh get their own regions.
+    The lightmap UV is the mesh's UV1 channel only: a mesh without one gets no
+    region (it still occludes and reflects light in the bake), and a scene
+    with none bakes no lightmap. The old fallback to tiled UV0 is deleted:
+    UV0 is not a lightmap layout, and Nebula also laid every mesh's UVs over
+    the whole atlas and assigned regions only after baking, so texels were
+    shared between meshes. Nebula now assigns regions first and bakes each
+    mesh's UV1 inside its own. No content writes UV1 today, so the cathedral
+    examples bake PVS only and render as before; `helio-bake-host`'s
+    `lightmap_frame` GPU test bakes a room with UV1 and checks the payload and
+    full indirect weight on its pixels; `helio-bake`'s own GPU tests check that
+    each UV1 mesh bakes into its own region (a lit floor holds the bounce of a
+    ceiling without UV1, a dark floor's region stays black) and that a scene
+    without UV1 bakes no lightmap. Lightmap quality (UV generation at
+    import, area-weighted packing, sampling and denoising, a BVH) is
+    follow-up work.
+  - **Lightmaps hold indirect light only, and reach the lighting as indirect
+    diffuse.** The deferred lighting's lightmap sampling (replacing ambient
+    and direct light) and the light field's override are deleted: direct
+    light is dynamic for every surface. The bake's irradiance node
+    (`Slot::LightingInputs`, order 5) writes the lightmap's irradiance over pi
+    into `lighting::INDIRECT_DIFFUSE` at every pixel carrying the payload,
+    refining the GI probes' buffer in place (or publishing its own with
+    weight 0 elsewhere when GI is absent). This is Unreal's stationary-light
+    model (Lightmass bakes indirect, lights stay movable for direct and
+    shadows): a moved light stays right, and nothing is counted twice. The
+    CPU direct-light baker (a copy of the deferred lighting's attenuation) is
+    deleted; Nebula's lightmap integrator gained `LightmapConfig::direct`
+    (`helio-bake` always bakes with it off), the hit surface's normal, and a
+    bounce estimator that converges to the irradiance (it used the ray
+    direction as the hit normal and a wrong per-bounce weight).
+  - **The bake is a feature setting.** A host bakes (`run_bake_blocking`)
+    and installs the result with `Renderer::set_feature(BakedLighting::new(..))`,
+    which rebuilds the graph; the feature's preparer requests the payload,
+    its inject node (`Slot::Prepare`) publishes the regions, the reflection
+    probes (the frame's environment cubes) and the PVS, and both nodes build
+    nothing without a bake. `helio-bake-host` does both for standalone hosts
+    (`bake`, `bake_scene_from_world`, moved from the meshes' host).
+  - **The cache is keyed by its inputs** (an xxHash3 of the scene and each
+    pass's settings in every entry's header): editing the scene re-bakes.
+    It lives in a `BakeStore` the host supplies (bytes by name): the bake
+    does no file IO, and `helio-bake-host`'s `disk_store` goes through
+    Pulsar's file system (`engine_fs::virtual_fs`), so no `std::fs` came
+    into Pulsar with the move.
+    The AO bake and the irradiance-SH buffer are deleted (no reader since
+    V4).
+  Eighteen `kind-names.txt` lines are deleted; the list holds none for baked
+  lighting.

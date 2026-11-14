@@ -2,18 +2,16 @@
 name = "helio-components"
 version = "0.1.0"
 edition = "2021"
-description = "Row-component helpers for Helio's standalone hosts and the plugins' host rows (same_layout!, WorldRows) and the lightmap bake. Engines register their own components; the renderer never depends on this crate."
+description = "Row-component helpers for Helio's standalone hosts and the plugins' host rows (same_layout!, WorldRows). Engines register their own components; the renderer never depends on this crate."
 license = "MIT OR Apache-2.0"
 
 [features]
 default = ["gpu"]
 # `#[derive(SceneStore)]` checks the deriving crate's own `gpu` feature.
 gpu = []
-bake = ["dep:helio-bake"]
 
 [dependencies]
 helio = { path = "../helio" }
-helio-bake = { path = "../helio-bake", optional = true }
 helio-core = { workspace = true }
 pulsar_scenedb = { workspace = true }
 pulsar_scenedb_derive = { workspace = true }
@@ -27,4 +25,3 @@ log = { workspace = true }
 
 [dev-dependencies]
 helio = { path = "../helio" }
-helio-bake = { path = "../helio-bake" }

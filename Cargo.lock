@@ -151,17 +151,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-trait"
-version = "0.1.92"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f6aeea286b8eb4dd3431a1be1b59d290ace00f5bfd8e2a159bc2a05e2c1667"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.4",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -186,35 +175,6 @@ dependencies = [
  "object",
  "rustc-demangle",
  "windows-link",
-]
-
-[[package]]
-name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bincode"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
-dependencies = [
- "bincode_derive",
- "serde",
- "unty",
-]
-
-[[package]]
-name = "bincode_derive"
-version = "2.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09"
-dependencies = [
- "virtue",
 ]
 
 [[package]]
@@ -488,25 +448,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-deque"
-version = "0.8.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5181e0de7b61eb03a81e347d6dd8797bae9da5146707b51077e2d71a54ec0ceb"
-dependencies = [
- "crossbeam-epoch",
- "crossbeam-utils",
-]
-
-[[package]]
-name = "crossbeam-epoch"
-version = "0.9.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d6914041f254d6e9176c01941b21115dcfb7089e55135a35411081bd106ef3f"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-queue"
 version = "0.3.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -625,12 +566,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
-name = "either"
-version = "1.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
-
-[[package]]
 name = "env_filter"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -681,7 +616,7 @@ dependencies = [
  "helio-frame-api",
  "helio-presets",
  "log",
- "pollster 0.4.0",
+ "pollster",
  "pulsar_scenedb",
  "scenedb-inspector-agent",
  "wgpu",
@@ -814,10 +749,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
- "js-sys",
  "libc",
  "wasi",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -976,7 +909,7 @@ dependencies = [
  "image",
  "log",
  "openxr",
- "pollster 0.4.0",
+ "pollster",
  "pulsar_reflection",
  "pulsar_scenedb",
  "quark",
@@ -987,38 +920,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-bake"
-version = "0.1.0"
-dependencies = [
- "bincode 1.3.3",
- "bytemuck",
- "getrandom 0.2.17",
- "glam",
- "half",
- "helio-bake-types",
- "helio-core",
- "helio-frame-api",
- "log",
- "nebula",
- "pollster 0.4.0",
- "serde",
- "thiserror 2.0.20",
- "uuid",
- "wgpu",
-]
-
-[[package]]
-name = "helio-bake-types"
-version = "0.1.0"
-
-[[package]]
 name = "helio-components"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
  "helio",
- "helio-bake",
  "helio-core",
  "log",
  "pulsar_reflection",
@@ -1052,7 +959,7 @@ dependencies = [
  "log",
  "naga",
  "notify",
- "pollster 0.4.0",
+ "pollster",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native?rev=45cda191beb316fee0859ae40d59f0dff986a66a)",
  "pulsar_scenedb",
  "smallvec",
@@ -1121,7 +1028,7 @@ dependencies = [
  "helio-core",
  "helio-feature-api",
  "helio-frame-api",
- "pollster 0.4.0",
+ "pollster",
  "wgpu",
 ]
 
@@ -1133,7 +1040,7 @@ dependencies = [
  "helio-core",
  "helio-frame-api",
  "log",
- "pollster 0.4.0",
+ "pollster",
  "wgpu",
 ]
 
@@ -1167,7 +1074,7 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "helio-frame-api",
- "pollster 0.4.0",
+ "pollster",
  "pulsar_reflection",
  "pulsar_scenedb",
  "wgpu",
@@ -1184,7 +1091,7 @@ dependencies = [
  "helio-pass-hiz",
  "log",
  "naga",
- "pollster 0.4.0",
+ "pollster",
  "wgpu",
 ]
 
@@ -1208,7 +1115,7 @@ dependencies = [
  "half",
  "helio-core",
  "helio-frame-api",
- "pollster 0.4.0",
+ "pollster",
  "wgpu",
 ]
 
@@ -1241,7 +1148,7 @@ dependencies = [
  "helio-spine",
  "image",
  "log",
- "pollster 0.4.0",
+ "pollster",
  "profiling 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Pulsar-Native?rev=45cda191beb316fee0859ae40d59f0dff986a66a)",
  "pulsar_scenedb",
  "serde_json",
@@ -1304,7 +1211,7 @@ dependencies = [
  "helio-presets",
  "js-sys",
  "log",
- "pollster 0.4.0",
+ "pollster",
  "pulsar_scenedb",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -1798,133 +1705,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
-]
-
-[[package]]
-name = "nebula"
-version = "0.1.0"
-dependencies = [
- "nebula-ao",
- "nebula-core",
- "nebula-gpu",
- "nebula-light",
- "nebula-probe",
- "nebula-serialize",
- "nebula-visibility",
-]
-
-[[package]]
-name = "nebula-ao"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytemuck",
- "glam",
- "log",
- "nebula-core",
- "nebula-gpu",
- "nebula-serialize",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "wgpu",
-]
-
-[[package]]
-name = "nebula-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bitflags 2.13.1",
- "bytemuck",
- "glam",
- "log",
- "pollster 0.3.0",
- "serde",
- "thiserror 1.0.69",
- "uuid",
- "wgpu",
-]
-
-[[package]]
-name = "nebula-gpu"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam",
- "log",
- "nebula-core",
- "thiserror 1.0.69",
- "wgpu",
-]
-
-[[package]]
-name = "nebula-light"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bytemuck",
- "glam",
- "log",
- "nebula-core",
- "nebula-gpu",
- "nebula-serialize",
- "rayon",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "uuid",
- "wgpu",
-]
-
-[[package]]
-name = "nebula-probe"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bincode 2.0.1",
- "bytemuck",
- "glam",
- "log",
- "nebula-core",
- "nebula-gpu",
- "nebula-serialize",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "wgpu",
-]
-
-[[package]]
-name = "nebula-serialize"
-version = "0.1.0"
-dependencies = [
- "bincode 2.0.1",
- "log",
- "nebula-core",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "zstd",
-]
-
-[[package]]
-name = "nebula-visibility"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bincode 2.0.1",
- "bytemuck",
- "glam",
- "log",
- "nebula-core",
- "nebula-gpu",
- "nebula-serialize",
- "rayon",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "wgpu",
 ]
 
 [[package]]
@@ -2458,12 +2238,6 @@ dependencies = [
 
 [[package]]
 name = "pollster"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22686f4785f02a4fcc856d3b3bb19bf6c8160d103f7a99cc258bddd0251dc7f2"
-
-[[package]]
-name = "pollster"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
@@ -2721,26 +2495,6 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-quartz-core 0.3.2",
-]
-
-[[package]]
-name = "rayon"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
-dependencies = [
- "either",
- "rayon-core",
-]
-
-[[package]]
-name = "rayon-core"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
-dependencies = [
- "crossbeam-deque",
- "crossbeam-utils",
 ]
 
 [[package]]
@@ -3227,12 +2981,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
-name = "unty"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
-
-[[package]]
 name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3261,12 +3009,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "virtue"
-version = "0.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
 
 [[package]]
 name = "walkdir"
@@ -4124,34 +3866,6 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
-
-[[package]]
-name = "zstd"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
-dependencies = [
- "zstd-safe",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "7.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
-dependencies = [
- "zstd-sys",
-]
-
-[[package]]
-name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
-dependencies = [
- "cc",
- "pkg-config",
-]
 
 [[package]]
 name = "zune-core"
