@@ -8,7 +8,7 @@ use helio_core::Result as HelioResult;
 use crate::camera::Camera;
 
 use super::debug::DebugCameraUniform;
-use super::renderer_impl::{CullStatsReadbackState, Renderer};
+use super::renderer_impl::Renderer;
 
 /// R1/R2 low-discrepancy jitter — matches the sequence used by TSR passes.
 use helio_core::temporal::r1_r2_jitter;
@@ -41,48 +41,6 @@ impl Renderer {
         Ok(())
     }
 
-    fn poll_cull_stats_readback(&mut self) {
-        // The frame's one poll (`render`, `render_xr`) delivered the map.
-        if !self.owns_device {
-            return;
-        }
-
-        let result = match &self.cull_stats_readback_state {
-            CullStatsReadbackState::Idle | CullStatsReadbackState::Disabled => return,
-            CullStatsReadbackState::Mapping(completion) => completion
-                .lock()
-                .ok()
-                .and_then(|mut completion| completion.take()),
-        };
-
-        match result {
-            Some(Ok(())) => {
-                let read_succeeded = match self.cull_stats_staging.slice(..).get_mapped_range() {
-                    Ok(mapped) => {
-                        if mapped.len() >= 32 {
-                            let ptr = mapped.as_ptr() as *const u32;
-                            self.cull_stats = unsafe { std::ptr::read_unaligned(ptr.cast()) };
-                        }
-                        drop(mapped);
-                        true
-                    }
-                    Err(_) => false,
-                };
-                self.cull_stats_staging.unmap();
-                self.cull_stats_readback_state = if read_succeeded {
-                    CullStatsReadbackState::Idle
-                } else {
-                    CullStatsReadbackState::Disabled
-                };
-            }
-            Some(Err(_)) => {
-                self.cull_stats_staging.unmap();
-                self.cull_stats_readback_state = CullStatsReadbackState::Disabled;
-            }
-            None => {}
-        }
-    }
-
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         helio_core::cpu_scope!("Helio::Renderer::render");
         // Treat the caller's ordinary output texture as the PC mirror when
@@ -108,13 +66,6 @@ impl Renderer {
             helio_core::cpu_scope!("Helio: apply_coordinate_spaces");
             self.apply_coordinate_spaces();
         }
-        // Browser WebGPU buffer mapping is asynchronous. Consume the previous
-        // frame's completed readback before recording a new copy.
-        {
-            helio_core::cpu_scope!("Helio: poll_cull_stats_readback");
-            self.poll_cull_stats_readback();
-        }
-
         // Before the rebuild drain: a pending rebuild builds from the latest
         // shader sources anyway, so a reload on the same frame costs nothing.
         #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
@@ -394,7 +345,9 @@ impl Renderer {
                 },
             });
         }
-        clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
+        // The last frame's stats out, this frame's counters cleared: in this
+        // submission, so they cost no submit of their own.
+        self.stats.cycle(&mut clear_encoder);
         self.graph
             .profiler_mut()
             .end_gpu_pass(&mut clear_encoder, "__renderer_target_clear");
@@ -402,6 +355,7 @@ impl Renderer {
             helio_core::cpu_scope!("Helio: queue.submit (target clear)");
             self.queue.submit(std::iter::once(clear_encoder.finish()));
         }
+        self.stats.submitted();
 
         let _graph_start = Instant::now();
         let scene_input = {
@@ -434,38 +388,6 @@ impl Renderer {
         }
         drop(resource_registry);
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
-
-        if self.owns_device
-            && matches!(self.cull_stats_readback_state, CullStatsReadbackState::Idle)
-        {
-            let mut read_encoder =
-                self.device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("CullStats Readback"),
-                    });
-            read_encoder.copy_buffer_to_buffer(
-                &self.cull_stats_buffer,
-                0,
-                &self.cull_stats_staging,
-                0,
-                32,
-            );
-            {
-                helio_core::cpu_scope!("Helio: queue.submit (cull stats readback)");
-                self.queue.submit(std::iter::once(read_encoder.finish()));
-            }
-
-            let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
-            let callback_completion = std::sync::Arc::clone(&completion);
-            self.cull_stats_staging
-                .slice(..)
-                .map_async(wgpu::MapMode::Read, move |result| {
-                    if let Ok(mut completion) = callback_completion.lock() {
-                        *completion = Some(result);
-                    }
-                });
-            self.cull_stats_readback_state = CullStatsReadbackState::Mapping(completion);
-        }
 
         self.frame_count = self.frame_count.wrapping_add(1);
         Ok(())
@@ -511,7 +433,18 @@ impl Renderer {
         if self.owns_device {
             let _ = self.device.poll(wgpu::PollType::Poll);
         }
-        self.poll_cull_stats_readback();
+        // The last frame's stats out, this frame's counters cleared, ahead of
+        // the eyes' graphs.
+        {
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Helio Frame Stats"),
+                });
+            self.stats.cycle(&mut encoder);
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.stats.submitted();
+        }
         self.apply_pending_pipeline();
 
         let now = Instant::now();

@@ -81,7 +81,7 @@ struct Fixtures {
     queue: Arc<wgpu::Queue>,
     camera: wgpu::Buffer,
     debug_camera: wgpu::Buffer,
-    cull_stats: wgpu::Buffer,
+    stats: helio::FrameStats,
     scene_db: pulsar_scenedb::gpu::GpuMirrorHandle,
     debug_state: Arc<Mutex<DebugDrawState>>,
     config: RendererConfig,
@@ -96,7 +96,7 @@ fn fixtures() -> Option<Fixtures> {
             (std::mem::size_of::<GpuCameraUniforms>() * 2) as u64,
         ),
         debug_camera: uniform_buffer(&device, "Debug Camera Buffer", 64),
-        cull_stats: uniform_buffer(&device, "Cull Stats Buffer", 64),
+        stats: helio::FrameStats::new(&device),
         scene_db: mirror(&device, &queue),
         debug_state: Arc::new(Mutex::new(DebugDrawState::default())),
         config: RendererConfig::new(320, 180, wgpu::TextureFormat::Rgba8Unorm),
@@ -114,7 +114,7 @@ impl Fixtures {
             debug_state: Arc::clone(&self.debug_state),
             camera_buffer: &self.camera,
             debug_camera_buffer: &self.debug_camera,
-            cull_stats_buffer: &self.cull_stats,
+            stats: &self.stats,
             owns_device: false,
             scene_db: self.scene_db.clone(),
         }
@@ -512,7 +512,7 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
     for stochastic in [false, true] {
         let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
         let debug_camera = uniform_buffer(&device, "Debug Camera Buffer", 64);
-        let cull_stats = uniform_buffer(&device, "Cull Stats Buffer", 64);
+        let stats = helio::FrameStats::new(&device);
         let mut env = helio_graph_asset::build_env(&helio::PassBuildContext {
             device: &device,
             queue: &queue,
@@ -520,7 +520,7 @@ fn the_tsr_node_configures_motion_vectors_and_the_stochastic_mask() {
             debug_state: Arc::clone(&debug_state),
             camera_buffer: &camera,
             debug_camera_buffer: &debug_camera,
-            cull_stats_buffer: &cull_stats,
+            stats: &stats,
             owns_device: false,
             scene_db: scene_db.clone(),
         });

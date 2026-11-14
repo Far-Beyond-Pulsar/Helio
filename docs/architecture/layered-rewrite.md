@@ -260,6 +260,31 @@ TSR reset → `HistoryInvalidation`; fog `set_active` / post-process defaults �
 component rows the plugin writes; `ChunkPass::set_appearance/diagnostics` →
 `VoxelHandle`; `WaterSimPass::sim_texture` → a debug view.
 
+### Frame stats and the frame budget (as built)
+
+Two kind-agnostic frame facts every pass can use, owned by `helio-core`:
+
+- **Named frame stats** (`helio_core::stats::FrameStats`). A stat is a name;
+  the first contribution creates it and every contribution to the same name
+  is summed per frame, so kinds pool shared totals (`draw_calls`,
+  `vertices`, `instances`) and publish their own (`meshes.draws`,
+  `foliage.blades_drawn`) with no registry change. GPU-driven passes add on
+  the GPU with `atomicAdd(&stats[STAT_X], n)` into `FrameStats::buffer()`,
+  their slots compiled in as pipeline-override constants
+  (`FrameStats::slot_constants`, taken at build time from `BuildEnv::stats`);
+  `RenderCmds` counts direct draws on the CPU, once per pass; indirect draws
+  are counted by the pass that wrote their arguments, never twice. The
+  counters are copied out and cleared in the frame's first submission and
+  read back without waiting (`FrameStats::latest`, a frame or two behind);
+  secondary graphs count into the parent's. This replaced the anonymous
+  eight-slot `cull_stats_buffer`, which only the meshes wrote and which a
+  host sharing its device never read back.
+- **The frame budget** (`PassContext::frame_budget_ms`): how long the host
+  wants a frame to take (its output's refresh), set by
+  `Renderer::set_frame_budget`. Passes that stream work in (voxel generation)
+  size it against this and the measured `last_frame_gpu_ms` /
+  `last_frame_cpu_ms`, never an assumed 60 Hz.
+
 ### Why this shape
 
 - **Unreal** layers RHI → RenderCore (RDG) → Renderer; game-side components

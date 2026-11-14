@@ -11,7 +11,7 @@ use helio_core::{RenderGraph, RenderSize};
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
 use super::pipeline_status::PipelineStatus;
-use super::renderer_impl::{CullStatsReadbackState, GraphRebuilder, Renderer};
+use super::renderer_impl::{GraphRebuilder, Renderer};
 
 impl Renderer {
     pub(crate) fn create_depth_resources(
@@ -144,7 +144,7 @@ impl Renderer {
         debug_state: Arc<Mutex<DebugDrawState>>,
         camera_buffer: wgpu::Buffer,
         debug_camera_buffer: wgpu::Buffer,
-        cull_stats_buffer: wgpu::Buffer,
+        stats: helio_core::FrameStats,
         scene_db: super::builder::SceneDbHandle,
     ) -> Self {
         assert!(
@@ -185,14 +185,8 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
-        let cull_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("CullStats Staging"),
-            size: 32,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
         let mut graph = RenderGraph::new_with_external_device(&device, &queue);
+        graph.profiler_mut().set_frame_stats(Some(stats.clone()));
         graph.lock_sized(RenderSize::new([internal_w, internal_h], [width, height]));
 
         Self {
@@ -226,9 +220,6 @@ impl Renderer {
             debug_state,
             last_render_time: Instant::now(),
             delta_time: 0.0,
-            cull_stats_staging,
-            cull_stats_readback_state: CullStatsReadbackState::Idle,
-            cull_stats: [0; 8],
             graph_time_ms: 0.0,
             last_submission: None,
             frame_times: vec![0.0; 200],
@@ -238,13 +229,14 @@ impl Renderer {
             frame_delta_override: None,
             frame_clock: 0.0,
             frame_clock_delta: None,
+            frame_budget_ms: None,
             clear_target_next_frame: true,
             xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,
             pending_resize: None,
             pending_rebuild: false,
             last_resize_ms: 0.0,
-            cull_stats_buffer,
+            stats,
             graph_rebuilder: None,
             graph_rebuild_hook: None,
             pipeline_status: PipelineStatus::None,

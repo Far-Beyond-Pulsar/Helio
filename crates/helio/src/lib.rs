@@ -17,10 +17,12 @@ pub use camera::{follow_origin, Camera, WORLD_ORIGIN_CELL};
 pub use graphics_context::{
     HelioGraphicsConfig, HelioGraphicsContext, HelioGraphicsMode, HelioXrInput,
 };
+pub use helio_core::stats;
 pub use helio_core::wgpu_instance_descriptor;
 pub use helio_core::{
-    DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error, GpuCameraUniforms,
-    GpuTimingAvailability, Movability, RenderGraph, RenderPass, RenderPassTiming,
+    DebugViewDescriptor, DebugViewLegend, DebugViewLegendStop, Entity, Error, FrameStats,
+    GpuCameraUniforms, GpuTimingAvailability, Movability, RenderGraph, RenderPass,
+    RenderPassTiming, StatSlot, StatsSnapshot,
     RenderTimingSnapshot, Result, RoutingIssue, RoutingSeverity,
 };
 pub use helio_frame_api::lighting::AmbientLight;

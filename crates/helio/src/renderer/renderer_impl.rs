@@ -26,7 +26,7 @@ pub type GraphRebuilder = Arc<
             Arc<Mutex<DebugDrawState>>,
             &wgpu::Buffer,
             &wgpu::Buffer,
-            &wgpu::Buffer,
+            &helio_core::FrameStats,
         ) -> Result<RenderGraph, PipelineFailure>
         + Send
         + Sync,
@@ -41,12 +41,6 @@ use super::debug::DebugDrawState;
 
 /// Mono, stereo, and a few application-owned auxiliary views.
 const MAX_VIEW_HISTORY: usize = 16;
-
-pub(crate) enum CullStatsReadbackState {
-    Idle,
-    Mapping(Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>),
-    Disabled,
-}
 
 pub struct Renderer {
     pub(crate) device: Arc<wgpu::Device>,
@@ -85,7 +79,9 @@ pub struct Renderer {
     pub(crate) full_res_depth_view: Option<wgpu::TextureView>,
     pub(crate) surface_format: wgpu::TextureFormat,
     pub(crate) debug_camera_buffer: wgpu::Buffer,
-    pub(crate) cull_stats_buffer: wgpu::Buffer,
+    /// Named frame statistics passes count into (`helio_core::stats`),
+    /// cycled at the start of each frame in its first submission.
+    pub(crate) stats: helio_core::FrameStats,
     pub(crate) clear_color: [f32; 4],
     /// The configuration the current graph was built from: the recipe a
     /// rebuild (a config change, shader reload) hands the graph builder, so the new
@@ -113,9 +109,6 @@ pub struct Renderer {
     pub(crate) graph_time_ms: f32,
     /// The last frame's graph submission. See [`Self::last_submission`].
     pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
-    pub(crate) cull_stats_staging: wgpu::Buffer,
-    pub(crate) cull_stats_readback_state: CullStatsReadbackState,
-    pub(crate) cull_stats: [u32; 8],
     pub(crate) frame_times: Vec<f32>,
     pub(crate) frame_times_cursor: usize,
     /// Whether per-frame subpixel camera jitter is applied. Graphs with a
@@ -129,6 +122,10 @@ pub struct Renderer {
     /// How far the host's clock advances the frame clock each frame; `None`
     /// follows the frame delta (wall time, or `frame_delta_override`).
     pub(crate) frame_clock_delta: Option<f32>,
+    /// How long the host wants a frame to take (its output's refresh), in
+    /// milliseconds; handed to the graph each frame
+    /// (`PassContext::frame_budget_ms`).
+    pub(crate) frame_budget_ms: Option<f32>,
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
     /// A configuration change asks for a graph rebuild before the next frame.
@@ -419,12 +416,30 @@ impl Renderer {
         self.frame_clock
     }
 
+    /// How long the host wants a frame to take: its output's refresh
+    /// interval (a 165 Hz display's 6.06 ms), until changed. Passes that
+    /// stream work in (terrain generation, residency) size it against this
+    /// and the measured frame (`PassContext::frame_budget_ms`), so they keep
+    /// the display's pace rather than one assumed by the pass. `None` (the
+    /// default): unpaced (offline, uncapped) or unknown.
+    pub fn set_frame_budget(&mut self, budget: Option<std::time::Duration>) {
+        self.frame_budget_ms = budget
+            .map(|b| b.as_secs_f32() * 1000.0)
+            .filter(|ms| ms.is_finite() && *ms > 0.0);
+    }
+
     /// Advance the frame clock for a frame whose delta is `delta_time` and
-    /// hand it to the graph.
+    /// hand it to the graph, with the frame budget.
     pub(crate) fn advance_frame_clock(&mut self, delta_time: f32) {
         let advance = self.frame_clock_delta.unwrap_or(delta_time);
         self.frame_clock += f64::from(advance);
         self.graph.set_frame_clock(self.frame_clock as f32, advance);
+        let profiler = self.graph.profiler_mut();
+        profiler.set_frame_budget_ms(self.frame_budget_ms);
+        // A rebuilt graph's profiler starts without them.
+        if profiler.frame_stats().is_none() {
+            profiler.set_frame_stats(Some(self.stats.clone()));
+        }
     }
 
     /// Set the renderer-wide debug visualization mode.
@@ -492,8 +507,11 @@ impl Renderer {
         &self.debug_camera_buffer
     }
 
-    pub fn cull_stats_buf(&self) -> &wgpu::Buffer {
-        &self.cull_stats_buffer
+    /// The named frame statistics (`helio_core::stats`): passes count into
+    /// them; a reader takes [`helio_core::FrameStats::latest`] and asks by
+    /// name.
+    pub fn frame_stats(&self) -> &helio_core::FrameStats {
+        &self.stats
     }
 
     /// Latest frame timing state. Reading it performs no GPU polling,

@@ -119,7 +119,10 @@ pub struct BuildEnv<'e> {
     pub frame: FrameDesc,
     pub camera_buffer: &'e wgpu::Buffer,
     pub debug_camera_buffer: &'e wgpu::Buffer,
-    pub cull_stats_buffer: &'e wgpu::Buffer,
+    /// The renderer's named frame statistics (`helio_core::stats`): a node
+    /// takes the slots of the stats its passes count into here, at build
+    /// time, creating any stat no one has contributed to yet.
+    pub stats: &'e helio_core::FrameStats,
     pub owns_device: bool,
     settings: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     shared: HashMap<TypeId, Box<dyn Any>>,
@@ -133,7 +136,7 @@ impl<'e> BuildEnv<'e> {
         frame: FrameDesc,
         camera_buffer: &'e wgpu::Buffer,
         debug_camera_buffer: &'e wgpu::Buffer,
-        cull_stats_buffer: &'e wgpu::Buffer,
+        stats: &'e helio_core::FrameStats,
         owns_device: bool,
     ) -> Self {
         Self {
@@ -142,7 +145,7 @@ impl<'e> BuildEnv<'e> {
             frame,
             camera_buffer,
             debug_camera_buffer,
-            cull_stats_buffer,
+            stats,
             owns_device,
             settings: HashMap::new(),
             shared: HashMap::new(),

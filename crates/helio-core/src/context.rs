@@ -350,6 +350,12 @@ impl<'a> PassContext<'a> {
         let graph = graphs
             .entry(key)
             .or_insert_with(|| build(self.device, self.queue));
+        // A secondary view's draws are the frame's: they count into its stats.
+        if graph.profiler().frame_stats().is_none() {
+            graph
+                .profiler_mut()
+                .set_frame_stats(self.profiler.frame_stats().cloned());
+        }
         let size = graph.render_size().internal;
         if !graph.is_locked() {
             graph.lock(width.max(1), height.max(1));
@@ -377,6 +383,24 @@ impl<'a> PassContext<'a> {
     /// The graph's CPU milliseconds recording the last frame timed.
     pub fn last_frame_cpu_ms(&self) -> Option<f32> {
         self.profiler.timing_snapshot().total_cpu_ms
+    }
+
+    /// How long the host wants a frame to take, in milliseconds (its
+    /// output's refresh interval): what a pass streaming work in sizes it
+    /// against, with [`Self::last_frame_gpu_ms`] and
+    /// [`Self::last_frame_cpu_ms`] saying what the frame took. `None` when the
+    /// host paces no frames (uncapped, offline) or does not say.
+    pub fn frame_budget_ms(&self) -> Option<f32> {
+        self.profiler.frame_budget_ms()
+    }
+
+    /// The renderer's named frame statistics (`crate::stats`): add the
+    /// frame's CPU-known counts here (`add` through a slot kept from build
+    /// time). Draws recorded through [`Self::render_cmds`] and the recorders'
+    /// render passes are counted already. `None` when the graph runs without
+    /// a renderer.
+    pub fn stats(&self) -> Option<&crate::stats::FrameStats> {
+        self.profiler.frame_stats()
     }
 
     /// Whether GPU scope timestamps can be recorded on this graph.
@@ -463,7 +487,10 @@ impl<'a> PassContext<'a> {
             );
         }
         let pass = std::ptr::NonNull::new(self.active_render_pass?)?;
-        Some(RenderCmds::from_active(pass))
+        Some(RenderCmds::from_active(
+            pass,
+            self.profiler.frame_stats().cloned(),
+        ))
     }
 
     /// The graphics stream, in graph order: copies, clears, queries and
@@ -480,13 +507,16 @@ impl<'a> PassContext<'a> {
                  chain_transparent passes must only use the compute stream"
             );
         }
-        CommandRecorder::from_ptr(self.encoder_ptr)
+        CommandRecorder::from_ptr(self.encoder_ptr, self.profiler.frame_stats().cloned())
     }
 
     /// The pre-graphics compute stream, submitted before all graphics work
     /// regardless of this pass's place in the graph.
     pub fn compute_cmds(&self) -> CommandRecorder<'a> {
-        CommandRecorder::from_ptr(self.compute_encoder_ptr)
+        CommandRecorder::from_ptr(
+            self.compute_encoder_ptr,
+            self.profiler.frame_stats().cloned(),
+        )
     }
 }
 
