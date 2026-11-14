@@ -12,7 +12,7 @@ mod registry;
 mod settings;
 
 pub use feature::{ContractUse, Feature, FeatureRegistrar, FeatureSet};
-pub use pins::{PinDesc, PinKind, PinShape, PinType};
+pub use pins::{PinDesc, PinKind, PinShape, PinType, FRAME_RESOURCE};
 pub use registry::{
     missing, pass_kind, pass_node, BuildEnv, BuildFn, CheckFn, ExtensionPoint, FinishFn, FrameDesc,
     MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType, Params,

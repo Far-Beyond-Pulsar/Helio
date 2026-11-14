@@ -14,6 +14,8 @@ use helio_feature_api::{PinDesc, PinType};
 
 pub const ON_FRAME_START: &str = "core.on_frame_start";
 pub const OUTPUT: &str = "core.output";
+/// The id of the Output's frame buffer input pin.
+pub const FRAME_PIN: &str = "frame";
 pub const BUFFER_GET: &str = "core.buffer_get";
 pub const BUFFER_SET: &str = "core.buffer_set";
 pub const EXTERNAL: &str = "core.external";
@@ -131,10 +133,13 @@ pub fn register(registry: &mut NodeRegistry) {
             OUTPUT,
             "Output",
             "Graph",
-            "The end of the frame. The last pass in the chain flows into it.",
+            "The end of the frame. The last pass in the chain flows into it, and the pass that draws the final image is wired to its frame input.",
             |_| Ok(()),
         )
-        .with_pins(vec![PinDesc::flow("in")], Vec::new()),
+        .with_pins(
+            vec![PinDesc::flow("in"), PinDesc::frame(FRAME_PIN).optional()],
+            Vec::new(),
+        ),
     );
 
     registry.register(

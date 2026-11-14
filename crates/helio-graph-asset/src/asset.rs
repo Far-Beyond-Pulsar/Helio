@@ -162,6 +162,19 @@ pub struct GraphAsset {
     /// the passes no longer declare is reported, not trusted.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pins: BTreeMap<String, helio_feature_api::NodePins>,
+    /// Editor layout option, graph-wide: space the pins of a node with several
+    /// pin rows by the height of the smallest node, so small nodes stack beside
+    /// them at the pins' heights with straight wires. It only changes how the
+    /// editor draws and how auto layout places nodes, never what the graph
+    /// builds, so it is no part of [`Validation::build_key`](crate::Validation).
+    /// A file without the key predates the option and loads with it off (its
+    /// nodes were placed without the room); a new graph has it on.
+    #[serde(default = "no")]
+    pub space_pins: bool,
+}
+
+fn no() -> bool {
+    false
 }
 
 impl Default for GraphAsset {
@@ -176,6 +189,7 @@ impl Default for GraphAsset {
             zip_ties: Vec::new(),
             sections: Vec::new(),
             pins: BTreeMap::new(),
+            space_pins: true,
         }
     }
 }

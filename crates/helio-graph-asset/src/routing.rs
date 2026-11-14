@@ -10,7 +10,9 @@
 //! One node is one unit, in the order the compiler builds them. What a node
 //! reads and writes is what its pins carry (`Scene` pins and SceneDB buffers
 //! are the host's; a history or optional input needs no writer). The node
-//! whose flow wire enters the Output is the one that writes the final output.
+//! wired to the Output's frame pin writes the final output; a graph with no
+//! frame wire (one written before the frame pin) says it with the flow wire that
+//! enters the Output instead.
 
 use std::collections::HashSet;
 
@@ -18,7 +20,7 @@ use helio_core::{check_routing, RoutingIssue, RoutingRead, RoutingSeverity, Rout
 use helio_feature_api::{NodeRegistry, PinKind};
 
 use crate::asset::GraphAsset;
-use crate::core_nodes::OUTPUT;
+use crate::core_nodes::{FRAME_PIN, OUTPUT};
 use crate::probe::SCENEDB_PREFIX;
 use crate::validate::{Diagnostic, Plan, Severity};
 
@@ -31,17 +33,31 @@ pub fn check_asset_routing(
     plan: &Plan,
     registry: &NodeRegistry,
 ) -> Vec<RoutingIssue> {
-    let feeds_output: HashSet<&str> = asset
+    let into_output = |wire: &&crate::asset::Connection| {
+        asset
+            .nodes
+            .iter()
+            .any(|node| node.id == wire.to.node && node.kind == OUTPUT)
+    };
+    // The frame wire says which node draws the final image; without one, the flow
+    // wire into the Output does (the frame pin is newer than the chain).
+    let frame_fed: HashSet<&str> = asset
         .connections
         .iter()
-        .filter(|wire| {
-            asset
-                .nodes
-                .iter()
-                .any(|node| node.id == wire.to.node && node.kind == OUTPUT)
-        })
+        .filter(into_output)
+        .filter(|wire| wire.to.pin == FRAME_PIN)
         .map(|wire| wire.from.node.as_str())
         .collect();
+    let feeds_output: HashSet<&str> = if frame_fed.is_empty() {
+        asset
+            .connections
+            .iter()
+            .filter(into_output)
+            .map(|wire| wire.from.node.as_str())
+            .collect()
+    } else {
+        frame_fed
+    };
 
     let mut executes = false;
     let mut units = Vec::new();
@@ -54,7 +70,7 @@ pub fn check_asset_routing(
         let is_flow = |pin: &helio_feature_api::PinDesc| pin.ty.kind == PinKind::Flow;
         let data = |pin: &helio_feature_api::PinDesc| {
             !is_flow(pin)
-                && pin.ty.kind != PinKind::Scene
+                && !matches!(pin.ty.kind, PinKind::Scene | PinKind::Frame)
                 && !pin.resource.starts_with(SCENEDB_PREFIX)
         };
         let is_output = node.kind == OUTPUT;
@@ -293,7 +309,7 @@ mod tests {
                     PinDesc::flow("in"),
                     PinDesc::resource(PinType::TEXTURE, "scene"),
                 ],
-                vec![PinDesc::flow("out")],
+                vec![PinDesc::flow("out"), PinDesc::frame("out_frame")],
             ),
         );
         registry
@@ -348,5 +364,40 @@ mod tests {
             .errors()
             .any(|d| d.message.contains("final output is never written")));
         assert!(cut.plan.is_none());
+    }
+
+    /// The frame wire says which node draws the final image, apart from the order
+    /// the flow chain runs in: with it wired the Output needs no flow wire from
+    /// that node, and a frame wire from a node that does not draw it is refused.
+    #[test]
+    fn the_frame_wire_names_the_node_that_writes_the_final_output() {
+        let registry = registry();
+        let mut framed = asset(&["lit", "tonemap"]);
+        framed
+            .connections
+            .push(wire("tonemap", "out_frame", "out", "frame"));
+        let healthy = validate(&framed, &registry);
+        assert!(healthy.diagnostics.is_empty(), "{:?}", healthy.diagnostics);
+
+        // The flow chain no longer enters the Output; the frame wire still does.
+        let mut only_frame = framed.clone();
+        only_frame
+            .connections
+            .retain(|w| !(w.to.node == "out" && w.to.pin == "in"));
+        let only_frame = validate(&only_frame, &registry);
+        assert!(
+            !only_frame
+                .errors()
+                .any(|d| d.message.contains("final output is never written")),
+            "{:?}",
+            only_frame.diagnostics
+        );
+
+        // A pass that does not draw the frame has no frame output to wire.
+        let mut wrong = asset(&["lit", "tonemap"]);
+        wrong.connections.push(wire("lit", "out_frame", "out", "frame"));
+        assert!(validate(&wrong, &registry)
+            .errors()
+            .any(|d| d.message.contains("no output pin `out_frame`")));
     }
 }

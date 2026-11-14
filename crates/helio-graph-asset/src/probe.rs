@@ -18,7 +18,10 @@
 //!   - written by no node: an **optional** input, the pass binds a fallback;
 //! * **SceneDB inputs**: a Buffer pin `scenedb.<key>` for each SceneDB buffer a
 //!   pass consumes;
-//! * a node that declares a host-supplied resource offers it as a Scene output.
+//! * a node that declares a host-supplied resource offers it as a Scene output;
+//! * a node with a pass that draws the final image
+//!   ([`RenderPass::writes_target`](helio_core::RenderPass::writes_target)) has
+//!   a **Frame** output, the one the Output takes.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -28,7 +31,7 @@ use crate::asset::GraphAsset;
 use crate::compile::{build_graph, Purpose};
 use crate::validate::Diagnostic;
 use helio_feature_api::{BuildEnv, NodePins, NodeRegistry};
-use helio_feature_api::{PinDesc, PinType};
+use helio_feature_api::{PinDesc, PinType, FRAME_RESOURCE};
 
 /// Prefix of the resource name of a SceneDB buffer pin.
 pub const SCENEDB_PREFIX: &str = "scenedb.";
@@ -193,6 +196,9 @@ pub fn probe(
                     outputs.push(output_pin(kind_of(write.name), write.name));
                 }
             }
+        }
+        if declarations[range.clone()].iter().any(|d| d.writes_target) {
+            outputs.push(PinDesc::frame(format!("out_{FRAME_RESOURCE}")));
         }
         for key in consumed {
             scene_buffers.insert(key.to_string());

@@ -28,21 +28,22 @@ use helio_feature_api::{NodePins, NodeRegistry};
 /// on every run and leaves the author's alone.
 pub const LANE_PREFIX: &str = "lane:";
 
-// The editor's node metrics (`blueprint_editor::rendering::layout`).
-const HEADER_H: f32 = 28.0;
-const SEP_H: f32 = 2.0;
-const BODY_PAD: f32 = 8.0;
-const PIN_ROW_H: f32 = 18.0;
-const PIN_GAP: f32 = 4.0;
+// The editor's node metrics: the Graphy canvas's `LayoutMetrics` defaults
+// (`header_h`, `body_pad_y`, `row_h`, `row_gap`, `grid_snap`). Heights are exact,
+// so a node placed at a pin's height lines up with it; `render_bps` tests that
+// these agree with Graphy's own layout.
+const HEADER_H: f32 = 26.0;
+const BODY_PAD: f32 = 6.0;
+const PIN_ROW_H: f32 = 20.0;
+const PIN_GAP: f32 = 2.0;
 const PIN_SIZE: f32 = 12.0;
 const HEADER_PAD_X: f32 = 9.0;
 const GRID: f32 = 10.0;
 /// Average glyph width of the title and pin label fonts, and slack on top of the
-/// estimate: an estimate that is a little large only costs space.
+/// estimated width: an estimate that is a little wide only costs space.
 const TITLE_GLYPH: f32 = 7.4;
 const LABEL_GLYPH: f32 = 6.6;
 const SLACK_X: f32 = 24.0;
-const SLACK_Y: f32 = 12.0;
 
 const SOURCE_GAP: f32 = 70.0;
 const SOURCE_STACK_GAP: f32 = 24.0;
@@ -67,11 +68,41 @@ fn label_len(pin: &helio_feature_api::PinDesc) -> usize {
     }
 }
 
-/// The size the editor will give a node with these pins and this title.
-pub fn estimated_size(title: &str, pins: &NodePins) -> (f32, f32) {
+/// Height of the smallest node: a header and one pin row. Pin spacing
+/// ([`GraphAsset::space_pins`]) gives every pin row of a taller node this height.
+pub fn min_node_height() -> f32 {
+    snap(HEADER_H + BODY_PAD * 2.0 + PIN_ROW_H)
+}
+
+/// `(row height, pitch)` of a node with `rows` pin rows. A node with one row
+/// stays the smallest node, the unit the spacing is measured in.
+fn row_metrics(rows: usize, space: bool) -> (f32, f32) {
+    let row = if space && rows > 1 {
+        min_node_height()
+    } else {
+        PIN_ROW_H
+    };
+    (row, row + PIN_GAP)
+}
+
+/// Where pin row `row` of a node with `rows` rows has its centre, from the top.
+pub fn pin_center(rows: usize, row: usize, space: bool) -> f32 {
+    let (height, pitch) = row_metrics(rows, space);
+    HEADER_H + BODY_PAD + row as f32 * pitch + height * 0.5
+}
+
+/// The height of a node with `rows` pin rows.
+pub fn node_height(rows: usize, space: bool) -> f32 {
+    let rows = rows.max(1);
+    let (height, pitch) = row_metrics(rows, space);
+    snap(HEADER_H + BODY_PAD * 2.0 + (rows - 1) as f32 * pitch + height)
+}
+
+/// The size the editor will give a node with these pins and this title; `space`
+/// is the graph's pin spacing.
+pub fn estimated_size(title: &str, pins: &NodePins, space: bool) -> (f32, f32) {
     let rows = pins.inputs.len().max(pins.outputs.len()).max(1);
-    let rows_f = rows as f32;
-    let height = HEADER_H + SEP_H + BODY_PAD * 2.0 + rows_f * PIN_ROW_H + (rows_f - 1.0) * PIN_GAP;
+    let height = node_height(rows, space);
 
     let header = HEADER_PAD_X * 2.0 + title.chars().count() as f32 * TITLE_GLYPH;
     let body = (0..rows)
@@ -86,10 +117,7 @@ pub fn estimated_size(title: &str, pins: &NodePins) -> (f32, f32) {
             BODY_PAD * 2.0 + PIN_SIZE + 10.0 + input + output + gap
         })
         .fold(0.0_f32, f32::max);
-    (
-        snap(header.max(body).max(160.0)) + SLACK_X,
-        snap(height) + SLACK_Y,
-    )
+    (snap(header.max(body).max(160.0)) + SLACK_X, height)
 }
 
 struct Item {
@@ -103,10 +131,12 @@ struct Item {
 /// their own, then the main graph as a row of nodes (the sections among them) in
 /// execution order, wrapping when it gets too wide.
 fn layout_sections(asset: &mut GraphAsset, registry: &NodeRegistry) {
+    let space = asset.space_pins;
     for section in &mut asset.sections {
         let mut inner = GraphAsset {
             nodes: std::mem::take(&mut section.nodes),
             connections: section.connections.clone(),
+            space_pins: space,
             ..GraphAsset::default()
         };
         auto_layout(&mut inner, registry);
@@ -124,14 +154,16 @@ fn layout_sections(asset: &mut GraphAsset, registry: &NodeRegistry) {
         .nodes
         .iter()
         .map(|node| match asset.section_of(node) {
-            Some(section) => estimated_size(&section.name, &crate::sections::section_pins(section)),
+            Some(section) => {
+                estimated_size(&section.name, &crate::sections::section_pins(section), space)
+            }
             None => match registry.get(&node.kind) {
                 Some(descriptor) => {
                     let title =
                         crate::buffers::title_of(node).unwrap_or_else(|| descriptor.title.clone());
-                    estimated_size(&title, &descriptor.pins(&node.params))
+                    estimated_size(&title, &descriptor.pins(&node.params), space)
                 }
-                None => estimated_size(&node.kind, &NodePins::default()),
+                None => estimated_size(&node.kind, &NodePins::default(), space),
             },
         })
         .collect();
@@ -149,18 +181,15 @@ fn layout_sections(asset: &mut GraphAsset, registry: &NodeRegistry) {
     let all: Vec<usize> = (0..count).collect();
     let order = stable_topological_order(&all, &edges);
 
-    let (mut x, mut y, mut row_h) = (0.0_f32, 0.0_f32, 0.0_f32);
+    // The main graph is one row: a handful of sections in execution order. It never
+    // wraps, because a wrapped row sends the execution wire back across the whole
+    // graph from the end of one row to the start of the next.
+    let mut x = 0.0_f32;
     let mut positions = vec![[0.0_f32; 2]; count];
     for node in order {
-        let (w, h) = sizes[node];
-        if x > 0.0 && x + w > MAX_ROW_WIDTH {
-            y += row_h + ROW_GAP;
-            x = 0.0;
-            row_h = 0.0;
-        }
-        positions[node] = [x, y];
+        let (w, _) = sizes[node];
+        positions[node] = [x, 0.0];
         x += w + NODE_GAP;
-        row_h = row_h.max(h);
     }
     for (node, position) in asset.nodes.iter_mut().zip(positions) {
         node.position = position;
@@ -206,7 +235,7 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
         items.push(Item {
             kind: node.kind.clone(),
             category,
-            size: estimated_size(&title, &pins),
+            size: estimated_size(&title, &pins, asset.space_pins),
             executes,
         });
         all_pins.push(pins);
@@ -283,6 +312,47 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
         }
     }
 
+    // With pin spacing a data node sits at the height of the pin it connects to,
+    // so the wire is straight: remember where each end of a direct wire is.
+    let align: Option<Align> = asset.space_pins.then(|| {
+        let rows = |i: usize| all_pins[i].inputs.len().max(all_pins[i].outputs.len()).max(1);
+        let center = |i: usize, pin: Option<usize>| {
+            pin.map(|p| pin_center(rows(i), p, true))
+        };
+        let position = |pins: &[helio_feature_api::PinDesc], name: &str| {
+            pins.iter().position(|pin| pin.name == name)
+        };
+        let mut map = Align::new();
+        for connection in &asset.connections {
+            let (Some(&from), Some(&to)) = (
+                index.get(connection.from.node.as_str()),
+                index.get(connection.to.node.as_str()),
+            ) else {
+                continue;
+            };
+            // data node -> executing node (a read), or the other way (a set).
+            let (data, exec, data_c, exec_c) = match (items[from].executes, items[to].executes) {
+                (false, true) => (
+                    from,
+                    to,
+                    center(from, position(&all_pins[from].outputs, &connection.from.pin)),
+                    center(to, position(&all_pins[to].inputs, &connection.to.pin)),
+                ),
+                (true, false) => (
+                    to,
+                    from,
+                    center(to, position(&all_pins[to].inputs, &connection.to.pin)),
+                    center(from, position(&all_pins[from].outputs, &connection.from.pin)),
+                ),
+                _ => continue,
+            };
+            if let (Some(data_c), Some(exec_c)) = (data_c, exec_c) {
+                map.entry((data, exec)).or_insert((data_c, exec_c));
+            }
+        }
+        map
+    });
+
     // 4. Place.
     let mut positions: Vec<[f32; 2]> = vec![[0.0; 2]; count];
     let mut comments: Vec<GraphComment> = Vec::new();
@@ -298,13 +368,13 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
                 )
             })
             .collect();
-        let bounds = place_lane(&members, &items, &mut positions, lane_y);
+        let bounds = place_lane(&members, &items, &mut positions, lane_y, align.as_ref());
         comments.push(lane_comment(lane_index, key, &members, bounds));
         lane_y = bounds.3 + COMMENT_PAD + LANE_GAP;
     }
     if !unused.is_empty() {
         let members: Vec<Member> = vec![(usize::MAX, unused.clone(), Vec::new())];
-        let bounds = place_lane(&members, &items, &mut positions, lane_y);
+        let bounds = place_lane(&members, &items, &mut positions, lane_y, None);
         // Host inputs declared for the renderer and not wired anywhere are a group of
         // their own; anything else left over is just unattached.
         let title = if unused.iter().all(|n| items[*n].kind.starts_with("host.")) {
@@ -460,14 +530,69 @@ fn block_layout(nodes: &[usize], items: &[Item]) -> (Vec<(usize, f32, f32)>, (f3
     (offsets, (width, height))
 }
 
+/// For a direct wire between a data node and an executing node, keyed
+/// `(data, executing)`: the pin's height below the top of each node.
+type Align = HashMap<(usize, usize), (f32, f32)>;
+
+/// A single column of data nodes of the executing node `exec`, each at the height
+/// of the pin it is wired to (the executing node's top is 0), so their wires are
+/// straight. A node that no direct wire places, or that would overlap the one
+/// above, goes below it. Returns each node's offset and the column's size.
+fn aligned_block(
+    nodes: &[usize],
+    exec: usize,
+    items: &[Item],
+    align: &Align,
+) -> Option<(Vec<(usize, f32, f32)>, (f32, f32))> {
+    if nodes.is_empty() {
+        return Some((Vec::new(), (0.0, 0.0)));
+    }
+    let mut wanted: Vec<(usize, Option<f32>)> = nodes
+        .iter()
+        .map(|n| {
+            let y = align
+                .get(&(*n, exec))
+                .map(|(data_c, exec_c)| (exec_c - data_c).max(0.0));
+            (*n, y)
+        })
+        .collect();
+    // Several nodes on one pin cannot all sit at its height: lay them out as a block.
+    let placed: Vec<f32> = wanted.iter().filter_map(|(_, y)| *y).collect();
+    if placed
+        .iter()
+        .enumerate()
+        .any(|(i, y)| placed[..i].contains(y))
+    {
+        return None;
+    }
+    // By pin height; the ones nothing places keep their order, after the rest.
+    wanted.sort_by(|a, b| match (a.1, b.1) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let mut offsets = Vec::with_capacity(nodes.len());
+    let mut cursor = 0.0_f32;
+    let mut width = 0.0_f32;
+    for (node, y) in wanted {
+        let at = y.map_or(cursor, |y| y.max(cursor));
+        offsets.push((node, 0.0, at));
+        cursor = at + items[node].size.1 + PIN_GAP;
+        width = width.max(items[node].size.0);
+    }
+    Some((offsets, (width, cursor - PIN_GAP)))
+}
+
 /// Places one lane starting at `y`. Returns its bounds (min x, min y, max x, max y).
 /// A member is an executing node (or `usize::MAX` for the unattached lane) with the
-/// data nodes beside it.
+/// data nodes beside it. With `align`, those data nodes sit at their pins' heights.
 fn place_lane(
     members: &[Member],
     items: &[Item],
     positions: &mut [[f32; 2]],
     y: f32,
+    align: Option<&Align>,
 ) -> (f32, f32, f32, f32) {
     let mut bounds = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     let mut grow = |x: f32, y: f32, size: (f32, f32)| {
@@ -479,8 +604,14 @@ fn place_lane(
 
     let (mut x, mut row_y, mut row_h) = (0.0_f32, y, 0.0_f32);
     for (node, reads, sets) in members {
-        let (read_offsets, read_block) = block_layout(reads, items);
-        let (set_offsets, set_block) = block_layout(sets, items);
+        let block = |nodes: &[usize]| {
+            align
+                .filter(|_| *node != usize::MAX)
+                .and_then(|align| aligned_block(nodes, *node, items, align))
+                .unwrap_or_else(|| block_layout(nodes, items))
+        };
+        let (read_offsets, read_block) = block(reads);
+        let (set_offsets, set_block) = block(sets);
         let node_size = if *node == usize::MAX {
             (0.0, 0.0)
         } else {
@@ -643,7 +774,11 @@ mod tests {
     fn rect(asset: &GraphAsset, registry: &NodeRegistry, id: &str) -> (f32, f32, f32, f32) {
         let node = asset.node(id).unwrap();
         let descriptor = registry.get(&node.kind).unwrap();
-        let (w, h) = estimated_size(&descriptor.title, &descriptor.pins(&node.params));
+        let (w, h) = estimated_size(
+            &descriptor.title,
+            &descriptor.pins(&node.params),
+            asset.space_pins,
+        );
         (
             node.position[0],
             node.position[1],
@@ -682,8 +817,13 @@ mod tests {
         assert!(x("start") < x("a") && y("start") == y("a"));
         assert!(x("b") < x("out") && y("b") == y("out"));
         assert!(y("a") < y("b"), "Beta runs on the row below Alpha");
-        // A source is left of the node it feeds, and in the same lane row.
-        assert!(x("src_a") < x("a") && y("src_a") == y("a"));
+        // A source is left of the node it feeds, and its wire is straight: its pin is
+        // at the height of the pin it feeds (pin spacing is on by default).
+        assert!(x("src_a") < x("a"));
+        assert_eq!(
+            y("src_a") + pin_center(1, 0, true),
+            y("a") + pin_center(2, 1, true)
+        );
         assert!(x("src_b1") < x("b") && x("src_b2") < x("b"));
         assert_eq!(x("src_b1"), x("src_b2"), "one column");
         assert_ne!(
@@ -776,7 +916,11 @@ mod tests {
             x("sink") > x("a"),
             "a Set sits after the node that produces it"
         );
-        assert!(y("sink") == y("a"), "and in its row");
+        assert_eq!(
+            y("sink") + pin_center(1, 0, true),
+            y("a") + pin_center(2, 1, true),
+            "and at the height of its pin"
+        );
         for other in ["a", "b", "start", "out", "src_a", "src_b1"] {
             assert!(
                 !overlap(
@@ -786,6 +930,69 @@ mod tests {
                 "sink overlaps {other}"
             );
         }
+    }
+
+    /// A node with many outputs, each read by its own small node: spaced, every
+    /// reader sits at its pin's height, in one column, none overlapping, so each
+    /// wire is straight. Unspaced, the same graph is not aligned.
+    #[test]
+    fn spaced_pins_let_small_nodes_stack_at_their_pins() {
+        let mut registry = registry();
+        let outputs: Vec<PinDesc> = (0..6)
+            .map(|i| PinDesc::resource(PinType::TEXTURE, format!("o{i}")))
+            .collect();
+        registry.register(
+            NodeDescriptor::new("t.wide", "Wide", "Passes: Alpha", "", |_| Ok(())).with_pins(
+                vec![PinDesc::flow("in")],
+                std::iter::once(PinDesc::flow("out")).chain(outputs).collect(),
+            ),
+        );
+        registry.register(
+            NodeDescriptor::new("t.sink", "Sink", "Data", "", |_| Ok(()))
+                .with_pins(
+                    vec![PinDesc::resource(PinType::TEXTURE, "o0")],
+                    Vec::new(),
+                )
+                .with_data_only(),
+        );
+        let build = |space: bool| {
+            let mut asset = GraphAsset {
+                space_pins: space,
+                ..GraphAsset::default()
+            };
+            asset.nodes.push(node("start", ON_FRAME_START));
+            asset.nodes.push(node("w", "t.wide"));
+            asset.nodes.push(node("out", OUTPUT));
+            asset.connections.push(wire("start", "out", "w", "in"));
+            asset.connections.push(wire("w", "out", "out", "in"));
+            for i in 0..6 {
+                let id = format!("s{i}");
+                asset.nodes.push(node(&id, "t.sink"));
+                asset
+                    .connections
+                    .push(wire("w", &format!("o{i}"), &id, "o0"));
+            }
+            auto_layout(&mut asset, &registry);
+            asset
+        };
+        let spaced = build(true);
+        let wide = spaced.node("w").unwrap().position;
+        // The wide node has 7 outputs (flow + 6): pin `i + 1` is resource `o{i}`.
+        let pin_y = |i: usize| wide[1] + pin_center(7, i + 1, true);
+        for i in 0..6 {
+            let sink = spaced.node(&format!("s{i}")).unwrap().position;
+            assert_eq!(sink[1] + pin_center(1, 0, true), pin_y(i), "wire {i} is straight");
+            assert!(sink[0] > wide[0], "sinks are right of their producer");
+        }
+        for i in 0..5 {
+            let a = spaced.node(&format!("s{i}")).unwrap().position[1];
+            let b = spaced.node(&format!("s{}", i + 1)).unwrap().position[1];
+            assert!(b >= a + min_node_height(), "stacked sinks do not overlap");
+        }
+        // Spacing is what makes the room: unspaced the pins are closer than the nodes.
+        let plain = build(false);
+        let a = plain.node("s0").unwrap().position[1] + pin_center(1, 0, false);
+        assert_ne!(a, plain.node("w").unwrap().position[1] + pin_center(7, 1, false));
     }
 
     #[test]

@@ -235,6 +235,21 @@ pub fn graph_asset(preset: crate::presets::Preset, registry: &NodeRegistry) -> G
         })
         .collect();
 
+    // The frame buffer: the last pass in order that draws the final image is wired
+    // to the Output's frame input, so the graph shows where the frame goes (the flow
+    // chain only says what runs last).
+    let frame_writer = nodes.iter().rev().find_map(|(id, _)| {
+        let out = pins
+            .get(id.as_str())?
+            .outputs
+            .iter()
+            .find(|pin| pin.ty.kind == PinKind::Frame)?;
+        Some((id.clone(), out.name.clone()))
+    });
+    if let Some((id, pin)) = frame_writer {
+        connect(&mut asset, (&id, &pin), ("output", core_nodes::FRAME_PIN));
+    }
+
     // Every resource some pass reads: only those need a Set where they are written.
     let read_somewhere: std::collections::HashSet<String> = nodes
         .iter()

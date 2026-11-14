@@ -20,6 +20,12 @@ pub enum PinKind {
     Buffer,
     /// Frame inputs the host supplies (camera, SceneDB columns, environment).
     Scene,
+    /// The frame buffer: the image the renderer presents (`ctx.target`). Written
+    /// by the passes that draw the final image ([`RenderPass::writes_target`]) and
+    /// taken by the Output, so the graph shows where the frame goes apart from
+    /// the order passes run in. It is not a named resource and no buffer: it has
+    /// no Get or Set.
+    Frame,
 }
 
 /// Outline drawn for a pin.
@@ -31,6 +37,8 @@ pub enum PinShape {
     Diamond,
     Square,
     Hexagon,
+    /// A rounded screen: the frame buffer.
+    Frame,
 }
 
 /// A pin's type: its kind and whether the data persists across frames.
@@ -49,6 +57,7 @@ impl PinType {
     pub const DEPTH: Self = Self::new(PinKind::Depth, false);
     pub const BUFFER: Self = Self::new(PinKind::Buffer, false);
     pub const SCENE: Self = Self::new(PinKind::Scene, false);
+    pub const FRAME: Self = Self::new(PinKind::Frame, false);
     pub const PERSISTENT_TEXTURE: Self = Self::new(PinKind::Texture, true);
     pub const PERSISTENT_BUFFER: Self = Self::new(PinKind::Buffer, true);
 
@@ -57,10 +66,11 @@ impl PinType {
     }
 
     /// The short tag the type is written with in a buffer list (`tex`, `ptex`,
-    /// `depth`, `buf`, `pbuf`, `scene`); `None` for flow, which is no buffer.
+    /// `depth`, `buf`, `pbuf`, `scene`); `None` for flow and the frame, which are
+    /// no buffer.
     pub fn prefix(self) -> Option<&'static str> {
         Some(match (self.kind, self.persistent) {
-            (PinKind::Flow, _) => return None,
+            (PinKind::Flow | PinKind::Frame, _) => return None,
             (PinKind::Texture, false) => "tex",
             (PinKind::Texture, true) => "ptex",
             (PinKind::Depth, _) => "depth",
@@ -90,12 +100,13 @@ impl PinType {
             PinKind::Depth => PinShape::Diamond,
             PinKind::Buffer => PinShape::Square,
             PinKind::Scene => PinShape::Hexagon,
+            PinKind::Frame => PinShape::Frame,
         }
     }
 
     /// Drawn with a second outline: the data outlives the frame.
     pub fn ringed(self) -> bool {
-        self.persistent && self.kind != PinKind::Flow
+        self.persistent && !matches!(self.kind, PinKind::Flow | PinKind::Frame)
     }
 
     /// RGB used for the pin and its wire.
@@ -106,9 +117,13 @@ impl PinType {
             PinKind::Depth => [0xB3, 0x9D, 0xDB],
             PinKind::Buffer => [0xFF, 0xB7, 0x4D],
             PinKind::Scene => [0x81, 0xC7, 0x84],
+            PinKind::Frame => [0xF4, 0x8F, 0xB1],
         }
     }
 }
+
+/// The resource name of every [`PinKind::Frame`] pin.
+pub const FRAME_RESOURCE: &str = "frame";
 
 /// A pin on a node type. Serialisable, so a graph asset can keep the pins its
 /// generated nodes had when it was written (`GraphAsset::pins`).
@@ -139,6 +154,18 @@ impl PinDesc {
             name: name.into(),
             ty: PinType::FLOW,
             resource: String::new(),
+            history: false,
+            optional: false,
+        }
+    }
+
+    /// The frame buffer pin: `name` is its id on the node, the resource is
+    /// always [`FRAME_RESOURCE`], so any two frame pins connect.
+    pub fn frame(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ty: PinType::FRAME,
+            resource: FRAME_RESOURCE.to_string(),
             history: false,
             optional: false,
         }
@@ -185,6 +212,9 @@ mod tests {
         assert_eq!(PinType::DEPTH.shape(), PinShape::Diamond);
         assert_eq!(PinType::BUFFER.shape(), PinShape::Square);
         assert_eq!(PinType::SCENE.shape(), PinShape::Hexagon);
+        assert_eq!(PinType::FRAME.shape(), PinShape::Frame);
+        assert!(!PinType::new(PinKind::Frame, true).ringed());
+        assert_eq!(PinType::FRAME.prefix(), None, "the frame is no buffer");
         assert!(PinType::PERSISTENT_TEXTURE.ringed());
         assert!(PinType::PERSISTENT_BUFFER.ringed());
         assert!(!PinType::TEXTURE.ringed());
