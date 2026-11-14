@@ -33,10 +33,6 @@ pub type GraphRebuilder = Arc<
 >;
 
 /// Reapplies application-owned pass settings after a rebuild replaces the graph.
-/// Makes a pass the renderer keeps in every graph it builds (see
-/// [`Renderer::install_persistent_pass`]).
-pub type PassFactory = Arc<dyn Fn() -> Box<dyn RenderPass> + Send + Sync>;
-
 pub type GraphRebuildHook = Arc<dyn Fn(&mut RenderGraph, &wgpu::Device) + Send + Sync>;
 
 use crate::camera::Camera;
@@ -133,11 +129,6 @@ pub struct Renderer {
     /// How far the host's clock advances the frame clock each frame; `None`
     /// follows the frame delta (wall time, or `frame_delta_override`).
     pub(crate) frame_clock_delta: Option<f32>,
-    /// A bake to run before the next frame. Its result is owned by the
-    /// graph's `BakeInjectPass`, never by the renderer (Helio#256).
-    /// Optional CPU bake projection supplied by the SceneDB/frontend owner.
-    /// The renderer may execute it, but never traverses or synthesizes scene
-    /// entities to build it.
     pub(crate) owns_device: bool,
     pub(crate) pending_resize: Option<(u32, u32)>,
     /// A configuration change asks for a graph rebuild before the next frame.
@@ -160,8 +151,6 @@ pub struct Renderer {
     /// What the host published for the next frames' features to read
     /// ([`Self::set_scene_payloads`]).
     pub(crate) scene_payloads: helio_core::ScenePayloads,
-    /// Passes a host installed that survive graph rebuilds, by pass name.
-    pub(crate) persistent_passes: Vec<(&'static str, PassFactory)>,
     /// Shader hot-reload bookkeeping (see `shader_reload.rs`).
     #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
     pub(crate) shader_reload: super::shader_reload::ShaderReloadState,
@@ -687,42 +676,14 @@ impl Renderer {
         self.graph_rebuilder = Some(rebuilder);
     }
 
-    /// Keep a pass in the graph from now on: it is added (or replaces the
-    /// pass of the same [`RenderPass::name`]) now and after every graph
-    /// rebuild, made fresh by `factory`. A host's results the graph cannot
-    /// build itself (a finished bake, say) stay rendered this way.
-    pub fn install_persistent_pass(&mut self, factory: PassFactory) {
-        let pass = factory();
-        let name = pass.name();
-        self.place_pass(pass);
-        self.persistent_passes
-            .retain(|(existing, _)| *existing != name);
-        self.persistent_passes.push((name, factory));
-    }
-
-    fn place_pass(&mut self, pass: Box<dyn RenderPass>) {
-        match self.graph.pass_index_named(pass.name()) {
-            Some(index) => self.graph.replace_pass_at(index, pass),
-            None => self.graph.add_pass_live(pass),
-        }
-    }
-
     /// Replace the graph, keeping what a freshly built graph cannot know
-    /// about: the persistent passes and the debug mode for passes that only
-    /// learn it through `set_debug_mode`.
+    /// about: the debug mode for passes that only learn it through
+    /// `set_debug_mode`.
     pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
         graph.set_debug_mode(self.debug_mode);
         let derivations = graph.take_scene_derivations();
         self.graph = graph;
         self.adopt_scene_derivations(derivations);
-        let persistent: Vec<PassFactory> = self
-            .persistent_passes
-            .iter()
-            .map(|(_, factory)| Arc::clone(factory))
-            .collect();
-        for factory in persistent {
-            self.place_pass(factory());
-        }
     }
 
     /// Makes the scene derivations a graph's features bring that this

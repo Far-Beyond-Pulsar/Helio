@@ -1,6 +1,6 @@
 //! What Helio's standalone hosts (examples, tests) and the plugins' host
 //! rows share: tying a row component to its contract row ([`same_layout!`],
-//! [`RowComponent`], [`WorldRows`]) and the lightmap bake. Helio has no kind,
+//! [`RowComponent`], [`WorldRows`]). Helio has no kind,
 //! so it has no components: each plugin brings its own host components (the
 //! meshes' `helio-mesh-host`, the lights' and the materials' api
 //! `host_rows`).
@@ -101,33 +101,4 @@ macro_rules! same_layout {
             type Component = $component;
         }
     };
-}
-
-/// Bake `scene` now (blocking) and keep the result rendered: the bake's
-/// inject pass is a persistent pass, so it survives graph rebuilds.
-#[cfg(feature = "bake")]
-pub fn bake(
-    renderer: &mut helio::Renderer,
-    scene: helio_bake::SceneGeometry,
-    config: helio_bake::BakeConfig,
-) -> Result<(), helio_bake::BakeError> {
-    let started = std::time::Instant::now();
-    let (objects, lights) = (scene.meshes.len(), scene.lights.len());
-    let baked = std::sync::Arc::new(helio_bake::run_bake_blocking(
-        renderer.device(),
-        renderer.queue(),
-        &scene,
-        &config,
-    )?);
-    log::info!(
-        "[helio-bake] bake of '{}' done in {:.2}s: {objects} objects, {lights} lights",
-        config.scene_name,
-        started.elapsed().as_secs_f32(),
-    );
-    renderer.install_persistent_pass(std::sync::Arc::new(move || {
-        Box::new(helio_bake::BakeInjectPass::new(std::sync::Arc::clone(
-            &baked,
-        )))
-    }));
-    Ok(())
 }

@@ -33,7 +33,7 @@ impl RenderPass for GBufferClearPass {
         );
         builder.with_group_extra_usage(gbuffer::GROUP, wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
-            gbuffer::LIGHTMAP_UV,
+            gbuffer::SURFACE,
             wgpu::TextureFormat::Rg16Float,
             ResourceSize::MatchSurface,
         );
@@ -77,26 +77,34 @@ impl RenderPass for GBufferClearPass {
             ResourceKey::new(gbuffer::GROUP),
             "GBufferClear",
         )?;
-        let mut views: Vec<&'a wgpu::TextureView> = group.views.to_vec();
+        let mut views: Vec<(&'a wgpu::TextureView, wgpu::Color)> = group
+            .views
+            .iter()
+            .zip(gbuffer::GROUP_MEMBERS)
+            .map(|(view, (name, _))| (*view, gbuffer::clear_value(name)))
+            .collect();
         for name in [
-            gbuffer::LIGHTMAP_UV,
+            gbuffer::SURFACE,
             gbuffer::SSS,
             gbuffer::EXTRA,
             gbuffer::VELOCITY,
         ] {
-            views.push(resources.read(ResourceKey::new(name), "GBufferClear")?);
+            views.push((
+                resources.read(ResourceKey::new(name), "GBufferClear")?,
+                gbuffer::clear_value(name),
+            ));
         }
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = storage
             .retain_boxed_slice(
                 views
                     .into_iter()
-                    .map(|view| {
+                    .map(|(view, clear)| {
                         Some(wgpu::RenderPassColorAttachment {
                             view,
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                load: wgpu::LoadOp::Clear(clear),
                                 store: wgpu::StoreOp::Store,
                             },
                         })

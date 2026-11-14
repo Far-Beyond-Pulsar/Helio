@@ -3,13 +3,6 @@ members = [
     "crates/*",
     "crates/passes/3d/*",
 ]
-exclude = [
-    "vendor/nebula",
-    # Bake output, not a crate. Lands here when a demo is run with `crates/` as
-    # the working directory, and the `crates/*` member glob would otherwise try
-    # to read it as a workspace member and fail.
-    "crates/bake_cache",
-]
 resolver = "2"
 
 [workspace.dependencies]
@@ -61,7 +54,6 @@ helio-core = { path = "crates/helio-core" }
 helio-scene-join = { path = "crates/helio-scene-join" }
 helio-settings = { path = "crates/helio-settings" }
 helio-tasks = { path = "crates/helio-tasks" }
-helio-bake-types = { path = "crates/helio-bake-types" }
 pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f6769f61518e1e68475bb9b6191fa26a29cc09f6", features = ["gpu"] }
 pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f6769f61518e1e68475bb9b6191fa26a29cc09f6" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --

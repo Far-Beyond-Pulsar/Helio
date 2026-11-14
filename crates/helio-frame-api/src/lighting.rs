@@ -4,7 +4,7 @@
 //!
 //! | Contract | Form | Published today by | Stand-in |
 //! |---|---|---|---|
-//! | [`INDIRECT_DIFFUSE`] | buffer, 2 words a pixel | GI probes' resolve | sky/ambient only |
+//! | [`INDIRECT_DIFFUSE`] | buffer, 2 words a pixel | GI probes' resolve, then a bake's lightmaps | sky/ambient only |
 //! | [`INDIRECT_SPECULAR_LAYERS`] | rgba16f textures, straight alpha, any resolution | SSR (half res), planar reflections | no layer |
 //! | [`ENVIRONMENT_PROBES`] + [`ENVIRONMENT_CUBES`] | probe rows + cube array | reflection captures, bake | sky cube only |
 //! | [`SUN_VISIBILITY`] / [`DIRECTIONAL_VISIBILITY`] | rgba16f, full res | clouds / terrain | fully visible |
@@ -239,9 +239,15 @@ pub fn lighting_settings(env: &BuildEnv<'_>) -> LightingSettings {
 
 /// Indirect diffuse irradiance at each pixel: a storage buffer of
 /// `vec2<u32>` per internal-resolution pixel, row-major,
-/// `x = pack2x16float(r, g)`, `y = pack2x16float(b, weight)`. The lighting
-/// mixes its own ambient towards `rgb * albedo` by `weight`. Absent (or one
-/// element long): the lighting's own ambient alone.
+/// `x = pack2x16float(r, g)`, `y = pack2x16float(b, weight)`, `rgb` the
+/// irradiance over pi (the radiance a white Lambertian surface reflects).
+/// The lighting mixes its own ambient towards `rgb * albedo` by `weight`.
+/// Absent (or one element long): the lighting's own ambient alone.
+///
+/// Publishers run at [`crate::Slot::LightingInputs`] in order; a later one
+/// refines the buffer an earlier one published in place (a bake's lightmaps
+/// over the GI probes, on the surfaces it baked) and publishes its own only
+/// where none was.
 pub const INDIRECT_DIFFUSE: &str = "indirect_diffuse";
 
 /// Screen-space indirect specular layers, composited over the environment
@@ -309,7 +315,7 @@ pub const TRANSMISSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16
 
 /// View remaps: per chain, the matrix taking a point of the host world into
 /// the world the pixels of that chain show (portals). SceneDB buffer of 256
-/// `mat4x4<f32>`; a pixel belongs to chain `c` when its G-buffer lightmap UV
+/// `mat4x4<f32>`; a pixel belongs to chain `c` when its G-buffer surface tag
 /// is `(-1, -3 - c)` (the prelude's `gbuffer_tag_view_remap` and `view_remap_of`). Absent: no
 /// pixel is remapped. Bound as a uniform (fragment stages are at their
 /// storage-buffer limit).

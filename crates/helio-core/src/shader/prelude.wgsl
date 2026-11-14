@@ -137,14 +137,14 @@ fn helio_gbuffer_normal(raw: vec3<f32>) -> vec3<f32> {
     return normalize(raw);
 }
 
-// Surface tags (`helio_frame_api::gbuffer::LIGHTMAP_UV`). The lightmap-UV
-// target (Rg16Float) holds a lightmapped surface's UV (x >= 0) or, for a
-// surface without a lightmap, a tag saying what the lighting must know about
-// it. Drawers write a tag by these names; lighting models read it through the
-// predicates below. Nothing writes or compares a raw tag value.
+// Surface tags (`helio_frame_api::gbuffer::SURFACE`). The surface channel
+// (Rg16Float) holds a tag (x < 0) saying what the lighting must know about a
+// surface, or the payload one feature requested for the graph (x >= 0, which
+// that feature reads). Drawers write a tag by these names; readers test it
+// through the predicates below. Nothing writes or compares a raw tag value.
 
-/// An ordinary surface without a lightmap.
-const GBUFFER_TAG_UNLIGHTMAPPED: vec2<f32> = vec2<f32>(-1.0, -1.0);
+/// An ordinary surface with no payload.
+const GBUFFER_TAG_PLAIN: vec2<f32> = vec2<f32>(-1.0, -1.0);
 /// Dense geometry that carries its own occlusion (a meadow's blades): its
 /// many thin layers fill a screen-space AO kernel and would turn whole fields
 /// black, so the lighting applies none.
@@ -161,27 +161,27 @@ fn gbuffer_tag_view_remap(chain: u32) -> vec2<f32> {
     return vec2<f32>(-1.0, -3.0 - f32(chain));
 }
 
-/// Whether a lightmap-UV texel is a lightmapped surface's UV.
-fn gbuffer_has_lightmap(lightmap_uv: vec2<f32>) -> bool {
-    return lightmap_uv.x >= 0.0;
+/// Whether a surface texel holds the requested payload rather than a tag.
+fn gbuffer_has_payload(surface: vec2<f32>) -> bool {
+    return surface.x >= 0.0;
 }
 
-/// Whether a lightmap-UV texel is tag `tag`.
-fn gbuffer_tagged(lightmap_uv: vec2<f32>, tag: vec2<f32>) -> bool {
-    return lightmap_uv.x == tag.x && lightmap_uv.y == tag.y;
+/// Whether a surface texel is tag `tag`.
+fn gbuffer_tagged(surface: vec2<f32>, tag: vec2<f32>) -> bool {
+    return surface.x == tag.x && surface.y == tag.y;
 }
 
 /// Whether the surface's occlusion is its own: the lighting adds no
 /// screen-space AO.
-fn gbuffer_own_occlusion(lightmap_uv: vec2<f32>) -> bool {
-    return gbuffer_tagged(lightmap_uv, GBUFFER_TAG_TRACED)
-        || gbuffer_tagged(lightmap_uv, GBUFFER_TAG_OWN_OCCLUSION);
+fn gbuffer_own_occlusion(surface: vec2<f32>) -> bool {
+    return gbuffer_tagged(surface, GBUFFER_TAG_TRACED)
+        || gbuffer_tagged(surface, GBUFFER_TAG_OWN_OCCLUSION);
 }
 
 /// The view-remap chain a pixel belongs to, or -1.
-fn view_remap_of(lightmap_uv: vec2<f32>) -> i32 {
-    if lightmap_uv.x > -1.5 && lightmap_uv.x < -0.5 && lightmap_uv.y < -2.5 {
-        return min(i32(round(-3.0 - lightmap_uv.y)), 255);
+fn view_remap_of(surface: vec2<f32>) -> i32 {
+    if surface.x > -1.5 && surface.x < -0.5 && surface.y < -2.5 {
+        return min(i32(round(-3.0 - surface.y)), 255);
     }
     return -1;
 }

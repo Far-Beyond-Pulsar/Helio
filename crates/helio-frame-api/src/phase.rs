@@ -166,7 +166,7 @@ const GBUFFER_ATTACHMENTS: [Attachment; 9] = [
     fixed(gbuffer::NORMAL, gbuffer::NORMAL_FORMAT),
     fixed(gbuffer::ORM, gbuffer::ORM_FORMAT),
     fixed(gbuffer::EMISSIVE, gbuffer::EMISSIVE_FORMAT),
-    fixed(gbuffer::LIGHTMAP_UV, gbuffer::LIGHTMAP_UV_FORMAT),
+    fixed(gbuffer::SURFACE, gbuffer::SURFACE_FORMAT),
     fixed(gbuffer::SSS, gbuffer::SSS_FORMAT),
     fixed(gbuffer::EXTRA, gbuffer::EXTRA_FORMAT),
     fixed(gbuffer::VELOCITY, gbuffer::VELOCITY_FORMAT),

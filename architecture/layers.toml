@@ -64,7 +64,6 @@ may_use = ["host", "preset", "renderer", "feature", "spine", "api", "feature_api
 helio-settings = { layer = "leaf" }
 # Threads and jobs Helio-layer code starts, run by the host's task system.
 helio-tasks = { layer = "leaf" }
-helio-bake-types = { layer = "leaf" }
 scenedb-inspector-agent = { layer = "leaf" }
 helio-passes = { layer = "leaf" }
 
@@ -94,7 +93,6 @@ helio-pass-planar-reflection = { layer = "feature", group = "reflections" }
 helio-pass-fxaa = { layer = "feature", group = "post-aa" }
 helio-pass-perf-overlay = { layer = "feature", group = "debug" }
 helio-pass-buffer-view = { layer = "feature", group = "debug" }
-helio-bake = { layer = "feature", group = "bake" }
 
 # renderer
 helio = { layer = "renderer" }
