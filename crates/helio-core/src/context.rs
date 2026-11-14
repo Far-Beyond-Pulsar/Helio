@@ -379,6 +379,15 @@ impl<'a> PassContext<'a> {
         self.profiler.timing_snapshot().total_cpu_ms
     }
 
+    /// How long the host wants a frame to take, in milliseconds (its
+    /// output's refresh interval): what a pass streaming work in sizes it
+    /// against, with [`Self::last_frame_gpu_ms`] and
+    /// [`Self::last_frame_cpu_ms`] saying what the frame took. `None` when the
+    /// host paces no frames (uncapped, offline) or does not say.
+    pub fn frame_budget_ms(&self) -> Option<f32> {
+        self.profiler.frame_budget_ms()
+    }
+
     /// Whether GPU scope timestamps can be recorded on this graph.
     pub fn gpu_scopes_enabled(&self) -> bool {
         self.profiler.is_enabled() && self.profiler.gpu_timing_supported()

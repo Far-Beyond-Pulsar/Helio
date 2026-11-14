@@ -155,6 +155,10 @@ pub struct Profiler {
     enabled: bool,
     snapshot: RenderTimingSnapshot,
     gpu_frame_ms: Option<f32>,
+    /// How long the host wants a frame to take (its output's refresh), when
+    /// it says: what a pass streaming work in sizes it against, beside the
+    /// measured [`Self::gpu_frame_ms`].
+    frame_budget_ms: Option<f32>,
 }
 
 impl Profiler {
@@ -181,6 +185,7 @@ impl Profiler {
             enabled: cfg!(feature = "profiling"),
             snapshot: RenderTimingSnapshot::default(),
             gpu_frame_ms: None,
+            frame_budget_ms: None,
         }
     }
 
@@ -485,6 +490,17 @@ impl Profiler {
     /// may still contain the legacy sum of per-pass compute timings.
     pub const fn gpu_frame_ms(&self) -> Option<f32> {
         self.gpu_frame_ms
+    }
+
+    /// How long the host wants a frame to take, in milliseconds (`None`:
+    /// unpaced, or it does not say).
+    pub const fn frame_budget_ms(&self) -> Option<f32> {
+        self.frame_budget_ms
+    }
+
+    /// Set the frame budget [`Self::frame_budget_ms`] reports.
+    pub fn set_frame_budget_ms(&mut self, budget: Option<f32>) {
+        self.frame_budget_ms = budget.filter(|ms| ms.is_finite() && *ms > 0.0);
     }
 
     /// Print profiling results to console (blocking - use for debugging only!)

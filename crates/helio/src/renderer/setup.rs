@@ -238,6 +238,7 @@ impl Renderer {
             frame_delta_override: None,
             frame_clock: 0.0,
             frame_clock_delta: None,
+            frame_budget_ms: None,
             clear_target_next_frame: true,
             xr_stage_transform: glam::Mat4::IDENTITY,
             owns_device: true,

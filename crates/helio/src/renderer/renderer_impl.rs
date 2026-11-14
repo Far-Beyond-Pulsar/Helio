@@ -133,6 +133,10 @@ pub struct Renderer {
     /// How far the host's clock advances the frame clock each frame; `None`
     /// follows the frame delta (wall time, or `frame_delta_override`).
     pub(crate) frame_clock_delta: Option<f32>,
+    /// How long the host wants a frame to take (its output's refresh), in
+    /// milliseconds; handed to the graph each frame
+    /// (`PassContext::frame_budget_ms`).
+    pub(crate) frame_budget_ms: Option<f32>,
     /// A bake to run before the next frame. Its result is owned by the
     /// graph's `BakeInjectPass`, never by the renderer (Helio#256).
     /// Optional CPU bake projection supplied by the SceneDB/frontend owner.
@@ -430,12 +434,27 @@ impl Renderer {
         self.frame_clock
     }
 
+    /// How long the host wants a frame to take: its output's refresh
+    /// interval (a 165 Hz display's 6.06 ms), until changed. Passes that
+    /// stream work in (terrain generation, residency) size it against this
+    /// and the measured frame (`PassContext::frame_budget_ms`), so they keep
+    /// the display's pace rather than one assumed by the pass. `None` (the
+    /// default): unpaced (offline, uncapped) or unknown.
+    pub fn set_frame_budget(&mut self, budget: Option<std::time::Duration>) {
+        self.frame_budget_ms = budget
+            .map(|b| b.as_secs_f32() * 1000.0)
+            .filter(|ms| ms.is_finite() && *ms > 0.0);
+    }
+
     /// Advance the frame clock for a frame whose delta is `delta_time` and
-    /// hand it to the graph.
+    /// hand it to the graph, with the frame budget.
     pub(crate) fn advance_frame_clock(&mut self, delta_time: f32) {
         let advance = self.frame_clock_delta.unwrap_or(delta_time);
         self.frame_clock += f64::from(advance);
         self.graph.set_frame_clock(self.frame_clock as f32, advance);
+        self.graph
+            .profiler_mut()
+            .set_frame_budget_ms(self.frame_budget_ms);
     }
 
     /// Set the renderer-wide debug visualization mode.
