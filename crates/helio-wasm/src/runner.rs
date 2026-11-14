@@ -424,7 +424,7 @@ async fn init_wgpu<T: HelioWasmApp>(
                     ctx.debug_state.clone(),
                     ctx.camera_buffer,
                     ctx.debug_camera_buffer,
-                    ctx.cull_stats_buffer,
+                    ctx.stats,
                 )
                 .unwrap_or_else(|| {
                     helio_presets::Preset::Deferred

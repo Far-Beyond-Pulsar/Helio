@@ -27,6 +27,21 @@ use std::ptr::NonNull;
 /// or a self-managed one from [`CommandRecorder::begin_render_pass`].
 pub struct RenderCmds<'a> {
     inner: RenderInner<'a>,
+    /// The frame's stats, when the graph made this handle: its direct draws
+    /// are counted into [`crate::stats::DRAW_CALLS`],
+    /// [`crate::stats::VERTICES`] and [`crate::stats::INSTANCES`], added once
+    /// when it drops. Indirect draws are counted by the pass that wrote their
+    /// arguments, on the GPU.
+    stats: Option<crate::stats::FrameStats>,
+    tally: crate::stats::DrawTally,
+}
+
+impl Drop for RenderCmds<'_> {
+    fn drop(&mut self) {
+        if let Some(stats) = &self.stats {
+            self.tally.flush(stats);
+        }
+    }
 }
 
 enum RenderInner<'a> {
@@ -52,17 +67,29 @@ macro_rules! render {
 }
 
 impl<'a> RenderCmds<'a> {
-    pub(crate) fn from_active(ptr: NonNull<wgpu::RenderPass<'static>>) -> RenderCmds<'a> {
+    pub(crate) fn from_active(
+        ptr: NonNull<wgpu::RenderPass<'static>>,
+        stats: Option<crate::stats::FrameStats>,
+    ) -> RenderCmds<'a> {
         RenderCmds {
             inner: RenderInner::Active(ptr, PhantomData),
+            stats,
+            tally: Default::default(),
         }
     }
 
     /// Wraps a render pass the caller opened on a plain wgpu encoder (tests,
-    /// offline tools). Graph passes get theirs from the context.
+    /// offline tools). Graph passes get theirs from the context. Counts no
+    /// stats.
     pub fn from_wgpu(pass: wgpu::RenderPass<'a>) -> RenderCmds<'a> {
+        Self::owned(pass, None)
+    }
+
+    fn owned(pass: wgpu::RenderPass<'a>, stats: Option<crate::stats::FrameStats>) -> RenderCmds<'a> {
         RenderCmds {
             inner: RenderInner::Owned(pass),
+            stats,
+            tally: Default::default(),
         }
     }
 
@@ -117,10 +144,12 @@ impl<'a> RenderCmds<'a> {
     }
 
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        self.tally.direct(vertices.len() as u32, instances.len() as u32);
         render!(self, |p| p.draw(vertices, instances))
     }
 
     pub fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.tally.direct(indices.len() as u32, instances.len() as u32);
         render!(self, |p| p.draw_indexed(indices, base_vertex, instances))
     }
 
@@ -300,6 +329,8 @@ impl<'a> ComputeCmds<'a> {
 pub struct CommandRecorder<'a> {
     encoder: NonNull<wgpu::CommandEncoder>,
     _marker: PhantomData<&'a mut wgpu::CommandEncoder>,
+    /// The frame's stats, handed to the render passes it opens.
+    stats: Option<crate::stats::FrameStats>,
 }
 
 /// Encodes `$wgpu` into the wgpu encoder.
@@ -320,15 +351,20 @@ impl<'a> CommandRecorder<'a> {
         CommandRecorder {
             encoder: NonNull::from(encoder),
             _marker: PhantomData,
+            stats: None,
         }
     }
 
     /// For the graph: a recorder over one of its wgpu streams that does not
-    /// borrow the context.
-    pub(crate) fn from_ptr(ptr: *mut wgpu::CommandEncoder) -> CommandRecorder<'a> {
+    /// borrow the context, counting into the frame's `stats`.
+    pub(crate) fn from_ptr(
+        ptr: *mut wgpu::CommandEncoder,
+        stats: Option<crate::stats::FrameStats>,
+    ) -> CommandRecorder<'a> {
         CommandRecorder {
             encoder: NonNull::new(ptr).expect("graph command stream pointer is null"),
             _marker: PhantomData,
+            stats,
         }
     }
 
@@ -338,7 +374,8 @@ impl<'a> CommandRecorder<'a> {
         &'b mut self,
         desc: &wgpu::RenderPassDescriptor<'_>,
     ) -> RenderCmds<'b> {
-        RenderCmds::from_wgpu(encoder!(self, |e| e.begin_render_pass(desc)))
+        let stats = self.stats.clone();
+        RenderCmds::owned(encoder!(self, |e| e.begin_render_pass(desc)), stats)
     }
 
     /// Opens a compute pass on this stream. Ends when dropped.

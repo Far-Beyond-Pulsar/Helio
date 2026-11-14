@@ -207,7 +207,7 @@ pub fn build_env<'e>(ctx: &PassBuildContext<'e>) -> BuildEnv<'e> {
         },
         ctx.camera_buffer,
         ctx.debug_camera_buffer,
-        ctx.cull_stats_buffer,
+        ctx.stats,
         ctx.owns_device,
     )
     .with_feature_settings(&ctx.config.features)
@@ -257,7 +257,7 @@ fn build(
     let rebuilder: GraphRebuilder = {
         let pipeline = Arc::clone(&pipeline);
         Arc::new(
-            move |device, queue, config, debug_state, camera, debug_camera, cull_stats| {
+            move |device, queue, config, debug_state, camera, debug_camera, stats| {
                 build(
                     Arc::clone(&pipeline),
                     PassBuildContext {
@@ -267,7 +267,7 @@ fn build(
                         debug_state,
                         camera_buffer: camera,
                         debug_camera_buffer: debug_camera,
-                        cull_stats_buffer: cull_stats,
+                        stats,
                         owns_device,
                         scene_db: scene_db.clone(),
                     },

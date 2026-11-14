@@ -118,7 +118,7 @@ impl Renderer {
             self.debug_state.clone(),
             &self.camera_buffer,
             &self.debug_camera_buffer,
-            &self.cull_stats_buffer,
+            &self.stats,
         ))
     }
 

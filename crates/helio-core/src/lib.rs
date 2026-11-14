@@ -412,6 +412,7 @@ pub mod scene_derivation;
 pub mod scene_input;
 pub mod scene_liveness;
 pub mod shader;
+pub mod stats;
 pub mod temporal;
 pub mod texture_mips;
 pub mod traits;
@@ -458,6 +459,7 @@ macro_rules! cpu_scope {
 // crate, never here.
 pub use camera::GpuCameraUniforms;
 pub use cmd::{CommandRecorder, ComputeCmds, RenderCmds};
+pub use stats::{FrameStats, StatSlot, StatsSnapshot};
 pub use movability::Movability;
 pub use registry::{ResourceKey, ResourceRegistry, Tracked, ViewGroup};
 pub use render_environment::RenderEnvironment;

@@ -330,7 +330,7 @@ fn a_rebuild_retries_a_failure_and_reports_a_new_one() {
             debug_state: Default::default(),
             camera_buffer: &queue_scratch(device),
             debug_camera_buffer: &queue_scratch(device),
-            cull_stats_buffer: &queue_scratch(device),
+            stats: &helio::FrameStats::new(device),
             owns_device: false,
             scene_db: scene_db_for(device, queue),
         })

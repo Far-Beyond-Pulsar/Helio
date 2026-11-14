@@ -147,7 +147,7 @@ pub trait HelioWasmApp: Sized + 'static {
         _debug_state: std::sync::Arc<std::sync::Mutex<helio::DebugDrawState>>,
         _camera_buf: &wgpu::Buffer,
         _debug_camera_buf: &wgpu::Buffer,
-        _cull_stats_buf: &wgpu::Buffer,
+        _stats: &helio::FrameStats,
     ) -> Option<helio::RenderGraph> {
         None
     }

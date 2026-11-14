@@ -20,7 +20,9 @@ pub struct PassBuildContext<'a> {
     pub debug_state: Arc<Mutex<DebugDrawState>>,
     pub camera_buffer: &'a wgpu::Buffer,
     pub debug_camera_buffer: &'a wgpu::Buffer,
-    pub cull_stats_buffer: &'a wgpu::Buffer,
+    /// The renderer's named frame statistics (`helio_core::stats`): a pass
+    /// takes its stats' slots here, at build time.
+    pub stats: &'a helio_core::FrameStats,
     /// Whether the renderer owns the device and graph allocations.
     pub owns_device: bool,
     /// Frontend-owned authoritative SceneDB handle. It is guaranteed present
@@ -255,14 +257,7 @@ impl RendererBuilder {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let cull_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cull Stats Buffer"),
-            size: 64,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+        let stats = helio_core::FrameStats::new(&device);
 
         let config = self.config;
         let mut renderer = Renderer::construct(
@@ -276,7 +271,7 @@ impl RendererBuilder {
             debug_state,
             camera_buffer,
             debug_camera_buffer,
-            cull_stats_buffer,
+            stats,
             self.scene_db,
         );
 

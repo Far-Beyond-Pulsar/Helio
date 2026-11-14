@@ -105,7 +105,7 @@ impl Renderer {
                         debug_state: renderer.debug_state.clone(),
                         camera_buffer: &renderer.camera_buffer,
                         debug_camera_buffer: &renderer.debug_camera_buffer,
-                        cull_stats_buffer: &renderer.cull_stats_buffer,
+                        stats: &renderer.stats,
                         owns_device: renderer.owns_device,
                         scene_db: renderer.scene_db.clone(),
                     }))

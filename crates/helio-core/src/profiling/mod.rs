@@ -159,6 +159,10 @@ pub struct Profiler {
     /// it says: what a pass streaming work in sizes it against, beside the
     /// measured [`Self::gpu_frame_ms`].
     frame_budget_ms: Option<f32>,
+    /// The renderer's named frame statistics, which the graph's command
+    /// handles count draws into (`crate::stats`). `None`: a graph run without
+    /// a renderer (tests, a secondary view), counting nothing.
+    frame_stats: Option<crate::stats::FrameStats>,
 }
 
 impl Profiler {
@@ -186,6 +190,7 @@ impl Profiler {
             snapshot: RenderTimingSnapshot::default(),
             gpu_frame_ms: None,
             frame_budget_ms: None,
+            frame_stats: None,
         }
     }
 
@@ -501,6 +506,16 @@ impl Profiler {
     /// Set the frame budget [`Self::frame_budget_ms`] reports.
     pub fn set_frame_budget_ms(&mut self, budget: Option<f32>) {
         self.frame_budget_ms = budget.filter(|ms| ms.is_finite() && *ms > 0.0);
+    }
+
+    /// The frame statistics the graph counts into.
+    pub fn frame_stats(&self) -> Option<&crate::stats::FrameStats> {
+        self.frame_stats.as_ref()
+    }
+
+    /// Count the graph's draws into `stats` (the renderer's).
+    pub fn set_frame_stats(&mut self, stats: Option<crate::stats::FrameStats>) {
+        self.frame_stats = stats;
     }
 
     /// Print profiling results to console (blocking - use for debugging only!)
