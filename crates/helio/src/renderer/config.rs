@@ -1,4 +1,4 @@
-use helio_core::{TEXTURE_BINDING_ARRAYS, TEXTURE_TABLE_LIMIT};
+use helio_core::{TEXTURE_BINDING_ARRAYS, TEXTURE_TABLE_BINDINGS_LIMIT};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RenderMode {
@@ -173,8 +173,10 @@ pub fn required_experimental_features(
 
 #[cfg(test)]
 mod tests {
-    use super::{ray_queries_usable, required_wgpu_features, RendererConfig};
-    use helio_core::TEXTURE_BINDING_ARRAYS;
+    use super::{
+        ray_queries_usable, required_wgpu_features, required_wgpu_limits, RendererConfig,
+    };
+    use helio_core::{TEXTURE_BINDING_ARRAYS, TEXTURE_TABLE_BINDINGS_LIMIT};
 
     fn adapter(name: &str, driver: &str, device_type: wgpu::DeviceType) -> wgpu::AdapterInfo {
         wgpu::AdapterInfo {
@@ -237,6 +239,35 @@ mod tests {
     }
 
     #[test]
+    fn requested_limits_keep_the_adapters_binding_array_limits() {
+        let adapter = wgpu::Limits {
+            max_sampled_textures_per_shader_stage: 1_000_000,
+            max_samplers_per_shader_stage: 2048,
+            max_binding_array_elements_per_shader_stage: 1_000_000,
+            max_binding_array_sampler_elements_per_shader_stage: 2048,
+            ..wgpu::Limits::default()
+        };
+        let requested = required_wgpu_limits(adapter.clone());
+        assert_eq!(
+            requested.max_binding_array_elements_per_shader_stage,
+            adapter.max_binding_array_elements_per_shader_stage
+        );
+        assert_eq!(
+            requested.max_binding_array_sampler_elements_per_shader_stage,
+            adapter.max_binding_array_sampler_elements_per_shader_stage
+        );
+        assert_eq!(
+            requested.max_sampled_textures_per_shader_stage,
+            TEXTURE_TABLE_BINDINGS_LIMIT as u32
+        );
+        // So the table a device made with them holds what the adapter allows.
+        assert_eq!(
+            helio_core::texture_table_capacity(TEXTURE_BINDING_ARRAYS, &requested),
+            helio_core::texture_table_capacity(TEXTURE_BINDING_ARRAYS, &adapter)
+        );
+    }
+
+    #[test]
     fn renderer_config_never_exposes_an_empty_extent() {
         let config = RendererConfig::new(0, 0, wgpu::TextureFormat::Rgba8Unorm);
         assert_eq!((config.width, config.height), (1, 1));
@@ -246,10 +277,14 @@ mod tests {
 
 pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
-        max_sampled_textures_per_shader_stage: (TEXTURE_TABLE_LIMIT as u32)
+        max_sampled_textures_per_shader_stage: (TEXTURE_TABLE_BINDINGS_LIMIT as u32)
             .min(adapter_limits.max_sampled_textures_per_shader_stage),
-        max_samplers_per_shader_stage: (TEXTURE_TABLE_LIMIT as u32)
+        max_samplers_per_shader_stage: (TEXTURE_TABLE_BINDINGS_LIMIT as u32)
             .min(adapter_limits.max_samplers_per_shader_stage),
+        // The binding-array limits (`max_binding_array_*`) a texture table
+        // bound as binding arrays is counted against are taken as the adapter
+        // offers them: `helio_core::texture_table_capacity` sizes it from them.
+        //
         // Clamped to 4 GiB - 1 because wgpu-core's indirect-draw validation asserts
         // `max_buffer_size <= u32::MAX` while building its helper pipelines, and that
         // assertion runs at *device creation*:

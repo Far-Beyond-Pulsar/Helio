@@ -166,15 +166,16 @@ pub fn create_wgpu_device(
         ));
     }
 
-    // Limits: cap the bindless texture table at helio_core::TEXTURE_TABLE_LIMIT and ask for two
+    // Limits: cap a one-binding-per-texture table at helio_core::TEXTURE_TABLE_BINDINGS_LIMIT
+    // (binding arrays count against the adapter's binding-array limits, kept as they are) and ask for two
     // multiview layers (min'd against what the adapter reports).
     let mut limits = hal_adapter.capabilities.limits.clone();
     limits.max_sampled_textures_per_shader_stage = limits
         .max_sampled_textures_per_shader_stage
-        .min(helio_core::TEXTURE_TABLE_LIMIT as u32);
+        .min(helio_core::TEXTURE_TABLE_BINDINGS_LIMIT as u32);
     limits.max_samplers_per_shader_stage = limits
         .max_samplers_per_shader_stage
-        .min(helio_core::TEXTURE_TABLE_LIMIT as u32);
+        .min(helio_core::TEXTURE_TABLE_BINDINGS_LIMIT as u32);
     limits.max_multiview_view_count = limits.max_multiview_view_count.max(2);
     // Same clamp as `helio::required_wgpu_limits`, and it has to be repeated because this
     // path builds its limits from the HAL adapter directly rather than going through that

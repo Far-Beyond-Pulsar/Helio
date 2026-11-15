@@ -485,24 +485,30 @@ pub use graph::{
 };
 pub use instance::wgpu_instance_descriptor;
 
-/// Descriptor-indexed texture arrays: a table of textures and samplers a
-/// shader indexes per pixel (a kind's bindless table: the materials'). The
-/// pair is one capability; a device with only one of them uses none.
+/// Descriptor-indexed texture arrays: a table of textures a shader indexes
+/// per pixel (a kind's bindless table: the materials'). The pair of features
+/// is one capability; a device with only one of them uses none.
 pub const TEXTURE_BINDING_ARRAYS: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
 
-/// The most sampled textures (and samplers) per shader stage a host asks a
-/// device for: the size cap of a texture table. WebGPU's baseline
-/// guarantees 16; native Vulkan/D3D12 offer 256. Mobile GPUs (Apple,
-/// Android/Adreno) get the baseline too: their shader compilers and
-/// descriptor limits choke on a 256-wide binding array.
+/// The most textures a texture table bound as binding arrays holds, whatever
+/// the device offers; the device's own binding-array limits can lower it (see
+/// [`texture_table_capacity`]).
+///
+/// The table is sized once (each reader compiles its binding array at this
+/// size and binds every slot), so its per-reader cost is a bind group of
+/// this many texture descriptors, rebuilt when a texture is added: the cap
+/// bounds that cost while holding a large level's textures (thousands).
+/// Mobile GPUs (Apple, Android/Adreno) and the browser keep the
+/// WebGPU baseline of 16: their shader compilers and descriptor limits choke
+/// on wide binding arrays.
 #[cfg(not(any(
     target_arch = "wasm32",
     target_os = "macos",
     target_os = "ios",
     target_os = "android"
 )))]
-pub const TEXTURE_TABLE_LIMIT: usize = 256;
+pub const TEXTURE_TABLE_LIMIT: usize = 4096;
 #[cfg(any(
     target_arch = "wasm32",
     target_os = "macos",
@@ -510,6 +516,26 @@ pub const TEXTURE_TABLE_LIMIT: usize = 256;
     target_os = "android"
 ))]
 pub const TEXTURE_TABLE_LIMIT: usize = 16;
+
+/// The most sampled textures (and samplers) per shader stage a host asks a
+/// device for: the size cap of a texture table bound one binding per texture
+/// (no binding arrays). WebGPU's baseline guarantees 16; native Vulkan/D3D12
+/// offer 256. Binding arrays are counted against the device's binding-array
+/// limits instead, which a host takes as the adapter offers them.
+#[cfg(not(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+)))]
+pub const TEXTURE_TABLE_BINDINGS_LIMIT: usize = 256;
+#[cfg(any(
+    target_arch = "wasm32",
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "android"
+))]
+pub const TEXTURE_TABLE_BINDINGS_LIMIT: usize = 16;
 
 /// Sampled-texture slots a stage that binds the texture table one binding per
 /// texture (no binding arrays) keeps for its own inputs: the most any reader
@@ -527,25 +553,30 @@ pub fn texture_table_uses_binding_arrays(features: wgpu::Features) -> bool {
 /// and `limits`: every stage that binds it can address all of them. The
 /// scene's texture store is this big, and each reader's bindings are.
 ///
-/// With binding arrays the table is one array, capped by the per-stage
-/// texture and sampler limits. Without, each texture takes a binding and a
-/// sampler beside the reader's own inputs ([`TEXTURE_TABLE_RESERVE`]), in
-/// one bind group (two bindings of which are the reader's).
+/// The table is read through one sampler, an ordinary binding beside it (a
+/// kind's table owns which), never a sampler per texture: samplers are a
+/// handful of filter states, not per-texture resources, so the table's size
+/// never counts against a device's sampler limits (D3D12's shader-visible
+/// sampler heap is 2048).
+///
+/// With binding arrays the table is one array of textures, counted against
+/// `max_binding_array_elements_per_shader_stage` and capped at
+/// [`TEXTURE_TABLE_LIMIT`]. Without, each texture takes a binding beside the
+/// reader's own sampled inputs ([`TEXTURE_TABLE_RESERVE`]), in one bind group
+/// with the sampler and two bindings of the reader's, capped at
+/// [`TEXTURE_TABLE_BINDINGS_LIMIT`].
 pub fn texture_table_capacity(features: wgpu::Features, limits: &wgpu::Limits) -> usize {
-    let sampled = limits.max_sampled_textures_per_shader_stage as usize;
-    let samplers = limits.max_samplers_per_shader_stage as usize;
     let capacity = if texture_table_uses_binding_arrays(features) {
-        sampled.min(samplers)
+        (limits.max_binding_array_elements_per_shader_stage as usize).min(TEXTURE_TABLE_LIMIT)
     } else {
-        sampled
+        (limits.max_sampled_textures_per_shader_stage as usize)
             .saturating_sub(TEXTURE_TABLE_RESERVE)
-            .min(samplers)
-            .min((limits.max_bindings_per_bind_group as usize).saturating_sub(2) / 2)
+            .min((limits.max_bindings_per_bind_group as usize).saturating_sub(3))
+            .min(TEXTURE_TABLE_BINDINGS_LIMIT)
     };
-    let capacity = TEXTURE_TABLE_LIMIT.min(capacity);
     assert!(
         capacity > 0,
-        "Helio requires at least one sampled texture and sampler binding"
+        "Helio requires at least one sampled texture binding"
     );
     capacity
 }

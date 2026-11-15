@@ -1222,10 +1222,11 @@ outside its test host. Phase B is done.
     the render world's prepare stage, before the graph; Unity SRP renderer
     features set globals in `OnCameraSetup`. A publisher is not a pass, so
     the pass lists do not change.
-  - `helio_core::TEXTURE_BINDING_ARRAYS` and `TEXTURE_TABLE_LIMIT`: the
-    device capabilities a bindless table needs, named for no kind (the
-    facade and helio-xr ask devices for them; helio-mats'
-    `BINDLESS_MATERIAL_FEATURES`/`MAX_MATERIAL_TEXTURES` are them).
+  - `helio_core::TEXTURE_BINDING_ARRAYS`, `TEXTURE_TABLE_LIMIT` and
+    `TEXTURE_TABLE_BINDINGS_LIMIT`: the device capabilities a bindless
+    table needs and its caps, named for no kind (the facade and helio-xr
+    ask devices for them; helio-mats' `BINDLESS_MATERIAL_FEATURES`/
+    `MAX_MATERIAL_TEXTURES` are them).
   - The spine declares only `render_environment`; `material_textures` is the
     materials' host input (same node kind, so graph assets and pins are
     unchanged).
@@ -2758,6 +2759,25 @@ kernel: section 12 of `.agents/PLUGIN_API_REFACTOR_PLAN.md` there):
   `TEXTURE_TABLE_RESERVE`) decide how many textures the table holds on a
   device; the materials' binding config and Pulsar's scene texture store
   both read it, so the engine needs no kind's api for its store.
+  The table is read through **one sampler** bound beside it (the
+  materials' `scene_sampler`, at the table's first binding, the textures at
+  the next: `MaterialBindingConfig::append_layout_entries`), never a sampler
+  per texture: samplers are filter states, not per-texture resources, so the
+  table's size never counts against a device's sampler limits. A table bound
+  as a binding array is sized from `max_binding_array_elements_per_shader_stage`
+  alone, capped at `TEXTURE_TABLE_LIMIT` (4096 on desktop, 16 on
+  wasm/macOS/iOS/Android): D3D12 (2048-sampler shader-visible heap) and Vulkan
+  with descriptor indexing both hold the cap. A table bound one binding per
+  texture keeps the per-stage sampled-texture limit (one sampler binding,
+  whatever its size), capped at `TEXTURE_TABLE_BINDINGS_LIMIT` (256 native,
+  16 baseline), which is also all hosts ask devices for of those limits.
+  Per-texture sampler states (`TextureSamplerDesc` on an upload) do not
+  reach the GPU table; when they do, they become a small indexed sampler set
+  (a sampler index per slot in `MaterialTextureData`), still not one per
+  texture.
+  A texture the full table has no slot for is an error naming the table
+  (`helio_component::texture_assets`), and a graph material sampling it
+  draws its fallback surface with a warning naming material and texture.
 - **Texture mips are core** (`helio_core::texture_mips`, from the
   materials' api): colour, data and normal-map mip filtering is texture
   data, cooked by the engine for every kind.
