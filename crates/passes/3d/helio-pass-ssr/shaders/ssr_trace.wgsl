@@ -111,7 +111,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         cameras[0].proj,
         textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(source_dims)), 0),
     );
-    if ray_depth > scene_depth * (1.0 + THICKNESS) {
+    // A Hi-Z candidate is a surface hit only when the ray is close to the
+    // depth-buffer surface on either side. Accepting every candidate in front
+    // of the surface samples unrelated scene colour and creates screen-space
+    // patches; keep the same symmetric tolerance as the ray-query path.
+    if abs(ray_depth - scene_depth) > max(0.02, scene_depth * THICKNESS) {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
     }
