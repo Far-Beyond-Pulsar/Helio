@@ -841,7 +841,12 @@ helio-asset-compat, helio-snapshot, the web and Android demos).
     name, so a second kind of traced content joins the same TLAS without a
     setter. `RAY_TRANSMISSION` is the frame's; the instance rows' and proxy
     pool's keys are helio-mesh-api's. The meshes' projection publishes it
-    (`SceneDbRayTracing::publish`).
+    after the GPU mirror flush (`SceneDbRayTracing::publish`). Mesh BLASes
+    use one geometry segment per section so opacity flags remain accurate;
+    `instance_custom_data + geometry_index` addresses the section's ray
+    material row. Helio owns generic multi-segment BLAS construction and
+    preserves instance custom data in the TLAS; the meshes plugin owns the
+    section table and row publication.
   - **The G-buffer is the frame's**: when no kind opens its phase, the
     spine clears it (`helio_spine::GBufferClearPass`, `gbuffer_clear`), as
     Bevy's opaque pass node clears with no phase items. Without it a Helio

@@ -108,10 +108,17 @@ impl BlasGeometry<'_> {
     }
 }
 
+/// One geometry of a BLAS ([`BlasManager::build_segments`]) and its
+/// triangles' opacity.
+pub struct BlasSegment<'a> {
+    pub geometry: BlasGeometry<'a>,
+    pub opaque: bool,
+}
+
 /// Manages Bottom-Level Acceleration Structures (BLAS) for scene geometry, keyed by an id its owner chooses.
 pub struct BlasManager {
     blas_map: HashMap<u64, wgpu::Blas>,
-    geometry_keys: HashMap<u64, GeometryKey>,
+    geometry_keys: HashMap<u64, Vec<GeometryKey>>,
     device: Arc<wgpu::Device>,
     rt_available: bool,
     /// Changes whenever a cached BLAS handle is replaced or evicted. TLAS
@@ -172,34 +179,73 @@ impl BlasManager {
         geometry: BlasGeometry<'_>,
         opaque: bool,
     ) -> Result<bool, AccelerationError> {
+        self.build_segments(
+            geometry_id,
+            encoder,
+            vec![BlasSegment { geometry, opaque }],
+        )
+    }
+
+    /// Record one BLAS of several geometries (a mesh's sections, each with
+    /// its own opacity): a ray query reports a hit's segment as its
+    /// `geometry_index`, in `segments` order. Otherwise as
+    /// [`Self::build_from_buffers_with_opacity`]; the key covers every
+    /// segment.
+    pub fn build_segments(
+        &mut self,
+        geometry_id: u64,
+        encoder: &mut wgpu::CommandEncoder,
+        segments: Vec<BlasSegment<'_>>,
+    ) -> Result<bool, AccelerationError> {
         if !self.rt_available {
             return Err(AccelerationError::Unsupported);
         }
-        if let Err(error) = geometry.validate() {
-            // An invalid replacement must not leave the old shape queryable.
+        let limits = self.device.limits();
+        if segments.is_empty() {
             self.remove_blas(geometry_id);
-            return Err(error);
+            return Err(AccelerationError::InvalidGeometry("a BLAS needs a segment"));
         }
-        let primitives = if geometry.indices.is_some() {
-            geometry.index_count
-        } else {
-            geometry.vertex_count
-        } / 3;
-        if primitives > self.device.limits().max_blas_primitive_count {
+        if segments.len() as u64 > u64::from(limits.max_blas_geometry_count) {
+            self.remove_blas(geometry_id);
+            return Err(AccelerationError::InvalidGeometry(
+                "segment count exceeds the device limit",
+            ));
+        }
+        let mut primitives = 0u64;
+        for segment in &segments {
+            if let Err(error) = segment.geometry.validate() {
+                // An invalid replacement must not leave the old shape queryable.
+                self.remove_blas(geometry_id);
+                return Err(error);
+            }
+            let geometry = &segment.geometry;
+            primitives += u64::from(
+                if geometry.indices.is_some() {
+                    geometry.index_count
+                } else {
+                    geometry.vertex_count
+                } / 3,
+            );
+        }
+        if primitives > u64::from(limits.max_blas_primitive_count) {
             self.remove_blas(geometry_id);
             return Err(AccelerationError::InvalidGeometry(
                 "triangle count exceeds the device limit",
             ));
         }
-        let key = geometry.key(opaque);
+        let key: Vec<GeometryKey> = segments
+            .iter()
+            .map(|segment| segment.geometry.key(segment.opaque))
+            .collect();
         if self.geometry_keys.get(&geometry_id) == Some(&key) {
             return Ok(false);
         }
+        let device = self.device.clone();
         let mut copy_input = |source: &wgpu::Buffer, offset: u64, size: u64| {
             if source.usage().contains(wgpu::BufferUsages::BLAS_INPUT) {
                 return None;
             }
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("BLAS pooled geometry build input"),
                 size,
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::BLAS_INPUT,
@@ -208,29 +254,43 @@ impl BlasManager {
             encoder.copy_buffer_to_buffer(source, offset, &buffer, 0, size);
             Some(buffer)
         };
-        let vertex_copy = copy_input(
-            geometry.vertices,
-            u64::from(geometry.first_vertex) * geometry.vertex_stride,
-            u64::from(geometry.vertex_count) * geometry.vertex_stride,
-        );
-        let index_copy = geometry.indices.and_then(|indices| {
-            copy_input(
-                indices,
-                u64::from(geometry.first_index) * 4,
-                u64::from(geometry.index_count) * 4,
-            )
-        });
-        let size = wgpu::BlasTriangleGeometrySizeDescriptor {
-            vertex_format: wgpu::VertexFormat::Float32x3,
-            vertex_count: geometry.vertex_count,
-            index_format: geometry.indices.map(|_| wgpu::IndexFormat::Uint32),
-            index_count: geometry.indices.map(|_| geometry.index_count),
-            flags: if opaque {
-                wgpu::AccelerationStructureGeometryFlags::OPAQUE
-            } else {
-                wgpu::AccelerationStructureGeometryFlags::empty()
-            },
-        };
+        // Pools without BLAS_INPUT are copied into temporary inputs.
+        let copies: Vec<_> = segments
+            .iter()
+            .map(|segment| {
+                let geometry = &segment.geometry;
+                let vertices = copy_input(
+                    geometry.vertices,
+                    u64::from(geometry.first_vertex) * geometry.vertex_stride,
+                    u64::from(geometry.vertex_count) * geometry.vertex_stride,
+                );
+                let indices = geometry.indices.and_then(|indices| {
+                    copy_input(
+                        indices,
+                        u64::from(geometry.first_index) * 4,
+                        u64::from(geometry.index_count) * 4,
+                    )
+                });
+                (vertices, indices)
+            })
+            .collect();
+        let sizes: Vec<_> = segments
+            .iter()
+            .map(|segment| {
+                let geometry = &segment.geometry;
+                wgpu::BlasTriangleGeometrySizeDescriptor {
+                    vertex_format: wgpu::VertexFormat::Float32x3,
+                    vertex_count: geometry.vertex_count,
+                    index_format: geometry.indices.map(|_| wgpu::IndexFormat::Uint32),
+                    index_count: geometry.indices.map(|_| geometry.index_count),
+                    flags: if segment.opaque {
+                        wgpu::AccelerationStructureGeometryFlags::OPAQUE
+                    } else {
+                        wgpu::AccelerationStructureGeometryFlags::empty()
+                    },
+                }
+            })
+            .collect();
         let blas = self.device.create_blas(
             &wgpu::CreateBlasDescriptor {
                 label: Some("versioned_geometry_blas"),
@@ -238,31 +298,40 @@ impl BlasManager {
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             },
             wgpu::BlasGeometrySizeDescriptors::Triangles {
-                descriptors: vec![size.clone()],
+                descriptors: sizes.clone(),
             },
         );
-        let entry = wgpu::BlasBuildEntry {
-            blas: &blas,
-            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
-                size: &size,
-                vertex_buffer: vertex_copy.as_ref().unwrap_or(geometry.vertices),
-                first_vertex: if vertex_copy.is_some() {
-                    0
-                } else {
-                    geometry.first_vertex
-                },
-                vertex_stride: geometry.vertex_stride,
-                index_buffer: index_copy.as_ref().or(geometry.indices),
-                first_index: geometry.indices.map(|_| {
-                    if index_copy.is_some() {
+        let triangles = segments
+            .iter()
+            .zip(&copies)
+            .zip(&sizes)
+            .map(|((segment, (vertex_copy, index_copy)), size)| {
+                let geometry = &segment.geometry;
+                wgpu::BlasTriangleGeometry {
+                    size,
+                    vertex_buffer: vertex_copy.as_ref().unwrap_or(geometry.vertices),
+                    first_vertex: if vertex_copy.is_some() {
                         0
                     } else {
-                        geometry.first_index
-                    }
-                }),
-                transform_buffer: None,
-                transform_buffer_offset: None,
-            }]),
+                        geometry.first_vertex
+                    },
+                    vertex_stride: geometry.vertex_stride,
+                    index_buffer: index_copy.as_ref().or(geometry.indices),
+                    first_index: geometry.indices.map(|_| {
+                        if index_copy.is_some() {
+                            0
+                        } else {
+                            geometry.first_index
+                        }
+                    }),
+                    transform_buffer: None,
+                    transform_buffer_offset: None,
+                }
+            })
+            .collect();
+        let entry = wgpu::BlasBuildEntry {
+            blas: &blas,
+            geometry: wgpu::BlasGeometries::TriangleGeometries(triangles),
         };
         encoder.build_acceleration_structures(
             std::iter::once(&entry),
@@ -273,6 +342,7 @@ impl BlasManager {
         self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
+
 
     /// Build a BLAS from vertex/index data.
     pub fn build_blas(
@@ -576,7 +646,7 @@ impl TlasManager {
                 tlas[i] = Some(wgpu::TlasInstance::new(
                     blas,
                     input.transform,
-                    0,
+                    input.custom_data,
                     mask(masks, i),
                 ));
             }
@@ -605,4 +675,9 @@ impl TlasManager {
 pub struct TlasInstanceInput {
     pub geometry_id: u64,
     pub transform: [f32; 12],
+    /// The instance's 24-bit custom data (a ray query's
+    /// `instance_custom_data`): by convention the first row of the
+    /// instance's per-segment table, a hit's row being this plus its
+    /// `geometry_index`.
+    pub custom_data: u32,
 }
