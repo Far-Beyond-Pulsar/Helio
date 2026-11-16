@@ -1,0 +1,15 @@
+[package]
+name = "helio-pass-selection-outline"
+version = "0.1.0"
+edition = "2021"
+description = "Helio render pass: the editor's selection outline, from the selection mask every kind draws into"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-frame-api = { path = "../../../helio-frame-api" }
+helio-feature-api = { path = "../../../helio-feature-api" }
+helio-core = { workspace = true }
+wgpu = { workspace = true }
+
+[dev-dependencies]
+naga = { version = "30.0.0", features = ["wgsl-in"] }

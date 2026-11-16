@@ -981,6 +981,7 @@ dependencies = [
 name = "helio-frame-api"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "helio-core",
  "helio-feature-api",
  "naga",
@@ -1081,6 +1082,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-selection-outline"
+version = "0.1.0"
+dependencies = [
+ "helio-core",
+ "helio-feature-api",
+ "helio-frame-api",
+ "naga",
+ "wgpu",
+]
+
+[[package]]
 name = "helio-pass-ssr"
 version = "0.1.0"
 dependencies = [
@@ -1143,6 +1155,7 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-planar-reflection",
  "helio-pass-postprocess",
+ "helio-pass-selection-outline",
  "helio-pass-ssr",
  "helio-pass-tsr",
  "helio-spine",
