@@ -3326,3 +3326,17 @@ with its own program:
   secondary views yet**: its world is one pass's and its draw state (targets,
   denoiser history, per-eye motion, parameters) one camera's; drawing the
   frame's world for another view needs that state per view.
+- **Cost per view.** `Renderer::view_timing_snapshots` gives each view
+  graph's GPU timings (nested views included); the frame's own snapshot holds
+  the primary view's. A graph's span (`__graph_*`) also covers the time the
+  CPU spent recording views between its submissions, so a view's cost is the
+  sum of its passes. Render acceptance at 256x256 (debug build, pipelined
+  frames, three interleaved rounds): a linked portal pair in view, two inline
+  views with one nested, 1.46-1.68 ms of passes.
+- **Known gap (water).** The capture mirrors about
+  `WaterSimPass::ocean_rest_height` (0 unless a host calls
+  `set_ocean_rest_height`), while the surface draws at its volume row's
+  height; nothing in Pulsar sets the plane from the volumes, so a surface
+  away from y = 0 reflects about the wrong plane. It predates p25; the water
+  plugin owns the fix (the plane from the live volumes, and a choice when
+  several heights are in view).
