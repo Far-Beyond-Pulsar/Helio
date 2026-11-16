@@ -207,14 +207,11 @@ impl Renderer {
         // longer downcasts into GBufferPass to discover its storage.
         self.graph
             .publish_frame_inputs(&self.camera_data, &mut resource_registry);
-        let coordinate_spaces = resource_registry
-            .get::<helio_core::CoordinateSpacesFrameData<'_>>(
-                helio_core::resource_keys::coordinate_spaces(),
-            )
-            .unwrap_or(helio_core::CoordinateSpacesFrameData {
-                coordinate_spaces: &self.camera_buffer,
-                coordinate_spaces_prev: &self.camera_buffer,
-            });
+        // The frame's coordinate-space table (the renderer's: every kind
+        // places content by space through it).
+        self.coordinate_space_table
+            .upload(&self.queue, &self.coordinate_spaces);
+        let coordinate_spaces = self.coordinate_space_table.frame_data();
         let clear_color = self.clear_color;
         let ambient = self
             .graph_config

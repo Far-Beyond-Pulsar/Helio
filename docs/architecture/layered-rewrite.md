@@ -287,20 +287,22 @@ Two kind-agnostic frame facts every pass can use, owned by `helio-core`:
 
 ### Views (as built, p25)
 
-A frame renders its primary view and the secondary views features ask for
-(`helio_core::view`): **captures** into the requester's target (a planar
-reflection) and **inline** views into its G-buffer (a portal's destination).
-A pass that renders views (`RenderPass::renders_views`) asks for them at a
-pass boundary; each runs a view graph the preset composes from the frame's
-members for that view (`Preset::view_nodes`), so no feature names another's
-pass. Nodes marked `once_per_frame` (object batches, shadow views, GI's probe
-update) are the frame's and views read their outputs; everything else runs
-per view. Drawers read the view's facts from the build environment
-(`helio_frame_api::view`: winding, clip) and the view's camera (clip plane,
-inline slot, map), and tag their pixels with the view; the frame's view
-table (`lighting::VIEW_REMAPS`) maps an inline view's pixels back to their
-content for the lighting. `ViewBudget` bounds depth and count. Details:
-plugin-migration.md, "As built, p25".
+A frame renders its primary view and the captures features ask for
+(`helio_core::view`): a capture renders into the requester's target (a
+planar reflection). A pass that renders views (`RenderPass::renders_views`)
+asks for them at a pass boundary; each runs a view graph the preset composes
+from the frame's members (`Preset::view_nodes`), so no feature names
+another's pass. Nodes marked `once_per_frame` (object batches, shadow views,
+GI's probe update) are the frame's and views read their outputs; everything
+else runs per view. Drawers read the view's facts from the build environment
+(`helio_frame_api::view`: winding, clip) and the view's camera (clip plane).
+`ViewBudget` (the host's `capture_depth`, `max_captures`) bounds depth and
+count. A portal is not a view: it is a map between coordinate spaces, and
+every drawer draws its content through the frame's portal chains in the
+frame's own G-buffer, tagging those pixels with the chain's remap
+(`lighting::VIEW_REMAPS`) so lighting and decals take them back to their
+content's world. Details: plugin-migration.md, "As built, p25" and "As
+built, p25b".
 
 ### Why this shape
 

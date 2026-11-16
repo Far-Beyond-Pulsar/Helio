@@ -1,16 +1,12 @@
 //! Views: the cameras a frame renders.
 //!
 //! A frame renders its **primary** view (the host's camera, or an XR eye)
-//! and the secondary views its features ask for:
-//!
-//! - a **capture** renders into the requester's own target, lit (a planar
-//!   reflection; UE's SceneCaptures and planar reflections, HDRP's probe
-//!   cameras);
-//! - an **inline** view draws into the requesting view's G-buffer, inside a
-//!   mask the requester made in the view's depth (a portal's destination;
-//!   Valve's stencil portals). The lighting shades its pixels back in their
-//!   content's space through the frame's view table
-//!   ([`VIEW_REMAPS_RESOURCE`]).
+//! and the **captures** its features ask for: a capture renders into the
+//! requester's own target, lit (a planar reflection; UE's SceneCaptures and
+//! planar reflections, HDRP's probe cameras). What a rigid map can show (a
+//! portal, a sublevel) is not a view: it is drawn into the frame's own
+//! G-buffer as more occurrences of each drawer's content, through the frame's
+//! coordinate spaces and the portals' chains.
 //!
 //! A pass asks for views at a pass boundary ([`crate::RenderPass::renders_views`]):
 //! the graph submits what it recorded so far (so a view reads this frame's
@@ -22,16 +18,18 @@
 //! pipelines and history survive frames. A view graph starts from the
 //! requester's resources (the host's inputs and what once-per-frame passes
 //! published) and allocates only what it writes itself, except what the
-//! request imports (an inline view's G-buffer).
+//! request seeds (its colour target as the scene colour).
+//!
+//! A capture keeps no history of the frame's (no temporal resolve runs in
+//! one, `helio_presets`), and the frame's exposure maps what it captured: a
+//! capture adapts no exposure of its own.
 //!
 //! Every drawer draws every view it is built in with its own program: it
 //! reads the view's facts from the [`ViewDescription`] its graph was built
 //! for (winding, clip) and the [`GpuCameraUniforms`] of the view (camera,
-//! clip plane, inline-view slot).
+//! clip plane).
 
 use std::sync::{Arc, Mutex};
-
-use glam::Mat4;
 
 use crate::GpuCameraUniforms;
 
@@ -44,9 +42,6 @@ pub enum ViewKind {
     /// Rendered into the requester's target, lit (scene prep through the
     /// lighting).
     Capture,
-    /// Drawn into the requester's G-buffer through a mask in the view's
-    /// depth (visibility and the G-buffer phase only, every drawer loading).
-    Inline,
 }
 
 /// What a view is, as the graph that renders it was built for. A setting of
@@ -97,12 +92,13 @@ pub const VIEW_MIRRORED: u32 = 1;
 /// `view_info.y`: the view has a clip plane (`HELIO_VIEW_CLIPPED`).
 pub const VIEW_CLIPPED: u32 = 2;
 
-/// How many views a frame may render ([`ViewContext::render_view`] refuses
-/// past it; the requester shows its fallback). A setting of the frame.
+/// How many captures a frame may render ([`ViewContext::render_view`]
+/// refuses past it; the requester shows its fallback). A quality setting of
+/// the host (`helio_settings`), defaulting to [`ViewBudget::default`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewBudget {
-    /// The deepest view: 1 lets the primary view's portals and reflections
-    /// render, 2 a portal seen in a reflection or through another portal.
+    /// The deepest capture: 1 lets the primary view's reflections render,
+    /// 2 a reflection seen in a reflection.
     pub max_depth: u32,
     /// Secondary views per frame, all depths together.
     pub max_views: u32,
@@ -117,46 +113,26 @@ impl Default for ViewBudget {
     }
 }
 
-/// Inline-view slots the frame's view table holds
-/// (`helio_frame_api::lighting::VIEW_REMAP_CHAINS`).
-pub const VIEW_SLOTS: u32 = 256;
-
-/// The frame's view table in the registry: a uniform buffer of
-/// [`VIEW_SLOTS`] matrices, per inline-view slot the map from the drawn
-/// frame's space into the view's content space, written as inline views
-/// render. `helio_frame_api::lighting::VIEW_REMAPS` names it for readers.
-pub const VIEW_REMAPS_RESOURCE: &str = "view_remaps";
-
-/// One secondary view a pass asks for ([`ViewContext::render_view`]).
+/// One capture a pass asks for ([`ViewContext::render_view`]).
 pub struct ViewRequest<'r> {
-    /// Stable per requester and view (a portal's id, a reflection's plane):
-    /// the view graph and its history are retained under it.
+    /// Stable per requester and capture (a reflection's plane): the view
+    /// graph is retained under it.
     pub key: u64,
-    pub kind: ViewKind,
     /// The view's camera reverses handedness.
     pub mirrored: bool,
     /// The view's camera, clip plane included (`clip_plane` nonzero makes
-    /// the view clipped). An inline view's camera is the requester's seen
-    /// through [`Self::content_to_drawn`] ([`GpuCameraUniforms::through`]).
+    /// the view clipped).
     pub camera: GpuCameraUniforms,
-    /// An inline view's map from its content's space into the requester's
-    /// (rigid). Ignored for captures.
-    pub content_to_drawn: Mat4,
     pub width: u32,
     pub height: u32,
-    /// The colour target (a capture's lit colour). An inline view draws no
-    /// colour of its own; pass the requester's.
+    /// The capture's lit colour target.
     pub target: &'r wgpu::TextureView,
-    /// The view's depth. An inline view's holds its mask: far inside the
-    /// opening, near outside, so every drawer's depth test clips to it.
+    /// The capture's depth.
     pub depth: &'r wgpu::TextureView,
     /// The texture behind [`Self::depth`] (what copies it: the view's Hi-Z).
     pub depth_texture: &'r wgpu::Texture,
-    /// Resources the view takes from the requester instead of allocating
-    /// (an inline view's G-buffer, by its frame names).
-    pub imports: &'r [&'static str],
-    /// Texture views the view graph receives under a name, imported likewise
-    /// (a capture's colour target as the frame's scene colour).
+    /// Texture views the view graph takes under a name instead of allocating
+    /// them (the colour target as the frame's scene colour).
     pub seeds: &'r [(&'static str, &'r wgpu::TextureView)],
 }
 
@@ -175,36 +151,25 @@ pub struct ViewBuild<'b> {
 
 /// Builds the graph a kind of view runs: the graph builder's (the preset
 /// composes it from the frame's members). Returns the graph unlocked; the
-/// requester's graph imports what the request names and locks it.
+/// requester.s graph imports what the request seeds and locks it.
 pub trait ViewGraphSource: Send + Sync {
     fn build(&self, build: &ViewBuild<'_>) -> Result<crate::RenderGraph, String>;
 }
 
-/// The frame's views, shared by every graph that renders in the frame: the
-/// view table, the budget and what was spent of it.
+/// The frame's captures, shared by every graph that renders in the frame:
+/// the budget and what was spent of it.
 pub struct ViewFrame {
     pub(crate) budget: ViewBudget,
-    /// The view table (`VIEW_REMAPS_RESOURCE`), uniform.
-    pub(crate) remaps: wgpu::Buffer,
     pub(crate) frame: u64,
     pub(crate) views_rendered: u32,
-    pub(crate) slots_used: u32,
 }
 
 impl ViewFrame {
-    pub(crate) fn new(device: &wgpu::Device) -> Arc<Mutex<Self>> {
-        let remaps = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Frame view table"),
-            size: u64::from(VIEW_SLOTS) * 64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    pub(crate) fn new() -> Arc<Mutex<Self>> {
         Arc::new(Mutex::new(Self {
             budget: ViewBudget::default(),
-            remaps,
             frame: u64::MAX,
             views_rendered: 0,
-            slots_used: 0,
         }))
     }
 
@@ -213,14 +178,13 @@ impl ViewFrame {
         if self.frame != frame {
             self.frame = frame;
             self.views_rendered = 0;
-            self.slots_used = 0;
         }
     }
 }
 
 /// What [`crate::RenderPass::render_views`] gets: the requesting view's frame
-/// and an encoder for the pass's own work around its views (a portal's mask
-/// before, its depth after). Work recorded before a [`Self::render_view`] is
+/// and an encoder for the pass's own work around its captures (a
+/// reflection's mips after it). Work recorded before a [`Self::render_view`] is
 /// submitted ahead of the view; what follows the last view is submitted
 /// when the call returns.
 pub struct ViewContext<'a> {
@@ -245,7 +209,7 @@ pub struct ViewContext<'a> {
 }
 
 impl ViewContext<'_> {
-    /// An encoder for the pass's own work around its views.
+    /// An encoder for the pass's own work around its captures.
     pub fn encoder(&mut self) -> &mut wgpu::CommandEncoder {
         let device = self.device;
         self.encoder.get_or_insert_with(|| {

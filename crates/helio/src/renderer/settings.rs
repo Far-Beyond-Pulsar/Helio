@@ -57,6 +57,10 @@ impl RendererConfig {
         self.enable_environment_reflections = settings.bool("environment_reflections");
         self.enable_ssr = settings.bool("screen_space_reflections");
         self.enable_planar_reflections = settings.bool("planar_reflections");
+        self.views = helio_core::ViewBudget {
+            max_depth: settings.number("capture_depth") as u32,
+            max_views: settings.number("max_captures") as u32,
+        };
         self.hdr_output_mode = match settings.text("hdr_output_mode") {
             "hdr10" => HdrOutputMode::Hdr10,
             "scrgb" => HdrOutputMode::ScRgb,

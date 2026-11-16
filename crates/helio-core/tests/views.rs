@@ -1,14 +1,14 @@
-//! A pass renders secondary views (`helio_core::view`) through the graph's
-//! view source: each view graph runs with the request's camera and the
-//! requester's resources, inline views nest and compose their maps and slots
-//! in the frame's view table, and the frame's budget bounds how deep.
+//! A pass renders captures (`helio_core::view`) through the graph's view
+//! source: each view graph runs with the request's camera and the
+//! requester's resources, a capture can ask for one inside it, and the
+//! frame's budget bounds how deep.
 
 mod support;
 
 use std::sync::{Arc, Mutex};
 
-use glam::{Mat4, Vec3, Vec4};
-use helio_core::view::{VIEW_CLIPPED, VIEW_MIRRORED, VIEW_REMAPS_RESOURCE};
+use glam::Vec4;
+use helio_core::view::{VIEW_CLIPPED, VIEW_MIRRORED};
 use helio_core::{
     GpuCameraUniforms, PassContext, RenderGraph, RenderPass, ResourceKey, Result as HelioResult,
     ViewBudget, ViewBuild, ViewContext, ViewDescription, ViewGraphSource, ViewKind, ViewRequest,
@@ -22,19 +22,18 @@ struct Seen {
     built_for: ViewDescription,
     camera: GpuCameraUniforms,
     inherited: Option<u32>,
-    table: bool,
 }
 
 type Log = Arc<Mutex<Vec<Seen>>>;
 
-fn target(
-    device: &wgpu::Device,
-) -> (
+type Targets = (
     wgpu::Texture,
     wgpu::TextureView,
     wgpu::Texture,
     wgpu::TextureView,
-) {
+);
+
+fn target(device: &wgpu::Device) -> Targets {
     let make = |format, usage| {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("view test target"),
@@ -64,17 +63,26 @@ fn target(
     (color, color_view, depth, depth_view)
 }
 
-/// The pass a view graph runs: it records what it saw and, in an inline
-/// view, asks for a view inside it (a portal seen through a portal).
+fn capture<'r>(key: u64, mirrored: bool, camera: GpuCameraUniforms, targets: &'r Targets) -> ViewRequest<'r> {
+    ViewRequest {
+        key,
+        mirrored,
+        camera,
+        width: 32,
+        height: 32,
+        target: &targets.1,
+        depth: &targets.3,
+        depth_texture: &targets.2,
+        seeds: &[],
+    }
+}
+
+/// The pass a view graph runs: it records what it saw and asks for a
+/// capture inside it (a reflection seen in a reflection).
 struct Probe {
     built_for: ViewDescription,
     log: Log,
-    targets: (
-        wgpu::Texture,
-        wgpu::TextureView,
-        wgpu::Texture,
-        wgpu::TextureView,
-    ),
+    targets: Targets,
 }
 
 impl RenderPass for Probe {
@@ -83,25 +91,11 @@ impl RenderPass for Probe {
     }
 
     fn renders_views(&self) -> bool {
-        self.built_for.kind == ViewKind::Inline
+        true
     }
 
     fn render_views(&mut self, views: &mut ViewContext<'_>) -> HelioResult<()> {
-        let map = Mat4::from_translation(Vec3::new(0.0, 0.0, -10.0));
-        let request = ViewRequest {
-            key: 7,
-            kind: ViewKind::Inline,
-            mirrored: false,
-            camera: views.camera_data.through(map, map),
-            content_to_drawn: map,
-            width: 32,
-            height: 32,
-            target: views.target,
-            depth: &self.targets.3,
-            depth_texture: &self.targets.2,
-            imports: &[],
-            seeds: &[],
-        };
+        let request = capture(7, false, *views.camera_data, &self.targets);
         views.render_view(&request)?;
         Ok(())
     }
@@ -120,7 +114,6 @@ impl RenderPass for Probe {
             built_for: self.built_for,
             camera: *ctx.camera_data,
             inherited: ctx.registry.get(PARENT_VALUE),
-            table: ctx.registry.contains(VIEW_REMAPS_RESOURCE),
         });
         Ok(())
     }
@@ -142,21 +135,10 @@ impl ViewGraphSource for Source {
     }
 }
 
-/// The frame's own pass: a mirrored capture and a portal's inline view.
+/// The frame's own pass: a mirrored, clipped capture.
 struct Requester {
     rendered: Arc<Mutex<Vec<bool>>>,
-    capture: (
-        wgpu::Texture,
-        wgpu::TextureView,
-        wgpu::Texture,
-        wgpu::TextureView,
-    ),
-    inline: (
-        wgpu::Texture,
-        wgpu::TextureView,
-        wgpu::Texture,
-        wgpu::TextureView,
-    ),
+    capture: Targets,
 }
 
 impl RenderPass for Requester {
@@ -169,43 +151,12 @@ impl RenderPass for Requester {
     }
 
     fn render_views(&mut self, views: &mut ViewContext<'_>) -> HelioResult<()> {
-        let capture = ViewRequest {
-            key: 1,
-            kind: ViewKind::Capture,
-            mirrored: true,
-            camera: views
-                .camera_data
-                .with_clip_plane(Vec4::new(0.0, 1.0, 0.0, 0.0)),
-            content_to_drawn: Mat4::IDENTITY,
-            width: 32,
-            height: 32,
-            target: &self.capture.1,
-            depth: &self.capture.3,
-            depth_texture: &self.capture.2,
-            imports: &[],
-            seeds: &[],
-        };
-        let map = Mat4::from_translation(Vec3::new(100.0, 0.0, 0.0));
-        let inline = ViewRequest {
-            key: 2,
-            kind: ViewKind::Inline,
-            mirrored: false,
-            camera: views
-                .camera_data
-                .through(map, map)
-                .with_clip_plane(Vec4::new(1.0, 0.0, 0.0, 0.0)),
-            content_to_drawn: map,
-            width: 32,
-            height: 32,
-            target: &self.inline.1,
-            depth: &self.inline.3,
-            depth_texture: &self.inline.2,
-            imports: &[],
-            seeds: &[],
-        };
-        let mut rendered = self.rendered.lock().unwrap();
-        rendered.push(views.render_view(&capture)?);
-        rendered.push(views.render_view(&inline)?);
+        let camera = views
+            .camera_data
+            .with_clip_plane(Vec4::new(0.0, 1.0, 0.0, 0.0));
+        let request = capture(1, true, camera, &self.capture);
+        let ran = views.render_view(&request)?;
+        self.rendered.lock().unwrap().push(ran);
         Ok(())
     }
 
@@ -224,7 +175,7 @@ impl RenderPass for Requester {
 }
 
 #[test]
-fn views_run_their_graphs_nest_and_stop_at_the_budget() {
+fn captures_run_their_graphs_nest_and_stop_at_the_budget() {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(helio_core::wgpu_instance_descriptor());
         let Some(adapter) = instance
@@ -254,7 +205,6 @@ fn views_run_their_graphs_nest_and_stop_at_the_budget() {
         graph.add_pass(Box::new(Requester {
             rendered: Arc::clone(&rendered),
             capture: target(&device),
-            inline: target(&device),
         }));
         graph.lock(32, 32);
 
@@ -272,49 +222,33 @@ fn views_run_their_graphs_nest_and_stop_at_the_budget() {
                 .expect("the frame renders");
             let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
-            assert_eq!(*rendered.lock().unwrap(), [true, true], "frame {frame}");
+            assert_eq!(*rendered.lock().unwrap(), [true], "frame {frame}");
             let seen = log.lock().unwrap().clone();
-            // The capture, the inline view, and the view inside the inline
-            // view (depth 2); the depth-3 view the last one asks for is past
-            // the budget and does not run.
-            assert_eq!(seen.len(), 3, "frame {frame}: {seen:#?}");
+            // The capture and the capture inside it (depth 2); the depth-3
+            // capture the last one asks for is past the budget and does not
+            // run.
+            assert_eq!(seen.len(), 2, "frame {frame}: {seen:#?}");
             for view in &seen {
+                assert_eq!(view.built_for.kind, ViewKind::Capture);
                 assert_eq!(
                     view.inherited,
                     Some(42),
                     "a view reads its requester's resources"
                 );
-                assert!(view.table, "the frame's view table is published");
             }
-            let capture = seen
-                .iter()
-                .find(|v| v.built_for.kind == ViewKind::Capture)
-                .expect("the capture ran");
-            assert_eq!(capture.built_for.kind, ViewKind::Capture);
-            assert!(capture.built_for.mirrored && capture.built_for.clipped);
-            assert_eq!(
-                capture.camera.view_info,
-                [0, VIEW_MIRRORED | VIEW_CLIPPED, 1, 0],
-                "a capture owns its G-buffer: no inline slot"
-            );
-            // The view inside the inline view runs before the inline view's
-            // own draw (its pass renders views first).
             let at = |depth: u32| {
                 seen.iter()
-                    .find(|v| v.built_for.kind == ViewKind::Inline && v.built_for.depth == depth)
-                    .expect("the inline view at that depth ran")
+                    .find(|v| v.built_for.depth == depth)
+                    .expect("the capture at that depth ran")
             };
             let (outer, inner) = (at(1), at(2));
-            assert_eq!(outer.built_for.depth, 1);
-            assert_eq!(inner.built_for.depth, 2);
-            // Each inline view has its slot in the frame's table, and the
-            // nested one draws through both maps.
-            assert_ne!(outer.camera.view_info[0], 0);
-            assert_ne!(inner.camera.view_info[0], 0);
-            assert_ne!(outer.camera.view_info[0], inner.camera.view_info[0]);
-            let composed = Mat4::from_translation(Vec3::new(100.0, 0.0, -10.0));
-            let drawn = Mat4::from_cols_array(&inner.camera.content_to_drawn);
-            assert!(drawn.abs_diff_eq(composed, 1e-4), "{drawn} vs {composed}");
+            assert!(outer.built_for.mirrored && outer.built_for.clipped);
+            assert_eq!(
+                outer.camera.view_info,
+                [0, VIEW_MIRRORED | VIEW_CLIPPED, 1, 0]
+            );
+            assert!(!inner.built_for.mirrored);
+            assert_eq!(inner.camera.view_info[2], 2);
         }
     });
 }

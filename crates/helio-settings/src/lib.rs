@@ -359,6 +359,22 @@ pub static RENDERER: Group = Group {
             false,
             "Render authored planar reflection surfaces",
         ),
+        integer(
+            "capture_depth",
+            "Capture Depth",
+            "Reflections",
+            (1, 4),
+            2,
+            "How deep captures nest (a water reflection, a mirror): 2 lets a reflection show              another; past it a surface shows its fallback",
+        ),
+        integer(
+            "max_captures",
+            "Captures per Frame",
+            "Reflections",
+            (1, 64),
+            16,
+            "The most captures a frame renders, all depths together; each renders the scene              again",
+        ),
         pick(
             "hdr_output_mode",
             "HDR Output",

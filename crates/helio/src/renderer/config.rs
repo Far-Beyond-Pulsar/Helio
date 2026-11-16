@@ -336,9 +336,10 @@ pub struct RendererConfig {
     /// plane, so cost scales with scene complexity times plane count. As with
     /// SSR, `DeferredLightPass` falls back to a 1×1 black texture.
     pub enable_planar_reflections: bool,
-    /// How many secondary views a frame may render (`helio_core::view`): how
-    /// deep captures and portals nest, and how many render in all. Past it a
-    /// requester shows its fallback (a reflection its sky, a portal closed).
+    /// How many captures a frame may render (`helio_core::view`): how deep
+    /// they nest and how many render in all (the host's `capture_depth` and
+    /// `max_captures`). Past it a requester shows its fallback (a reflection
+    /// its sky).
     pub views: helio_core::ViewBudget,
     /// Enable environment-cubemap indirect specular. Default `true`.
     ///
