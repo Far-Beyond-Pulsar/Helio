@@ -3233,6 +3233,11 @@ As built, p25 (2026-11-15, branch `rewrite/p25-views` in Helio, Pulsar-Native
 and the plugin repos it touches): **views** (Helio#390). Design note:
 `p25-views-design.md` in the session notes.
 
+**Superseded in part by p25b** (below): portals are no longer inline views.
+The captures half of this section stands; the inline views, the camera's
+`content_to_drawn` and inline slot, the view-slot tags and the graph's view
+table were replaced.
+
 A frame renders its primary view and the secondary views its features ask
 for, each composed from the frame's own members, each drawn by every drawer
 with its own program:
@@ -3340,3 +3345,79 @@ with its own program:
   away from y = 0 reflects about the wrong plane. It predates p25; the water
   plugin owns the fix (the plane from the live volumes, and a choice when
   several heights are in view).
+
+As built, p25b (2026-11-16, branch `rewrite/p25b-portal-spaces` in Helio,
+Pulsar-Native and the plugin repos it touches): **portals are coordinate
+spaces** (Helio#390). The inline-view design of p25 drew each visible
+opening as a view (its own culls and drawers per portal); the user rejected
+it. A portal is a rigid map between coordinate spaces, never a view:
+
+- **The portals publish chains** (`helio_portal_api`, a new api crate):
+  `PortalSync` publishes every opening and every route through openings to
+  `project.portals.max_chain_depth` (default 3) as the frame payload
+  `PORTAL_CHAIN_SET`, each route's maps composed on the CPU into one
+  `content_to_drawn` that the frame's own camera projects. The chains pass
+  (`PortalChainsPass`, scene prep) keeps the routes the camera sees (every
+  opening faced and on screen, the prefix route live), shallowest first, at
+  most `project.portals.max_chains` (default 300), and uploads
+  `PORTAL_CHAINS` (with last frame's map per route key, for motion),
+  `PORTAL_STAGES` (each stage's opening, and each chain's holes: the
+  openings deeper chains show), the remaps (`lighting::VIEW_REMAPS`, now a
+  uniform of 1024) and `PORTAL_LIVE_CHAINS` (the CPU's copy: key, depth,
+  map, the camera in the content). The mask pass (`PortalMaskPass`, G-buffer
+  order 60, `MASK_ORDER`) stamps the outermost openings into `PORTAL_MASK`
+  (`R32Uint`, `opening + 1`) and clears the depth behind them.
+- **Each drawer draws its content through the chains** at
+  `OCCURRENCE_ORDER` (70), one cull and one draw whatever the chain count:
+  - meshes: `PortalOccurrencePass` (count, single-workgroup scan, write;
+    no fixed caps, buffers grow from last frame's total) emits
+    (instance, chain) occurrences into one multi-draw, compacted with the
+    occlusion cull's own range compaction; the one G-buffer program's
+    `vs_occurrence`/`fs_occurrence` map through the chain and clip;
+  - foliage: eye sets (`project.foliage.portal_eyes`, default 1): the tile
+    rings kept resident around the camera and around the places the live
+    chains show (a set follows a route while it lives; content within the
+    near band of another set's eye shares it), one cull dispatch per stage
+    with a chain dimension (`cs_*_chains`: the frustum mapped into the
+    content, band distances from the camera's place there, only what lies
+    beyond the route's openings), the occurrence draw
+    (`FoliageGBufferPortalOccurrences`) and its boxes expansion;
+  - decals: no draw of their own; each pixel is taken back to its content's
+    world through its remap and the decals there paint it.
+  The clip is `//!use portal_chain`: the outer stage by the mask and its
+  plane, each inner stage by the camera's ray through its rectangle, holes
+  where a deeper chain draws.
+- **Lighting**: a chain's pixels carry its remap (`gbuffer_remap_tag`), and
+  deferred lighting, water transmission and decals map position and normal
+  back through `VIEW_REMAPS`. G-buffer normals are in the drawn space.
+  Lights and shadows through portals are as before views: lit by the lights
+  of the content's own world, shadows sampled at the content's position
+  (content outside the camera's cascades and local shadow maps is unlit by
+  shadows).
+- **The coordinate-space table moved to the renderer**
+  (`helio::renderer::CoordinateSpaceTable`, published as
+  `CoordinateSpacesFrameData`): the G-buffer pass no longer owns it, so it
+  exists without meshes.
+- **Captures only** (`ViewKind::{Primary, Capture}`): `ViewBudget` is the
+  host's `rendering.capture_depth`/`max_captures` (it was never applied
+  before: `RendererConfig::views` reached no graph). Water's capture renders
+  at `project.water.reflection_scale` (default 0.5) and only while a placed
+  water volume is in the frustum: the volumes' bounds come back by a
+  non-blocking readback (two frames late) and are tested against this
+  frame's camera.
+- **Deleted**: `PortalViewsPass`, `portal_views.wgsl`, the openings payload
+  (`PORTAL_OPENINGS`, `PortalOpenings`), `ViewKind::Inline`, the camera's
+  `content_to_drawn` and inline slot, `GpuCameraUniforms::through`,
+  `helio_view_normal(_in_content)`, `gbuffer_view_tag`, `gbuffer_in_view`,
+  `view_remap_of`, `VIEW_SLOTS`, `VIEW_REMAPS_RESOURCE`, the graph's view
+  table, `view::loads_gbuffer`, `INLINE_TARGETS`, the request's imports and
+  kind, the G-buffer pass's coordinate-space ownership, the foliage
+  placement's single eye uniform, and the examples' portal recursion through
+  the capture budget.
+- **Known gap (virtual geometry)**: virtual geometry does not draw through
+  portals (`virtual_geometry_shows_through_a_portal` fails). Its
+  visibility-buffer pipeline (cluster cull, hardware and software raster,
+  resolve) needs a chain dimension: the cull emitting (cluster, chain), the
+  visibility buffer carrying the chain, and the raster clipping per pixel.
+  That is VG's own phase (Far-Beyond-Pulsar/Pulsar-Native#1747).
+

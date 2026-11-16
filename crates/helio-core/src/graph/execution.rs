@@ -281,6 +281,8 @@ pub struct RenderGraph {
     pub(crate) xr_active: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
+    /// The scene frame this graph last executed: its views' current frame.
+    scene_frame: Option<u64>,
     /// The views this graph's passes render ([`crate::view`]), retained per
     /// requesting pass and request key.
     views: HashMap<(&'static str, u64), ViewSlot>,
@@ -453,6 +455,7 @@ impl RenderGraph {
             xr_active: false,
             pass_cache: Vec::new(),
             frame_count: 0,
+            scene_frame: None,
             views: HashMap::new(),
             view_source: None,
             view_frame: Arc::clone(&view_frame),
@@ -747,12 +750,14 @@ impl RenderGraph {
         self.view_description
     }
 
-    /// The graphs of the views this graph's passes rendered, with the
-    /// requesting pass, the request key and each one's last measured GPU
-    /// time: a view's cost.
+    /// The graphs of the views this graph's passes rendered in its last
+    /// frame, with the requesting pass, the request key and each one's last
+    /// measured GPU time: a view's cost. A retained view not rendered that
+    /// frame (its requester skipped it) is not listed.
     pub fn view_graphs(&self) -> Vec<(&'static str, u64, &RenderGraph)> {
         self.views
             .iter()
+            .filter(|(_, slot)| Some(slot.rendered_frame) == self.scene_frame)
             .map(|((pass, key), slot)| (*pass, *key, &slot.graph))
             .collect()
     }
@@ -1668,6 +1673,7 @@ impl RenderGraph {
             self.locked,
             "RenderGraph::execute() requires lock() to be called first"
         );
+        self.scene_frame = Some(scene.frame_count());
         // The frame's captures ([`crate::view`]): the first graph of the
         // frame starts the budget.
         self.view_frame
@@ -3041,6 +3047,8 @@ struct ViewSlot {
     camera_generation: u64,
     description: crate::ViewDescription,
     imports: Vec<&'static str>,
+    /// The scene frame it last rendered.
+    rendered_frame: u64,
 }
 
 /// The frame as a view graph sees it: the requester's scene, the view's
@@ -3181,10 +3189,12 @@ impl crate::view::ViewRunner for GraphViews<'_> {
                     camera_generation: 0,
                     description,
                     imports,
+                    rendered_frame: parent.frame_num,
                 },
             );
         }
         let slot = self.views.get_mut(&key).expect("inserted above");
+        slot.rendered_frame = parent.frame_num;
         if slot.graph.render_size().internal != [width, height] {
             slot.graph.set_render_size(width, height);
         }

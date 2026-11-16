@@ -119,6 +119,8 @@ impl Setting {
     pub fn accept(&self, value: Value) -> Option<Value> {
         match (self.kind, value) {
             (Kind::Toggle, Value::Bool(b)) => Some(Value::Bool(b)),
+            // Hosts that store toggles as numbers (0 off, anything else on).
+            (Kind::Toggle, Value::Number(n)) if n.is_finite() => Some(Value::Bool(n != 0.0)),
             (Kind::Number { min, max, .. }, Value::Number(n)) if n.is_finite() => {
                 Some(Value::Number(n.clamp(min, max)))
             }

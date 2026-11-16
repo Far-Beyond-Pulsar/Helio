@@ -63,7 +63,12 @@ fn target(device: &wgpu::Device) -> Targets {
     (color, color_view, depth, depth_view)
 }
 
-fn capture<'r>(key: u64, mirrored: bool, camera: GpuCameraUniforms, targets: &'r Targets) -> ViewRequest<'r> {
+fn capture<'r>(
+    key: u64,
+    mirrored: bool,
+    camera: GpuCameraUniforms,
+    targets: &'r Targets,
+) -> ViewRequest<'r> {
     ViewRequest {
         key,
         mirrored,

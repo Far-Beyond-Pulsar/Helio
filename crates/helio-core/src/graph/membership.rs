@@ -12,8 +12,7 @@
 //! Scene content is SceneDB rows. Hosts register component columns up front,
 //! so a buffer's presence says nothing; [`SceneContent::holds_rows`] reads the
 //! rows back whenever SceneDB reports new contents and answers whether any row
-//! is live. One reader per buffer key serves every pass that asks (the four
-//! portal passes share `portal_views`).
+//! is live. One reader per buffer key serves every pass that asks.
 
 use std::collections::HashMap;
 
