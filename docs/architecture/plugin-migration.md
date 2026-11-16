@@ -3359,7 +3359,9 @@ it. A portal is a rigid map between coordinate spaces, never a view:
   `content_to_drawn` that the frame's own camera projects. The chains pass
   (`PortalChainsPass`, scene prep) keeps the routes the camera sees (every
   opening faced and on screen, the prefix route live), shallowest first, at
-  most `project.portals.max_chains` (default 300), and uploads
+  most `project.portals.max_chains` (default 300), composing each route
+  in f64 about the frame origin (the host's poses, `chain_set_with_poses`)
+  and converting to f32 once, and uploads
   `PORTAL_CHAINS` (with last frame's map per route key, for motion),
   `PORTAL_STAGES` (each stage's opening, and each chain's holes: the
   openings deeper chains show), the remaps (`lighting::VIEW_REMAPS`, now a
@@ -3390,10 +3392,14 @@ it. A portal is a rigid map between coordinate spaces, never a view:
 - **Lighting**: a chain's pixels carry its remap (`gbuffer_remap_tag`), and
   deferred lighting, water transmission and decals map position and normal
   back through `VIEW_REMAPS`. G-buffer normals are in the drawn space.
-  Lights and shadows through portals are as before views: lit by the lights
-  of the content's own world, shadows sampled at the content's position
-  (content outside the camera's cascades and local shadow maps is unlit by
-  shadows).
+- **Known gap (lights and shadows through portals)**: content seen through
+  a portal is lit by the lights of its own world, walking the scene's lights
+  (at most 256; the tile lists are the camera's), and is not shadowed: the
+  frame's shadow maps are the camera's world's (deferred lighting skips them
+  for remapped pixels, as it did for p25's views). No light shines through
+  an opening into the other side. Shadow views per chain (or a
+  shared virtual shadow map covering the chains' content) and lights
+  crossing openings are an open design for the user.
 - **The coordinate-space table moved to the renderer**
   (`helio::renderer::CoordinateSpaceTable`, published as
   `CoordinateSpacesFrameData`): the G-buffer pass no longer owns it, so it
