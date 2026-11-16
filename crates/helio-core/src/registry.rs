@@ -159,6 +159,7 @@ trait ErasedResourceSlot: Send + Sync {
     fn self_mut_ptr(&mut self) -> *mut ();
     fn has_value(&self) -> bool;
     fn reset_tracking(&mut self, writer: &'static str);
+    fn clone_slot(&self) -> Box<dyn ErasedResourceSlot + '_>;
 }
 
 struct TypedResourceSlot<T> {
@@ -177,7 +178,7 @@ impl<T> TypedResourceSlot<T> {
     }
 }
 
-impl<T: Send + Sync> ErasedResourceSlot for TypedResourceSlot<T> {
+impl<T: Copy + Send + Sync> ErasedResourceSlot for TypedResourceSlot<T> {
     fn type_tag(&self) -> &'static str {
         resource_type_tag::<T>()
     }
@@ -192,6 +193,14 @@ impl<T: Send + Sync> ErasedResourceSlot for TypedResourceSlot<T> {
 
     fn has_value(&self) -> bool {
         self.value.is_some()
+    }
+
+    fn clone_slot(&self) -> Box<dyn ErasedResourceSlot + '_> {
+        Box::new(TypedResourceSlot {
+            value: self.value,
+            #[cfg(debug_assertions)]
+            written_by: self.written_by,
+        })
     }
 
     fn reset_tracking(&mut self, writer: &'static str) {
@@ -220,6 +229,21 @@ impl<'a> ResourceRegistry<'a> {
         Self {
             slots: HashMap::new(),
             bindings: HashMap::new(),
+            graph_bindings: HashSet::new(),
+        }
+    }
+
+    /// A registry that starts as this one: every value and binding written
+    /// so far (a view graph runs over its requester's resources; see
+    /// [`crate::view`]). Writes to it stay its own.
+    pub fn inherit(&self) -> ResourceRegistry<'_> {
+        ResourceRegistry {
+            slots: self
+                .slots
+                .iter()
+                .map(|(name, slot)| (*name, slot.clone_slot()))
+                .collect(),
+            bindings: self.bindings.clone(),
             graph_bindings: HashSet::new(),
         }
     }
@@ -546,6 +570,23 @@ mod resource_registry_tests {
     use super::{ResourceKey, ResourceRegistry};
 
     const VALUE: ResourceKey<u32> = ResourceKey::new("test_value");
+
+    /// A view's registry starts as its requester's; what the view writes
+    /// stays the view's.
+    #[test]
+    fn an_inherited_registry_starts_as_its_parent_and_keeps_its_own_writes() {
+        const OTHER: ResourceKey<u32> = ResourceKey::new("test_other");
+        let mut parent = ResourceRegistry::empty();
+        parent.write(VALUE, 7, "parent");
+        let mut child = parent.inherit();
+        assert_eq!(child.get(VALUE), Some(7));
+        child.write(VALUE, 9, "child");
+        child.write(OTHER, 1, "child");
+        assert_eq!(child.get(VALUE), Some(9));
+        drop(child);
+        assert_eq!(parent.get(VALUE), Some(7));
+        assert_eq!(parent.get(OTHER), None);
+    }
     const OPTIONAL: ResourceKey<u64> = ResourceKey::new("optional_value");
 
     #[test]

@@ -173,9 +173,7 @@ pub fn required_experimental_features(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        ray_queries_usable, required_wgpu_features, required_wgpu_limits, RendererConfig,
-    };
+    use super::{ray_queries_usable, required_wgpu_features, required_wgpu_limits, RendererConfig};
     use helio_core::{TEXTURE_BINDING_ARRAYS, TEXTURE_TABLE_BINDINGS_LIMIT};
 
     fn adapter(name: &str, driver: &str, device_type: wgpu::DeviceType) -> wgpu::AdapterInfo {
@@ -338,6 +336,10 @@ pub struct RendererConfig {
     /// plane, so cost scales with scene complexity times plane count. As with
     /// SSR, `DeferredLightPass` falls back to a 1×1 black texture.
     pub enable_planar_reflections: bool,
+    /// How many secondary views a frame may render (`helio_core::view`): how
+    /// deep captures and portals nest, and how many render in all. Past it a
+    /// requester shows its fallback (a reflection its sky, a portal closed).
+    pub views: helio_core::ViewBudget,
     /// Enable environment-cubemap indirect specular. Default `true`.
     ///
     /// This is the *base* reflection layer in deferred lighting — SSR and planar
@@ -388,6 +390,7 @@ impl RendererConfig {
             enable_ssr: false,
             features: helio_feature_api::FeatureSettings::new(),
             enable_planar_reflections: false,
+            views: helio_core::ViewBudget::default(),
             enable_environment_reflections: true,
             tsr_quality: None,
             hdr_output_mode: helio_pass_postprocess::HdrOutputMode::Ldr,

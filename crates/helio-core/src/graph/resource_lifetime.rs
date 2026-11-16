@@ -252,16 +252,25 @@ impl RenderGraph {
             } else {
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
             } | rl.extra_usage;
+            // An imported resource is the executor's (an inline view draws
+            // into its requester's G-buffer): its texture here is a 1x1
+            // stand-in of its format, for what probes the passes at lock; each
+            // frame the graph keeps the view it was handed (`execute`).
+            let imported = self.is_imported(name);
             let tex_desc = TextureDescriptor {
                 name: name.clone(),
                 format: rl.format,
-                width: rl.width,
-                height: rl.height,
+                width: if imported { 1 } else { rl.width },
+                height: if imported { 1 } else { rl.height },
                 depth_or_array_layers: rl.depth_or_array_layers,
-                mip_level_count: rl.mip_level_count,
+                mip_level_count: 1.max(if imported { 1 } else { rl.mip_level_count }),
                 sample_count: 1,
                 usage,
-                alias_group: rl.alias_group.clone(),
+                alias_group: if imported {
+                    None
+                } else {
+                    rl.alias_group.clone()
+                },
             };
             self.pool.allocate(&self.device, tex_desc);
             active.push(name.as_str());

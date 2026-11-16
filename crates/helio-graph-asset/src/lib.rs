@@ -28,7 +28,7 @@ pub use asset::{
     SECTION_PREFIX,
 };
 pub use compile::build_env;
-pub use compile::{compile, GraphAssetPipeline, MakeAsset};
+pub use compile::{compile, compile_view, GraphAssetPipeline, MakeAsset, MakeViewAsset};
 pub use helio_feature_api::{PinDesc, PinKind, PinShape, PinType};
 pub use layout::{auto_layout, LANE_PREFIX};
 pub use probe::{output_pin, probe, Probe, SCENEDB_PREFIX};

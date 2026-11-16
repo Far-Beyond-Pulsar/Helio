@@ -331,6 +331,12 @@ pub struct NodeDescriptor {
     /// The extension point the node joins a preset graph at, and its order
     /// there (lower first). `None`: the preset places it by name.
     pub placement: Option<(ExtensionPoint, i32)>,
+    /// The node's work is the frame's, done once whatever views the frame
+    /// renders (an object kind's batches, the shadow views and their
+    /// casters, GI's probe update, the atmosphere's tables): the graphs of
+    /// secondary views leave it out and read what it published
+    /// (`helio_core::view`). Every other node runs per view.
+    pub once_per_frame: bool,
     pins: PinsFn,
     build: BuildFn,
     checks: Vec<CheckFn>,
@@ -356,6 +362,7 @@ impl NodeDescriptor {
             alternative_inputs: Vec::new(),
             unsupported: None,
             placement: None,
+            once_per_frame: false,
             pins: Arc::new(|_| NodePins::default()),
             build: Arc::new(build),
             checks: Vec::new(),
@@ -404,6 +411,13 @@ impl NodeDescriptor {
     /// A performance marker is inserted after this node by the registry's marker.
     pub fn with_marker_after(mut self) -> Self {
         self.marker_after = true;
+        self
+    }
+
+    /// Marks the node's work as the frame's, done once whatever views it
+    /// renders ([`Self::once_per_frame`]).
+    pub fn once_per_frame(mut self) -> Self {
+        self.once_per_frame = true;
         self
     }
 

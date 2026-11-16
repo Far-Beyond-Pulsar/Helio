@@ -670,7 +670,9 @@ impl RenderPass for HiZBuildPass {
         if self.depth_copy_supported && (nearest_wanted || farthest_rebuild) {
             let depth_texture = ctx
                 .registry
-                .get::<&wgpu::Texture>(helio_core::ResourceKey::new("depth_texture"))
+                .get::<&wgpu::Texture>(helio_core::ResourceKey::new(
+                    helio_core::resource_keys::DEPTH_TEXTURE,
+                ))
                 .expect("Renderer must publish the active depth texture for HiZ");
             cmds.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {

@@ -23,14 +23,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use helio::{IntoGraph, PassBuildContext, PipelineFailure};
 use helio_core::RenderGraph;
+use helio_core::{ViewDescription, ViewKind};
 use helio_feature_api::ExtensionPoint;
 use helio_frame_api::lighting::{
     model, resolve_model, Antialiasing, LightingModel, ModelPipeline, Shading,
 };
 use helio_frame_api::{Phase, Slot, HOST_INPUTS};
 use helio_graph_asset::{
-    core_nodes, Connection, GraphAsset, GraphAssetPipeline, NodeInstance, NodeRegistry, Params,
-    PinRef,
+    core_nodes, Connection, GraphAsset, GraphAssetPipeline, MakeViewAsset, NodeInstance,
+    NodeRegistry, Params, PinRef,
 };
 use serde_json::Value;
 
@@ -150,24 +151,13 @@ impl Preset {
         let mut nodes = Nodes {
             registry,
             list: Vec::new(),
+            view: None,
         };
         let aa = self.antialiasing();
         let model = self.model(registry);
-
-        // What the frame is: the lighting model (and so the draw phases, the
-        // specular layers, where the lighting inputs run) and whether the
-        // temporal resolve reads a reactive mask. A node, so a `.rendergraph`
-        // states the same thing as data.
-        nodes.raw(
-            "frame",
-            crate::features::FRAME_SETUP,
-            [
-                ("model", Value::from(self.model_id())),
-                (
-                    "reactive_mask",
-                    Value::from(model.reactive_transparency && aa != Antialiasing::Fxaa),
-                ),
-            ],
+        nodes.frame(
+            self,
+            model.reactive_transparency && aa != Antialiasing::Fxaa,
         );
 
         // Scene prep: per-frame tables (an object kind's batches first), the
@@ -181,15 +171,7 @@ impl Preset {
 
         // Geometry and lighting: the forward phase draws lit; otherwise the
         // G-buffer is resolved by the installed lighting model, or unlit.
-        if model.shading == Shading::Forward {
-            nodes.phase(Phase::Forward);
-            nodes.slot(Slot::LightingInputs);
-        } else {
-            nodes.phase(Phase::GBuffer);
-            nodes.slot(Slot::Geometry);
-            nodes.slot(Slot::LightingInputs);
-            nodes.lighting_model(model);
-        }
+        nodes.geometry_and_lighting(model);
         nodes.slot(Slot::Lighting);
 
         // Over the lit scene, then the scene-linear chain: media,
@@ -222,37 +204,76 @@ impl Preset {
         nodes.list
     }
 
+    /// The preset's nodes for a secondary view (`helio_core::view`): the
+    /// same frame with its once-per-frame nodes left out (the view reads
+    /// what they published), as far as the view needs.
+    ///
+    /// - A **capture** renders lit: scene prep, the background, visibility,
+    ///   the geometry phase and its slots, the lighting inputs, the lighting
+    ///   model and the lighting slot. It stops before the overlay phase, so
+    ///   a capture never sees what draws over the lit scene there (water's
+    ///   own surface): a reflection holds no reflection (UE's and HDRP's
+    ///   rule, here a property of the composition).
+    /// - An **inline** view draws into its requester's G-buffer: visibility
+    ///   and the geometry phase, every drawer loading the G-buffer (its
+    ///   opener included, `helio_frame_api::view::loads_gbuffer`).
+    ///
+    /// No pass is named: every feature placed at those slots and phases
+    /// joins the view as it joins the frame.
+    pub fn view_nodes(self, registry: &NodeRegistry, view: &ViewDescription) -> Vec<NodeInstance> {
+        if view.kind == ViewKind::Primary {
+            return self.nodes(registry);
+        }
+        let mut nodes = Nodes {
+            registry,
+            list: Vec::new(),
+            view: Some(*view),
+        };
+        let model = self.model(registry);
+        nodes.frame(self, false);
+        if view.kind == ViewKind::Inline {
+            nodes.slot(Slot::Visibility);
+            nodes.phase(if model.shading == Shading::Forward {
+                Phase::Forward
+            } else {
+                Phase::GBuffer
+            });
+        } else {
+            nodes.slot(Slot::Prepare);
+            nodes.pass("background");
+            nodes.slot(Slot::Visibility);
+            nodes.geometry_and_lighting(model);
+            nodes.slot(Slot::Lighting);
+        }
+        nodes.list
+    }
+
+    /// [`Self::view_nodes`] as a graph (On Frame Start, the nodes on one
+    /// chain), for `helio_graph_asset::GraphAssetPipeline::with_views`.
+    pub fn view_asset(self, registry: &NodeRegistry, view: &ViewDescription) -> GraphAsset {
+        chain_asset(
+            &format!("{} ({:?} view)", self.name(), view.kind),
+            self.view_nodes(registry, view),
+            registry,
+            true,
+        )
+    }
+
     /// The preset as a graph: On Frame Start, its nodes on one execution
     /// chain, the Output, and the host inputs it reads.
     pub fn asset(self, registry: &NodeRegistry) -> GraphAsset {
-        let mut asset = GraphAsset {
-            name: self.name().into(),
-            ..Default::default()
-        };
-        asset.nodes.push(node("start", core_nodes::ON_FRAME_START));
-        let chain = self.nodes(registry);
-        let ids: Vec<String> = chain.iter().map(|node| node.id.clone()).collect();
-        asset.nodes.extend(chain);
-        asset.nodes.push(node("output", core_nodes::OUTPUT));
-        let mut from = "start".to_string();
-        for id in ids.into_iter().chain(["output".to_string()]) {
-            asset.connections.push(Connection {
-                from: PinRef::new(&from, "out"),
-                to: PinRef::new(&id, "in"),
-            });
-            from = id;
-        }
-        for descriptor in registry.placed(HOST_INPUTS) {
-            let id = descriptor.kind.replace('.', "_");
-            asset.nodes.push(node(&id, &descriptor.kind));
-        }
-        asset
+        chain_asset(self.name(), self.nodes(registry), registry, false)
     }
 
     /// The preset as a pipeline over `registry`'s nodes.
     pub fn pipeline_with(self, registry: Arc<NodeRegistry>) -> GraphAssetPipeline {
         let asset = Arc::new(self.asset(&registry));
-        GraphAssetPipeline::new(asset, registry)
+        GraphAssetPipeline::new(asset, registry).with_views(self.views())
+    }
+
+    /// How the preset composes its secondary views ([`Self::view_asset`]).
+    pub fn views(self) -> MakeViewAsset {
+        Arc::new(move |registry, view| self.view_asset(registry, view))
     }
 
     /// The preset as a pipeline over the default features' nodes.
@@ -358,6 +379,77 @@ pub(crate) fn tsr_quality_name(quality: helio::TsrQuality) -> &'static str {
     }
 }
 
+/// On Frame Start, `chain` on one execution chain, the Output, and the host
+/// inputs the registry's nodes read (a `view`'s leave out the frame's
+/// once-per-frame inputs, which it reads from its requester).
+fn chain_asset(
+    name: &str,
+    chain: Vec<NodeInstance>,
+    registry: &NodeRegistry,
+    view: bool,
+) -> GraphAsset {
+    let mut asset = GraphAsset {
+        name: name.into(),
+        ..Default::default()
+    };
+    asset.nodes.push(node("start", core_nodes::ON_FRAME_START));
+    let ids: Vec<String> = chain.iter().map(|node| node.id.clone()).collect();
+    asset.nodes.extend(chain);
+    asset.nodes.push(node("output", core_nodes::OUTPUT));
+    let mut from = "start".to_string();
+    for id in ids.into_iter().chain(["output".to_string()]) {
+        asset.connections.push(Connection {
+            from: PinRef::new(&from, "out"),
+            to: PinRef::new(&id, "in"),
+        });
+        from = id;
+    }
+    // A view reads the frame's once-per-frame inputs from its requester.
+    for descriptor in registry
+        .placed(HOST_INPUTS)
+        .into_iter()
+        .filter(|descriptor| !(view && descriptor.once_per_frame))
+    {
+        let id = descriptor.kind.replace('.', "_");
+        asset.nodes.push(node(&id, &descriptor.kind));
+    }
+    asset
+}
+
+/// How an authored pipeline's secondary views are composed: the frame's
+/// members for the view, lit by the lighting model `asset`'s frame setup
+/// chose (a project's own graph, a shipped one copied and edited). A graph
+/// names its primary view's passes; a capture or an inline view is every
+/// feature placed at the view's slots and phases, as the preset composes it.
+pub fn view_graphs_for(asset: &GraphAsset) -> MakeViewAsset {
+    let model = asset
+        .nodes
+        .iter()
+        .find(|node| node.kind == crate::features::FRAME_SETUP)
+        .and_then(|node| node.params.get("model"))
+        .and_then(Value::as_str)
+        .unwrap_or(model::DEFERRED)
+        .to_string();
+    Arc::new(move |registry, view| preset_for_model(registry, &model).view_asset(registry, view))
+}
+
+/// The preset whose lighting model is `model_id`: a shipped one, or the
+/// pipeline a registered model brings (the deferred preset, unlit if nobody
+/// registered it, otherwise).
+fn preset_for_model(registry: &NodeRegistry, model_id: &str) -> Preset {
+    Preset::ALL
+        .into_iter()
+        .find(|preset| preset.model_id() == model_id)
+        .or_else(|| {
+            helio_frame_api::lighting::registered_models(registry)
+                .into_iter()
+                .flat_map(|registered| registered.pipelines.iter())
+                .find(|pipeline| pipeline.model == model_id)
+                .map(|pipeline| Preset::Model(*pipeline))
+        })
+        .unwrap_or(Preset::Deferred)
+}
+
 fn node(id: &str, kind: &str) -> NodeInstance {
     NodeInstance {
         id: id.into(),
@@ -371,6 +463,9 @@ fn node(id: &str, kind: &str) -> NodeInstance {
 struct Nodes<'r> {
     registry: &'r NodeRegistry,
     list: Vec<NodeInstance>,
+    /// The secondary view the list is for, if any: its once-per-frame nodes
+    /// are left out.
+    view: Option<ViewDescription>,
 }
 
 impl Nodes<'_> {
@@ -393,8 +488,41 @@ impl Nodes<'_> {
 
     /// The nodes placed at `point`, by order then kind; a node's id is its
     /// kind without the `helio.pass.` prefix.
+    /// What the frame is: the lighting model (and so the draw phases, the
+    /// specular layers, where the lighting inputs run) and whether the
+    /// temporal resolve reads a reactive mask. A node, so a `.rendergraph`
+    /// states the same thing as data.
+    fn frame(&mut self, preset: Preset, reactive_mask: bool) {
+        self.raw(
+            "frame",
+            crate::features::FRAME_SETUP,
+            [
+                ("model", Value::from(preset.model_id())),
+                ("reactive_mask", Value::from(reactive_mask)),
+            ],
+        );
+    }
+
+    /// The geometry phase, its slots and the lighting model: the forward
+    /// phase draws lit; otherwise the G-buffer is resolved by the installed
+    /// lighting model, or unlit.
+    fn geometry_and_lighting(&mut self, model: &LightingModel) {
+        if model.shading == Shading::Forward {
+            self.phase(Phase::Forward);
+            self.slot(Slot::LightingInputs);
+        } else {
+            self.phase(Phase::GBuffer);
+            self.slot(Slot::Geometry);
+            self.slot(Slot::LightingInputs);
+            self.lighting_model(model);
+        }
+    }
+
     fn at(&mut self, point: ExtensionPoint) {
         for descriptor in self.registry.placed(point) {
+            if self.view.is_some() && descriptor.once_per_frame {
+                continue;
+            }
             let id = descriptor
                 .kind
                 .trim_start_matches("helio.pass.")
@@ -430,7 +558,9 @@ impl Nodes<'_> {
     fn phase(&mut self, phase: Phase) {
         let openers = self.registry.placed(phase.open()).len();
         let drawers = self.registry.placed(phase.draw()).len();
-        let spine_clears = phase == Phase::GBuffer && openers == 0;
+        // An inline view draws into its requester's G-buffer: nothing clears it.
+        let inline = self.view.is_some_and(|view| view.kind == ViewKind::Inline);
+        let spine_clears = phase == Phase::GBuffer && openers == 0 && !inline;
         if phase.needs_opener() {
             assert!(
                 openers <= 1 && (drawers == 0 || openers == 1 || spine_clears),
@@ -466,6 +596,84 @@ mod tests {
         fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
             registrar.lighting_model(self.0.clone());
             registrar.node(pass_node("test_lit", "Test lit", "Test", "", |_| Ok(())).at(POINT, 0));
+        }
+    }
+
+    /// A secondary view is the frame's members for it: a capture renders lit
+    /// and stops before the overlay phase, an inline view draws only the
+    /// G-buffer phase (and its visibility) into its requester's G-buffer, and
+    /// neither runs what is the frame's once (`once_per_frame`).
+    #[test]
+    fn a_view_is_the_frames_members_for_it_without_its_once_per_frame_work() {
+        use helio_feature_api::FeatureRegistrar;
+        use helio_frame_api::FrameNode;
+        struct Kinds;
+        impl helio_feature_api::Feature for Kinds {
+            fn id(&self) -> &'static str {
+                "test.views"
+            }
+            fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+                let node = |kind: &str| pass_node(kind, kind, "Test", "", |_| Ok(()));
+                registrar.node(node("batch").once_per_frame().in_slot(Slot::Prepare, -100));
+                registrar.node(node("tables").in_slot(Slot::Prepare, 0));
+                registrar.node(node("cull").in_slot(Slot::Visibility, -10));
+                registrar.node(node("opener").opens(Phase::GBuffer, 0));
+                registrar.node(node("leaves").drawer(Phase::GBuffer, 20));
+                registrar.node(node("probes").once_per_frame().in_slot(Slot::Geometry, 20));
+                registrar.node(node("resolve").in_slot(Slot::LightingInputs, 0));
+                registrar.node(node("sky").in_slot(Slot::Lighting, 0));
+                registrar.node(node("sea").drawer(Phase::Overlay, 30));
+                registrar.node(node("fog").in_slot(Slot::Media, 0));
+            }
+        }
+        let registry = crate::graphs::registry_with(&FeatureSet::new().with(Kinds));
+        let ids = |view: ViewDescription| -> Vec<String> {
+            Preset::DeferredFxaa
+                .view_nodes(&registry, &view)
+                .into_iter()
+                .map(|node| node.id)
+                .collect()
+        };
+        let has = |list: &[String], id: &str| list.iter().any(|n| n == id);
+        let capture = ids(ViewDescription {
+            kind: ViewKind::Capture,
+            mirrored: true,
+            clipped: true,
+            depth: 1,
+        });
+        for id in [
+            "frame",
+            "tables",
+            "background",
+            "cull",
+            "opener",
+            "leaves",
+            "resolve",
+            "sky",
+        ] {
+            assert!(has(&capture, id), "a capture runs `{id}`: {capture:?}");
+        }
+        for id in ["batch", "probes", "sea", "fog", "fxaa", "post_process"] {
+            assert!(
+                !has(&capture, id),
+                "a capture does not run `{id}`: {capture:?}"
+            );
+        }
+        let inline = ids(ViewDescription {
+            kind: ViewKind::Inline,
+            mirrored: false,
+            clipped: true,
+            depth: 1,
+        });
+        assert_eq!(
+            inline,
+            ["frame", "cull", "hiz", "opener", "leaves"],
+            "{inline:?}"
+        );
+        // The frame's own graph is unchanged by any of it.
+        let primary = ids(ViewDescription::PRIMARY);
+        for id in ["batch", "probes", "sea", "fog"] {
+            assert!(has(&primary, id), "{primary:?}");
         }
     }
 

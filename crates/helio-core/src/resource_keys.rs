@@ -14,6 +14,10 @@ use crate::{ResourceKey, ResourceRegistry};
 /// [`crate::graph::AttachmentSlot::Depth`] to (the frame's G-buffer depth,
 /// `helio_frame_api::gbuffer::DEPTH`).
 pub const DEPTH: &str = "depth";
+/// The texture behind the graph's depth target (`&wgpu::Texture`), for what
+/// copies it (the Hi-Z pyramid): the renderer's for the frame's own view, a
+/// view request's for a secondary view (`crate::view`).
+pub const DEPTH_TEXTURE: &str = "depth_texture";
 /// Current coordinate-space table published for culling and geometry passes.
 pub const COORDINATE_SPACES: &str = "coordinate_spaces";
 /// Previous-frame coordinate-space table, when exposed as an independent resource.

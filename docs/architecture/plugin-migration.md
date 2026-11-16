@@ -2492,7 +2492,9 @@ issue (above); views are the next design item, not p17's.
   per-view mirroring, and the meshes cull and draw remapped, clip-masked
   views; removes water's capture graph naming the meshes' passes and the
   portals' copy of the mesh G-buffer program. Waits on: its design (a new
-  capability that changes what reflections and portals show).
+  capability that changes what reflections and portals show). **Done in
+  p25** (Helio#390, "As built, p25" below), except voxel terrain, which
+  secondary views do not draw yet.
 - Pulsar-Native (meshes, VG): **dense VG acceptance**:
   `virtual_geometry_dense_acceptance` fails as on p16 (hardware raster, no
   dense tiles). Waits on: VG's final structure.
@@ -3221,3 +3223,101 @@ Helio#393's frame owners.
     V4).
   Eighteen `kind-names.txt` lines are deleted; the list holds none for baked
   lighting.
+
+As built, p25 (2026-11-15, branch `rewrite/p25-views` in Helio, Pulsar-Native
+and the plugin repos it touches): **views** (Helio#390). Design note:
+`p25-views-design.md` in the session notes.
+
+A frame renders its primary view and the secondary views its features ask
+for, each composed from the frame's own members, each drawn by every drawer
+with its own program:
+
+- **Two kinds of secondary view** (`helio_core::view`). A *capture* renders
+  into its requester's target, lit (a planar reflection: UE's planar
+  reflections and SceneCaptures, HDRP's probe cameras). An *inline* view draws
+  into its requester's G-buffer, inside a mask in the view's depth (a portal's
+  destination: Valve's stencil portals, the mask held in depth instead of a
+  stencil). `ViewDescription` (kind, mirrored, clipped, depth) is a setting of
+  every node's build environment (`helio_frame_api::view::view_of`), so a
+  drawer bakes winding (`front_face`) and clip (`CLIP_CONSTANT`, compiled out
+  of the primary view's pipelines) into what it builds.
+- **The camera is the view's.** `GpuCameraUniforms` (464 B, was 368) gained
+  `clip_plane` (a capture clips at its water plane instead of an oblique
+  projection, so every view's depth is the frame's standard reversed-Z depth),
+  `view_info` (the inline-view slot, flags, depth) and `content_to_drawn` (an
+  inline view's map into the G-buffer's space). The prelude's
+  `helio_view_clipped`, `helio_view_normal` and `gbuffer_view_tag` are the
+  one place drawers read them. `GpuCameraUniforms::through` is a camera seen
+  through a rigid map: same projection, so an inline view's depth and pixels
+  are exactly what drawing its content through the map would give.
+- **Surface tags carry the view** (`gbuffer::SURFACE`): `x` the view that
+  drew the pixel (-1, or -2 - slot for an inline view), `y` the kind (plain,
+  own occlusion, traced). A pixel of a portal's content keeps its kind (it
+  lost it before: foliage through a portal got SSAO), and screen-space
+  drawers touch only their view's pixels (`gbuffer_in_view`: the frame's
+  decals no longer paint what a portal shows).
+- **The frame owns the view table.** `lighting::VIEW_REMAPS` is the
+  graph's registry buffer (256 slots, `VIEW_REMAPS_RESOURCE`), written as
+  inline views render and composed through nested ones; the portals no
+  longer upload chain unmaps, and it left `FRAME_BUFFERS`.
+- **Views render at a pass boundary.** `RenderPass::renders_views` (such a
+  pass never fuses into a render-pass chain) and `render_views(ViewContext)`:
+  the graph submits what it recorded so far, so a view reads this frame's
+  shadows, batches, probes and the requester's depth; `ViewContext::render_view`
+  submits the pass's own work so far and runs the view's graph in its own
+  submission (its uploads go out with it; a graph run twice in a frame never
+  sees the other run's writes). View graphs are retained per requesting pass
+  and request key (pipelines, history and Hi-Z survive frames), start from the
+  requester's registry (`ResourceRegistry::inherit`: host inputs, frame
+  inputs, what once-per-frame passes published), get the view's depth texture
+  (`resource_keys::DEPTH_TEXTURE`, which Hi-Z copies) and allocate only what
+  they write themselves except what the request imports
+  (`RenderGraph::import_resource`: an inline view's G-buffer, a 1x1 stand-in
+  at lock for what probes the passes). `ViewBudget` (`RendererConfig::views`,
+  default depth 2, 16 views) bounds them; past it `render_view` returns
+  `false` and the requester shows its fallback. Deleted:
+  `PassContext::execute_secondary_graph`, the executor's secondary-graph map,
+  `RenderGraph::new_with_external_device_ref`.
+- **Once per frame, or per view.** `NodeDescriptor::once_per_frame()` marks
+  the frame's work: the meshes' object batch and shadow casters, the lights'
+  shadow views, GI's probe update and mesh tracer, baked lighting's
+  injection, the sky's tables, the materials' texture table. Everything else
+  runs per view, at its cost per view.
+- **The preset composes view graphs** (`Preset::view_nodes`/`view_asset`;
+  `helio_presets::view_graphs_for` for an authored asset, by its frame
+  setup's lighting model; `GraphAssetPipeline::with_views` hands the built
+  graph a `ViewGraphSource`). A capture is scene prep, the background,
+  visibility, the geometry phase and its slots, the lighting inputs, the
+  model and the lighting slot: it stops before the overlay phase, so a
+  reflection holds no reflection (UE's and HDRP's depth-1 rule, a property of
+  the composition). An inline view is visibility and the geometry phase,
+  every drawer loading the G-buffer (`view::loads_gbuffer`; the spine's clear
+  never runs). No pass is named.
+- **Water** requests one mirrored capture clipped at its rest plane (half
+  resolution, mips after) from its surface pass. Deleted: the capture's pass
+  list, `ReflectedScene`/`PassScene`, `oblique_reverse_z`, and water's
+  dependencies on five mesh and light pass crates and the materials.
+- **Portals** publish the frame's direct openings (`PORTAL_OPENINGS`: pose,
+  extent, view map, stable key), and one drawer, last in the G-buffer phase
+  (`PortalViewsPass`), stamps the visible ones against the view's depth,
+  makes each opening's view depth from the stamp (far inside, near outside:
+  every drawer's depth test clips to it), renders the inline view through the
+  opening (clipped at the destination's plane) and writes its depth back.
+  Recursion is the same drawer inside the inline view's graph, bounded by the
+  budget. Deleted: `PortalCullPass`, `PortalInstancePass`, `PortalMaskPass`,
+  `gbuffer_portal.wgsl`, `portal_cull.wgsl`, `compact_portal.wgsl`,
+  `portal_mask.wgsl`, the compaction segments, the chain/view/counts GPU
+  contracts and their derivation (`scene_rows`), `PORTAL_COUNTS`, the
+  portals' coordinate-space slots in the frame's table, the demos' GPU row
+  components, and the cull crate's dependencies on the meshes and materials.
+- **Drawers.** Meshes (`GBufferPass::with_view`; `set_mirrored_view`
+  deleted), foliage, decals and virtual geometry draw every view: winding
+  from the view, the clip compiled in for clipped views, normals through the
+  view (`helio_view_normal`), the view's tag. Decals touch only their view's
+  pixels. VG's winding follows the view, its cull drops clusters wholly
+  behind the clip plane and sends those crossing it to the hardware raster
+  (which clips per pixel), and a secondary view adds no stream begin or end
+  (streaming is the frame's view's). **Voxel terrain does not draw
+  secondary views yet**: its world is one pass's and its draw state (targets,
+  denoiser history, per-eye motion, parameters) one camera's; drawing the
+  frame's world for another view needs that state per view.

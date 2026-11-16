@@ -19,7 +19,9 @@
 pub mod features;
 pub mod graphs;
 pub mod presets;
-pub use presets::{deferred, deferred_fxaa, forward, registry, Preset, PresetGraph};
+pub use presets::{
+    deferred, deferred_fxaa, forward, registry, view_graphs_for, Preset, PresetGraph,
+};
 
 pub(crate) fn convert_perf_mode(
     mode: helio::PerfOverlayMode,

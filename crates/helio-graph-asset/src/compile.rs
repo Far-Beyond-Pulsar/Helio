@@ -36,6 +36,11 @@ pub(crate) enum Purpose {
     /// output), so its structure is checked and its routing is not, and it is
     /// left open.
     Probe,
+    /// A secondary view's graph (`helio_core::view`): it ends where its
+    /// requester reads it (a lit colour, a G-buffer), not at an output, so
+    /// its structure is checked and its routing is not, and it is left open
+    /// for its requester to import into and lock.
+    View,
 }
 
 /// The shared build (see [`Purpose`]).
@@ -49,7 +54,7 @@ pub(crate) fn build_graph(
     let lock = purpose == Purpose::Pipeline;
     let validation = match purpose {
         Purpose::Pipeline => validate(asset, registry),
-        Purpose::Probe => validate_structure(asset, registry),
+        Purpose::Probe | Purpose::View => validate_structure(asset, registry),
     };
     for diagnostic in &validation.diagnostics {
         if diagnostic.severity == Severity::Warning {
@@ -129,6 +134,22 @@ pub(crate) fn build_graph(
     Ok(graph)
 }
 
+/// Builds the graph of a secondary view from `asset` (made by
+/// [`MakeViewAsset`]), unlocked: its requester imports what it shares and
+/// locks it (`helio_core::view`).
+pub fn compile_view(
+    asset: &GraphAsset,
+    registry: &NodeRegistry,
+    env: &mut BuildEnv<'_>,
+) -> Result<RenderGraph, Vec<Diagnostic>> {
+    build_graph(asset, registry, env, Purpose::View, &mut |_, _, _| {})
+}
+
+/// Makes the asset of a secondary view's graph: the frame's members for that
+/// view ([`helio_core::ViewDescription`]), as the preset composes them.
+pub type MakeViewAsset =
+    Arc<dyn Fn(&NodeRegistry, &helio_core::ViewDescription) -> GraphAsset + Send + Sync>;
+
 /// Makes the asset a pipeline builds, from the build's environment (its
 /// renderer config is the [`helio::RendererConfig`] setting). It may add
 /// settings the asset's nodes read.
@@ -160,6 +181,9 @@ enum Source {
 pub struct GraphAssetPipeline {
     source: Source,
     registry: Arc<NodeRegistry>,
+    /// How the graph's secondary views are composed; without it a pass's
+    /// view requests render nothing.
+    views: Option<MakeViewAsset>,
 }
 
 impl GraphAssetPipeline {
@@ -167,6 +191,7 @@ impl GraphAssetPipeline {
         Self {
             source: Source::Fixed(asset),
             registry,
+            views: None,
         }
     }
 
@@ -176,7 +201,62 @@ impl GraphAssetPipeline {
         Self {
             source: Source::Made(make),
             registry,
+            views: None,
         }
+    }
+
+    /// Composes the graph's secondary views with `views` (the preset's
+    /// `view_asset`): what a capture or an inline view runs.
+    pub fn with_views(mut self, views: MakeViewAsset) -> Self {
+        self.views = Some(views);
+        self
+    }
+}
+
+/// The graphs of a pipeline's secondary views: its registry and settings, the
+/// view's description and size (`helio_core::ViewGraphSource`).
+struct AssetViews {
+    registry: Arc<NodeRegistry>,
+    make: MakeViewAsset,
+    config: helio::RendererConfig,
+    debug_state: Arc<std::sync::Mutex<helio::DebugDrawState>>,
+    debug_camera_buffer: wgpu::Buffer,
+    scene_db: helio::SceneDbHandle,
+}
+
+impl helio_core::ViewGraphSource for AssetViews {
+    fn build(&self, build: &helio_core::ViewBuild<'_>) -> Result<RenderGraph, String> {
+        let mut env = BuildEnv::new(
+            build.device,
+            build.queue,
+            helio_feature_api::FrameDesc {
+                width: build.width,
+                height: build.height,
+                internal_width: build.width,
+                internal_height: build.height,
+                surface_format: self.config.surface_format,
+                xr: false,
+            },
+            build.camera_buffer,
+            &self.debug_camera_buffer,
+            build.stats,
+            false,
+        )
+        .with_feature_settings(&self.config.features)
+        .with_setting(self.config.clone())
+        .with_setting(self.debug_state.clone())
+        .with_setting(self.scene_db.clone())
+        .with_setting(build.description);
+        let asset = (self.make)(&self.registry, &build.description);
+        let mut graph = compile_view(&asset, &self.registry, &mut env).map_err(|diagnostics| {
+            diagnostics
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
+        graph.set_swap_policy(self.registry.swap_policy().clone());
+        Ok(graph)
     }
 }
 
@@ -279,6 +359,17 @@ fn build(
         Ok(mut graph) => {
             // What the features declared of their passes.
             graph.set_swap_policy(pipeline.registry.swap_policy().clone());
+            graph.set_view_budget(ctx.config.views);
+            if let Some(make) = &pipeline.views {
+                graph.set_view_source(Arc::new(AssetViews {
+                    registry: Arc::clone(&pipeline.registry),
+                    make: Arc::clone(make),
+                    config: ctx.config.clone(),
+                    debug_state: ctx.debug_state.clone(),
+                    debug_camera_buffer: ctx.debug_camera_buffer.clone(),
+                    scene_db: ctx.scene_db.clone(),
+                }));
+            }
             graph.set_graph_data(rebuilder);
             Ok(graph)
         }

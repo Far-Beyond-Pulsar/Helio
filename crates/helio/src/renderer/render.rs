@@ -259,7 +259,7 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let depth_texture: &wgpu::Texture = &self.depth_texture;
         resource_registry.write(
-            helio_core::ResourceKey::new("depth_texture"),
+            helio_core::ResourceKey::new(helio_core::resource_keys::DEPTH_TEXTURE),
             depth_texture,
             "Renderer",
         );

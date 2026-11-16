@@ -457,6 +457,21 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Returns `Err` if GPU command recording fails (rare).
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()>;
 
+    /// Whether the pass renders secondary views this frame
+    /// ([`Self::render_views`]). Asked after `prepare`; when it is `true`
+    /// the graph submits everything recorded before the pass, then calls
+    /// `render_views`, then the pass's `execute`. See [`crate::view`].
+    fn renders_views(&self) -> bool {
+        false
+    }
+
+    /// Renders the pass's secondary views ([`crate::ViewContext::render_view`]):
+    /// a capture before the pass samples it, a portal's destination into the
+    /// G-buffer.
+    fn render_views(&mut self, _views: &mut crate::ViewContext<'_>) -> Result<()> {
+        Ok(())
+    }
+
     /// Publishes outputs into the shared pass-resource view for later passes.
     ///
     /// Passes should expose only stable resource contracts here (e.g. GBuffer,
