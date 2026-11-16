@@ -80,10 +80,12 @@ pub(crate) fn frame_setup_node(models: Vec<LightingModel>) -> NodeDescriptor {
             build.env.insert_setting(model.inputs_order);
             // The mask is for the temporal resolve: a frame that does not
             // resolve temporally (the project's TSR is off) has no reader for it.
-            let temporal = build
-                .env
-                .setting::<RendererConfig>()
-                .is_some_and(|config| config.tsr_quality.is_some());
+            // A secondary view has no temporal resolve of its own.
+            let temporal = helio_frame_api::view::view_of(build.env).is_primary()
+                && build
+                    .env
+                    .setting::<RendererConfig>()
+                    .is_some_and(|config| config.tsr_quality.is_some());
             if temporal {
                 build.env.insert_setting(TemporalResolve);
                 if build.boolean("reactive_mask") {

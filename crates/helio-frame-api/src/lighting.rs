@@ -11,7 +11,7 @@
 //! | [`sun_transmittance`] | world-space map along the sun + frame | clouds | fully lit |
 //! | [`TRANSMISSION`] | rgba16f, internal res | water caustics | nothing added |
 //! | [`sky`] | sky frame (medium, suns) + sky table | the sky | no sky |
-//! | [`VIEW_REMAPS`] | SceneDB `mat4` per chain + G-buffer tag | portals | no remap |
+//! | [`VIEW_REMAPS`] | `mat4` per inline-view slot + G-buffer tag | the frame, as inline views render | no remap |
 //!
 //! A lighting model binds every contract it uses, the stand-in where it is
 //! absent; a publisher writes it at [`crate::Slot::LightingInputs`] (or
@@ -313,15 +313,17 @@ pub const DIRECTIONAL_VISIBILITY: &str = "directional_visibility";
 pub const TRANSMISSION: &str = "transmission";
 pub const TRANSMISSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// View remaps: per chain, the matrix taking a point of the host world into
-/// the world the pixels of that chain show (portals). SceneDB buffer of 256
-/// `mat4x4<f32>`; a pixel belongs to chain `c` when its G-buffer surface tag
-/// is `(-1, -3 - c)` (the prelude's `gbuffer_tag_view_remap` and `view_remap_of`). Absent: no
-/// pixel is remapped. Bound as a uniform (fragment stages are at their
-/// storage-buffer limit).
-pub const VIEW_REMAPS: &str = "view_remaps";
-/// Chains [`VIEW_REMAPS`] holds.
-pub const VIEW_REMAP_CHAINS: u64 = 256;
+/// View remaps: the frame's view table. Per inline-view slot
+/// (`helio_core::view`), the matrix taking a point of the space the view was
+/// drawn into to its content's own space (a portal's destination), written by
+/// the graph as inline views render, composed through nested ones. A pixel
+/// holds slot `s`'s content when its G-buffer surface tag says so (the
+/// prelude's `gbuffer_view_tag` and `view_remap_of`). A registry buffer of
+/// 256 `mat4x4<f32>`, always published (no inline view: nothing tagged).
+/// Bound as a uniform (fragment stages are at their storage-buffer limit).
+pub const VIEW_REMAPS: &str = helio_core::view::VIEW_REMAPS_RESOURCE;
+/// Slots [`VIEW_REMAPS`] holds.
+pub const VIEW_REMAP_CHAINS: u64 = helio_core::view::VIEW_SLOTS as u64;
 pub const VIEW_REMAPS_BYTES: u64 = VIEW_REMAP_CHAINS * 64;
 
 /// The sky: what lights a surface from the air above it and what the air

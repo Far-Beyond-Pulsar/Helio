@@ -285,6 +285,23 @@ Two kind-agnostic frame facts every pass can use, owned by `helio-core`:
   size it against this and the measured `last_frame_gpu_ms` /
   `last_frame_cpu_ms`, never an assumed 60 Hz.
 
+### Views (as built, p25)
+
+A frame renders its primary view and the secondary views features ask for
+(`helio_core::view`): **captures** into the requester's target (a planar
+reflection) and **inline** views into its G-buffer (a portal's destination).
+A pass that renders views (`RenderPass::renders_views`) asks for them at a
+pass boundary; each runs a view graph the preset composes from the frame's
+members for that view (`Preset::view_nodes`), so no feature names another's
+pass. Nodes marked `once_per_frame` (object batches, shadow views, GI's probe
+update) are the frame's and views read their outputs; everything else runs
+per view. Drawers read the view's facts from the build environment
+(`helio_frame_api::view`: winding, clip) and the view's camera (clip plane,
+inline slot, map), and tag their pixels with the view; the frame's view
+table (`lighting::VIEW_REMAPS`) maps an inline view's pixels back to their
+content for the lighting. `ViewBudget` bounds depth and count. Details:
+plugin-migration.md, "As built, p25".
+
 ### Why this shape
 
 - **Unreal** layers RHI → RenderCore (RDG) → Renderer; game-side components

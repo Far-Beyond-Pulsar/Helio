@@ -281,9 +281,23 @@ pub struct RenderGraph {
     pub(crate) xr_active: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
-    /// Persistent secondary-view graphs, keyed by the pass that owns each
-    /// capture (planar reflections, portals, editor probes, ...).
-    secondary_graphs: HashMap<&'static str, RenderGraph>,
+    /// The views this graph's passes render ([`crate::view`]), retained per
+    /// requesting pass and request key.
+    views: HashMap<(&'static str, u64), ViewSlot>,
+    /// Builds the graphs of those views (the graph builder's).
+    view_source: Option<Arc<dyn crate::ViewGraphSource>>,
+    /// The frame's views, shared with every view graph this one runs.
+    view_frame: Arc<Mutex<crate::view::ViewFrame>>,
+    /// The frame's view table (`ViewFrame::remaps`), published every frame.
+    view_remaps: wgpu::Buffer,
+    /// What view this graph renders.
+    view_description: crate::ViewDescription,
+    /// For an inline view, the map from its content's space into the space
+    /// of the G-buffer it draws into (composed through nested views).
+    content_to_drawn: glam::Mat4,
+    /// Resources supplied by whoever executes the graph, never allocated
+    /// (an inline view's G-buffer).
+    imports: std::collections::HashSet<&'static str>,
     /// Optional resources passes declared for the current frame; see
     /// [`crate::FrameDemands`].
     frame_demands: crate::FrameDemands,
@@ -398,6 +412,12 @@ impl RenderGraph {
     }
 
     pub fn new(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
+        let view_frame = crate::view::ViewFrame::new(device);
+        let view_remaps = view_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remaps
+            .clone();
         Self {
             passes: Vec::new(),
             member_slots: Vec::new(),
@@ -443,7 +463,13 @@ impl RenderGraph {
             xr_active: false,
             pass_cache: Vec::new(),
             frame_count: 0,
-            secondary_graphs: HashMap::new(),
+            views: HashMap::new(),
+            view_source: None,
+            view_frame: Arc::clone(&view_frame),
+            view_remaps,
+            view_description: crate::ViewDescription::PRIMARY,
+            content_to_drawn: glam::Mat4::IDENTITY,
+            imports: std::collections::HashSet::new(),
             frame_demands: crate::FrameDemands::default(),
             resize_pending: false,
             graph_data: None,
@@ -462,18 +488,6 @@ impl RenderGraph {
         queue: &wgpu::Queue,
     ) -> Self {
         let mut graph = Self::new(device, queue);
-        graph.owns_device = false;
-        graph
-    }
-
-    /// Construct an externally driven graph from the borrowed handles exposed
-    /// to render passes. wgpu handles are cheap shared handles, so this keeps
-    /// secondary graphs owned by a pass from having to retain a frontend's
-    /// `Arc<Device>` just to create their executor.
-    pub fn new_with_external_device_ref(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let device = std::sync::Arc::new(device.clone());
-        let queue = queue.clone();
-        let mut graph = Self::new(&device, &queue);
         graph.owns_device = false;
         graph
     }
@@ -709,6 +723,54 @@ impl RenderGraph {
     /// instead of a silent hardcoded exception.
     pub fn declare_external_input(&mut self, name: &'static str) {
         self.external_inputs.insert(name);
+    }
+
+    /// Takes `name` from whoever executes the graph instead of allocating it,
+    /// even where a pass writes it (an inline view draws into its
+    /// requester's G-buffer; [`crate::view`]). A `write_group` name imports
+    /// its members. Call before `lock`.
+    pub fn import_resource(&mut self, name: &'static str) {
+        self.external_inputs.insert(name);
+        self.imports.insert(name);
+    }
+
+    /// Whether `name` is supplied by the graph's executor
+    /// ([`Self::import_resource`]).
+    pub(crate) fn is_imported(&self, name: &str) -> bool {
+        self.imports.contains(name)
+            || self
+                .resource_groups
+                .iter()
+                .any(|(_, group, members)| self.imports.contains(group) && members.contains(&name))
+    }
+
+    /// Sets what builds the graphs of the views this graph's passes render
+    /// ([`crate::view`]): the graph builder's.
+    pub fn set_view_source(&mut self, source: Arc<dyn crate::ViewGraphSource>) {
+        self.view_source = Some(source);
+    }
+
+    /// Sets how many views a frame of this graph may render.
+    pub fn set_view_budget(&mut self, budget: crate::ViewBudget) {
+        self.view_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .budget = budget;
+    }
+
+    /// What view this graph renders ([`crate::ViewDescription`]).
+    pub fn view_description(&self) -> crate::ViewDescription {
+        self.view_description
+    }
+
+    /// The graphs of the views this graph's passes rendered, with the
+    /// requesting pass, the request key and each one's last measured GPU
+    /// time: a view's cost.
+    pub fn view_graphs(&self) -> Vec<(&'static str, u64, &RenderGraph)> {
+        self.views
+            .iter()
+            .map(|((pass, key), slot)| (*pass, *key, &slot.graph))
+            .collect()
     }
 
     /// Adds a feature's frame-input publisher (see
@@ -1622,6 +1684,24 @@ impl RenderGraph {
             self.locked,
             "RenderGraph::execute() requires lock() to be called first"
         );
+        // The frame's views ([`crate::view`]): the first graph of the frame
+        // starts the budget, and the view table is the lighting's to read.
+        self.view_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .begin(scene.frame_count());
+        if !registry.contains(crate::view::VIEW_REMAPS_RESOURCE) {
+            // SAFETY: the buffer is the graph's (a handle kept for the
+            // frame's view table) and outlives this frame's registry, as the
+            // passes' publications do.
+            let remaps: &wgpu::Buffer = unsafe { &*std::ptr::addr_of!(self.view_remaps) };
+            registry.write_buffer_binding(crate::view::VIEW_REMAPS_RESOURCE, remaps, "RenderGraph");
+            registry.write(
+                crate::ResourceKey::<&wgpu::Buffer>::new(crate::view::VIEW_REMAPS_RESOURCE),
+                remaps,
+                "RenderGraph",
+            );
+        }
         // The frame's members: passes join and leave with the scene's content
         // before anything of the frame is recorded.
         if self.update_membership(scene) {
@@ -1901,6 +1981,9 @@ impl RenderGraph {
                                     registry.route_named_texture(name, view, "Graph");
                                 }
                             }
+                            // An imported group is the executor's: the view
+                            // it was handed stays (`import_resource`).
+                            PrePassAction::Group { name, .. } if self.imports.contains(name) => {}
                             PrePassAction::Group { name, members } => {
                                 // Generic: the core resolves a `write_group`'s
                                 // members to concrete views but has no notion of
@@ -1970,7 +2053,6 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            secondary_graphs: &mut self.secondary_graphs as *mut _,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -2002,6 +2084,81 @@ impl RenderGraph {
                 }
 
                 prepare_pass!(pass, pass_index);
+
+                // Views the pass renders ([`crate::view`]): everything
+                // recorded so far goes out first, so a view reads this
+                // frame's work (shadows, batches, probes, the requester's
+                // depth), and the views' own submissions follow it.
+                if pass.renders_views() {
+                    close_chain!();
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let mut first_panic = None;
+                        for _ in 0..finishes_in_flight {
+                            match finish_reply_rx.recv() {
+                                Ok((index, Ok(buffer))) if index != COMPUTE_SEGMENT => {
+                                    graphics_segments[index] = Some(buffer)
+                                }
+                                Ok((_, Ok(_))) => {}
+                                Ok((_, Err(payload))) => {
+                                    first_panic.get_or_insert(payload);
+                                }
+                                Err(_) => panic!("helio encoder-finish thread exited mid-frame"),
+                            }
+                        }
+                        finishes_in_flight = 0;
+                        if let Some(payload) = first_panic {
+                            std::panic::resume_unwind(payload);
+                        }
+                    }
+                    let done_compute =
+                        std::mem::replace(&mut compute_encoder, new_encoder("Compute Graph"));
+                    let done_graphics =
+                        std::mem::replace(&mut encoder, new_encoder("Render Graph"));
+                    let mut recorded: Vec<wgpu::CommandBuffer> = Vec::new();
+                    recorded.extend(self.uploads.record_deferred(scene.device()));
+                    recorded.append(&mut compute_segments);
+                    recorded.push(done_compute.finish());
+                    recorded.extend(graphics_segments.drain(..).map(|segment| {
+                        segment.expect("every graphics segment is finished before submit")
+                    }));
+                    recorded.push(done_graphics.finish());
+                    scene.queue().submit(recorded);
+                    segment_passes.clear();
+                    segment_recording = std::time::Duration::ZERO;
+
+                    let mut runner = GraphViews {
+                        device: scene.device(),
+                        queue: scene.queue(),
+                        views: &mut self.views,
+                        source: self.view_source.as_ref(),
+                        frame: &self.view_frame,
+                        remaps: &self.view_remaps,
+                        content_to_drawn: self.content_to_drawn,
+                        stats: self.profiler.frame_stats().cloned(),
+                        requester: pass.name(),
+                    };
+                    let mut views = crate::ViewContext {
+                        device: scene.device(),
+                        queue: scene.queue(),
+                        camera: scene.camera(),
+                        camera_data: scene.camera_data(),
+                        world_origin: scene.world_origin(),
+                        scene_buffers: scene.scene_buffers(),
+                        registry: &*registry,
+                        frame_num: scene.frame_count(),
+                        width: self.internal_w,
+                        height: self.internal_h,
+                        target,
+                        depth,
+                        description: self.view_description,
+                        encoder: None,
+                        runner: &mut runner,
+                    };
+                    let _scope = self.profiler.scope(pass.name());
+                    pass.render_views(&mut views)?;
+                    views.finish();
+                }
 
                 // execute()
                 let pass_name = pass.name();
@@ -2091,7 +2248,6 @@ impl RenderGraph {
                             width: self.internal_w,
                             height: self.internal_h,
                             device: scene.device(),
-                            secondary_graphs: &mut self.secondary_graphs as *mut _,
                             registry: &*registry,
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
@@ -2167,7 +2323,6 @@ impl RenderGraph {
                                 width: self.internal_w,
                                 height: self.internal_h,
                                 device: scene.device(),
-                                secondary_graphs: &mut self.secondary_graphs as *mut _,
                                 registry: &*registry,
                                 owns_device: self.owns_device,
                                 resource_pool: &self.pool,
@@ -2227,7 +2382,6 @@ impl RenderGraph {
                         width: self.internal_w,
                         height: self.internal_h,
                         device: scene.device(),
-                        secondary_graphs: &mut self.secondary_graphs as *mut _,
                         registry: &*registry,
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
@@ -2623,7 +2777,8 @@ impl RenderGraph {
         let probes: Vec<Option<(usize, Vec<usize>)>> = self
             .passes
             .iter()
-            .map(|pass| {
+            .enumerate()
+            .map(|(index, pass)| {
                 let desc = pass.render_pass_descriptor_with_pool_and_storage(
                     &dummy_target,
                     &dummy_depth,
@@ -2647,6 +2802,11 @@ impl RenderGraph {
                         .map(|d| d.view as *const wgpu::TextureView as usize)
                         .unwrap_or(0),
                 );
+                // A pass that renders views ends the graph's submission
+                // before it runs, so it never shares a render pass.
+                if pass.renders_views() {
+                    signature = vec![usize::MAX - index];
+                }
                 Some((color_len, signature))
             })
             .collect();
@@ -2902,5 +3062,239 @@ impl RenderGraph {
         drop(base);
         self.last_bundle_chain_gen
             .resize(self.passes.len(), self.chain_generation);
+    }
+}
+
+/// A view a pass renders, retained across frames ([`crate::view`]).
+struct ViewSlot {
+    graph: RenderGraph,
+    /// The view's camera (two cameras, as the primary's buffer).
+    camera_buffer: wgpu::Buffer,
+    camera: crate::GpuCameraUniforms,
+    camera_generation: u64,
+    description: crate::ViewDescription,
+    imports: Vec<&'static str>,
+}
+
+/// The frame as a view graph sees it: the requester's scene, the view's
+/// camera.
+struct ViewScene<'a> {
+    device: &'a Arc<wgpu::Device>,
+    queue: &'a Arc<wgpu::Queue>,
+    camera: &'a wgpu::Buffer,
+    camera_data: &'a crate::GpuCameraUniforms,
+    camera_generation: u64,
+    frame: u64,
+    scene_buffers: &'a crate::SceneBufferProjection,
+    world_origin: glam::DVec3,
+}
+
+impl SceneInput for ViewScene<'_> {
+    fn device(&self) -> &Arc<wgpu::Device> {
+        self.device
+    }
+    fn queue(&self) -> &Arc<wgpu::Queue> {
+        self.queue
+    }
+    fn frame_count(&self) -> u64 {
+        self.frame
+    }
+    fn camera(&self) -> &wgpu::Buffer {
+        self.camera
+    }
+    fn camera_data(&self) -> &crate::GpuCameraUniforms {
+        self.camera_data
+    }
+    fn camera_generation(&self) -> u64 {
+        self.camera_generation
+    }
+    fn scene_buffers(&self) -> &crate::SceneBufferProjection {
+        self.scene_buffers
+    }
+    fn world_origin(&self) -> glam::DVec3 {
+        self.world_origin
+    }
+}
+
+/// Runs one pass's view requests against the graph's retained views.
+struct GraphViews<'g> {
+    device: &'g Arc<wgpu::Device>,
+    queue: &'g Arc<wgpu::Queue>,
+    views: &'g mut HashMap<(&'static str, u64), ViewSlot>,
+    source: Option<&'g Arc<dyn crate::ViewGraphSource>>,
+    frame: &'g Arc<Mutex<crate::view::ViewFrame>>,
+    remaps: &'g wgpu::Buffer,
+    content_to_drawn: glam::Mat4,
+    stats: Option<crate::FrameStats>,
+    requester: &'static str,
+}
+
+impl crate::view::ViewRunner for GraphViews<'_> {
+    fn can_render(&self, requester: &crate::ViewDescription) -> bool {
+        let frame = self
+            .frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.source.is_some()
+            && requester.depth < frame.budget.max_depth
+            && frame.views_rendered < frame.budget.max_views
+    }
+
+    fn run(
+        &mut self,
+        parent: &crate::view::ViewParent<'_>,
+        request: &crate::ViewRequest<'_>,
+    ) -> Result<bool> {
+        let Some(source) = self.source else {
+            return Ok(false);
+        };
+        let inline = request.kind == crate::ViewKind::Inline;
+        let description = crate::ViewDescription {
+            kind: request.kind,
+            mirrored: request.mirrored,
+            clipped: request.camera.clip_plane != [0.0; 4],
+            depth: parent.description.depth + 1,
+        };
+        // Spend the budget, and give an inline view its slot in the frame's
+        // view table.
+        let slot_index = {
+            let mut frame = self
+                .frame
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if inline && frame.slots_used >= crate::view::VIEW_SLOTS {
+                return Ok(false);
+            }
+            frame.views_rendered += 1;
+            if inline {
+                frame.slots_used += 1;
+                Some(frame.slots_used - 1)
+            } else {
+                None
+            }
+        };
+        let content_to_drawn = if inline {
+            self.content_to_drawn * request.content_to_drawn
+        } else {
+            glam::Mat4::IDENTITY
+        };
+        let mut camera = request.camera;
+        camera.view_info = [
+            slot_index.map_or(0, |slot| slot + 1),
+            description.flags(),
+            description.depth,
+            0,
+        ];
+        camera.content_to_drawn = content_to_drawn.to_cols_array();
+        let (width, height) = (request.width.max(1), request.height.max(1));
+        let mut imports: Vec<&'static str> = request.imports.to_vec();
+        imports.extend(request.seeds.iter().map(|(name, _)| *name));
+        let key = (self.requester, request.key);
+        let stale = self
+            .views
+            .get(&key)
+            .is_none_or(|slot| slot.description != description || slot.imports != imports);
+        if stale {
+            let camera_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("View camera"),
+                size: 2 * std::mem::size_of::<crate::GpuCameraUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let stats = self
+                .stats
+                .clone()
+                .unwrap_or_else(|| crate::FrameStats::new(self.device));
+            let mut graph = source
+                .build(&crate::ViewBuild {
+                    device: self.device,
+                    queue: self.queue,
+                    description,
+                    width,
+                    height,
+                    camera_buffer: &camera_buffer,
+                    stats: &stats,
+                })
+                .map_err(|message| {
+                    crate::Error::InvalidPassConfig(format!(
+                        "the {:?} view `{}` asked for does not build: {message}",
+                        description.kind, self.requester
+                    ))
+                })?;
+            for name in &imports {
+                graph.import_resource(name);
+            }
+            graph.view_description = description;
+            graph.view_source = Some(Arc::clone(source));
+            graph.view_frame = Arc::clone(self.frame);
+            graph.view_remaps = self.remaps.clone();
+            graph.owns_device = false;
+            // A view's draws are the frame's: they count into its stats.
+            graph.profiler_mut().set_frame_stats(Some(stats));
+            graph.lock(width, height);
+            self.views.insert(
+                key,
+                ViewSlot {
+                    graph,
+                    camera_buffer,
+                    camera,
+                    camera_generation: 0,
+                    description,
+                    imports,
+                },
+            );
+        }
+        let slot = self.views.get_mut(&key).expect("inserted above");
+        if slot.graph.render_size().internal != [width, height] {
+            slot.graph.set_render_size(width, height);
+        }
+        if bytemuck::bytes_of(&slot.camera) != bytemuck::bytes_of(&camera) {
+            slot.camera_generation += 1;
+        }
+        slot.camera = camera;
+        slot.graph.content_to_drawn = content_to_drawn;
+        // The view's camera and its table row go out with the next
+        // submission: the view's own.
+        parent.queue.write_buffer(
+            &slot.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[camera, camera]),
+        );
+        if let Some(slot_index) = slot_index {
+            parent.queue.write_buffer(
+                self.remaps,
+                u64::from(slot_index) * 64,
+                bytemuck::bytes_of(&content_to_drawn.inverse().to_cols_array()),
+            );
+        }
+        let scene = ViewScene {
+            device: self.device,
+            queue: self.queue,
+            camera: &slot.camera_buffer,
+            camera_data: &slot.camera,
+            camera_generation: slot.camera_generation,
+            frame: parent.frame_num,
+            scene_buffers: parent.scene_buffers,
+            world_origin: parent.world_origin,
+        };
+        let mut registry = parent.registry.inherit();
+        for (name, view) in request.seeds {
+            registry.route_named_texture(name, view, "View request");
+        }
+        // The view's depth is its own: what copies the graph's depth target
+        // (the Hi-Z pyramid) copies the view's.
+        registry.write(
+            crate::ResourceKey::<&wgpu::Texture>::new(crate::resource_keys::DEPTH_TEXTURE),
+            request.depth_texture,
+            "View request",
+        );
+        // Frame inputs (the coordinate spaces, a texture table) are the
+        // frame's: the view inherits what the primary graph published and
+        // publishes none of its own.
+        slot.graph
+            .execute_with_registry(&scene, request.target, request.depth, &mut registry)?;
+        Ok(true)
     }
 }

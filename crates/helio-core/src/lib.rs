@@ -417,6 +417,7 @@ pub mod temporal;
 pub mod texture_mips;
 pub mod traits;
 pub mod upload;
+pub mod view;
 
 /// RAII CPU span that lands in the engine flamegraph's profiler, on the thread
 /// that creates it. A no-op unless the `profiling` feature is enabled (and always
@@ -459,10 +460,13 @@ macro_rules! cpu_scope {
 // crate, never here.
 pub use camera::GpuCameraUniforms;
 pub use cmd::{CommandRecorder, ComputeCmds, RenderCmds};
-pub use stats::{FrameStats, StatSlot, StatsSnapshot};
 pub use movability::Movability;
 pub use registry::{ResourceKey, ResourceRegistry, Tracked, ViewGroup};
 pub use render_environment::RenderEnvironment;
+pub use stats::{FrameStats, StatSlot, StatsSnapshot};
+pub use view::{
+    ViewBudget, ViewBuild, ViewContext, ViewDescription, ViewGraphSource, ViewKind, ViewRequest,
+};
 
 // Re-export managers
 pub use crate::acceleration::{

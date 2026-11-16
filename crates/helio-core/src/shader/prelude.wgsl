@@ -14,7 +14,8 @@
 // is not per-pass policy, so it does not live in per-pass code.
 
 // ── Camera ──────────────────────────────────────────────────────────────────
-// Field-for-field mirror of helio_core `GpuCameraUniforms` (368 B).
+// Field-for-field mirror of helio_core `GpuCameraUniforms` (464 B): one per
+// view the frame renders (helio_core::view).
 // Shaders declare their OWN binding (the group/binding varies per pass) but must
 // use this struct rather than redeclaring it:
 //
@@ -34,6 +35,56 @@ struct Camera {
     /// TAA jitter (xy) + frame index (z) + padding (w).
     jitter_frame:   vec4<f32>,
     prev_view_proj: mat4x4<f32>,
+    /// The view's clip plane (xyz normal, w offset, frame space): nothing on
+    /// its negative side is drawn. Zero for none. See `helio_view_clipped`.
+    clip_plane:     vec4<f32>,
+    /// x: inline-view slot + 1 (0: the view owns its G-buffer), y: flags
+    /// (`HELIO_VIEW_MIRRORED`, `HELIO_VIEW_CLIPPED`), z: depth in views.
+    view_info:      vec4<u32>,
+    /// An inline view's map from its content's space into the G-buffer's
+    /// (identity otherwise). See `helio_view_normal`.
+    content_to_drawn: mat4x4<f32>,
+}
+
+// ── Views ───────────────────────────────────────────────────────────────────
+// A frame renders several views (helio_core::view): its camera, captures
+// (a planar reflection) and inline views (a portal's destination, drawn into
+// the requesting view's G-buffer). Every drawer draws every view it is built
+// for with its own program; these are the view's facts it needs.
+
+/// The view is mirrored (a planar reflection): front faces wind clockwise.
+const HELIO_VIEW_MIRRORED: u32 = 1u;
+/// The view has a clip plane (`Camera.clip_plane`).
+const HELIO_VIEW_CLIPPED: u32 = 2u;
+
+/// Whether `world_pos` (frame space) is clipped away by the view's plane.
+/// Drawers call it in pipelines built for a clipped view and discard; the
+/// primary view's pipelines never pay for it.
+fn helio_view_clipped(camera: Camera, world_pos: vec3<f32>) -> bool {
+    return (camera.view_info.y & HELIO_VIEW_CLIPPED) != 0u
+        && dot(camera.clip_plane.xyz, world_pos) + camera.clip_plane.w < 0.0;
+}
+
+/// A G-buffer normal for `camera`'s view: `normal` (in the space the view's
+/// content is drawn in) in the space of the G-buffer it draws into. Every
+/// pixel of a G-buffer holds its normal in that one space; the lighting
+/// takes an inline view's back to its content (`VIEW_REMAPS`).
+fn helio_view_normal(camera: Camera, normal: vec3<f32>) -> vec3<f32> {
+    return normalize((camera.content_to_drawn * vec4<f32>(normal, 0.0)).xyz);
+}
+
+/// A G-buffer normal (in the G-buffer's space) in `camera`'s view's content
+/// space: the inverse of `helio_view_normal`, for what reads and rewrites the
+/// G-buffer per view (decals).
+fn helio_view_normal_in_content(camera: Camera, normal: vec3<f32>) -> vec3<f32> {
+    let m = camera.content_to_drawn;
+    return normalize(transpose(mat3x3<f32>(m[0].xyz, m[1].xyz, m[2].xyz)) * normal);
+}
+
+/// The inline-view slot of the view (`helio_frame_api::lighting::VIEW_REMAPS`),
+/// or -1 for a view that owns its G-buffer.
+fn helio_view_slot(camera: Camera) -> i32 {
+    return i32(camera.view_info.x) - 1;
 }
 
 // ── Screen space ────────────────────────────────────────────────────────────
@@ -140,8 +191,13 @@ fn helio_gbuffer_normal(raw: vec3<f32>) -> vec3<f32> {
 // Surface tags (`helio_frame_api::gbuffer::SURFACE`). The surface channel
 // (Rg16Float) holds a tag (x < 0) saying what the lighting must know about a
 // surface, or the payload one feature requested for the graph (x >= 0, which
-// that feature reads). Drawers write a tag by these names; readers test it
-// through the predicates below. Nothing writes or compares a raw tag value.
+// that feature reads). A tag is two facts: x the view the surface was drawn
+// for (-1 a view's own surfaces, -2 - slot an inline view's, whose content
+// the lighting shades back in its own space through
+// `helio_frame_api::lighting::VIEW_REMAPS`), y its kind (plain, own
+// occlusion, traced). Drawers write a kind through `gbuffer_view_tag`, so
+// each view's pixels say whose they are; readers test through the
+// predicates below. Nothing writes or compares a raw tag value.
 
 /// An ordinary surface with no payload.
 const GBUFFER_TAG_PLAIN: vec2<f32> = vec2<f32>(-1.0, -1.0);
@@ -155,10 +211,10 @@ const GBUFFER_TAG_OWN_OCCLUSION: vec2<f32> = vec2<f32>(-1.0, -1.5);
 /// source show it as traced.
 const GBUFFER_TAG_TRACED: vec2<f32> = vec2<f32>(-1.0, -2.0);
 
-/// The tag of content drawn through view-remap chain `chain`
-/// (`helio_frame_api::lighting::VIEW_REMAPS`): (-1, -3 - chain).
-fn gbuffer_tag_view_remap(chain: u32) -> vec2<f32> {
-    return vec2<f32>(-1.0, -3.0 - f32(chain));
+/// Tag `tag` (one of the kinds above) for a surface drawn for `camera`'s
+/// view.
+fn gbuffer_view_tag(camera: Camera, tag: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(-1.0 - f32(camera.view_info.x), tag.y);
 }
 
 /// Whether a surface texel holds the requested payload rather than a tag.
@@ -166,9 +222,9 @@ fn gbuffer_has_payload(surface: vec2<f32>) -> bool {
     return surface.x >= 0.0;
 }
 
-/// Whether a surface texel is tag `tag`.
+/// Whether a surface texel is of kind `tag` (whatever view drew it).
 fn gbuffer_tagged(surface: vec2<f32>, tag: vec2<f32>) -> bool {
-    return surface.x == tag.x && surface.y == tag.y;
+    return surface.x < 0.0 && surface.y == tag.y;
 }
 
 /// Whether the surface's occlusion is its own: the lighting adds no
@@ -178,12 +234,20 @@ fn gbuffer_own_occlusion(surface: vec2<f32>) -> bool {
         || gbuffer_tagged(surface, GBUFFER_TAG_OWN_OCCLUSION);
 }
 
-/// The view-remap chain a pixel belongs to, or -1.
+/// The inline-view slot whose content a pixel holds, or -1 (the view's own
+/// surface, a payload or nothing).
 fn view_remap_of(surface: vec2<f32>) -> i32 {
-    if surface.x > -1.5 && surface.x < -0.5 && surface.y < -2.5 {
-        return min(i32(round(-3.0 - surface.y)), 255);
+    if surface.x < -1.5 {
+        return min(i32(round(-2.0 - surface.x)), 255);
     }
     return -1;
+}
+
+/// Whether a pixel was drawn for `camera`'s view (screen-space drawers that
+/// change surfaces, decals, touch only their own view's pixels).
+fn gbuffer_in_view(surface: vec2<f32>, camera: Camera) -> bool {
+    return surface.x >= 0.0 && camera.view_info.x == 0u
+        || surface.x < 0.0 && i32(round(-1.0 - surface.x)) == i32(camera.view_info.x);
 }
 
 // ── Volumetric scattering ───────────────────────────────────────────────────

@@ -520,6 +520,27 @@ impl Renderer {
         self.graph.profiler().timing_snapshot()
     }
 
+    /// GPU timings of the secondary views the frame rendered
+    /// (`helio_core::view`), nested views included: the requesting pass, the
+    /// view's key and its graph's own snapshot. [`Self::timing_snapshot`]
+    /// holds the primary view's passes only.
+    pub fn view_timing_snapshots(
+        &self,
+    ) -> Vec<(&'static str, u64, &helio_core::RenderTimingSnapshot)> {
+        fn collect<'g>(
+            graph: &'g helio_core::RenderGraph,
+            out: &mut Vec<(&'static str, u64, &'g helio_core::RenderTimingSnapshot)>,
+        ) {
+            for (pass, key, view) in graph.view_graphs() {
+                out.push((pass, key, view.profiler().timing_snapshot()));
+                collect(view, out);
+            }
+        }
+        let mut out = Vec::new();
+        collect(&self.graph, &mut out);
+        out
+    }
+
     /// Process-local identity for the timing snapshot's graph profiler.
     /// Combine this with a GPU frame index to disambiguate graph rebuilds.
     pub fn profiling_instance_id(&self) -> u64 {

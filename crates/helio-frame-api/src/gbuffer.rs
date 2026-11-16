@@ -15,9 +15,9 @@ pub const NORMAL: &str = "gbuffer_normal";
 pub const ORM: &str = "gbuffer_orm";
 pub const EMISSIVE: &str = "gbuffer_emissive";
 /// The surface channel (`Rg16Float`): `x < 0` holds the frame's surface tags
-/// (the prelude's `GBUFFER_TAG_*`: a plain surface, one with its own
-/// occlusion, a traced one, a view remap's chain, see
-/// [`crate::lighting::VIEW_REMAPS`]); `x >= 0` holds the payload one feature
+/// (the prelude's `GBUFFER_TAG_*` kinds, plain, own occlusion or traced, in
+/// `y`, and the view that drew the surface in `x`, see `gbuffer_view_tag`
+/// and [`crate::lighting::VIEW_REMAPS`]); `x >= 0` holds the payload one feature
 /// requested for the graph ([`request_payload`]), which the drawers that carry
 /// it write. Phase openers clear it to the plain tag ([`SURFACE_CLEAR`]).
 ///
@@ -26,6 +26,7 @@ pub const EMISSIVE: &str = "gbuffer_emissive";
 /// than adding a target (Unreal packs its shading models' data into shared
 /// custom-data channels the same way).
 pub const SURFACE: &str = "gbuffer_surface";
+
 pub const SSS: &str = "gbuffer_sss";
 pub const EXTRA: &str = "gbuffer_extra";
 /// Per-texel motion vectors, written by every G-buffer drawer.
