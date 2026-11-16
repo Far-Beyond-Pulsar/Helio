@@ -466,7 +466,7 @@ pub use render_environment::RenderEnvironment;
 
 // Re-export managers
 pub use crate::acceleration::{
-    AccelerationError, BlasGeometry, BlasManager, TlasInstanceInput, TlasManager,
+    AccelerationError, BlasGeometry, BlasManager, BlasSegment, TlasInstanceInput, TlasManager,
 };
 // Re-export core types
 pub use context::{PassContext, PrepareContext};
