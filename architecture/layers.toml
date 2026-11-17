@@ -93,6 +93,8 @@ helio-pass-planar-reflection = { layer = "feature", group = "reflections" }
 helio-pass-fxaa = { layer = "feature", group = "post-aa" }
 helio-pass-perf-overlay = { layer = "feature", group = "debug" }
 helio-pass-buffer-view = { layer = "feature", group = "debug" }
+# The editor's selection outline over the mask every kind draws into.
+helio-pass-selection-outline = { layer = "feature", group = "debug" }
 
 # renderer
 helio = { layer = "renderer" }
