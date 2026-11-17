@@ -216,6 +216,11 @@ impl RenderPass for SimpleCubePass {
         "SimpleCube"
     }
 
+    /// The cube is the frame's whole image, drawn into the presented output.
+    fn writes_target(&self) -> bool {
+        true
+    }
+
     fn render_pass_descriptor_with_storage<'a>(
         &'a self,
         target: &'a wgpu::TextureView,

@@ -3557,4 +3557,10 @@ the post-split sequence.
   records), and `Notes.md` (an Android build of a demo that left with the
   meshes). The justfile's default example was `editor_demo`, which no
   longer exists; it is `simple_graph`.
+- **`simple_graph` ran no frame**: its graph builder never locked the graph,
+  so the first frame panicked ("execute() requires lock()"), and its pass
+  did not declare that it writes the frame's output (routing reported a
+  black frame). It locks at the config's sizes and its pass declares
+  `writes_target`; both examples were run and render (the cube; the debug
+  shapes over the grid).
 
