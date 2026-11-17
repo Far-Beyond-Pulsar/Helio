@@ -123,3 +123,74 @@ and then sees no other kind.
 ### As built
 
 Filled in as the phase lands.
+
+#### Acceleration structures
+
+`helio_core::acceleration` (`BlasManager`, `TlasManager`) is the build
+policy every ray-traced kind uses; a kind's projection keys its BLASes,
+says what each one's geometry does (`Movability`) and hands over complete
+instance lists. Helio pins the wgpu fork branch `helio/as-refit`: refit
+(`PreferUpdate`, `request_rebuild`), compaction safe against present, and
+`Blas::sizes` / `Tlas::sizes` for memory.
+
+- **Static geometry** (`!movability.can_deform()`): `PREFER_FAST_TRACE |
+  ALLOW_COMPACTION`, `Build`. `BlasManager::maintain(queue)`, once a frame
+  before the frame's builds, prepares the BLASes built two calls ago and
+  compacts those the device reported ready (on its own submits and polls:
+  no wait, no poll of the manager's), oldest first, up to
+  `BlasPolicy::compaction_bytes_per_frame` (32 MiB; at least one a call).
+  The compacted handle replaces the built one and `revision()` changes; the
+  next TLAS build rewrites only the slots whose handle changed, and the
+  built structure stays alive while earlier TLAS builds hold it. A change
+  of static geometry is a new structure (a compacted one cannot be built).
+- **Deforming geometry** (`Movability::Dynamic`): `PREFER_FAST_BUILD |
+  ALLOW_UPDATE`, `PreferUpdate`. `BlasGeometry::positions_revision`
+  (positions written in place) refits; `topology_revision`, counts, index
+  buffer, first index, opacity or a movability change make a new structure.
+  Every `BlasPolicy::refits_per_rebuild` (16) refits the policy rebuilds it,
+  the k-th deforming BLAS first rebuilding after `N - k % (N + 1)` refits so
+  rebuilds spread over frames; `request_rebuild(id)` rebuilds on the next
+  change (a large deformation the owner knows of). COPY_SRC-only index pools
+  are copied once and the copy kept, since a refit needs the same index
+  buffer. A refit or rebuild changes the BLAS's generation, so the next TLAS
+  build refits the instances holding it (wgpu rejects a TLAS older than its
+  BLASes).
+- **TLAS**: `PREFER_FAST_TRACE | ALLOW_UPDATE`, `PreferUpdate`, always fast
+  trace: every ray of the frame starts in it and its build is linear in
+  instances, so build-speed flags would trade every ray's cost for a small
+  saving. Only changed slots are rewritten. A build is a refit unless the
+  count changed, a slot holds another instance (its BLAS id or custom data
+  changed), `request_rebuild()` was called, or `TlasPolicy` says so: after
+  `max_refits` (8) refits, or once the instances moved since the last full
+  build reach `moved_fraction` (0.5) of the count. The last adapts to the
+  churn the manager observes: a scene where most things move every frame
+  rebuilds every frame; one with a few movers refits.
+- **Memory and stats**: `BlasManager::memory()` (`count`, `bytes`,
+  `bytes_before_compaction`), `TlasManager::memory()` (structure and
+  instance buffer), `counters()` on both (builds, refits, policy rebuilds,
+  compactions, scratch bytes). `report(&FrameStats)` once a frame adds them
+  under `acceleration::stat`: `rays.blas_bytes`,
+  `rays.blas_bytes_before_compaction`, `rays.tlas_bytes`,
+  `rays.as_scratch_bytes`, `rays.blas_builds`, `rays.blas_refits`,
+  `rays.blas_compactions`, `rays.tlas_builds`, `rays.tlas_refits`. Every
+  owner adds into the same names, so the totals cover every kind.
+- **Ordering**: encoders the managers record into are submitted in the
+  order recorded (a refit submitted after a different build of the same
+  structure is rejected at submit).
+
+How it compares: Unreal's ray-tracing geometry keeps static geometry
+fast-trace and compacted through a queue after its build, and updates
+dynamic geometry (skinned, deforming) with fast-build refits and periodic
+full builds (`EAccelerationStructureBuildMode::Update` against `Build`),
+its dynamic-geometry scratch shared across the frame's updates; the 2026
+NVIDIA path-tracing guidance is the same split (static: fast trace,
+compacted; dynamic: refit, rebuild periodically), with update priority by
+hit counts under instance and geometry budgets. What breaks each: a refit
+under large deformation (an explosion, a ragdoll) keeps a tree whose boxes
+overlap, so trace cost grows until the rebuild; compaction holds both
+copies until the frames using the built one are done (bounded here by the
+byte budget a frame); a TLAS rebuild is linear in instances, which a
+partitioned TLAS (r6) removes. Not built yet: priorities by hit counts and
+geometry budgets (the callers' projections budget their own builds), and
+a scratch pool shared across builds (wgpu allocates scratch per build
+call).

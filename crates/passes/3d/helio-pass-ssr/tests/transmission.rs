@@ -1,4 +1,6 @@
-use helio_core::{BlasGeometry, BlasManager, TlasInstanceInput, TlasManager};
+use helio_core::{
+    BlasGeometry, BlasManager, BlasSegment, Movability, TlasInstanceInput, TlasManager,
+};
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
@@ -73,20 +75,24 @@ fn reflected_segment_filters_only_sheets_before_nearest_opaque_hit() {
                 for mode in 0..5 {
                     let mut encoder = device.create_command_encoder(&Default::default());
                     for (id, opaque) in [(1, false), (2, true)] {
-                        blas.build_from_buffers_with_opacity(
+                        blas.build(
                             id,
                             &mut encoder,
-                            BlasGeometry {
-                                revision: 0,
-                                vertices: &vertices,
-                                first_vertex: 0,
-                                vertex_count: 3,
-                                vertex_stride: 12,
-                                indices: None,
-                                first_index: 0,
-                                index_count: 0,
-                            },
-                            if classified { opaque } else { true },
+                            vec![BlasSegment {
+                                geometry: BlasGeometry {
+                                    positions_revision: 0,
+                                    topology_revision: 0,
+                                    vertices: &vertices,
+                                    first_vertex: 0,
+                                    vertex_count: 3,
+                                    vertex_stride: 12,
+                                    indices: None,
+                                    first_index: 0,
+                                    index_count: 0,
+                                },
+                                opaque: if classified { opaque } else { true },
+                            }],
+                            Movability::Static,
                         )
                         .unwrap();
                     }
