@@ -40,7 +40,11 @@ Write down, for yourself, what owns the thing you are changing and how data flow
 | Concept | Owner |
 |---|---|
 | Object kinds: mesh, light, material, sky, fog, water, voxel, foliage, VG, decal, portal, lens, post, GI, particles, sprites, splines | Their plugin in Pulsar `plugins/vendor/<kind>/`: `api`, `component`, `feature`, `editor`, `examples` |
-| Kind-agnostic pieces: views, cameras, jitter, motion vectors, draw phases, G-buffer layout, scene colour chain, lighting-input contracts, uploads, the graph | The frame and spine in Helio core |
+| Kind-agnostic pieces: views and their budget, cameras, jitter, motion vectors, coordinate spaces, draw phases, G-buffer layout, scene colour chain, lighting-input contracts, uploads, the graph | The frame and spine in Helio core |
+| Host settings: every setting a host can change | `helio-settings`; Pulsar's schema, editor UI and game config are generated from it |
+| Threads and pipeline compiles in Helio-layer code | `helio-tasks` (run by the host's task system) and `helio_core::compile` |
+| CPU profiling scopes | The `profiling` crate in the public Pulsar-Profiling repository |
+| Creating, drawing and presenting renderers in Pulsar | Pulsar's engine-owned `render_runtimes` service; plugins get handles and outputs and never build Helio themselves |
 
 Before adding anything (a struct, WGSL function, constant, key, buffer, pass, setting, registry, trait or helper), search for an existing one:
 
@@ -50,6 +54,11 @@ Before adding anything (a struct, WGSL function, constant, key, buffer, pass, se
   - scene derivations;
   - extension points (`GBufferContributor`, `ShadowCaster`, `RayProxySource`, `LightingContributor`, `ParticipatingMedia`, `PostEffect`, `SurfaceQuery`, `HistoryInvalidation`);
   - draw phases;
+  - views: `ViewContext::render_view`, `Preset::view_nodes`, and `NodeDescriptor::once_per_frame` for nodes that must not repeat per view;
+  - coordinate spaces (`CoordinateSpacesFrameData`) for content drawn through a rigid transform, such as portals, which add draws to the main view instead of a second view;
+  - `ResourceBuilder::read_optional` for an input whose producer may be absent;
+  - `helio_core::upload::FrameUploads` for buffer writes, `helio-tasks` for threads, `helio_core::compile::Compiling` for pipeline compiles off the frame;
+  - `helio-settings` for every setting a host can change;
   - the editor's `ui_level_editor::extend` registrations;
   - the asset loader and reload registrations;
   - by-name component methods.
@@ -95,16 +104,20 @@ Each of these means the design is wrong; redesign instead of shipping it:
 - Per-frame O(all objects) CPU scans, per-frame GPU buffer or bind-group re-creation, or per-frame allocation in hot paths.
 - Blocking readbacks, `device.poll(Wait)` in the frame, sleeps, or "wait N frames" instead of a real readiness signal.
 - Picking "the first directional light" or "the first anything" instead of an explicit contract.
+- A second view (camera, targets, per-view lighting, composite) for content that is a rigid transform of what the main view already draws. Transform it into the main view instead. Portals are coordinate spaces, not views; a view is only for what really needs its own image, such as a planar reflection.
+- Raw threads, or pipeline compiles on the frame, in Helio-layer code.
 
 **Hiding problems**
 - Hiding an artefact (bias, blur, clamp, fade, extra samples) without fixing its cause.
 - Loosening a test threshold, disabling or ignoring a test, or catching and dropping an error so a change passes.
 - Env-var knobs or feature flags as a substitute for explicit config.
+- Silencing warnings. Delete dead code; a narrow `#[allow]` needs a one-line reason, and no crate-wide or global allow is added.
 
 **Leftovers and private copies**
 - `v2`/compat paths or old code kept "just in case".
 - Copying code "for now" with a TODO to dedupe.
 - A private graph, private G-buffer drawer or private resource that duplicates what the frame provides.
+- A git dependency on Pulsar-Native from Helio or a plugin. Shared crates have their own repositories.
 
 ## 4. Architecture invariants
 
@@ -132,10 +145,11 @@ The full rules are in the plan docs; a change must keep all of these:
   - `just arch` (Helio layer gate);
   - `cargo test -p one_owner` (Pulsar);
   - the contract layout tests;
-  - clippy on the crates you touched;
-  - the crates' own tests.
+  - clippy on the crates you touched, and no new rustc warnings in first-party crates;
+  - the crates' own tests;
+  - in Pulsar: `scripts/submodule-pins.sh check --strict` and `just check-pulsar-native-git-deps`.
 - **Rendering changes:**
-  - Compare the preset pass lists before and after.
+  - Compare the preset pass lists before and after (Pulsar `installed_plugins`: `plugin_pass_lists`, `render_acceptance`).
   - Check real frames, not only synthetic tests. On voxel_craft, A/B against a baseline exe, plus the flicker burst for anything temporal.
   - Check every setup the change affects, not just one example. Include a large-world setup when the code depends on scale. For voxel work, that means an Earth- or Moon-scale planet (voxel_flight presets, the voxel_planet level).
   - Check that an example actually wires the system you changed before trusting its result.
