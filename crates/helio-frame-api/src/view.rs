@@ -1,9 +1,8 @@
 //! The views a frame renders, as a node sees them when it builds
 //! (`helio_core::view`).
 //!
-//! A graph renders one view: the frame's camera, a capture (a planar
-//! reflection, into its requester's target) or an inline view (a portal's
-//! destination, into its requester's G-buffer). The graph's builder supplies
+//! A graph renders one view: the frame's camera or a capture (a planar
+//! reflection, into its requester's target). The graph's builder supplies
 //! the [`ViewDescription`] as a setting; a drawer reads it here and bakes the
 //! view's facts into what it builds:
 //!
@@ -11,14 +10,7 @@
 //! - its clip ([`clipped`]): a pipeline built for a clipped view discards
 //!   what the camera's clip plane cuts (the prelude's `helio_view_clipped`;
 //!   [`CLIP_CONSTANT`] is the override that compiles it in), so the primary
-//!   view keeps early depth;
-//! - for an inline view ([`ViewKind::Inline`]), that the G-buffer is already
-//!   open: the phase's opener loads it ([`loads_gbuffer`]).
-//!
-//! Every view's surfaces carry their view in the G-buffer's surface tag
-//! (`gbuffer_view_tag`, from the camera), so screen-space drawers (decals)
-//! touch only their own view's pixels and the lighting shades an inline
-//! view's pixels in its content's space ([`crate::lighting::VIEW_REMAPS`]).
+//!   view keeps early depth.
 
 use helio_feature_api::BuildEnv;
 
@@ -44,24 +36,6 @@ pub fn front_face(env: &BuildEnv<'_>) -> wgpu::FrontFace {
 pub fn clipped(env: &BuildEnv<'_>) -> bool {
     view_of(env).clipped
 }
-
-/// Whether the G-buffer phase's opener must load the G-buffer rather than
-/// clear it: an inline view draws into its requester's.
-pub fn loads_gbuffer(env: &BuildEnv<'_>) -> bool {
-    view_of(env).kind == ViewKind::Inline
-}
-
-/// What an inline view draws into and takes from its requester
-/// (`ViewRequest::imports`): the G-buffer's colour targets and the scene
-/// colour (where a forward frame's opaque drawers light what they draw).
-pub const INLINE_TARGETS: [&str; 6] = [
-    crate::gbuffer::GROUP,
-    crate::gbuffer::SURFACE,
-    crate::gbuffer::SSS,
-    crate::gbuffer::EXTRA,
-    crate::gbuffer::VELOCITY,
-    crate::color::SCENE_COLOR,
-];
 
 /// The WGSL override constant a drawer's shader gates its clip test on:
 /// `override HELIO_VIEW_CLIP: bool = false;` and

@@ -185,6 +185,7 @@ impl Renderer {
         #[cfg(target_arch = "wasm32")]
         let (xr_depth_texture, xr_depth_view, xr_depth_view_layer0) = (None, None, None);
 
+        let coordinate_space_table = super::coordinate_spaces::CoordinateSpaceTable::new(&device);
         let mut graph = RenderGraph::new_with_external_device(&device, &queue);
         graph.profiler_mut().set_frame_stats(Some(stats.clone()));
         graph.lock_sized(RenderSize::new([internal_w, internal_h], [width, height]));
@@ -214,6 +215,7 @@ impl Renderer {
             clear_color: [0.02, 0.02, 0.03, 1.0],
             graph_config: config.clone(),
             coordinate_spaces: Vec::new(),
+            coordinate_space_table,
             xr_mode: false,
             debug_mode: config.debug_mode,
             editor_mode: false,

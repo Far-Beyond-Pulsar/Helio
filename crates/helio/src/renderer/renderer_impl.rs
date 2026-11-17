@@ -97,6 +97,8 @@ pub struct Renderer {
     /// placed sublevels, what its features project). Kept on Renderer so
     /// graph rebuilds cannot reset the G-buffer's table back to identity.
     pub(crate) coordinate_spaces: Vec<glam::Mat4>,
+    /// The table on the GPU, uploaded each frame (`super::coordinate_spaces`).
+    pub(crate) coordinate_space_table: super::coordinate_spaces::CoordinateSpaceTable,
     /// Whether the current renderer output is an XR eye view.
     pub(crate) xr_mode: bool,
     /// TSR quality preset, preserved across graph rebuilds.
@@ -720,6 +722,7 @@ impl Renderer {
     /// `set_debug_mode`.
     pub(crate) fn replace_graph(&mut self, mut graph: RenderGraph) {
         graph.set_debug_mode(self.debug_mode);
+        graph.set_view_budget(self.graph_config.views);
         let derivations = graph.take_scene_derivations();
         self.graph = graph;
         self.adopt_scene_derivations(derivations);

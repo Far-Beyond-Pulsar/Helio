@@ -313,17 +313,20 @@ pub const DIRECTIONAL_VISIBILITY: &str = "directional_visibility";
 pub const TRANSMISSION: &str = "transmission";
 pub const TRANSMISSION_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// View remaps: the frame's view table. Per inline-view slot
-/// (`helio_core::view`), the matrix taking a point of the space the view was
-/// drawn into to its content's own space (a portal's destination), written by
-/// the graph as inline views render, composed through nested ones. A pixel
-/// holds slot `s`'s content when its G-buffer surface tag says so (the
-/// prelude's `gbuffer_view_tag` and `view_remap_of`). A registry buffer of
-/// 256 `mat4x4<f32>`, always published (no inline view: nothing tagged).
-/// Bound as a uniform (fragment stages are at their storage-buffer limit).
-pub const VIEW_REMAPS: &str = helio_core::view::VIEW_REMAPS_RESOURCE;
-/// Slots [`VIEW_REMAPS`] holds.
-pub const VIEW_REMAP_CHAINS: u64 = helio_core::view::VIEW_SLOTS as u64;
+/// View remaps: per remap, the rigid matrix taking a point of the space a
+/// surface was drawn in back to its content's own space (a portal chain's
+/// drawn-to-content map). A pixel holds remap `r`'s content when its G-buffer
+/// surface tag says so (the prelude's `gbuffer_remap_tag` and
+/// `gbuffer_remap_of`), and the lighting shades it there, with the lights of
+/// its own world. Published under this name, a uniform buffer of
+/// [`VIEW_REMAP_CHAINS`] `mat4x4<f32>`, by the feature that draws through
+/// remaps (the portals' chains); absent, nothing is tagged and readers bind a
+/// stand-in. Bound as a uniform (fragment stages are at their storage-buffer
+/// limit), so its size is the 64 KiB uniform binding limit.
+pub const VIEW_REMAPS: &str = "view_remaps";
+/// Remaps [`VIEW_REMAPS`] holds (a surface tag carries up to the prelude's
+/// `GBUFFER_MAX_REMAP`).
+pub const VIEW_REMAP_CHAINS: u64 = 1024;
 pub const VIEW_REMAPS_BYTES: u64 = VIEW_REMAP_CHAINS * 64;
 
 /// The sky: what lights a surface from the air above it and what the air

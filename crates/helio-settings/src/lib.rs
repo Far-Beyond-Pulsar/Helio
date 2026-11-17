@@ -119,6 +119,8 @@ impl Setting {
     pub fn accept(&self, value: Value) -> Option<Value> {
         match (self.kind, value) {
             (Kind::Toggle, Value::Bool(b)) => Some(Value::Bool(b)),
+            // Hosts that store toggles as numbers (0 off, anything else on).
+            (Kind::Toggle, Value::Number(n)) if n.is_finite() => Some(Value::Bool(n != 0.0)),
             (Kind::Number { min, max, .. }, Value::Number(n)) if n.is_finite() => {
                 Some(Value::Number(n.clamp(min, max)))
             }
@@ -358,6 +360,22 @@ pub static RENDERER: Group = Group {
             "Reflections",
             false,
             "Render authored planar reflection surfaces",
+        ),
+        integer(
+            "capture_depth",
+            "Capture Depth",
+            "Reflections",
+            (1, 4),
+            2,
+            "How deep captures nest (a water reflection, a mirror): 2 lets a reflection show              another; past it a surface shows its fallback",
+        ),
+        integer(
+            "max_captures",
+            "Captures per Frame",
+            "Reflections",
+            (1, 64),
+            16,
+            "The most captures a frame renders, all depths together; each renders the scene              again",
         ),
         pick(
             "hdr_output_mode",

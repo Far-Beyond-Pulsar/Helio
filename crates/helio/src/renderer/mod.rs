@@ -1,5 +1,6 @@
 mod builder;
 mod config;
+mod coordinate_spaces;
 mod debug;
 mod fullscreen;
 mod input;

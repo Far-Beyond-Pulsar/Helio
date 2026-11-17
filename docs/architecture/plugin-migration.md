@@ -3233,6 +3233,11 @@ As built, p25 (2026-11-15, branch `rewrite/p25-views` in Helio, Pulsar-Native
 and the plugin repos it touches): **views** (Helio#390). Design note:
 `p25-views-design.md` in the session notes.
 
+**Superseded in part by p25b** (below): portals are no longer inline views.
+The captures half of this section stands; the inline views, the camera's
+`content_to_drawn` and inline slot, the view-slot tags and the graph's view
+table were replaced.
+
 A frame renders its primary view and the secondary views its features ask
 for, each composed from the frame's own members, each drawn by every drawer
 with its own program:
@@ -3340,3 +3345,151 @@ with its own program:
   away from y = 0 reflects about the wrong plane. It predates p25; the water
   plugin owns the fix (the plane from the live volumes, and a choice when
   several heights are in view).
+
+As built, p25b (2026-11-16, branch `rewrite/p25b-portal-spaces` in Helio,
+Pulsar-Native and the plugin repos it touches): **portals are coordinate
+spaces** (Helio#390). The inline-view design of p25 drew each visible
+opening as a view (its own culls and drawers per portal); the user rejected
+it. A portal is a rigid map between coordinate spaces, never a view:
+
+- **The portals publish chains** (`helio_portal_api`, a new api crate):
+  `PortalSync` publishes every opening and every route through openings to
+  `project.portals.max_chain_depth` (default 3) as the frame payload
+  `PORTAL_CHAIN_SET`, each route's maps composed on the CPU into one
+  `content_to_drawn` that the frame's own camera projects. The chains pass
+  (`PortalChainsPass`, scene prep) keeps the routes the camera sees (every
+  opening faced and on screen, the prefix route live), shallowest first, at
+  most `project.portals.max_chains` (default 300), composing each route
+  in f64 about the frame origin (the host's poses, `chain_set_with_poses`)
+  and converting to f32 once, and uploads
+  `PORTAL_CHAINS` (with last frame's map per route key, for motion),
+  `PORTAL_STAGES` (each stage's opening, and each chain's holes: the
+  openings deeper chains show), the remaps (`lighting::VIEW_REMAPS`, now a
+  uniform of 1024) and `PORTAL_LIVE_CHAINS` (the CPU's copy: key, depth,
+  map, the camera in the content). The mask pass (`PortalMaskPass`, G-buffer
+  order 60, `MASK_ORDER`) stamps the outermost openings into `PORTAL_MASK`
+  (`R32Uint`, `opening + 1`) and clears the depth behind them.
+- **Each drawer draws its content through the chains** at
+  `OCCURRENCE_ORDER` (70), one cull and one draw whatever the chain count:
+  - meshes: `PortalOccurrencePass` (count, single-workgroup scan, write;
+    no fixed caps, buffers grow from last frame's total) emits
+    (instance, chain) occurrences into one multi-draw, compacted with the
+    occlusion cull's own range compaction; the one G-buffer program's
+    `vs_occurrence`/`fs_occurrence` map through the chain and clip;
+  - foliage: eye sets (`project.foliage.portal_eyes`, default 1): the tile
+    rings kept resident around the camera and around the places the live
+    chains show (a set follows a route while it lives; content within the
+    near band of another set's eye shares it), one cull dispatch per stage
+    with a chain dimension (`cs_*_chains`: the frustum mapped into the
+    content, band distances from the camera's place there, only what lies
+    beyond the route's openings), the occurrence draw
+    (`FoliageGBufferPortalOccurrences`) and its boxes expansion;
+  - decals: no draw of their own; each pixel is taken back to its content's
+    world through its remap and the decals there paint it.
+  The clip is `//!use portal_chain`: the outer stage by the mask and its
+  plane, each inner stage by the camera's ray through its rectangle, holes
+  where a deeper chain draws.
+- **Lighting**: a chain's pixels carry its remap (`gbuffer_remap_tag`), and
+  deferred lighting, water transmission and decals map position and normal
+  back through `VIEW_REMAPS`. G-buffer normals are in the drawn space.
+- **Known gap (lights and shadows through portals)**: content seen through
+  a portal is lit by the lights of its own world, walking the scene's lights
+  (at most 256; the tile lists are the camera's), and is not shadowed: the
+  frame's shadow maps are the camera's world's (deferred lighting skips them
+  for remapped pixels, as it did for p25's views). No light shines through
+  an opening into the other side. Shadow views per chain (or a
+  shared virtual shadow map covering the chains' content) and lights
+  crossing openings are an open design for the user.
+- **The coordinate-space table moved to the renderer**
+  (`helio::renderer::CoordinateSpaceTable`, published as
+  `CoordinateSpacesFrameData`): the G-buffer pass no longer owns it, so it
+  exists without meshes.
+- **Captures only** (`ViewKind::{Primary, Capture}`): `ViewBudget` is the
+  host's `rendering.capture_depth`/`max_captures` (it was never applied
+  before: `RendererConfig::views` reached no graph). Water's capture renders
+  at `project.water.reflection_scale` (default 0.5) and only while a placed
+  water volume is in the frustum: the volumes' bounds come back by a
+  non-blocking readback (two frames late) and are tested against this
+  frame's camera.
+- **Deleted**: `PortalViewsPass`, `portal_views.wgsl`, the openings payload
+  (`PORTAL_OPENINGS`, `PortalOpenings`), `ViewKind::Inline`, the camera's
+  `content_to_drawn` and inline slot, `GpuCameraUniforms::through`,
+  `helio_view_normal(_in_content)`, `gbuffer_view_tag`, `gbuffer_in_view`,
+  `view_remap_of`, `VIEW_SLOTS`, `VIEW_REMAPS_RESOURCE`, the graph's view
+  table, `view::loads_gbuffer`, `INLINE_TARGETS`, the request's imports and
+  kind, the G-buffer pass's coordinate-space ownership, the foliage
+  placement's single eye uniform, and the examples' portal recursion through
+  the capture budget.
+- **Virtual geometry through portals** (Far-Beyond-Pulsar/Pulsar-Native#1747):
+  a second run of the cluster pipeline over virtual instances, drawn at
+  `OCCLUDED_OCCURRENCE_ORDER` (75), after the mask and the classic
+  occurrences.
+  - **The run seam** (`helio_vg_format::VgRun`): every VG pass takes the run
+    it belongs to, which owns its pass names, every graph key it shares
+    (inputs, Hi-Z, cull and raster frame data), where its instances come
+    from (`VgInstanceSource::Scene`, or `Registry` buffers another pass
+    publishes, with a per-instance remap) and its instance tree
+    (`VgRun::tree`: the direct run's BVH; `None` for instances that are
+    already a spatial query's result, whose cull seeds every instance,
+    `VgCullConfig::seeds_instances`, instead of rebuilding a tree each
+    frame). `VgRun::DIRECT` keeps the old names; `VgRun::SECONDARY` names
+    nothing of portals. A `VgRunGate` schedules a run's passes only while
+    its producer is a member.
+  - **Virtual instances** (`VgPortalInstancesPass`, meshes' VG feature): one
+    workgroup per live chain walks the direct run's instance BVH a level at
+    a time (a shared frontier its threads split; a thread walks what the
+    frontier cannot hold) against
+    the chain's volume (`PORTAL_CHAIN_VOLUMES`: the frustum mapped back into
+    the content, the four planes from the camera's place there through the
+    chain's deepest opening, and that opening's plane; composed in f64 on
+    the CPU by the chains pass), and appends each instance whose world
+    sphere passes: its object rows copied with `content_to_drawn · space ·
+    transform` and last frame's `prev_content_to_drawn · space_prev ·
+    prev_transform` (motion vectors carry the chain's motion), the space
+    folded in, the chain's remap per instance. Work follows the BVH nodes the
+    volumes overlap; buffers grow from read-back totals. The kernel reads
+    and writes `StaticObjectRow` through the meshes api's new
+    `OBJECT_ROW_SNIPPET` (`//!use mesh_object_row`), which replaced six
+    WGSL copies of the row (object batch, both scene joins, the VG BVH,
+    the VG cull, authored LOD apply). Its last word, `_skin_pad` in Rust,
+    held the section index the scene join writes and the authored LOD
+    reads under another name: it is `section_index` everywhere now.
+  - **The second run** culls one exact phase against its own Hi-Z of the
+    frame's depth as it stands after the mask and the classic occurrences
+    (`VgHizSource::FrameDepth`, `FLAG_CURRENT_HIZ`), never the direct run's.
+    Its raster clips every pixel to its chain (`vg_chain_clip.wgsl`,
+    `//!use portal_chain`, the mask texture and the stages); its shade's
+    final depth (`fs_remapped`) tags pixels with the chain's remap, so
+    lighting and decals see them in their own world. No Tier 3.
+  - **One cluster store**: the run reads the direct run's stream buffers;
+    its page requests append to the same feedback, read back with the next
+    frame's (one residency owner, no second pool).
+  - **Classic occurrences skip VG-active instances**
+    (`INSTANCE_FLAG_CLASSIC_SUPPRESSED`), as the direct cull does, so a
+    virtual-geometry mesh draws once through a portal.
+  - **Scheduled** only while the frame has live chains and the scene holds
+    VG instances (`SceneContent::holds_rows`); through portals that show no
+    VG while the scene has some, the passes run with no instances (about
+    1.4 ms of VG passes in the test frame below, the largest the shade's
+    full-screen passes at 0.45 ms; the whole live chain costs 1.8 ms over none, as
+    main's inline view did).
+  - **Verified** (`virtual_geometry_acceptance`, against main's inline
+    views, 76f61b459): through one portal VG covers what the classic mesh
+    covers (4791 against 4792 depth texels); through a chain two portals
+    deep it shows (1714 texels; none with the second pair unlinked); a
+    camera moving through a VG portal under TSR differs from its settled
+    frame on 0.059 of the pixels, against 0.060 seen directly; the run's
+    passes are absent without portals, through unlinked portals and in a
+    scene without VG instances. GPU time (`diag_vg_portal_cost`, 96 dense
+    VG spheres, medians of pipelined frames, rounds interleaved, GPU
+    timestamps of the frame and its views): one portal 19.2-19.5 ms against
+    main's 19.2-19.5 (unlinked 12.1 against 12.2-12.4); a depth-2 chain
+    17.5-17.7 against 19.7-20.0; a live chain showing no VG 13.9-14.1
+    against 13.9-14.1. The first build rebuilt a BVH over the virtual
+    instances every frame (a 1-bit radix sort, 4-7 ms whatever the count);
+    seeding the cull removed it.
+  - **Known gap**: the VG cull, raster and BVH of the direct run ignore
+    coordinate spaces (only its shade applies them); the second run folds
+    the space into its rows, but its BVH walk tests the direct tree's
+    space-free node bounds.
+

@@ -210,19 +210,15 @@ impl Preset {
         nodes.list
     }
 
-    /// The preset's nodes for a secondary view (`helio_core::view`): the
-    /// same frame with its once-per-frame nodes left out (the view reads
-    /// what they published), as far as the view needs.
-    ///
-    /// - A **capture** renders lit: scene prep, the background, visibility,
-    ///   the geometry phase and its slots, the lighting inputs, the lighting
-    ///   model and the lighting slot. It stops before the overlay phase, so
-    ///   a capture never sees what draws over the lit scene there (water's
-    ///   own surface): a reflection holds no reflection (UE's and HDRP's
-    ///   rule, here a property of the composition).
-    /// - An **inline** view draws into its requester's G-buffer: visibility
-    ///   and the geometry phase, every drawer loading the G-buffer (its
-    ///   opener included, `helio_frame_api::view::loads_gbuffer`).
+    /// The preset's nodes for a capture (`helio_core::view`): the same frame
+    /// with its once-per-frame nodes left out (the capture reads what they
+    /// published), rendered lit: scene prep, the background, visibility, the
+    /// geometry phase and its slots, the lighting inputs, the lighting model
+    /// and the lighting slot. It stops before the overlay phase, so a capture
+    /// never sees what draws over the lit scene there (water's own surface):
+    /// a reflection holds no reflection (UE's and HDRP's rule, here a
+    /// property of the composition). No temporal resolve and no exposure run
+    /// in it: it keeps no history and the frame's exposure maps it.
     ///
     /// No pass is named: every feature placed at those slots and phases
     /// joins the view as it joins the frame.
@@ -237,20 +233,11 @@ impl Preset {
         };
         let model = self.model(registry);
         nodes.frame(self, false);
-        if view.kind == ViewKind::Inline {
-            nodes.slot(Slot::Visibility);
-            nodes.phase(if model.shading == Shading::Forward {
-                Phase::Forward
-            } else {
-                Phase::GBuffer
-            });
-        } else {
-            nodes.slot(Slot::Prepare);
-            nodes.pass("background");
-            nodes.slot(Slot::Visibility);
-            nodes.geometry_and_lighting(model);
-            nodes.slot(Slot::Lighting);
-        }
+        nodes.slot(Slot::Prepare);
+        nodes.pass("background");
+        nodes.slot(Slot::Visibility);
+        nodes.geometry_and_lighting(model);
+        nodes.slot(Slot::Lighting);
         nodes.list
     }
 
@@ -564,9 +551,7 @@ impl Nodes<'_> {
     fn phase(&mut self, phase: Phase) {
         let openers = self.registry.placed(phase.open()).len();
         let drawers = self.registry.placed(phase.draw()).len();
-        // An inline view draws into its requester's G-buffer: nothing clears it.
-        let inline = self.view.is_some_and(|view| view.kind == ViewKind::Inline);
-        let spine_clears = phase == Phase::GBuffer && openers == 0 && !inline;
+        let spine_clears = phase == Phase::GBuffer && openers == 0;
         if phase.needs_opener() {
             assert!(
                 openers <= 1 && (drawers == 0 || openers == 1 || spine_clears),
@@ -665,17 +650,6 @@ mod tests {
                 "a capture does not run `{id}`: {capture:?}"
             );
         }
-        let inline = ids(ViewDescription {
-            kind: ViewKind::Inline,
-            mirrored: false,
-            clipped: true,
-            depth: 1,
-        });
-        assert_eq!(
-            inline,
-            ["frame", "cull", "hiz", "opener", "leaves"],
-            "{inline:?}"
-        );
         // The frame's own graph is unchanged by any of it.
         let primary = ids(ViewDescription::PRIMARY);
         for id in ["batch", "probes", "sea", "fog"] {
