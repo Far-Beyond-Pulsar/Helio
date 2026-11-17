@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Warnings fail the build (Pulsar-Native#1644). Helio's dependencies are git
+  # or registry crates, whose lints cargo caps, so this denies Helio's own.
+  RUSTFLAGS: "-D warnings"
 
 jobs:
   build:
