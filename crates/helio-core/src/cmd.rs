@@ -85,7 +85,10 @@ impl<'a> RenderCmds<'a> {
         Self::owned(pass, None)
     }
 
-    fn owned(pass: wgpu::RenderPass<'a>, stats: Option<crate::stats::FrameStats>) -> RenderCmds<'a> {
+    fn owned(
+        pass: wgpu::RenderPass<'a>,
+        stats: Option<crate::stats::FrameStats>,
+    ) -> RenderCmds<'a> {
         RenderCmds {
             inner: RenderInner::Owned(pass),
             stats,
@@ -144,12 +147,14 @@ impl<'a> RenderCmds<'a> {
     }
 
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        self.tally.direct(vertices.len() as u32, instances.len() as u32);
+        self.tally
+            .direct(vertices.len() as u32, instances.len() as u32);
         render!(self, |p| p.draw(vertices, instances))
     }
 
     pub fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        self.tally.direct(indices.len() as u32, instances.len() as u32);
+        self.tally
+            .direct(indices.len() as u32, instances.len() as u32);
         render!(self, |p| p.draw_indexed(indices, base_vertex, instances))
     }
 

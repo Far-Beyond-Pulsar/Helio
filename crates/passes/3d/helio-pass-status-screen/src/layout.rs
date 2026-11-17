@@ -121,7 +121,15 @@ pub fn compute(content: &StatusContent, width: u32, height: u32) -> Layout {
         let (mut low, mut high) = (0usize, (total - 1).min(MAX_LINES));
         while low <= high {
             let mid = (low + high) / 2;
-            let trial = compose(content, screen, unit, &Budget { details: mid, ..budget.clone() });
+            let trial = compose(
+                content,
+                screen,
+                unit,
+                &Budget {
+                    details: mid,
+                    ..budget.clone()
+                },
+            );
             if fits(&trial) {
                 best = trial.map(|t| (mid, t));
                 low = mid + 1;
@@ -525,8 +533,7 @@ impl Builder {
             ],
         });
         self.chars.extend(cells.iter().map(|c| u32::from(c.ch)));
-        self.text
-            .push(cells.iter().map(|c| c.ch as char).collect());
+        self.text.push(cells.iter().map(|c| c.ch as char).collect());
     }
 
     /// A wrapped line in a box `lh` tall at `top`, with its chips. Returns
@@ -578,7 +585,11 @@ fn natural_width(lines: &[Vec<Cell>], m: &Metrics) -> f32 {
 
 fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -> Option<Composed> {
     let shown = budget.details.min(content.details.len());
-    let hidden = if budget.section { content.details.len() - shown } else { 0 };
+    let hidden = if budget.section {
+        content.details.len() - shown
+    } else {
+        0
+    };
 
     // The styles.
     let kicker_color = match content.tone {
@@ -653,7 +664,8 @@ fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -
     let has_details = budget.section && !content.details.is_empty();
     let mut natural = icon
         + icon_gap
-        + natural_width(&kicker_cells, &plain(&kicker)).max(natural_width(&title_cells, &plain(&title)));
+        + natural_width(&kicker_cells, &plain(&kicker))
+            .max(natural_width(&title_cells, &plain(&title)));
     if let Some(id) = &id_cells {
         natural = natural.max(
             natural_width(&label_cells, &plain(&label))
@@ -688,18 +700,33 @@ fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -
     let mut y = pad_top;
 
     // Header: the icon, the kicker and the title.
-    let title_lines = clip(wrap(&title_cells, inner - icon - icon_gap, &plain(&title)), 2);
+    let title_lines = clip(
+        wrap(&title_cells, inner - icon - icon_gap, &plain(&title)),
+        2,
+    );
     let title_lh = 1.2 * title.size;
     let block = kicker.size + 0.4 * u + title_lines.len() as f32 * title_lh;
     let header = icon.max(block);
     let text_x = x0 + icon + icon_gap;
     let mut ty = y + (header - block) / 2.0;
     for line in &kicker_cells {
-        b.run(text_x, ty + (kicker.size - kicker.cell()) / 2.0, &kicker, line, kicker.color);
+        b.run(
+            text_x,
+            ty + (kicker.size - kicker.cell()) / 2.0,
+            &kicker,
+            line,
+            kicker.color,
+        );
     }
     ty += kicker.size + 0.4 * u;
     for line in &title_lines {
-        b.run(text_x, ty + (title_lh - title.cell()) / 2.0, &title, line, title.color);
+        b.run(
+            text_x,
+            ty + (title_lh - title.cell()) / 2.0,
+            &title,
+            line,
+            title.color,
+        );
         ty += title_lh;
     }
     let icon_center = [x0 + icon / 2.0, y + header / 2.0, icon];
@@ -723,7 +750,13 @@ fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -
             label.color,
         );
         for line in &lines {
-            b.run(id_x, y + (lh - pipe_id.cell()) / 2.0, &pipe_id, line, pipe_id.color);
+            b.run(
+                id_x,
+                y + (lh - pipe_id.cell()) / 2.0,
+                &pipe_id,
+                line,
+                pipe_id.color,
+            );
             y += lh;
         }
     }
@@ -742,7 +775,13 @@ fn compose(content: &StatusContent, screen: [f32; 2], u: f32, budget: &Budget) -
     if has_details {
         y += 1.5 * u;
         let label_width = natural_width(&section_cells, &plain(&section));
-        b.run(x0, y + (section.size - section.cell()) / 2.0, &section, &section_cells[0], section.color);
+        b.run(
+            x0,
+            y + (section.size - section.cell()) / 2.0,
+            &section,
+            &section_cells[0],
+            section.color,
+        );
         let rule_x = x0 + label_width + 0.8 * section.size;
         b.rect(
             [
@@ -986,11 +1025,7 @@ mod tests {
     #[test]
     fn backticks_make_chips_and_an_unpaired_one_is_dropped() {
         let cells = &paragraphs("a `b` c", true, false)[0];
-        assert_eq!(
-            cells.iter().filter(|c| c.code).count(),
-            1,
-            "{cells:?}"
-        );
+        assert_eq!(cells.iter().filter(|c| c.code).count(), 1, "{cells:?}");
         let cells = &paragraphs("a `b c", true, false)[0];
         assert!(cells.iter().all(|c| !c.code));
         assert_eq!(cells.len(), 5);
@@ -1012,7 +1047,10 @@ mod tests {
     fn assert_fits(layout: &Layout, label: &str) {
         let [x, y, w, h] = layout.dialog;
         let [sw, sh] = layout.screen.map(|v| v as f32);
-        assert!(x >= 0.0 && y >= 0.0 && x + w <= sw && y + h <= sh, "{label}: inside");
+        assert!(
+            x >= 0.0 && y >= 0.0 && x + w <= sw && y + h <= sh,
+            "{label}: inside"
+        );
         assert!(w <= 0.9 * sw + 1.0, "{label}: width {w} of {sw}");
         assert!(h <= 0.9 * sh + 1.0, "{label}: height {h} of {sh}");
         assert!(
@@ -1029,13 +1067,22 @@ mod tests {
                 line.place,
                 x + w
             );
-            assert!(line.place[1] >= y && line.place[1] + line.place[3] <= y + h + 1.0, "{label}: run in height");
+            assert!(
+                line.place[1] >= y && line.place[1] + line.place[3] <= y + h + 1.0,
+                "{label}: run in height"
+            );
         }
     }
 
     #[test]
     fn every_state_fits_at_the_review_sizes() {
-        for (w, h) in [(1280, 720), (720, 405), (420, 320), (1920, 1080), (3840, 2160)] {
+        for (w, h) in [
+            (1280, 720),
+            (720, 405),
+            (420, 320),
+            (1920, 1080),
+            (3840, 2160),
+        ] {
             for (name, content) in [
                 ("none", idle()),
                 ("invalid", sample(3)),
@@ -1075,12 +1122,12 @@ mod tests {
         content.details[0].text = "word ".repeat(80);
         let layout = compute(&content, 1280, 720);
         assert_fits(&layout, "wrapped");
-        let rows = layout
-            .text
-            .iter()
-            .filter(|t| t.starts_with("word"))
-            .count();
-        assert!(rows > 1, "the detail wraps onto several lines: {:?}", layout.text);
+        let rows = layout.text.iter().filter(|t| t.starts_with("word")).count();
+        assert!(
+            rows > 1,
+            "the detail wraps onto several lines: {:?}",
+            layout.text
+        );
         assert!(rows <= 4, "and stops at four, ending in `...`");
         assert!(layout.text.iter().any(|t| t.ends_with("...")));
     }

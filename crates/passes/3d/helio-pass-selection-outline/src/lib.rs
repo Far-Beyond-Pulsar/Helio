@@ -60,7 +60,8 @@ impl RenderPass for SelectionMaskClearPass {
         if !self.editor {
             return None;
         }
-        let mask = resources.read_texture_view(ResourceKey::new(MASK_DEPTH), "SelectionMaskClear")?;
+        let mask =
+            resources.read_texture_view(ResourceKey::new(MASK_DEPTH), "SelectionMaskClear")?;
         Some(wgpu::RenderPassDescriptor {
             label: Some("Selection Mask Clear"),
             color_attachments: &[],
