@@ -14,6 +14,8 @@
 //! - [`lighting`]: the inputs a lighting model reads, as generic contracts
 //!   with stand-ins: indirect diffuse and specular, the sun's visibility and
 //!   transmittance, transmission, the sky, the light list, view remaps.
+//! - [`selection`]: the editor's selection rows and the mask the selected
+//!   geometry is drawn into, for the selection outline.
 //! - [`view`]: the views a frame renders (its camera, captures, inline
 //!   views) as a drawer sees them when it builds.
 //! - [`rays`]: the frame's TLAS and the buffers that follow it, published by
@@ -34,6 +36,7 @@ pub mod lighting;
 pub mod media;
 mod phase;
 pub mod rays;
+pub mod selection;
 pub mod view;
 
 pub use host::{host_input, host_kind, HOST_INPUTS};

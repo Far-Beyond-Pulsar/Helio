@@ -304,6 +304,28 @@ frame's own G-buffer, tagging those pixels with the chain's remap
 content's world. Details: plugin-migration.md, "As built, p25" and "As
 built, p25b".
 
+### The selection outline (as built)
+
+The editor's selection outline is a draw phase, so the frame names no kind
+(`helio_frame_api::selection`):
+
+- **Selection rows.** The host publishes `object_selected` (`OBJECT_SELECTED`,
+  one `u32` per object entity).
+- **The phase.** `Phase::SelectionMask` has one attachment, `selection_depth`
+  (Depth32Float, reversed Z, unjittered), and runs after the post-process,
+  before the Display slot. `helio-pass-selection-outline` opens it (a clear).
+  Each kind that can be selected draws its selected geometry into it.
+- **The outline.** Drawn at Display, order 5: a 2-pixel line around the mask,
+  dimmed where the scene's depth hides the selected surface.
+- **The meshes' drawer.** It joins a culled draw's instance to its object
+  through `helio_mesh_api::STATIC_OBJECT_OWNERS`, written by the scene join
+  with the rows' structure. A selection change touches one row per object and
+  no join or batch work.
+- **Editor only.** Every pass of it is gated on `RenderPass::set_editor_mode`.
+
+This is Unreal's custom-depth outline. The difference is that the mask is
+filled through a phase rather than by a per-primitive flag the renderer reads.
+
 ### Why this shape
 
 - **Unreal** layers RHI → RenderCore (RDG) → Renderer; game-side components

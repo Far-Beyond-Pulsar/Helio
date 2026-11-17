@@ -24,6 +24,7 @@ helio-pass-fxaa = { path = "../passes/3d/helio-pass-fxaa" }
 helio-pass-buffer-view = { path = "../passes/3d/helio-pass-buffer-view" }
 helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
 helio-pass-perf-overlay = { path = "../passes/3d/helio-pass-perf-overlay" }
+helio-pass-selection-outline = { path = "../passes/3d/helio-pass-selection-outline" }
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }

@@ -80,12 +80,14 @@ pub(crate) fn phases_for(shading: Shading) -> Vec<Phase> {
             Phase::Forward,
             Phase::Overlay,
             Phase::Transparent,
+            Phase::SelectionMask,
         ],
         Shading::GBuffer => vec![
             Phase::ShadowCasters,
             Phase::GBuffer,
             Phase::Overlay,
             Phase::Transparent,
+            Phase::SelectionMask,
         ],
     }
 }
@@ -197,6 +199,10 @@ impl Preset {
         }
         nodes.slot(Slot::Resolved);
         nodes.pass("post_process");
+
+        // The editor's selected geometry, for the outline drawn over the
+        // final image (its drawers draw nothing outside the editor).
+        nodes.phase(Phase::SelectionMask);
 
         // Over the final image.
         nodes.slot(Slot::Display);

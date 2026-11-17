@@ -120,6 +120,10 @@ pub enum Phase {
     /// Over the lit scene colour, depth-tested, before media: light
     /// sprites, glows, editor gizmos.
     Overlay,
+    /// The editor's selected geometry, depth only, into its own target
+    /// ([`crate::selection::MASK_DEPTH`]), unjittered: what the selection
+    /// outline is drawn from. Its drawers draw nothing outside the editor.
+    SelectionMask,
 }
 
 /// Which views a phase is drawn for. A graph is built for one camera (stereo
@@ -174,13 +178,14 @@ const GBUFFER_ATTACHMENTS: [Attachment; 9] = [
 ];
 
 impl Phase {
-    pub const ALL: [Phase; 6] = [
+    pub const ALL: [Phase; 7] = [
         Phase::ShadowCasters,
         Phase::DepthPrepass,
         Phase::GBuffer,
         Phase::Forward,
         Phase::Transparent,
         Phase::Overlay,
+        Phase::SelectionMask,
     ];
 
     pub fn name(self) -> &'static str {
@@ -191,6 +196,7 @@ impl Phase {
             Phase::Forward => "forward",
             Phase::Transparent => "transparent",
             Phase::Overlay => "overlay",
+            Phase::SelectionMask => "selection_mask",
         }
     }
 
@@ -209,12 +215,17 @@ impl Phase {
         const SHADOW: [Attachment; 1] = [fixed("shadow_atlas", ResourceFormat::Depth32Float)];
         const DEPTH: [Attachment; 1] = [fixed(gbuffer::DEPTH, ResourceFormat::Depth32Float)];
         const COLOUR: [Attachment; 1] = [scene(crate::color::SCENE_COLOR)];
+        const SELECTION: [Attachment; 1] = [fixed(
+            crate::selection::MASK_DEPTH,
+            ResourceFormat::Depth32Float,
+        )];
         match self {
             Phase::ShadowCasters => &SHADOW,
             Phase::DepthPrepass => &DEPTH,
             Phase::GBuffer => &GBUFFER_ATTACHMENTS,
             Phase::Forward | Phase::Overlay => &COLOUR,
             Phase::Transparent => &[],
+            Phase::SelectionMask => &SELECTION,
         }
     }
 
@@ -227,6 +238,7 @@ impl Phase {
             Phase::Forward => "phase.forward.before",
             Phase::Transparent => "phase.transparent.before",
             Phase::Overlay => "phase.overlay.before",
+            Phase::SelectionMask => "phase.selection_mask.before",
         })
     }
 
@@ -239,6 +251,7 @@ impl Phase {
             Phase::Forward => "phase.forward.open",
             Phase::Transparent => "phase.transparent.open",
             Phase::Overlay => "phase.overlay.open",
+            Phase::SelectionMask => "phase.selection_mask.open",
         })
     }
 
@@ -251,6 +264,7 @@ impl Phase {
             Phase::Forward => "phase.forward.draw",
             Phase::Transparent => "phase.transparent.draw",
             Phase::Overlay => "phase.overlay.draw",
+            Phase::SelectionMask => "phase.selection_mask.draw",
         })
     }
 
@@ -260,7 +274,7 @@ impl Phase {
     pub fn needs_opener(self) -> bool {
         matches!(
             self,
-            Phase::ShadowCasters | Phase::DepthPrepass | Phase::GBuffer
+            Phase::ShadowCasters | Phase::DepthPrepass | Phase::GBuffer | Phase::SelectionMask
         )
     }
 }
