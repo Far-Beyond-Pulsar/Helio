@@ -737,36 +737,6 @@ impl DebugPass {
         self.vertex_count = count as u32;
     }
 
-    /// Overwrites vertices from `first_vertex` within what the last
-    /// [`update_lines`](Self::update_lines) made room for.
-    pub fn update_lines_at(
-        &mut self,
-        queue: &wgpu::Queue,
-        first_vertex: usize,
-        verts: &[DebugVertex],
-    ) {
-        let capacity = (self.vertex_buf.size() as usize) / std::mem::size_of::<DebugVertex>();
-        if verts.is_empty() || first_vertex >= capacity {
-            return;
-        }
-        let max_writable = capacity.saturating_sub(first_vertex);
-        let count = verts.len().min(max_writable);
-        if count == 0 {
-            return;
-        }
-        let offset_bytes = (first_vertex * std::mem::size_of::<DebugVertex>()) as u64;
-        helio_core::upload::write_buffer(
-            queue,
-            &self.vertex_buf,
-            offset_bytes,
-            bytemuck::cast_slice(&verts[..count]),
-        );
-    }
-
-    pub fn set_line_vertex_count(&mut self, count: usize) {
-        self.vertex_count = count.min(MAX_DEBUG_VERTS as usize) as u32;
-    }
-
     /// Uploads triangle vertices (triples), growing the buffer to fit up to
     /// `MAX_DEBUG_TRIS`.
     pub fn update_tris(
@@ -843,62 +813,6 @@ impl DebugPass {
             }));
             self.bind_group_key = Some(self.camera_buf.clone());
         }
-    }
-
-    pub fn execute_on_target(
-        &mut self,
-        ctx: &mut PassContext,
-        target: &wgpu::TextureView,
-    ) -> HelioResult<()> {
-        if self.vertex_count == 0 && self.tri_count == 0 {
-            return Ok(());
-        }
-
-        self.ensure_bind_group(ctx.device);
-
-        let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.registry.get(helio_core::ResourceKey::new(
-                helio_frame_api::depth::FULL_RES_DEPTH,
-            )) {
-                frd
-            } else {
-                ctx.depth
-            };
-            Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            })
-        } else {
-            None
-        };
-
-        let color_attachment = wgpu::RenderPassColorAttachment {
-            view: target,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        };
-        let color_attachments = [Some(color_attachment)];
-        let desc = wgpu::RenderPassDescriptor {
-            label: Some("DebugDraw"),
-            color_attachments: &color_attachments,
-            depth_stencil_attachment: depth_attachment,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        };
-
-        let mut cmds = ctx.graphics_cmds();
-        let mut pass = cmds.begin_render_pass(&desc);
-        self.draw_commands(&mut pass);
-        Ok(())
     }
 }
 

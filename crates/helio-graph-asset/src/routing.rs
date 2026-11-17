@@ -395,7 +395,9 @@ mod tests {
 
         // A pass that does not draw the frame has no frame output to wire.
         let mut wrong = asset(&["lit", "tonemap"]);
-        wrong.connections.push(wire("lit", "out_frame", "out", "frame"));
+        wrong
+            .connections
+            .push(wire("lit", "out_frame", "out", "frame"));
         assert!(validate(&wrong, &registry)
             .errors()
             .any(|d| d.message.contains("no output pin `out_frame`")));

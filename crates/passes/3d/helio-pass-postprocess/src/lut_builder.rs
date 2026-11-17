@@ -1,6 +1,5 @@
 pub struct LutBuilder {
     pipeline: wgpu::ComputePipeline,
-    pipeline_layout: wgpu::PipelineLayout,
     bind_group_layout: wgpu::BindGroupLayout,
     lut_texture: wgpu::Texture,
     lut_view_3d: wgpu::TextureView,
@@ -61,7 +60,6 @@ impl LutBuilder {
 
         Self {
             pipeline,
-            pipeline_layout,
             bind_group_layout,
             lut_texture: tex,
             lut_view_3d: view,

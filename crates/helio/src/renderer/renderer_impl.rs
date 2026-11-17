@@ -849,21 +849,6 @@ impl Renderer {
             .and_then(helio_xr::session::XrSession::display_refresh_rate_hz)
     }
 
-    /// Ask the OpenXR runtime for an exact supported headset display rate.
-    /// The request is optional and may be declined;
-    /// query [`Self::xr_display_refresh_rate_hz`] on subsequent frames to see
-    /// which rate the runtime actually adopted.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn request_xr_display_refresh_rate_hz(
-        &self,
-        requested_hz: f32,
-    ) -> helio_xr::Result<bool> {
-        match self.xr.as_ref() {
-            Some(session) => session.request_display_refresh_rate_hz(requested_hz),
-            None => Ok(false),
-        }
-    }
-
     /// Set the camera template used for XR frames (postprocess settings,
     /// near/far planes, position). The per-eye view/projection
     /// matrices are overridden by the headset pose each frame; only the
@@ -882,11 +867,6 @@ impl Renderer {
             self.xr_mirror_format = Some(format);
             self.xr_mirror = None;
         }
-    }
-
-    /// Whether the renderer was built with the OpenXR multiview path enabled.
-    pub(crate) fn xr_enabled(&self) -> bool {
-        self.enable_xr
     }
 }
 

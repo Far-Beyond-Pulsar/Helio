@@ -257,10 +257,6 @@ impl RenderPass for PlanarReflectionPass {
 
         Ok(())
     }
-
-    fn publish<'a>(&self, frame: &mut helio_core::ResourceRegistry<'a>) {
-        // Published by the graph automatically via the resource pool name.
-    }
 }
 
 fn buffer_camera_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

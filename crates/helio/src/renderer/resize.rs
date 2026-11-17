@@ -184,9 +184,4 @@ impl Renderer {
     pub(crate) fn set_xr_stage_transform(&mut self, world_from_stage: glam::Mat4) {
         self.xr_stage_transform = world_from_stage;
     }
-
-    /// The current stage transform.
-    pub(crate) fn xr_stage_transform(&self) -> glam::Mat4 {
-        self.xr_stage_transform
-    }
 }
