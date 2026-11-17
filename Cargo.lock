@@ -2249,7 +2249,7 @@ dependencies = [
 [[package]]
 name = "profiling"
 version = "0.1.0"
-source = "git+https://github.com//Far-Beyond-Pulsar/Pulsar-Profiling?rev=5370d7143d0f90754e7922e1e10e507747971b7d#5370d7143d0f90754e7922e1e10e507747971b7d"
+source = "git+https://github.com//Far-Beyond-Pulsar/Pulsar-Profiling?rev=4862e1be94a5f11090513a40b3ac2aeafcee1246#4862e1be94a5f11090513a40b3ac2aeafcee1246"
 dependencies = [
  "chrono",
  "crossbeam-channel",

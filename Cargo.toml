@@ -22,7 +22,7 @@ winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "
 # is the public Pulsar-Profiling repository; SceneDB pins it too, and the
 # patch below makes every pin one copy (one `PROFILER`). Pulsar-Native patches
 # the same source onto its submodule of the repository.
-profiling = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling", rev = "5370d7143d0f90754e7922e1e10e507747971b7d" }
+profiling = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling", rev = "4862e1be94a5f11090513a40b3ac2aeafcee1246" }
 egui = "0.36.1"
 egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
@@ -102,7 +102,7 @@ wgpu-types = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "heli
 # to a second copy with its own `PROFILER`. The `//` spelling is the same
 # repository as a distinct source, which is what lets a patch name it.
 [patch."https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling"]
-profiling = { git = "https://github.com//Far-Beyond-Pulsar/Pulsar-Profiling", rev = "5370d7143d0f90754e7922e1e10e507747971b7d" }
+profiling = { git = "https://github.com//Far-Beyond-Pulsar/Pulsar-Profiling", rev = "4862e1be94a5f11090513a40b3ac2aeafcee1246" }
 
 # The vg_stress build script decompresses and converts ~570 MB of scans; build
 # scripts default to opt-level 0 even in release, which would be glacial.
