@@ -18,7 +18,8 @@ struct RayStreamHeader {
 // A ray: its origin and the most distance it travels (0 or less: no ray in
 // this row), its unit direction, and `cone`: its spread (the width of its
 // footprint a metre out, a half float in bits 0..16) and the caster mask it
-// sees (bits 16..24, `RAY_MASK_*`).
+// sees (bits 16..24, `RAY_MASK_*`). A tracer traces from the origin itself,
+// from distance 0: the consumer starts a ray off the surface it leaves.
 struct SceneRay {
     origin: vec3<f32>,
     t_max: f32,
@@ -61,7 +62,9 @@ struct SceneHit {
 const SCENE_HIT_INSIDE: u32 = 0x08000000u;
 const SCENE_HIT_PAYLOAD: u32 = 0x07ffffffu;
 
-fn scene_hit(tracer: u32, t: f32, inside: bool, payload: u32, b: u32, c: u32) -> SceneHit {
+// The row of a nearest-hit stream for a hit `t` along its ray, found by
+// `tracer`.
+fn scene_nearest(tracer: u32, t: f32, inside: bool, payload: u32, b: u32, c: u32) -> SceneHit {
     return SceneHit(t, (tracer << 28u) | select(0u, SCENE_HIT_INSIDE, inside) | (payload & SCENE_HIT_PAYLOAD), b, c);
 }
 

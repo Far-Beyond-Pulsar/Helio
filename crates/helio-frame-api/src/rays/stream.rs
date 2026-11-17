@@ -349,7 +349,7 @@ impl StreamBuffers {
     }
 }
 
-/// A tracer's number in the hits it writes (`scene_hit`'s `tracer`): 1 and
+/// A tracer's number in the hits it writes (`scene_nearest`'s `tracer`): 1 and
 /// up, in registration order; 0 is no hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TracerId(pub u32);
@@ -368,7 +368,9 @@ pub struct Tracer {
     pub supported: Arc<dyn Fn(&BuildEnv<'_>) -> bool + Send + Sync>,
     /// Adds the passes that trace `stream`: they read its header and rays
     /// and write, into each row of its hits, the nearer of what the row
-    /// holds and this kind's hit (`scene_hit_reach`); for
+    /// holds and this kind's hit (`scene_hit_reach`, `scene_nearest`), from
+    /// the ray's origin itself (a consumer whose rays leave a surface starts
+    /// them off it: a tracer adds no offset of its own); for
     /// [`RayClass::Occlusion`], what the row lets through times what this
     /// kind's geometry does (`scene_occlusion`). One indirect dispatch over
     /// the header's groups ([`GROUP`] invocations each). On a frame where
