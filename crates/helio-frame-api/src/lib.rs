@@ -19,7 +19,8 @@
 //! - [`view`]: the views a frame renders (its camera and the captures
 //!   features ask for) as a drawer sees them when it builds.
 //! - [`rays`]: the frame's TLAS and the buffers that follow it, published by
-//!   whatever builds it.
+//!   whatever builds it; and [`rays::stream`], the ray streams every kind's
+//!   tracer answers, so a consumer traces the whole scene knowing no kind.
 //! - [`static_names`]: the read lists of a pass whose reads are what a
 //!   publisher named (media, the sun's transmittance).
 //! - [`host_input`]: resources a host supplies every frame, declared by the
@@ -69,4 +70,19 @@ pub fn static_names(names: &[&'static str]) -> &'static [&'static str] {
     let list: &'static [&'static str] = Box::leak(names.to_vec().into_boxed_slice());
     lists.push(list);
     list
+}
+
+/// `name` as a `'static` string, one per distinct name: a resource a node
+/// names when it is built (a ray stream's buffers) is a `'static` name in
+/// its passes' read and write lists.
+pub fn static_name(name: &str) -> &'static str {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
+        std::sync::OnceLock::new();
+    let mut names = NAMES.get_or_init(Default::default).lock().unwrap();
+    if let Some(known) = names.get(name) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    names.insert(leaked);
+    leaked
 }
