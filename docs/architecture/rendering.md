@@ -122,7 +122,69 @@ and then sees no other kind.
 
 ### As built
 
-Filled in as the phase lands.
+#### The contract
+
+`helio_frame_api::rays::stream` and its snippet (`//!use frame_ray_stream`,
+`shaders/ray_stream.wgsl`).
+
+- **Rows.** `StreamHeader` (16 bytes: indirect dispatch groups of
+  `GROUP` = 64 rays, and the count), `SceneRay` (32), `SceneHit` (16),
+  `SceneSurface` (20). Layout tests cover Rust against WGSL.
+- **A ray's cone** (`SceneRay::cone`, `scene_ray_cone`): the spread a metre
+  (half float), the caster mask (`MASK_STATIC`, `MASK_MOVABLE`), and a
+  starting width (8 bits, a micrometre to kilometres in steps of 9%), so a
+  ray that leaves a hit starts as wide as the footprint that found it.
+  `scene_ray_footprint(ray, t)` is what a tracer reads textures and tests
+  cut-outs at.
+- **A tracer traces from the ray's origin**, from distance 0. The consumer
+  starts its rays off the surface they leave; a tracer adds no bias of its
+  own.
+- **A nearest hit** (`scene_nearest`): the distance, the tracer's id (4
+  bits, `MAX_TRACERS` = 15), `INSIDE` (the origin is inside something
+  solid), and 27 + 32 + 32 bits that are the tracer's own (it reads them
+  back in its surface pass). **An occlusion row** (`scene_occlusion`): what
+  gets through, as a colour, so cut-outs and tinted glass share one row.
+- **A surface** has what a consumer may light without knowing the kind:
+  shading and face normals (octahedral), base colour, metalness, roughness,
+  transmission, emission (RGB9E5).
+- **Registration.** A kind's feature calls
+  `RegisterRayTracer::ray_tracer(Tracer { name, supported, trace, surface })`.
+  `supported(env)` says whether it traces on this device and graph (the
+  meshes' tracer needs ray queries; the terrain's needs none), so
+  `stream::traced(env)` is how many kinds a consumer's rays would see, and a
+  consumer that sees none schedules nothing.
+- **Statistics.** `Stream::stat` reports the rays of each stream a frame
+  under `rays.<stream>`: the per-signal ray count the rules above ask for.
+
+#### Tracers
+
+- **Meshes** (`helio-pass-mesh-rays`, the meshes plugin): one compute pass
+  a stream over the frame's TLAS with a ray query. Cut-outs are tested at
+  the ray's footprint (the alpha mip that footprint covers; stochastic past
+  mip 0). The surface is written in the same pass: only the committed ray
+  query has the instance's transform. r2 splits a surface pass off once the
+  projections publish a transform a row.
+- **Voxel terrain** (the voxel plugin's `chunks::rays`): the chunk-tree walk
+  the camera uses, entered from any origin. A nearest stream is two passes
+  (entry, which places each ray in its chunk, then the walk) and a surface
+  pass; occlusion keeps entry in its kernel. A ray whose origin is in rock,
+  or on a solid face, reports `INSIDE`. One dispatch a drawn volume: cost is
+  rays times volumes, which a ray-to-volume binning pass would remove when a
+  scene has many volumes. The tracer walks the cut the camera's draw
+  published, so a consumer schedules after the G-buffer phase to see this
+  frame's terrain.
+
+Measured on an RTX 3060, 174,080 probe rays over a voxel planet: entry and
+nearest walk 1.32 ms, surfaces 0.09 ms, occlusion 0.25 ms; the kernel it
+replaced, which could start only from GI's probes, took 1.12 ms.
+
+#### Hosts
+
+Ray tracing is the default tier. The engine's device
+(`request_engine_device` in Pulsar: editor window, game window, headless)
+asks for ray queries where the adapter runs them, unless the user turned
+`editor.renderer.hardware_ray_queries` off; the tier without ray tracing is
+what that setting, or an adapter without them, gets.
 
 #### Acceleration structures
 
