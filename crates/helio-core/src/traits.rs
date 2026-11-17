@@ -1,19 +1,10 @@
-//! Core traits for helio-core modular renderer.
+//! The render graph's pass trait.
 //!
-//! This module defines the fundamental traits that power helio-core's modular architecture:
-//!
-//! - [`RenderPass`] - Trait for implementing render/compute passes
-//! - [`GpuSceneManager`] - Trait for managing GPU buffers with dirty tracking
-//! - [`GpuResource`] - Trait for auto-growing GPU buffers
-//!
-//! # Design Pattern: Trait-Based Modularity
-//!
-//! Helio v3 uses trait-based modularity to enable compile-time polymorphism with zero runtime overhead.
-//! Each render pass is a separate crate that implements `RenderPass`, allowing:
-//!
-//! - **Hot-swappable pipelines**: Change passes without recompiling the core
-//! - **Zero abstraction cost**: Traits are monomorphized at compile-time (no vtable overhead)
-//! - **Type-safe composition**: RenderGraph enforces correct pass ordering at compile-time
+//! [`RenderPass`] is one GPU step: its name, the resources it reads and
+//! writes, an optional `prepare` for per-frame uploads, `execute`, and the
+//! hooks the graph calls around them (scene membership, resizes, views,
+//! frame inputs). The graph holds passes as `Box<dyn RenderPass>`; a feature
+//! (`helio-feature-api`) adds them through the nodes it registers.
 //!
 //! # Example: Implementing a Custom Pass
 //!
@@ -70,7 +61,7 @@
 //!         let mut pass = ctx.begin_render_pass(&descriptor);
 //!
 //!         pass.set_pipeline(&self.pipeline);
-//!         // Access scene resources: ctx.scene.lights, ctx.scene.meshes, etc.
+//!         // Scene buffers are read by contract from ctx.scene_buffers.
 //!         pass.draw(0..3, 0..1);
 //!
 //!         Ok(())
@@ -634,7 +625,7 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         self.render_pass_descriptor(target, depth, resources)
     }
 
-    /// Pool-aware variant of [`render_pass_descriptor_with_storage`].
+    /// Pool-aware variant of [`render_pass_descriptor_with_storage`](Self::render_pass_descriptor_with_storage).
     ///
     /// The executor only ever calls this method (never `render_pass_
     /// descriptor_with_storage`/`_with_pool` directly), so its default must

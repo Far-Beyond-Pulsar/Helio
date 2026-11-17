@@ -3,6 +3,10 @@
 Status: proposal, 2026-10-31. Measured against Helio `main` (3ea02d06),
 Pulsar-Native `main` (edfbcf35a) and `plugin-api-v2-phase1` (9363348e2,
 not merged), SceneDB `main` (30ab68d; Helio and Pulsar pin 017252c).
+Built in phases 0 to 5 (the "As built" notes below); phase 6 and the
+per-kind work are `plugin-migration.md`. Section 1 is the measurement that
+motivated the rewrite, not today's tree: the repository README describes
+Helio as it is.
 
 Goal: every change touches one feature and the contracts it uses, never the
 whole tree. A voxel change builds and tests voxel, not the renderer, the
@@ -259,6 +263,12 @@ Each existing downcast becomes one of these, a handle method or SceneDB data:
 TSR reset → `HistoryInvalidation`; fog `set_active` / post-process defaults →
 component rows the plugin writes; `ChunkPass::set_appearance/diagnostics` →
 `VoxelHandle`; `WaterSimPass::sim_texture` → a debug view.
+
+As built (phases A to p25b): none of these became a trait. They are the
+frame's slots, draw phases and contracts (`helio_frame_api`: `Slot`,
+`Phase` drawers, lighting inputs, media, the colour chain, `SCENE_RAYS`),
+and surface queries are the reading kind's api; the README's
+extension-point table maps each row.
 
 ### Frame stats and the frame budget (as built)
 

@@ -11,7 +11,7 @@
 //! | [`sun_transmittance`] | world-space map along the sun + frame | clouds | fully lit |
 //! | [`TRANSMISSION`] | rgba16f, internal res | water caustics | nothing added |
 //! | [`sky`] | sky frame (medium, suns) + sky table | the sky | no sky |
-//! | [`VIEW_REMAPS`] | `mat4` per inline-view slot + G-buffer tag | the frame, as inline views render | no remap |
+//! | [`VIEW_REMAPS`] | `mat4` per remap chain + G-buffer tag | what draws through remaps (the portals' chains) | no remap |
 //!
 //! A lighting model binds every contract it uses, the stand-in where it is
 //! absent; a publisher writes it at [`crate::Slot::LightingInputs`] (or

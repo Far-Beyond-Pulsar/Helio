@@ -15,8 +15,9 @@
 //!    (`helio_core::depth`) farthest is the *smallest* value; the shader
 //!    names its reductions by meaning, not by min/max.
 //!
-//! The finished pyramid is consumed NEXT FRAME by OcclusionCullPass (temporal
-//! approach: frame N-1 depth tests visibility of frame N geometry).
+//! The finished pyramid is consumed NEXT FRAME by a kind's occlusion culling
+//! (the meshes plugin's, in `Slot::Visibility`; temporal approach: frame N-1
+//! depth tests visibility of frame N geometry).
 //!
 //! The HiZ texture is owned by the render graph and declared via `declare_resources`.
 //! The pass recreates mip views and bind groups lazily during `execute()` from the

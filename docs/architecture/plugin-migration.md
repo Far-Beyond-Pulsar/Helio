@@ -2555,6 +2555,9 @@ issue (above); views are the next design item, not p17's.
 - Plugin_Shaders: **superseded**: the shader graph editor is
   `pulsar.materials`' graph editor and compiles through the materials'
   compiler. Waits on: the user's decision on the repo (archive or keep).
+- Helio: **the README** describes the renderer as it is now (Helio#391).
+  Waits on: the repo split, since crates move again. **Done in p26** ("As
+  built, p26" below).
 
 **C. Helio repo is core only**: helio-core, helio-feature-api,
 helio-frame-api, helio-spine, helio-graph-asset, helio-presets, helio,
@@ -3516,3 +3519,48 @@ PulsarConfig, WGPUI and the plugin repos): housekeeping before the README
   were fixed, mostly by deleting dead code; Helio's CI denies warnings
   (`RUSTFLAGS=-D warnings`), Pulsar's clippy lane denies them on its members.
   Vendored WGPUI stays quiet through its own package lints.
+
+As built, p26 (2026-11-17, branch `rewrite/p26-readme` in Helio): **the
+README and the docs describe Helio as it is** (Helio#391), the last item of
+the post-split sequence.
+
+- **The README** says what Helio is and is not, tours the layers of
+  `architecture/layers.toml` with their real crates, the seams a plugin
+  plugs into (feature registration, buffer/pool/payload contracts and where
+  their versions live, the extension points as slots, phases and frame
+  contracts, the scene-driven graph, views, coordinate spaces and portals),
+  how to build a renderer, and the `just` recipes and the two examples that
+  need no plugin (`simple_graph`, `debug_shapes`).
+- **Its Rust blocks are doctests** of `helio-presets` (`#[cfg(doctest)]`
+  over `include_str!` of the README): the feature-registration example runs
+  (a feature's drawer registers into a registry built over Helio's features)
+  and the renderer example compiles. CI's `cargo test` runs them.
+- **Crate docs** that described the old shape: `helio-core`'s crate doc (a
+  "Helio v3" with a `GpuScene`, light/mesh/material managers and a
+  migration table from `helio-render-v2`), the frame api's inline views and
+  `VIEW_REMAPS` row, the Hi-Z pass's `OcclusionCullPass`, the shader
+  snippets' `helio-pass-gbuffer`, the wasm runner's `helio-web-demos`, the
+  controls README's `Camera::from_fly`, the reflections flag's
+  `DeferredLightPass`, two preset comments about inline views.
+- **The pass guides** (`docs/custom-render-pass.md`,
+  `docs/custom-pass-pipeline.md`) lost names that no longer exist
+  (`crates/passes/2d`, `hlfs_viewer.rs`, the sprite demos, `GBufferPass`,
+  `FogCompositePass`, `declare_pipelines`, `PassContext::pipelines`, the
+  spine's old host-input list) and read scene buffers through a contract.
+- **Deleted**: records of code that now lives in plugins, findable at Helio
+  `daeb65dc`: `docs/bindless_rendering.md` (material bindings and the
+  meshes' draw segments; their owners' crate docs carry the design,
+  `helio-mesh-api`'s `draw_segments.rs`), `docs/lighting-audit.md` (the
+  2026-10-14 voxel lighting audit), `docs/resolution_performance.md`,
+  `docs/two_million_diagnosis.md` and `docs/issues/` (benchmarks that are
+  Plugin_Meshes' examples now; the six closed GitHub issues keep their
+  records), and `Notes.md` (an Android build of a demo that left with the
+  meshes). The justfile's default example was `editor_demo`, which no
+  longer exists; it is `simple_graph`.
+- **`simple_graph` ran no frame**: its graph builder never locked the graph,
+  so the first frame panicked ("execute() requires lock()"), and its pass
+  did not declare that it writes the frame's output (routing reported a
+  black frame). It locks at the config's sizes and its pass declares
+  `writes_target`; both examples were run and render (the cube; the debug
+  shapes over the grid).
+

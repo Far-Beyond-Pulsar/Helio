@@ -1,10 +1,10 @@
 # Creating a custom Helio render pass
 
-This guide follows the current Helio 3.0 `RenderPass` API in `helio-core`. The pass trait and contexts live in `crates/helio-core/src/traits.rs` and `crates/helio-core/src/context.rs`; working implementations are in `crates/passes/`.
+This guide follows the `RenderPass` API in `helio-core`. The pass trait and contexts live in `crates/helio-core/src/traits.rs` and `crates/helio-core/src/context.rs`; working implementations are in `crates/passes/`.
 
 ## 1. Put the pass in its own crate
 
-Production passes are separate `helio-pass-*` crates under `crates/passes/2d/` or `crates/passes/3d/`. A minimal crate usually depends on `helio-core` and `wgpu`; add other dependencies only for APIs the pass actually uses. Keep shader files beside the implementation and load them with `helio_core::include_wgsl!` as the existing passes do.
+Helio's own passes are `helio-pass-*` crates under `crates/passes/3d/`. A pass that draws or reads an object kind belongs to that kind's plugin (its `feature` crate in Pulsar-Native `plugins/vendor/<kind>/`), never to Helio. A minimal crate usually depends on `helio-core` and `wgpu`; add other dependencies only for APIs the pass actually uses. Keep shader files beside the implementation and load them with `helio_core::include_wgsl!` as the existing passes do.
 
 ## 2. Keep persistent GPU state on the pass
 
@@ -73,24 +73,26 @@ For graphics work, returning a descriptor is the preferred route: Helio owns the
 
 Override `declare_resources` for graph-owned textures and pass dependencies. For example, a pass consuming `pre_aa` should call `builder.read("pre_aa")`; a pass producing a transient color target should declare it with `builder.write_color(name, format, size)`. `ResourceSize` is in `helio_core::graph`. The graph allocates declared transient textures and validates that reads have a writer or were declared external inputs.
 
-Declaration does not itself make a texture accessible under every API. The executor routes graph-declared color outputs through the per-frame `ResourceRegistry`; a consumer commonly reads one with `ctx.registry.read(ResourceKey::new("pre_aa"), self.name())`. A pass-owned resource that is not a graph texture must be published by the producer through `publish` or `publish_frame_inputs`. For attachment setup, see `GBufferPass` and `FxaaPass`; for named view publication, see `FogCompositePass` and `ResourceRegistry::route_named_texture`.
+Declaration does not itself make a texture accessible under every API. The executor routes graph-declared color outputs through the per-frame `ResourceRegistry`; a consumer commonly reads one with `ctx.registry.read(ResourceKey::new("pre_aa"), self.name())`. A pass-owned resource that is not a graph texture must be published by the producer through `publish` or `publish_frame_inputs`. For attachment setup, see `FxaaPass`; for publishing a pass-owned resource, see `HiZBuildPass::publish` and `ResourceRegistry::route_named_texture`.
 
-Use `declare_pipelines` and the pipeline recipe APIs when you want the graph executor to cache a pipeline across attachment-format variants. The pass crate's `PipelineRegistry` handles are available from `PassContext::pipelines`. Manual pipeline creation is also used in existing passes; if formats can vary, ensure the pipeline matches the actual attachments and recreate or cache it accordingly.
+Create pipelines when the pass is made, through `helio_core::shader` (`module`, `create_render_pipeline`, `create_compute_pipeline`, which use the driver's pipeline cache). A pipeline that depends on content known only later compiles off the frame with `helio_core::compile::Compiling` and draws once it is ready. If formats can vary, make sure the pipeline matches the actual attachments and recreate or cache it accordingly.
 
 ## 4. Read scene data through the current boundary
 
-The current `PassContext` has `scene_buffers: &SceneBufferProjection`, not the old typed `ctx.scene` fields described in some older comments and examples. SceneDB GPU columns are type-erased and resolved by key:
+`PassContext` has `scene_buffers: &SceneBufferProjection`. SceneDB GPU columns are type-erased; a pass reads one through the contract its owner's api crate declares (`BufferContract<Row>`), never by a string literal:
 
 ```rust
-let Some(sprite_rows) = ctx.scene_buffers.get(
-    pulsar_scenedb::gpu::BufferKey::of("sprite_instances"),
-) else {
-    return Ok(()); // this graph/host did not provide the optional column
+// `GLOWS` is a `helio_core::BufferContract<GlowRow>` from the owner's api crate.
+let Some(glows) = GLOWS
+    .resolve(ctx.scene_buffers)
+    .map_err(|e| helio_core::Error::InvalidPassConfig(e.to_string()))?
+else {
+    return Ok(()); // nothing published under the key this frame
 };
-// Bind sprite_rows.buffer according to the registered SceneDB GPU layout.
+// Bind glows.buffer; its stride is checked against GlowRow.
 ```
 
-The renderer does not discover component types for a pass. The host must register and upload a component's GPU columns in SceneDB before exposing them in `SceneBufferProjection`; the pass owns the interpretation of the named buffer layout. `PrepareContext` also exposes the read-only projection when the pass needs to detect or bind current buffers before execution.
+`resolve` fails with an error naming the contract when the published stride is not the row's. The renderer does not discover component types for a pass. The host (a plugin's component) registers and uploads the GPU columns in SceneDB; the contract's api crate owns the row layout, and the pass's feature declares that it reads it (`FeatureRegistrar::consumes`). `PrepareContext` also exposes the read-only projection when the pass needs to detect or bind current buffers before execution.
 
 ## 5. Keep per-frame behavior bounded
 
@@ -98,7 +100,7 @@ Do not walk large CPU scene collections or rebuild scene data in `execute`. Bind
 
 Useful source references:
 
-- `crates/helio-core/src/traits.rs` — `RenderPass` hooks and resource declarations.
-- `crates/helio-core/src/context.rs` — `PassContext`, `PrepareContext`, and encoder helpers.
-- `crates/passes/3d/helio-pass-fxaa/src/lib.rs` — named input/output and descriptor-backed graphics.
-- `crates/passes/2d/helio-pass-sprite-batch/src/lib.rs` — SceneDB buffer consumption and resize/bind-group invalidation.
+- `crates/helio-core/src/traits.rs`: `RenderPass` hooks and resource declarations.
+- `crates/helio-core/src/context.rs`: `PassContext`, `PrepareContext`, and encoder helpers.
+- `crates/passes/3d/helio-pass-fxaa/src/lib.rs`: named input/output and descriptor-backed graphics.
+- `crates/passes/3d/helio-pass-hiz/src/lib.rs`: a graph-owned texture, bind groups rebuilt when its views change, and a published resource.

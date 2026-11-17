@@ -16,8 +16,8 @@
 //!   transmittance, transmission, the sky, the light list, view remaps.
 //! - [`selection`]: the editor's selection rows and the mask the selected
 //!   geometry is drawn into, for the selection outline.
-//! - [`view`]: the views a frame renders (its camera, captures, inline
-//!   views) as a drawer sees them when it builds.
+//! - [`view`]: the views a frame renders (its camera and the captures
+//!   features ask for) as a drawer sees them when it builds.
 //! - [`rays`]: the frame's TLAS and the buffers that follow it, published by
 //!   whatever builds it.
 //! - [`static_names`]: the read lists of a pass whose reads are what a

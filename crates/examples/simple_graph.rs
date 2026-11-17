@@ -177,6 +177,9 @@ impl ApplicationHandler for App {
                     ctx.device,
                     ctx.config.surface_format,
                 )));
+                // Every pass is added: schedule the graph at the config's
+                // sizes, as a graph asset's compile does.
+                graph.lock_sized(ctx.config.render_size());
                 graph
             }))
             .build_with_graphics_context(&mut graphics)

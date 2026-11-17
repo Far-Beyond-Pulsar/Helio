@@ -2,305 +2,208 @@
 
 <img src="./branding/Helio.svg" alt="Helio Renderer" width="400"/>
 
-**GPU-driven deferred rendering in pure Rust, modular and cross-platform**
+A kind-agnostic, GPU-driven renderer in Rust on wgpu
 
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-30-blue)](https://wgpu.rs/)
-[![WebGPU](https://img.shields.io/badge/WebGPU-native%20%2B%20browser-8A2BE2)](https://gpuweb.github.io/gpuweb/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 </div>
 
-Helio is a GPU-driven deferred renderer written entirely in Rust on top of `wgpu`. The idea that runs through the whole project is that the GPU should do the heavy lifting. Culling, level-of-detail selection, indirect-draw dispatch, and light evaluation all happen on the GPU, and the CPU side of every frame stays bounded, usually constant time regardless of how much is on screen. It is built out of small, independent pieces, and the exact same renderer runs on a native desktop backend and in a browser through WebGPU without you writing two versions of anything.
+Helio is the renderer of the [Pulsar](https://github.com/Far-Beyond-Pulsar/Pulsar-Native) engine.
+It owns the frame, the render graph, GPU uploads, shaders, profiling and settings.
+It knows no object kind. Meshes, lights, materials, sky, fog, water, voxels, foliage and every other kind are Pulsar plugins that bring their own components, features, passes and contracts.
 
-This README is the tour: how the engine is put together, how to draw a frame, how the native and web builds share one codebase, and how to push past the defaults with your own material shaders, post-process effects, and render passes.
+This README covers what Helio is, its layers, the seams a plugin plugs into, and how to build and test it.
+The design and its history are in [`docs/architecture/`](docs/architecture/).
 
-## How the engine is put together
+## 1. What Helio is
 
-The thing that shapes everything else is that every render pass is its own crate. The G-buffer fill, the deferred lighting, temporal anti-aliasing, the sky, the water simulation, and forty-odd others each live in a `helio-pass-*` crate, and the central `helio` crate has no idea any of them exist. A pass is just a struct that implements a trait from `helio-core` and declares which named resources it reads and writes. A graph builder strings passes together into a pipeline. Adding a brand new effect never means editing the core; you write a crate and drop it into a graph. That constraint keeps the middle of the engine small and makes it genuinely pleasant to experiment in.
+- The frame: views, draw phases, the G-buffer layout, the scene colour chain and the lighting-input contracts (`helio-frame-api`), and the spine passes no kind owns (`helio-spine`).
+- The render graph: passes, resources, scheduling, render-pass fusion and scene membership (`helio-core`), graphs as data (`helio-graph-asset`) and the presets built from them (`helio-presets`).
+- GPU uploads: a frame's buffer writes staged through one ring and copied in one flush (`helio_core::upload::FrameUploads`), pipeline compiles off the frame (`helio_core::compile::Compiling`) and the threads Helio-layer code starts (`helio-tasks`, run by the host's task system).
+- Shaders: `include_wgsl!`, the shared prelude and the WGSL snippet system (`helio_core::shader`).
+- Profiling: CPU scopes through the `profiling` crate of the public [Pulsar-Profiling](https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling) repository, and GPU timestamps per pass (`RenderTimingSnapshot`).
+- Settings: every setting a host can change, described once (`helio-settings`).
 
-Because the GPU drives the draws, the CPU never loops over draw calls. Scene data lives in GPU buffers, with dirty-tracked mirrors on the CPU side, so when you change one object and call `flush()` only that object's bytes get uploaded. The scene itself is handle-based: a mesh, a material, a light, or an object is a small `Copy` handle backed by a generational arena, and inserting, updating, or removing any of them is a constant-time operation with no dangling references to worry about.
+What Helio is not:
 
-The render graph is a little smart about its own lifecycle. When you build one, the builder tucks a rebuilder closure inside it, and the renderer pulls that out at construction time. The practical result is that resizing the window rebuilds the whole pipeline, recreates depth targets, and rewires everything for you, with no resize boilerplate in your code.
+- It has no object kind and no API for one: no mesh, light, material or sky types, setters or passes. The layer gate fails when a crate outside the test host names a kind (`[kinds]` in [`architecture/layers.toml`](architecture/layers.toml)); the names left are in [`architecture/kind-names.txt`](architecture/kind-names.txt), a list that only shrinks.
+- It defines no SceneDB components (`scene_store_derives = 0` in the layer manifest). It declares contracts and reads what components publish under them.
+- It ships no default pipeline. A host chooses what it renders with. Pulsar's `pulsar.default_pipelines` plugin makes its `.rendergraph` assets from Helio's presets.
 
-If you want to see where things live: `helio` is the public API you program against (the renderer, scene, camera, the Radiant material system, debug helpers), `helio-core` is the graph runtime and the `RenderPass` trait, `libhelio` holds the plain GPU-shared structs like `GpuLight` and `GpuMaterial`, `helio-default-passes` has the ready-made pipelines, the `helio-pass-*` crates are the passes, `helio-wasm` is the cross-platform app runner, `helio-web-demos` compiles every example to WebAssembly, and `helio-asset-compat` handles model loading. The runnable native demos and the editor are in `crates/examples`.
+## 2. Layers
 
-## Drawing a frame
+Every workspace crate has a layer in [`architecture/layers.toml`](architecture/layers.toml), and a crate depends only on the layers its layer's `may_use` lists: those below it, and for some layers its own. `just arch` checks this. Feature crates of one group may use each other, never another group's crates.
 
-The fastest way to see something is to run one of the demos:
+| Layer | Crates | What it holds |
+|---|---|---|
+| leaf | `helio-settings`, `helio-tasks`, `scenedb-inspector-agent` | No workspace dependency. Setting descriptions, the task seam, a SceneDB inspector agent. |
+| core | `helio-core` | gpu and graph: `RenderGraph`, `RenderPass`, resources, views, uploads, compiles, shaders, profiling, frame stats, `BufferContract`/`PayloadContract`, `SceneDerivation`. |
+| scene | `helio-scene-join`, `helio-scene-derivations` | Scene input building blocks no kind owns: the generic GPU row join (`RowJoin`) and the hierarchy resolve. |
+| feature_api | `helio-feature-api`, `helio-frame-api` | What a feature registers (`Feature`, `FeatureRegistrar`, `NodeDescriptor`, `BuildEnv`) and the frame it registers into (slots, phases, G-buffer, colour chain, lighting inputs, views, rays). |
+| api | (none in Helio) | A kind's contracts. Each lives in its plugin (`helio-light-api`, `helio-mesh-api`, ...). |
+| spine | `helio-spine`, `helio-pass-hiz`, `helio-pass-tsr`, `helio-pass-postprocess`, `helio-pass-debug-overlay`, `helio-pass-status-screen` | The passes every pipeline is built around: background, depth pyramid, unlit stand-in, TSR, tone map, on-screen text, the status screen. |
+| feature | `helio-pass-ssr`, `helio-pass-planar-reflection`, `helio-pass-fxaa`, `helio-pass-perf-overlay`, `helio-pass-buffer-view`, `helio-pass-selection-outline` | Kind-agnostic features: screen-space and planar reflections, FXAA, the performance overlay, buffer views, the editor's selection outline. |
+| renderer | `helio`, `helio-xr` | The facade: `Renderer`, `RendererBuilder`, `RendererConfig`, cameras, the frame loop, surfaces, the coordinate-space table, debug draw, OpenXR. It knows no feature. |
+| preset | `helio-presets`, `helio-graph-asset` | Graphs as data, node registries, the shipped presets (`Preset::Deferred`, `DeferredFxaa`, `Forward`) and the feature list they build from. |
+| host | `examples`, `helio-components`, `helio-controls`, `helio-wasm` | Helio's own hosts: examples, row components tied to their contract rows (`same_layout!`, for Helio's tests and the plugins' host rows), camera controllers, the wasm runner. |
+
+The crates are in [`crates/`](crates/), the pass crates in [`crates/passes/3d/`](crates/passes/3d/).
+
+## 3. How a plugin plugs in
+
+A plugin is a Pulsar repository, `Far-Beyond-Pulsar/Plugin_<Kind>`, vendored at `plugins/vendor/<kind>/` in Pulsar-Native. It has an `api` crate (its contracts), a `component` crate (its SceneDB component and the methods scripts and the editor call), a `feature` crate (its Helio feature and passes), an `editor` crate and a root crate that registers everything. The plugins are listed in the [plugins registry](https://github.com/Far-Beyond-Pulsar/Plugins) and in the table of [`docs/architecture/plugin-migration.md`](docs/architecture/plugin-migration.md), section 3.
+
+A plugin meets Helio and other plugins only at the seams below.
+
+### Feature registration
+
+A feature implements `helio_feature_api::Feature`. Its `register` adds node types (each builds passes into a graph), declares the buffer contracts its passes read, and may add preparers (`prepare`), finishers (`finish`), scene derivations (`scene_derivation`), records a frame contract asks for (`provide`) and shader hot-reload policy (`swappable`, `swap_group`). A preset places each node at the slot or phase it names, so no preset names a feature.
+
+```rust
+use helio_core::BufferContract;
+use helio_feature_api::{pass_kind, pass_node, Feature, FeatureRegistrar, FeatureSet};
+use helio_frame_api::{FrameNode, Phase};
+
+/// The row a glow kind publishes. Its api crate owns this layout.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GlowRow {
+    pub position_radius: [f32; 4],
+    pub color: [f32; 4],
+}
+
+pub const GLOWS: BufferContract<GlowRow> = BufferContract::new("glows");
+
+pub struct GlowFeature;
+
+impl Feature for GlowFeature {
+    fn id(&self) -> &'static str {
+        "example.glow"
+    }
+
+    fn register(&self, registrar: &mut FeatureRegistrar<'_>) {
+        registrar.consumes(GLOWS);
+        registrar.node(
+            pass_node("glow", "Glow", "Passes: Example", "Glows over the lit scene.", |_build| {
+                // build.graph.add_pass(Box::new(GlowPass::new(build.env.device, ..)));
+                Ok(())
+            })
+            .drawer(Phase::Overlay, 10),
+        );
+    }
+}
+
+// An engine adds its plugins' features to Helio's own.
+let registry = helio_presets::graphs::registry_with(&FeatureSet::new().with(GlowFeature));
+assert_eq!(registry.feature_of(&pass_kind("glow")), Some("example.glow"));
+```
+
+In Pulsar, the plugin's root crate hands its features to the engine through `RenderFeatureRegistration` (engine_backend), and the engine builds every pipeline over the features of the plugins a project enables.
+
+### Buffer and pool contracts
+
+A contract is the seam between a component and the passes that read its data. The consumer's api crate owns the row ABI, because its shaders read it.
+
+- `BufferContract<R>` (`helio_core::scene_input`) is a key and a row type. `resolve` checks a published buffer's stride against `R` and names the contract on a mismatch. A producer asserts its layout at compile time with `assert_producer`.
+- `PoolContract<T>` is the same type, for variable-length pools (vertices, indices).
+- `PayloadContract<T>` is a key and a CPU type for payloads a host hands the renderer (`Renderer::set_scene_payloads`), read by passes from `ctx.scene_buffers.payload(..)`.
+- The version lives in the plugin's `pulsar-plugin.toml`: each `provides` entry has an `id`, a `kind` (`buffer`, `api`, `class`, `trait`), its `members` (buffer keys or crate names) and an integer `version`. A `requires` entry names a contract id, and one that pins a version needs exactly that one.
+- Row ABIs carry layout tests in their api crates (the meshes api checks each row against its WGSL struct). Pulsar's `one_owner` test fails a WGSL copy of another owner's snippet and a key named by string literal.
+
+### Extension points
+
+The plan's extension-point traits (`GBufferContributor`, `ShadowCaster`, `LightingContributor`, `PostEffect`, ...) were not built as traits. Most became a place in the frame (an `ExtensionPoint` a node is placed at) or a contract in `helio-frame-api`, and two need no frame seam:
+
+| Planned seam | What it is on main |
+|---|---|
+| `GBufferContributor` | A drawer of `Phase::GBuffer`, writing the layout in `helio_frame_api::gbuffer` |
+| `ShadowCaster` | A drawer of `Phase::ShadowCasters`, drawn for every shadow face the lights pick |
+| `RayProxySource` | The frame's TLAS payload, `helio_frame_api::rays::SCENE_RAYS`, published by whatever builds it |
+| `LightingContributor` | A publisher of a lighting input (`helio_frame_api::lighting`: `INDIRECT_DIFFUSE`, `INDIRECT_SPECULAR_LAYERS`, `SUN_VISIBILITY`, `TRANSMISSION`, ...) at `Slot::LightingInputs`, or a `LightingModel` |
+| `ParticipatingMedia` | A publisher of `helio_frame_api::media` at `Slot::Media` |
+| `PostEffect` | A node on the scene colour chain (`helio_frame_api::color::current` and `advance`) at `Slot::Resolved` or `Slot::Display` |
+| `SurfaceQuery` | No frame seam: a kind that offers its surface implements the reader's api (foliage's ground, `helio-foliage-api`, which voxel terrain implements) |
+| `HistoryInvalidation` | No frame seam: TSR is a spine pass, a host resets its history on a cut (`TsrPass::reset_history`), and producers describe their shading through the reactive and stochastic masks |
+
+Slots (`helio_frame_api::Slot`): `Prepare`, `Visibility`, `Geometry`, `LightingInputs`, `Lighting`, `Media`, `Resolved`, `Display`, `Output`. A node joins one with `FrameNode::in_slot(slot, order)`. Host inputs, resources a host supplies every frame, are declared by the feature that reads them (`helio_frame_api::host_input`, placed at `HOST_INPUTS`).
+
+### Draw phases
+
+A phase (`helio_frame_api::Phase`) is a place in the frame where every kind with something to draw there draws into attachments the frame owns: `ShadowCasters`, `DepthPrepass`, `GBuffer`, `Forward`, `Transparent`, `Overlay`, `SelectionMask`. A phase has three stages: compute before it (`before_phase`), one opener that clears its attachments (`opens`), and drawers that load them (`drawer`). Adjacent drawers with the same attachments fuse into one render pass. A drawer's declared attachments are checked against the phase's formats when it builds. The lighting model a preset uses decides which phases run (`Preset::phases`).
+
+### The scene-driven graph
+
+A graph holds every pass its pipeline can use. Each frame it schedules only its members: before a frame it asks every pass `RenderPass::is_member(&mut SceneContent)`. A pass with content-dependent work answers from the scene, usually `SceneContent::holds_rows(key)`, whether a buffer has a live row (read back without waiting). A dormant pass is not prepared or executed and holds no graph textures. It frees its content resources in `on_leave`. A resize keeps the graph and reallocates its textures in place.
+
+### Views
+
+A frame renders its primary view and the captures features ask for (`helio_core::view`). A pass that renders views returns `true` from `RenderPass::renders_views`. At that pass boundary the graph calls its `render_views` with a `ViewContext`, and `ViewContext::render_view` runs a view graph the preset composed from the frame's members (`Preset::view_nodes`). Nodes marked `once_per_frame` run once for the frame, and views read their outputs. `ViewBudget` bounds view depth and count. A drawer reads the view's facts (winding, clip) from `helio_frame_api::view` when it builds. A planar reflection is a capture.
+
+### Coordinate spaces and portals
+
+A portal is not a view. It is a rigid map between coordinate spaces, drawn in the frame's own G-buffer.
+
+- The renderer owns the frame's coordinate-space table (slot 0 the frame's own space, then the host's spaces, current and previous frame), published as `helio_core::CoordinateSpacesFrameData`. Every kind's culling and drawers place an instance through its space.
+- World positions are f64 (`Camera::eye`). Each frame renders about an origin the renderer picks near the camera (`Renderer::origin_for`), and pass rows are relative to it.
+- A portals plugin publishes its chains through its own api crate. Each drawer draws its content through them. The pixels a chain draws carry its remap (`helio_frame_api::lighting::VIEW_REMAPS`), so lighting and decals take them back to their own world.
+
+## 4. Building a renderer
+
+A host makes a `RendererConfig`, hands `RendererBuilder` the SceneDB GPU mirror and a pipeline, builds the renderer and calls `Renderer::render(&camera, &target)` once a frame.
+
+```rust,no_run
+use helio::{HelioGraphicsContext, Renderer, RendererBuilder, RendererConfig, SceneDbHandle};
+use helio_feature_api::FeatureSet;
+use helio_presets::Preset;
+
+fn renderer(
+    graphics: &mut HelioGraphicsContext<'_>,
+    scene_db: SceneDbHandle,
+    plugin_features: &FeatureSet,
+    width: u32,
+    height: u32,
+) -> helio::Result<Renderer> {
+    let config = RendererConfig::new(width, height, graphics.surface_config.format);
+    RendererBuilder::new(config, scene_db)
+        .with_graph(Preset::Deferred.with_features(plugin_features))
+        .build_with_graphics_context(graphics)
+}
+```
+
+Without the plugins' features nothing draws into the preset's phases, and its lighting model resolves to the spine's unlit stand-in (with one warning naming the missing model). Scenes of meshes, lights and materials are the plugins' examples in Pulsar-Native.
+
+## 5. Build and test
+
+The recipes are in the [`justfile`](justfile):
 
 ```sh
-cargo run -p examples --bin indoor_cathedral --release
-cargo run -p examples --bin outdoor_city --release
-cargo run -p examples --bin two_million_dynamic --release
-cargo run --bin web                # build every demo to WASM and serve it locally
+just ci      # fmt-check, layer gate, check, clippy, nextest
+just arch    # the layer gate (Python 3.11+)
+just co-change   # how often a change to one unit also changed others
 ```
 
-`two_million_dynamic` creates two million instanced cubes as static objects,
-records a baseline, then promotes them to dynamic objects in 100,000-object
-steps. Each step waits three seconds for the renderer to settle and records a
-frame sample window. The default run writes `two_million_dynamic.sqlite`.
-Set `HELIO_INITIAL_FRAMES`, `HELIO_DYNAMIC_STEP`, `HELIO_STABILIZE_SECONDS`,
-`HELIO_SAMPLE_FRAMES`, or `HELIO_PERF_DB` to tune a run. The SQLite database
-contains indexed `runs`, `checkpoints`, and `frames` tables plus
-`profiler_frames` and `pass_timings`. The latter two are populated from
-Helio's `RenderTimingSnapshot`: every render-graph pass has CPU and GPU
-milliseconds, and each profiler frame records GPU availability, frame lag,
-readback drops, and query overflows. GPU timings are asynchronous, so use the
-stored GPU frame index/lag when correlating them with frame samples.
+Helio's own examples need no plugin:
 
-To wire the renderer up to your own window, the shape of it is always the same. You ask Helio which GPU features and limits it needs for the adapter you have, create a config, hand the builder SceneDB's GPU mirror and a pipeline, and build the renderer. From then on you call `render` once per frame with a camera and a surface view.
-
-```rust
-use helio::{Camera, RendererBuilder, RendererConfig,
-            required_wgpu_features, required_wgpu_limits};
-use helio_default_passes::presets::Preset;
-
-let features = required_wgpu_features(adapter.features());
-let limits   = required_wgpu_limits(adapter.limits());
-// ... create your device and queue with those, and a SceneDB with its GPU
-// mirror attached (`scene_db_mirror`) ...
-
-let config = RendererConfig::new(width, height, surface_format);
-let mut renderer = RendererBuilder::new(config, scene_db_mirror)
-    .with_graph(Preset::Deferred)
-    .build(device.clone(), queue.clone(), width, height, surface_format);
-
-let camera = Camera::perspective_look_at(
-    glam::Vec3::new(0.0, 2.0, 6.0), glam::Vec3::ZERO, glam::Vec3::Y,
-    60_f32.to_radians(), width as f32 / height as f32, 0.1, 1000.0,
-);
-
-renderer.render(&camera, &surface_view)?;
+```sh
+cargo run -p examples --bin simple_graph   # a custom one-pass graph: a spinning test cube
+cargo run -p examples --bin debug_shapes   # the facade's debug draw
 ```
 
-That is the low-level path, and it is worth understanding once. In practice, if you want your code to also run in the browser, you should not hand-roll the windowing at all. That is what the next section is about.
-
-## One codebase, native and web
-
-Helio runs on the native backends (Vulkan, Metal, DX12, GLES) and in the browser on WebGPU, and this is not a port that drifts out of sync. It is the same renderer driven through the same graph. The parts you actually touch are identical on both targets. Building a graph, adding passes, locking it to a size, inserting materials and lights, calling `render`, drawing debug shapes: none of that has any target-specific code in it. The differences that do exist live down inside the passes, where the engine handles them for you, and up in the windowing layer, which a shared runner handles for you.
-
-The one thing worth carrying in your head is that WebGPU is a smaller target than a native driver, and Helio quietly adapts to it. On a desktop adapter that exposes the required texture binding array features, materials use the bindless `BindingArray` layout and can reference up to two hundred and fifty-six textures (clamped to device limits). On the web, or on native adapters without both features, Helio uses the `Expanded` fallback layout and the texture ceiling is lower (sixteen on web, further clamped to device limits). Where native issues a single multi-draw-indirect call, the web build loops and issues one indirect draw at a time, because WebGPU has no multi-draw. You do not select the mode yourself: Helio chooses it from device capabilities when the renderer is created. This does mean "same API" is not quite "same capabilities." A scene that stays inside the web envelope looks identical in both places, and a scene that exceeds it can look different or fail to start in the browser. Always build your device through `required_wgpu_features` and `required_wgpu_limits`, which request exactly what Helio needs for whichever target you are on.
-
-The abstraction that makes single-source demos work is a trait called `HelioWasmApp` in the `helio-wasm` crate. You implement it and call `launch::<T>()`, and on native that spins up a winit window while in the browser it attaches a WebGPU canvas. The runner owns the event loop, the surface, the input, and the camera plumbing, and you are left with the two methods that actually matter: `init`, where you build the scene once, and `update`, where you read input, animate, and hand back the camera for this frame.
-
-```rust
-use std::sync::Arc;
-use helio::{Camera, Renderer};
-use helio_wasm::{HelioWasmApp, InputState, launch};
-
-struct Demo { /* camera state, handles, whatever you need */ }
-
-impl HelioWasmApp for Demo {
-    fn title() -> &'static str { "My Demo" }
-
-    fn init(renderer: &mut Renderer, _device: Arc<wgpu::Device>,
-            _queue: Arc<wgpu::Queue>, _w: u32, _h: u32) -> Self {
-        renderer.set_ambient([0.4, 0.45, 0.5], 0.15);
-        // build meshes, materials, lights here
-        Demo { /* ... */ }
-    }
-
-    fn update(&mut self, renderer: &mut Renderer, dt: f32, elapsed: f32,
-              input: &InputState) -> Camera {
-        // read input.keys / input.mouse_delta, move the camera, return it
-        Camera::perspective_look_at(/* ... */ input.aspect_ratio(), 0.1, 1000.0)
-    }
-}
-
-fn main() { launch::<Demo>(); }
-```
-
-Everything else on the trait has a default, so you only override what you care about. You can set the window title, choose an internal render scale (it defaults to three-quarters resolution and upscales, which you would set back to `1.0` for a pipeline that has no temporal upscale step), adjust the mouse-look capture behaviour, react to resizes, and, most powerfully, return a completely custom render graph from `build_graph`. That last one is how the VHS demo plugs in its own pipeline while still running on both targets; returning `None` just uses the standard deferred graph. The `InputState` you get each frame carries the held keys, the mouse delta, whether the cursor is grabbed, a one-frame left-click edge, the cursor position, the viewport size, and an `aspect_ratio()` helper.
-
-Building the web version is its own small tool rather than a shell script. Running `cargo run --bin web` opens a terminal UI that builds every demo to WebAssembly and then serves the lot on a local port, and `cargo run --bin web -- --headless` does the same thing without the UI, writes the finished site out, and exits with a failure code if any demo did not build. Headless mode is what continuous integration runs. Under the hood it invokes `wasm-pack` per demo and writes each landing page plus a master index. The one prerequisite is a wasm-capable `clang` for the C dependencies, which means installing LLVM (`brew install llvm` on macOS, or your distribution's `clang` package on Linux).
-
-## Building pipelines with the render graph
-
-For current graph APIs and a composition walkthrough, see [Composing a custom Helio pass pipeline](docs/custom-pass-pipeline.md).
-
-A render graph is an ordered set of passes, each declaring the named resources it reads and produces, and the graph validates that dependency structure, manages the transient textures and barriers between passes, and rebuilds itself when the window changes size. Most of the time you never construct one directly, because a preset does it: `Preset::Deferred` is the full deferred pipeline (TSR or FXAA, as the config says), and `Hlfs`, `Forward` and `Simple` are the others. A preset is a graph of pass nodes made for your renderer config, the same nodes the editor's render-graph assets are made of; an engine's features (a plugin's, such as Pulsar's voxel terrain) join it with `Preset::with_features`, and injected post-process WGSL is the `UserEffects` setting.
-
-When you do want something bespoke, you build the graph yourself, and it reads the same whether it ends up on a desktop or in a browser.
-
-Passes talk to each other through resource names like `"gbuffer"` and `"pre_aa"`; a pass says what it reads and what it writes, and the graph connects the wires. Once a graph is running you can reach back into it and grab any pass by its type with `renderer.find_pass_mut::<FxaaPass>()`, which is how you tweak a pass's settings or feed it per-frame data.
-
-## Working with the scene
-
-The scene is GPU-native and everything in it is a handle. You insert a material and get a `MaterialId`, insert a mesh and get a handle, insert an object that points at both, and insert lights. You hold onto those handles to update or remove things later, and the uploads are dirty-tracked so nothing you did not change gets re-sent.
-
-```rust
-let scene = renderer.scene_mut();
-
-let material = scene.insert_material(GpuMaterial { /* base_color, roughness_metallic, ... */ });
-let mesh     = scene.insert_actor(helio::SceneActor::mesh(mesh_upload));
-let object   = scene.insert_actor(helio::SceneActor::object(ObjectDescriptor {
-    mesh, material, transform, /* bounds, groups, movability, ... */
-}));
-let light    = scene.insert_actor(helio::SceneActor::light(GpuLight { /* ... */ }));
-```
-
-There is more under the surface when you need it. Every object carries a sixty-four-bit group mask, so you can hide, show, or transform whole groups of objects in one call. Meshes can be split into sections, one vertex buffer with several index ranges, which is the Unreal-style way of putting several materials on one model. SceneDB voxel components own canonical chunk payloads through `helio-voxel-data`; a rendering backend can consume those snapshots independently. Whole-scene knobs like ambient light, the clear color, editor mode, and temporal jitter live on the renderer as `set_ambient`, `set_clear_color`, `set_editor_mode`, and `set_jitter_enabled`, and `scene.clear()` wipes the slate.
-
-## Writing your own material shaders
-
-Materials in Helio go through a system called Radiant, which is a deliberate middle path between "one fixed shader for everything" and "every material is a bespoke pipeline." It blends a built-in physically based shader, hand-authored surface templates, and WGSL snippets generated by an external graph compiler, and it does it by having the G-buffer pass evaluate every material through a single shared function with marked injection points. Custom code splices in at those markers without the engine ever knowing about it.
-
-There are three tiers, and they share one cost model. The overwhelming majority of materials never leave the first tier, which is just feature flags on the built-in shader; you flip a normal-map bit or an alpha-test bit and nothing new gets compiled. The second tier is for surface archetypes that genuinely behave differently, things like clear coat, skin, hair, fabric, or thin-film iridescence. You write a small WGSL template for the surface, optionally pair it with a graph snippet, and pay for exactly one pipeline per template. The third tier is a fully custom surface emitted by a graph compiler, one pipeline per unique snippet, for the surfaces that fit no template at all. Whichever tier a material uses, the G-buffer pass sorts instances by their material class and graph hash, issues one draw per pipeline, and caches the compiled shader by the combination of template, graph, and flags. Crucially the lighting pass never changes, because every variant writes the same G-buffer format.
-
-A material is a plain struct. Its base color, emissive, and packed roughness/metallic/IOR/tint values are the ordinary PBR inputs, the texture fields are bindless indices, the `flags` field drives the first tier, `material_class` selects a template (zero being the built-in shader), and `class_params` is four free floats that whatever template is active can interpret however it likes.
-
-Bindless `BindingArray` material textures are the default wherever the device supports the required features; `Expanded` bindings are the fallback on other adapters and on the web. Each material's draws are drawn from a fixed per-material segment that the GPU fills in the same frame, so a material never draws with another's pipeline while the scene changes. See [bindless rendering](docs/bindless_rendering.md) for the capability contract, bind group lifetime rules, and how material dispatch works.
-
-```rust
-GpuMaterial {
-    base_color:         [f32; 4],   // linear RGBA
-    emissive:           [f32; 4],   // RGB + strength
-    roughness_metallic: [f32; 4],   // x = roughness, y = metallic, z = IOR, w = specular tint
-    tex_base_color, tex_normal, tex_roughness, tex_emissive, tex_occlusion: u32,
-    workflow:       u32,
-    flags:          u32,            // FLAG_HAS_NORMAL_MAP | FLAG_ALPHA_TEST | ...   (tier 1)
-    material_class: u32,            // 0 = built-in PBR, 1+ = a template            (tier 2/3)
-    class_params:   [f32; 4],       // free parameters read by the active template
-}
-```
-
-Staying in the first tier is a single call that just toggles flags:
-
-```rust
-scene.set_material_class(material_id, 0, 0, Some(FLAG_HAS_NORMAL_MAP | FLAG_ALPHA_TEST));
-```
-
-A tier-two template is a full WGSL file that defines `radiant_eval_surface`, returning the surface data the rest of the pipeline consumes. It contains two marker comments, and if a graph snippet is attached, the compiler replaces everything between them; if not, the markers are simply stripped and your template runs as written. The example below reads two of the free `class_params` to drive a thin-film effect, and `crates/examples/shaders/radiant_iridescent.wgsl` is a complete working version.
-
-```wgsl
-fn radiant_eval_surface(material: GpuMaterial,
-                        material_tex: MaterialTextureData,
-                        input: VertexOutput) -> SurfaceData {
-    var s = default_pbr_surface(material, material_tex, input);
-
-    let film_freq = material.class_params.x;
-    // ... your surface math, e.g. thin-film interference on s.f0 ...
-
-    // RADIANT_OVERRIDE_SURFACE
-    // RADIANT_OVERRIDE_END
-    return s;
-}
-```
-
-Registering templates and graphs is a short bit of setup. You register a compiled snippet on the scene with `scene.radiant_graphs.register(graph_hash, wgsl_source)`, load a template through the G-buffer pass, and then point a material at both the template and the snippet.
-
-```rust
-use helio_pass_gbuffer::GBufferPass;
-
-let reg = renderer.find_pass_mut::<GBufferPass>()
-    .map(|p| p.template_registry_mut()).unwrap();
-let template_id = reg.load_from_file("templates/clear_coat.wgsl").unwrap();
-// or reg.register_str("iridescent", wgsl_source);
-
-scene.set_material_class(material_id, template_id, graph_hash, Some(flags));
-```
-
-## Writing your own post-process shaders
-
-The post-process pass runs the usual chain of exposure, bloom, tone mapping, grain, vignette, and chromatic aberration, and it lets you splice your own WGSL into fixed points along that chain. This is how the backrooms demo lays a full VHS camcorder look over the rendered image.
-
-An effect is a WGSL function body that takes the current color and returns a new one. The engine wraps it in the signature `(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32>`, so the simplest possible effect is just `return color * vec3<f32>(1.0, 0.95, 0.9);` for a warm tint. You choose where in the chain it runs by position: before the blend stage, after the tonemap, after the grain, or right at the end after every built-in effect. Inside the snippet you have access to two things the engine provides, a storage array called `pp_custom` full of `vec4` parameters you upload each frame, and a tiling noise texture and sampler for grain and dithering.
-
-There are two ways to get your WGSL in. For a whole-frame effect that runs at the end, you give it to the renderer config, and every preset's post-process node builds with it. That is what the VHS demo does:
-
-```rust
-const VHS: &str = include_str!("vhs_effects.wgsl");
-
-let mut config = RendererConfig::new(width, height, surface_format);
-config.features.insert(helio_pass_postprocess::UserEffects(VHS));
-let renderer = RendererBuilder::new(config, scene_db_mirror)
-    .with_graph(Preset::Deferred)
-    .build(device.clone(), queue.clone(), width, height, surface_format);
-```
-
-Or you can add effects to a live pass at runtime and commit them, which rebuilds the pipeline:
-
-```rust
-use helio_pass_postprocess::{PostProcessPass, UserEffectPosition};
-
-if let Some(pp) = renderer.find_pass_mut::<PostProcessPass>() {
-    pp.add_user_effect(UserEffectPosition::PostTonemap, "return color * 0.85;");
-    pp.commit_user_effects(&device);
-}
-```
-
-Either way, you drive the effect frame to frame by uploading the parameters it reads out of `pp_custom`:
-
-```rust
-if let Some(pp) = renderer.find_pass_mut::<PostProcessPass>() {
-    pp.set_custom_params(&[
-        [0.0, 0.12, 8.0, 0.2],    // tape jitter, frequency, flicker
-        [0.4, elapsed, 0.0, 0.0], // grain amount, animation time
-    ]);
-}
-```
-
-The whole chain is gated behind a post-process volume, so to get a global effect you insert one unbounded volume once. Leaving its built-in settings at their defaults keeps the standard chain neutral, which lets your injected shader own the entire look:
-
-```rust
-scene.insert_actor(helio::SceneActor::post_process_volume(PostProcessVolumeDescriptor {
-    bounds_min: [-1000.0; 3], bounds_max: [1000.0; 3],
-    unbound: true, priority: 100.0, blend_weight: 1.0, blend_radius: 0.0,
-    settings: PostProcessSettings::default(),
-}));
-```
-
-For a real, non-trivial example, `crates/helio-web-demos/examples-wasm/vhs_effects.wgsl` is a complete camcorder shader with chromatic aberration, YIQ chroma drift, tracking noise, a head-switching bar at the bottom of frame, grain, and flicker.
-
-## Writing your own render passes
-
-For the current `RenderPass` descriptor, resource declaration, execution, and SceneDB APIs, see [Creating a custom Helio render pass](docs/custom-render-pass.md).
-
-The example below documents the older slot-based API; new passes should follow the current guide above.
-
-If you need to do something the existing passes do not, you write your own. A pass is any struct that implements the `RenderPass` trait from `helio-core`. It gives itself a name, tells the graph which resources it reads and writes, and does its work in `execute`, where it records GPU commands and reads scene data straight out of the context with no copies. There is an optional `prepare` step for per-frame uploads and resizing.
-
-```rust
-use helio_core::{RenderPass, PassContext, PrepareContext, Result};
-
-struct MyPass { /* pipelines, buffers, ... */ }
-
-impl RenderPass for MyPass {
-    fn name(&self) -> &'static str { "MyPass" }
-
-    fn reads(&self)  -> &'static [&'static str] { &["gbuffer"] }
-    fn writes(&self) -> &'static [&'static str] { &["pre_aa"] }
-
-    fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> { Ok(()) }
-
-    fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        // begin a render or compute pass on ctx, set pipelines and bind groups,
-        // read scene resources from ctx.scene, issue your draws or dispatches
-        Ok(())
-    }
-}
-
-graph.add_pass(Box::new(MyPass::new(&device)));
-```
-
-A pass that reconstructs temporal data opts into camera jitter, which lets the renderer keep non-temporal pipelines pixel-stable by default. Profiling, both CPU and GPU, is injected around every pass automatically, and debug builds will tell you if a pass declared a resource it never actually wrote.
-
-## Debugging
-
-Helio has an immediate-mode debug drawing API right on the renderer. Turn on editor mode with `set_editor_mode(true)`, call `debug_clear()` at the top of a frame, and then draw lines, spheres, circles, tori, cylinders, cones, and frustums by calling the matching `debug_*` methods; the default graph's debug pass renders them. The `debug_shapes` demo is a live gallery of every primitive. While a demo is running, F2 toggles an overlay showing frame rate and timing (with a hook for your own per-frame text), and F3 and F4 cycle through debug views like UVs, world-space normals, albedo, roughness, the shadow heatmap, the LOD heatmap, and overdraw.
-
-## What the passes give you
-
-The full pipeline is assembled out of the pass crates, and it is worth knowing roughly what is in the box. Geometry goes through an early depth prepass and a GPU-driven G-buffer fill that also evaluates Radiant materials, with an optional cluster-DAG virtual geometry path (GPU instance BVH, two-phase Hi-Z culling, hardware and software raster, deferred material shading) for dense static meshes and a hierarchical-Z occlusion system keeping hidden triangles off the GPU. Lighting is deferred, using a Cook-Torrance BRDF with tile and cluster light culling so hundreds of lights stay cheap, cascaded shadow maps with soft filtering, screen-space ambient occlusion, and a world-space probe clipmap (DDGI-style) for multi-bounce indirect light on voxel worlds. The sky is a Hillaire atmospheric model with volumetric clouds. Anti-aliasing comes in temporal and spatial flavours (TAA, FXAA, SMAA), and the post-process pass handles exposure, bloom, tonemapping, and the user WGSL described above. On top of that there are specialised passes for water simulation and surface rendering with caustics and an underwater look, sorted forward transparency, and the debug and performance overlays. Every one of these is an independent crate, and you compose only the ones a given pipeline needs.
-
-## Examples and demos
-
-The `crates/examples` directory has the native binaries, and the very same demos run in the browser through `helio-web-demos`. There is an indoor cathedral lit by chandeliers and shafts of stained-glass light, a dense night city, a desert canyon where Q and E rotate the sun, an orbital space station, a six-degree-of-freedom ship flying through an asteroid field, the VHS backrooms with its injected post-process shader, the debug shapes gallery, an interactive editor that picks and moves objects, a drop-in FBX/glTF/OBJ/USD viewer, a benchmark pushing a hundred and twenty-eight animated point lights, and a bare-bones fly-camera scene to start from. Run any of them natively with `cargo run -p examples --bin <name> --release`, or run `cargo run --bin web` to build them all for the browser at once.
-
-## Assets
-
-Model loading covers FBX, glTF, OBJ, and USD through `helio-asset-compat`. For static geometry there is a baking crate that precomputes ambient occlusion, lightmaps, reflection probes, and irradiance spherical harmonics, along with potentially-visible sets for CPU-side culling. On the web you load assets from bytes embedded at compile time with `include_bytes!` rather than from disk, which the `load_fbx_embedded` demo shows.
+`simple_graph` builds its graph with `RendererBuilder::with_pass_build_context` and draws with no scene content. `debug_shapes` draws lines, spheres, boxes, cones, cylinders, tori and frustums through the renderer's debug draw.
+
+The wasm runner is `helio-wasm`. The web and Android demos are scenes of meshes, so they live in Plugin_Meshes (`plugins/vendor/meshes/web-demos` and `android-demos` in Pulsar-Native).
+
+## 6. Further reading
+
+- [`AGENTS.md`](AGENTS.md): the rules every change follows, and the key commands.
+- The [`helio-architecture` skill](.agents/skills/helio-architecture/SKILL.md): the steps for any change to Helio or a plugin's rendering (read, find the owner, design note, invariants, verify).
+- [`docs/architecture/layered-rewrite.md`](docs/architecture/layered-rewrite.md): layers, rules, buffer contracts, extension points and why this shape.
+- [`docs/architecture/plugin-migration.md`](docs/architecture/plugin-migration.md): every object kind is a plugin, what Helio is, the plugin table and the "As built" notes per phase.
+- [`docs/custom-render-pass.md`](docs/custom-render-pass.md) and [`docs/custom-pass-pipeline.md`](docs/custom-pass-pipeline.md): writing a `RenderPass` and composing passes into a graph.
+- [Pulsar-Native](https://github.com/Far-Beyond-Pulsar/Pulsar-Native): the engine and editor, and the plugins at `plugins/vendor/`.
+- [Far-Beyond-Pulsar/Plugins](https://github.com/Far-Beyond-Pulsar/Plugins): the plugins registry.
 
 ## License
 

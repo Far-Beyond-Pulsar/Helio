@@ -16,6 +16,13 @@
 //! what it needs of the others (GI's terrain tracer, TSR's stochastic mask)
 //! through settings in its own preparer.
 
+// The repository README's Rust blocks, compiled (and the runnable ones run)
+// as this crate's doctests, so the README's code stays real. This crate is
+// the lowest that depends on every crate they use.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
+
 pub mod features;
 pub mod graphs;
 pub mod presets;
