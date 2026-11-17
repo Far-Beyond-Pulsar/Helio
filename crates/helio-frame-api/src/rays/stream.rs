@@ -103,12 +103,86 @@ pub struct SceneRay {
     /// The most distance the ray travels; 0 or less: no ray in this row.
     pub t_max: f32,
     pub dir: [f32; 3],
-    /// Spread (half float, bits 0..16) and caster mask (bits 16..24).
+    /// The ray's cone ([`Self::cone`]): spread, caster mask and width.
     pub cone: u32,
 }
 
 impl SceneRay {
     pub const BYTES: u64 = std::mem::size_of::<Self>() as u64;
+
+    /// `scene_ray_cone`: a footprint `width` across at the origin that grows
+    /// by `spread` a metre, seeing the casters of `mask`.
+    pub fn cone(width: f32, spread: f32, mask: u8) -> u32 {
+        let w = if width > 0.0 {
+            (width.log2() * 8.0 + 160.0).round().clamp(1.0, 255.0) as u32
+        } else {
+            0
+        };
+        u32::from(half_bits(spread)) | (u32::from(mask) << 16) | (w << 24)
+    }
+
+    /// `scene_ray_spread`.
+    pub fn spread(&self) -> f32 {
+        half_value(self.cone as u16)
+    }
+
+    /// `scene_ray_width`.
+    pub fn width(&self) -> f32 {
+        match self.cone >> 24 {
+            0 => 0.0,
+            w => ((w as f32 - 160.0) / 8.0).exp2(),
+        }
+    }
+
+    /// `scene_ray_mask`.
+    pub fn mask(&self) -> u8 {
+        (self.cone >> 16) as u8
+    }
+}
+
+/// The half float nearest `value` (finite, zero or more; past the largest
+/// half: the largest).
+fn half_bits(value: f32) -> u16 {
+    if value.is_nan() || value <= 0.0 {
+        return 0;
+    }
+    let bits = value.to_bits();
+    let exponent = (bits >> 23) as i32 - 127;
+    let mantissa = bits & 0x007f_ffff;
+    if exponent > 15 {
+        return 0x7bff;
+    }
+    if exponent >= -14 {
+        // Normal: 10 bits of mantissa, rounded to nearest (a carry runs
+        // into the exponent, which is the next half).
+        let half = (((exponent + 15) as u32) << 10) | (mantissa >> 13);
+        let round = (mantissa >> 12) & 1;
+        return (half + round).min(0x7bff) as u16;
+    }
+    if exponent >= -25 {
+        // Subnormal: the implicit one shifted down.
+        let shift = (-14 - exponent) as u32;
+        let full = (mantissa | 0x0080_0000) >> (13 + shift);
+        let round = ((mantissa | 0x0080_0000) >> (12 + shift)) & 1;
+        return (full + round) as u16;
+    }
+    0
+}
+
+/// The value of half float `bits` (finite ones).
+fn half_value(bits: u16) -> f32 {
+    let exponent = i32::from((bits >> 10) & 0x1f);
+    let mantissa = f32::from(bits & 0x3ff);
+    let value = if exponent == 0 {
+        mantissa * (-24.0f32).exp2()
+    } else {
+        (1.0 + mantissa / 1024.0) * ((exponent - 15) as f32).exp2()
+    };
+    if bits & 0x8000 != 0 {
+        -value
+    } else {
+        value
+    }
 }
 
 /// `SceneHit` (see the WGSL).
@@ -467,6 +541,41 @@ mod tests {
         assert_eq!(SceneRay::BYTES, 32);
         assert_eq!(SceneHit::BYTES, 16);
         assert_eq!(SceneSurface::BYTES, 20);
+    }
+
+    #[test]
+    fn a_cone_keeps_its_spread_mask_and_width() {
+        let ray = SceneRay {
+            cone: SceneRay::cone(0.0, 0.443, MASK_ALL),
+            ..Default::default()
+        };
+        assert!((ray.spread() - 0.443).abs() < 2e-4, "{}", ray.spread());
+        assert_eq!(ray.mask(), MASK_ALL);
+        assert_eq!(ray.width(), 0.0);
+        // Widths keep within their step (2^(1/16) either way), from a
+        // micrometre to kilometres; the other fields are untouched.
+        for width in [1e-6f32, 0.002, 0.1, 1.0, 37.5, 3000.0] {
+            let ray = SceneRay {
+                cone: SceneRay::cone(width, 0.01, MASK_STATIC),
+                ..Default::default()
+            };
+            let ratio = ray.width() / width;
+            assert!(
+                (0.957..1.045).contains(&ratio),
+                "{width} -> {}",
+                ray.width()
+            );
+            assert!((ray.spread() - 0.01).abs() < 1e-5);
+            assert_eq!(ray.mask(), MASK_STATIC);
+        }
+        // Halves round to nearest and survive their range's ends.
+        assert_eq!(half_value(half_bits(1.0)), 1.0);
+        assert_eq!(half_value(half_bits(0.5)), 0.5);
+        assert_eq!(half_value(half_bits(65504.0)), 65504.0);
+        assert_eq!(half_value(half_bits(1e9)), 65504.0);
+        assert_eq!(half_bits(0.0), 0);
+        let tiny = half_value(half_bits(1e-6));
+        assert!((tiny - 1e-6).abs() < 6e-8, "{tiny}");
     }
 
     #[test]

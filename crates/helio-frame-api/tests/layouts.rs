@@ -43,11 +43,12 @@ fn the_ray_stream_rows_have_their_contract_sizes() {
          @compute @workgroup_size(RAY_STREAM_GROUP)
          fn main(@builtin(global_invocation_id) id: vec3<u32>) {
              if id.x >= header.count { return; }
-             let ray = rays[id.x];
+             var ray = rays[id.x];
+             ray.cone = scene_ray_cone(scene_ray_width(ray), scene_ray_spread(ray), RAY_MASK_ALL);
              let reach = scene_hit_reach(ray, hits[id.x]);
              let n = scene_unpack_unit(scene_pack_unit(ray.dir));
              hits[id.x] = scene_nearest(1u, reach, false, scene_ray_mask(ray), 0u, 0u);
-             hits[id.x] = scene_occlusion(scene_occlusion_through(hits[id.x]) * scene_ray_spread(ray));
+             hits[id.x] = scene_occlusion(scene_occlusion_through(hits[id.x]) * scene_ray_footprint(ray, reach));
              surfaces[id.x] = scene_surface(n, n, vec3<f32>(0.5), 0.0, 1.0, 0.0, scene_unpack_radiance(scene_pack_radiance(n)));
          }
 ",

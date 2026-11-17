@@ -16,10 +16,19 @@ struct RayStreamHeader {
 }
 
 // A ray: its origin and the most distance it travels (0 or less: no ray in
-// this row), its unit direction, and `cone`: its spread (the width of its
-// footprint a metre out, a half float in bits 0..16) and the caster mask it
-// sees (bits 16..24, `RAY_MASK_*`). A tracer traces from the origin itself,
-// from distance 0: the consumer starts a ray off the surface it leaves.
+// this row), its unit direction, and `cone`. A tracer traces from the origin
+// itself, from distance 0: the consumer starts a ray off the surface it
+// leaves.
+//
+// `cone` is the ray's cone (Akenine-Moller et al., "Texture Level of Detail
+// Strategies for Real-Time Ray Tracing", Ray Tracing Gems): its footprint is
+// `width` across at the origin and grows by `spread` a metre, so a tracer
+// reads textures and tests cut-outs at the detail the ray can resolve
+// (`scene_ray_footprint`). Bits 0..16: the spread, a half float. Bits
+// 16..24: the caster mask the ray sees (`RAY_MASK_*`). Bits 24..32: the
+// width, 0 for none, else `2^((bits - 160) / 8)` metres (a micrometre to
+// kilometres in steps of 9%). A camera or probe ray has no width; a ray
+// that leaves a hit starts as wide as the ray that found the hit was there.
 struct SceneRay {
     origin: vec3<f32>,
     t_max: f32,
@@ -32,12 +41,23 @@ const RAY_MASK_STATIC: u32 = 1u;
 const RAY_MASK_MOVABLE: u32 = 2u;
 const RAY_MASK_ALL: u32 = 0xffu;
 
-fn scene_ray_cone(spread: f32, mask: u32) -> u32 {
-    return (pack2x16float(vec2<f32>(spread, 0.0)) & 0xffffu) | ((mask & 0xffu) << 16u);
+fn scene_ray_cone(width: f32, spread: f32, mask: u32) -> u32 {
+    let w = select(0u, u32(clamp(round(log2(max(width, 1e-30)) * 8.0 + 160.0), 1.0, 255.0)), width > 0.0);
+    return (pack2x16float(vec2<f32>(spread, 0.0)) & 0xffffu) | ((mask & 0xffu) << 16u) | (w << 24u);
 }
 
 fn scene_ray_spread(ray: SceneRay) -> f32 {
     return unpack2x16float(ray.cone & 0xffffu).x;
+}
+
+fn scene_ray_width(ray: SceneRay) -> f32 {
+    let w = ray.cone >> 24u;
+    return select(0.0, exp2((f32(w) - 160.0) / 8.0), w != 0u);
+}
+
+// How wide the ray's footprint is `t` along it.
+fn scene_ray_footprint(ray: SceneRay, t: f32) -> f32 {
+    return scene_ray_width(ray) + scene_ray_spread(ray) * t;
 }
 
 fn scene_ray_mask(ray: SceneRay) -> u32 {
