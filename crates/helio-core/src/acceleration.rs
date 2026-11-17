@@ -179,11 +179,7 @@ impl BlasManager {
         geometry: BlasGeometry<'_>,
         opaque: bool,
     ) -> Result<bool, AccelerationError> {
-        self.build_segments(
-            geometry_id,
-            encoder,
-            vec![BlasSegment { geometry, opaque }],
-        )
+        self.build_segments(geometry_id, encoder, vec![BlasSegment { geometry, opaque }])
     }
 
     /// Record one BLAS of several geometries (a mesh's sections, each with
@@ -342,7 +338,6 @@ impl BlasManager {
         self.revision = self.revision.wrapping_add(1);
         Ok(true)
     }
-
 
     /// Build a BLAS from vertex/index data.
     pub fn build_blas(

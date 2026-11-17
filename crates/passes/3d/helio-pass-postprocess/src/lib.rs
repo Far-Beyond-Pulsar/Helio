@@ -314,7 +314,6 @@ pub struct PostProcessPass {
     bloom_active: bool,
 
     // ── Custom effect infrastructure ───────────────────────────────────────
-    noise_texture: wgpu::Texture,
     noise_view: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
     /// 1x1 black stand-in bound at b17 when nothing published glare.
@@ -1041,7 +1040,6 @@ impl PostProcessPass {
             format,
             exposure_history: false,
             bloom_active: true,
-            noise_texture,
             noise_view,
             noise_sampler,
             fallback_glare_view,

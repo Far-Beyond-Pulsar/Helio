@@ -19,8 +19,8 @@ helio-tasks = { workspace = true }
 # A compile job's failure (`compile`) is logged.
 log = { workspace = true }
 
-# Pulsar-Profiling fork scopes (same instrumentation the engine flamegraph
-# collects). The fork is std-only, so it is excluded on wasm targets. The
+# Pulsar-Profiling scopes (same instrumentation the engine flamegraph
+# collects). The crate is std-only, so it is excluded on wasm targets. The
 # module code gates every `profiling::profile_scope!` site with the same cfg.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # A compile job waits for its error scope (`compile`).

@@ -52,7 +52,12 @@ mod tests {
         ] {
             let old_camera = shift + glam::DVec3::new(0.031, 0.023, 0.047);
             let previous = projection
-                * glam::DMat4::look_to_rh(old_camera, glam::DVec3::NEG_Z, glam::DVec3::Y).as_mat4();
+                * glam::dcamera::rh::view::look_to_mat4(
+                    old_camera,
+                    glam::DVec3::NEG_Z,
+                    glam::DVec3::Y,
+                )
+                .as_mat4();
             let rebased = rebase_previous_projection(previous, shift);
             for distance in [1.0, 32.0, 1024.0, 8_000_000.0] {
                 let new_point = glam::DVec3::new(0.25, -0.1, -distance);

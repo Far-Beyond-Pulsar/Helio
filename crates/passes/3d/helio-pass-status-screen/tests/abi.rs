@@ -36,12 +36,7 @@ fn shader_struct(module: &naga::Module, name: &str) -> (Vec<(String, u32)>, u32)
     panic!("the shader declares no struct `{name}`");
 }
 
-fn assert_same(
-    module: &naga::Module,
-    name: &str,
-    rust_size: usize,
-    rust_fields: &[(&str, usize)],
-) {
+fn assert_same(module: &naga::Module, name: &str, rust_size: usize, rust_fields: &[(&str, usize)]) {
     let (fields, span) = shader_struct(module, name);
     assert_eq!(
         fields.len(),

@@ -113,7 +113,10 @@ mod tests {
         // A marker must be the whole first word's prefix, not a substring.
         assert_eq!(Severity::split("errors: 3").0, Severity::Note);
         assert_eq!(Severity::split("").0, Severity::Note);
-        assert_eq!(Severity::split("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}").0, Severity::Note);
+        assert_eq!(
+            Severity::split("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}").0,
+            Severity::Note
+        );
     }
 
     #[test]

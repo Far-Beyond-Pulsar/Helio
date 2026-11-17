@@ -164,7 +164,7 @@ fn scene_db_with_gpu_mirror(
 ) -> pulsar_scenedb::SceneDb {
     let mut scene_db = pulsar_scenedb::SceneDb::new();
     let ctx = pulsar_scenedb::gpu::EngineGpuContext::new(device.clone(), queue.clone());
-    let mut store = pulsar_scenedb::gpu::SceneGpuStore::new(
+    let store = pulsar_scenedb::gpu::SceneGpuStore::new(
         &ctx,
         pulsar_scenedb::gpu::SceneGpuConfig {
             classes: Vec::new(),

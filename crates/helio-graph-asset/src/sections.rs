@@ -20,8 +20,8 @@ use crate::asset::{
 use crate::core_nodes::{ON_FRAME_START, OUTPUT};
 use crate::layout::LANE_PREFIX;
 use crate::validate::{Diagnostic, Severity};
+use helio_feature_api::PinDesc;
 use helio_feature_api::{NodePins, NodeRegistry};
-use helio_feature_api::{PinDesc, PinType};
 
 /// The id of the section a node kind stands for.
 pub fn section_id(kind: &str) -> Option<&str> {
@@ -251,7 +251,6 @@ pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
                 }
             }
         }
-        drop(pin_of);
         asset.connections = outer;
 
         let (moved, kept): (Vec<NodeInstance>, Vec<NodeInstance>) =
@@ -274,6 +273,7 @@ pub fn sectionize(asset: &mut GraphAsset, registry: &NodeRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use helio_feature_api::PinType;
 
     fn node(id: &str, kind: &str) -> NodeInstance {
         NodeInstance {

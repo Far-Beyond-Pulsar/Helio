@@ -3493,3 +3493,26 @@ it. A portal is a rigid map between coordinate spaces, never a view:
     the space into its rows, but its BVH walk tests the direct tree's
     space-free node bounds.
 
+
+As built, p25c (2026-11-17, branch `rewrite/p25c-housekeeping` in Helio,
+Pulsar-Native, Pulsar-Profiling, Pulsar-Reflection, Graphy, PSGC,
+PulsarConfig, WGPUI and the plugin repos): housekeeping before the README
+(Pulsar-Native#1662, #1644).
+
+- **`profiling` has one home**, the public Pulsar-Profiling repository.
+  Helio pinned it from Pulsar-Native by git rev, so building Helio (a
+  generated game) fetched the whole engine with its submodules, one of them
+  private. Helio and SceneDB pin Pulsar-Profiling by rev; Helio's `//` patch
+  and Pulsar-Native's `[patch.Pulsar-Profiling]` (onto its submodule
+  `crates/external/pulsar-profiling`) make every pin one copy, one
+  `PROFILER`. The crate's remote publisher takes its thread spawner from the
+  caller (`remote::SpawnThread`): Pulsar passes
+  `editor_task_queue::service_spawner`, Helio's own tools `remote::std_thread`.
+  No manifest names Pulsar-Native as a git source
+  (`scripts/no-pulsar-native-git-deps.sh` in Pulsar-Native's CI).
+- **Warnings are visible and fail CI.** Pulsar-Native's `-A warnings` is
+  gone (it applied on macOS only: a `[target.<triple>].rustflags` entry makes
+  cargo ignore `[build].rustflags`). About 1000 first-party warning sites
+  were fixed, mostly by deleting dead code; Helio's CI denies warnings
+  (`RUSTFLAGS=-D warnings`), Pulsar's clippy lane denies them on its members.
+  Vendored WGPUI stays quiet through its own package lints.

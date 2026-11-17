@@ -24,39 +24,6 @@ pub enum PerfOverlayMode {
     PassOutput = 4,
 }
 
-/// Select the best available surface texture format for the given HDR output mode.
-///
-/// * `Ldr` — prefers an sRGB format (`Rgba8UnormSrgb` / `Bgra8UnormSrgb`)
-/// * `Hdr10` — prefers `Rgba16Float` (PQ encoded in shader; system handles display)
-/// * `ScRgb` — prefers `Rgba16Float` (linear float, Windows HDR / macOS EDR)
-/// * `Passthrough` — prefers `Rgba16Float` (raw HDR float)
-///
-/// Falls back to the first available format if no preferred format is found.
-pub fn select_hdr_surface_format(
-    caps: &wgpu::SurfaceCapabilities,
-    mode: helio_pass_postprocess::HdrOutputMode,
-) -> wgpu::TextureFormat {
-    let preferred = match mode {
-        helio_pass_postprocess::HdrOutputMode::Ldr => {
-            caps.formats.iter().find(|f| f.is_srgb()).copied()
-        }
-        helio_pass_postprocess::HdrOutputMode::Hdr10
-        | helio_pass_postprocess::HdrOutputMode::ScRgb
-        | helio_pass_postprocess::HdrOutputMode::Passthrough => caps
-            .formats
-            .iter()
-            .find(|f| **f == wgpu::TextureFormat::Rgba16Float)
-            .copied()
-            .or_else(|| {
-                caps.formats
-                    .iter()
-                    .find(|f| **f == wgpu::TextureFormat::Rgba32Float)
-                    .copied()
-            }),
-    };
-    preferred.unwrap_or(caps.formats[0])
-}
-
 /// Instance flags Helio recommends for the host's `wgpu::Instance`
 /// (Helio#308).
 ///

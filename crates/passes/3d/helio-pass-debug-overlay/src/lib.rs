@@ -102,8 +102,6 @@ pub struct DebugOverlayState {
 
 impl DebugOverlayState {
     pub fn new() -> Arc<Mutex<Self>> {
-        let cols = DEFAULT_COLS;
-        let rows = DEFAULT_ROWS;
         Arc::new(Mutex::new(Self {
             enabled: false,
             grid_cols: DEFAULT_COLS,
@@ -306,7 +304,6 @@ pub struct DebugOverlayPass {
     bar_buf: wgpu::Buffer,
     pie_buf: wgpu::Buffer,
     line_buf: wgpu::Buffer,
-    font_texture: wgpu::Texture,
     font_view: wgpu::TextureView,
     sampler: wgpu::Sampler,
     bind_group: Option<wgpu::BindGroup>,
@@ -525,7 +522,6 @@ impl DebugOverlayPass {
             bar_buf,
             pie_buf,
             line_buf,
-            font_texture: font_tex,
             font_view,
             sampler,
             bind_group: None,

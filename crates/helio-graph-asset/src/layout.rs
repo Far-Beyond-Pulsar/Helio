@@ -154,9 +154,11 @@ fn layout_sections(asset: &mut GraphAsset, registry: &NodeRegistry) {
         .nodes
         .iter()
         .map(|node| match asset.section_of(node) {
-            Some(section) => {
-                estimated_size(&section.name, &crate::sections::section_pins(section), space)
-            }
+            Some(section) => estimated_size(
+                &section.name,
+                &crate::sections::section_pins(section),
+                space,
+            ),
             None => match registry.get(&node.kind) {
                 Some(descriptor) => {
                     let title =
@@ -315,10 +317,14 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
     // With pin spacing a data node sits at the height of the pin it connects to,
     // so the wire is straight: remember where each end of a direct wire is.
     let align: Option<Align> = asset.space_pins.then(|| {
-        let rows = |i: usize| all_pins[i].inputs.len().max(all_pins[i].outputs.len()).max(1);
-        let center = |i: usize, pin: Option<usize>| {
-            pin.map(|p| pin_center(rows(i), p, true))
+        let rows = |i: usize| {
+            all_pins[i]
+                .inputs
+                .len()
+                .max(all_pins[i].outputs.len())
+                .max(1)
         };
+        let center = |i: usize, pin: Option<usize>| pin.map(|p| pin_center(rows(i), p, true));
         let position = |pins: &[helio_feature_api::PinDesc], name: &str| {
             pins.iter().position(|pin| pin.name == name)
         };
@@ -335,14 +341,20 @@ pub fn auto_layout(asset: &mut GraphAsset, registry: &NodeRegistry) {
                 (false, true) => (
                     from,
                     to,
-                    center(from, position(&all_pins[from].outputs, &connection.from.pin)),
+                    center(
+                        from,
+                        position(&all_pins[from].outputs, &connection.from.pin),
+                    ),
                     center(to, position(&all_pins[to].inputs, &connection.to.pin)),
                 ),
                 (true, false) => (
                     to,
                     from,
                     center(to, position(&all_pins[to].inputs, &connection.to.pin)),
-                    center(from, position(&all_pins[from].outputs, &connection.from.pin)),
+                    center(
+                        from,
+                        position(&all_pins[from].outputs, &connection.from.pin),
+                    ),
                 ),
                 _ => continue,
             };
@@ -944,15 +956,14 @@ mod tests {
         registry.register(
             NodeDescriptor::new("t.wide", "Wide", "Passes: Alpha", "", |_| Ok(())).with_pins(
                 vec![PinDesc::flow("in")],
-                std::iter::once(PinDesc::flow("out")).chain(outputs).collect(),
+                std::iter::once(PinDesc::flow("out"))
+                    .chain(outputs)
+                    .collect(),
             ),
         );
         registry.register(
             NodeDescriptor::new("t.sink", "Sink", "Data", "", |_| Ok(()))
-                .with_pins(
-                    vec![PinDesc::resource(PinType::TEXTURE, "o0")],
-                    Vec::new(),
-                )
+                .with_pins(vec![PinDesc::resource(PinType::TEXTURE, "o0")], Vec::new())
                 .with_data_only(),
         );
         let build = |space: bool| {
@@ -981,7 +992,11 @@ mod tests {
         let pin_y = |i: usize| wide[1] + pin_center(7, i + 1, true);
         for i in 0..6 {
             let sink = spaced.node(&format!("s{i}")).unwrap().position;
-            assert_eq!(sink[1] + pin_center(1, 0, true), pin_y(i), "wire {i} is straight");
+            assert_eq!(
+                sink[1] + pin_center(1, 0, true),
+                pin_y(i),
+                "wire {i} is straight"
+            );
             assert!(sink[0] > wide[0], "sinks are right of their producer");
         }
         for i in 0..5 {
@@ -992,7 +1007,10 @@ mod tests {
         // Spacing is what makes the room: unspaced the pins are closer than the nodes.
         let plain = build(false);
         let a = plain.node("s0").unwrap().position[1] + pin_center(1, 0, false);
-        assert_ne!(a, plain.node("w").unwrap().position[1] + pin_center(7, 1, false));
+        assert_ne!(
+            a,
+            plain.node("w").unwrap().position[1] + pin_center(7, 1, false)
+        );
     }
 
     #[test]

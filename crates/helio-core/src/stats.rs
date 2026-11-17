@@ -132,7 +132,10 @@ pub struct FrameStats {
 impl std::fmt::Debug for FrameStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameStats")
-            .field("stats", &self.inner.names.lock().map_or(0, |n| n.list.len()))
+            .field(
+                "stats",
+                &self.inner.names.lock().map_or(0, |n| n.list.len()),
+            )
             .finish()
     }
 }
@@ -327,9 +330,7 @@ impl FrameStats {
                     Ok(view) => bytemuck::cast_slice::<u8, u32>(&view)[..count].to_vec(),
                     Err(_) => Vec::new(),
                 };
-                if gpu.len() == count
-                    && newest.as_ref().is_none_or(|n| n.frame < staging.frame)
-                {
+                if gpu.len() == count && newest.as_ref().is_none_or(|n| n.frame < staging.frame) {
                     newest = Some(StatsSnapshot {
                         frame: staging.frame,
                         values: names[..count]
@@ -443,8 +444,16 @@ mod tests {
         // custom stat (written ahead of the next submission, as a pass's
         // atomics land before the next frame's copy), its CPU 3 to `vertices`.
         frame(&stats);
-        queue.write_buffer(stats.buffer(), u64::from(StatSlot(1).index()) * 4, &5u32.to_le_bytes());
-        queue.write_buffer(stats.buffer(), u64::from(custom.index()) * 4, &7u32.to_le_bytes());
+        queue.write_buffer(
+            stats.buffer(),
+            u64::from(StatSlot(1).index()) * 4,
+            &5u32.to_le_bytes(),
+        );
+        queue.write_buffer(
+            stats.buffer(),
+            u64::from(custom.index()) * 4,
+            &7u32.to_le_bytes(),
+        );
         stats.add_named(VERTICES, 3);
         // Frame 2's start copies frame 1 out; frame 3's start collects it.
         frame(&stats);

@@ -14,10 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
-use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
-    RendererBuilder, RendererConfig,
-};
+use helio::{Camera, Renderer, RendererBuilder, RendererConfig};
 
 mod common;
 mod simple_cube;
@@ -46,7 +43,6 @@ struct AppState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
     last_frame: Instant,
@@ -192,7 +188,6 @@ impl ApplicationHandler for App {
             window,
             surface,
             device,
-            queue,
             surface_format,
             renderer,
             last_frame: Instant::now(),
