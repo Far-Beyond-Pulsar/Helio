@@ -206,7 +206,7 @@ impl GraphAssetPipeline {
     }
 
     /// Composes the graph's secondary views with `views` (the preset's
-    /// `view_asset`): what a capture or an inline view runs.
+    /// `view_asset`): what a capture runs.
     pub fn with_views(mut self, views: MakeViewAsset) -> Self {
         self.views = Some(views);
         self

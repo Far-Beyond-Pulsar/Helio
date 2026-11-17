@@ -10,7 +10,7 @@ winit / TRUEOS UI4 / OpenXR / automation
        NavigationAction + NavigationState
                  │
                  ▼
-              FlyCamera ───► helio::Camera::from_fly
+              FlyCamera ───► position + basis ───► helio::Camera
 ```
 
 The semantic core knows no window, cursor, device, or compositor type. Platform

@@ -30,7 +30,7 @@
 //! // Native entry point
 //! fn main() { launch::<MyDemo>(); }
 //!
-//! // WASM entry point (in helio-web-demos)
+//! // WASM entry point (in a web demos crate, such as the meshes plugin's `web-demos`)
 //! #[cfg(target_arch = "wasm32")]
 //! #[wasm_bindgen::prelude::wasm_bindgen(start)]
 //! pub fn run() { launch::<MyDemo>(); }

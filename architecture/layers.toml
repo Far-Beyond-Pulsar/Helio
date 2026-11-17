@@ -24,7 +24,7 @@ about = "No dependency on any other workspace crate."
 may_use = []
 
 [layers.core]
-about = "gpu + graph (helio-core today; splits into helio-gpu and helio-graph in phase 2)."
+about = "gpu + graph, one crate (helio-core); its split into helio-gpu and helio-graph was deferred (layered-rewrite.md, phase 2)."
 may_use = ["leaf"]
 
 [layers.scene]

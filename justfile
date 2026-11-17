@@ -60,16 +60,16 @@ build-package pkg:
 build-package-release pkg:
     cargo build -p {{pkg}} --release
 
-build-example example='editor_demo':
+build-example example='simple_graph':
     cargo build -p examples --bin {{example}}
 
-build-example-release example='editor_demo':
+build-example-release example='simple_graph':
     cargo build -p examples --bin {{example}} --release
 
-run example='editor_demo' *args:
+run example='simple_graph' *args:
     cargo run -p examples --bin {{example}} -- {{args}}
 
-run-release example='editor_demo' *args:
+run-release example='simple_graph' *args:
     cargo run -p examples --bin {{example}} --release -- {{args}}
 
 run-package pkg *args:

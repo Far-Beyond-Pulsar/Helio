@@ -28,7 +28,7 @@
 //! );
 //! ```
 //!
-//! [`include_wgsl!`] is `include_str!` plus the file's identity; with the
+//! [`include_wgsl!`](crate::include_wgsl) is `include_str!` plus the file's identity; with the
 //! `shader-hot-reload` feature that identity lets [`hot`] recompile the shader
 //! when the file changes. With the feature off it is exactly `include_str!`.
 //!
@@ -187,7 +187,7 @@ macro_rules! wgsl_snippet {
 /// Shader text handed to [`module`]/[`module_with`].
 ///
 /// Built from a plain `&str` (never hot reloaded) or, with the
-/// `shader-hot-reload` feature, from an [`include_wgsl!`] value that carries
+/// `shader-hot-reload` feature, from an [`include_wgsl!`](crate::include_wgsl) value that carries
 /// the file's identity.
 #[derive(Clone, Copy)]
 pub struct ShaderSource<'a> {
@@ -253,8 +253,8 @@ impl TextSource for Embedded {
 /// the shader contains `marker` as a WGSL comment.
 ///
 /// Declared as a `const` by whichever pass crate owns the snippet's content
-/// (e.g. `helio-pass-hiz`'s Hi-Z traversal, `helio-pass-gbuffer`'s PBR
-/// evaluation library, `helio-frame-api`'s atmosphere) and passed
+/// (e.g. `helio-pass-hiz`'s Hi-Z traversal, `helio-frame-api`'s frame sky,
+/// a materials plugin's PBR evaluation library) and passed
 /// explicitly to [`resolve_with`]/[`module_with`] by the pass that wants it.
 /// `helio-core` never declares one itself and never hardcodes a marker or
 /// source string belonging to a specific domain — only this generic shape.
@@ -465,7 +465,7 @@ fn mark_done(text: &str, marker: &str) -> String {
 /// array substitutions, tier-specific defines, ...).
 ///
 /// Pass the result to [`module`]/[`module_with`] as a plain `&str`. With the
-/// `shader-hot-reload` feature, an [`include_wgsl!`] source is registered with
+/// `shader-hot-reload` feature, an [`include_wgsl!`](crate::include_wgsl) source is registered with
 /// the watcher and this returns the latest accepted on-disk text instead of the
 /// embedded text, so the rewrite is applied to the edited file. The file is
 /// not validated on the CPU (it is not valid WGSL until rewritten); the
@@ -487,7 +487,7 @@ pub fn source_text<'a>(label: &str, source: impl Into<ShaderSource<'a>>) -> Cow<
 /// Creates a shader module, expanding only the generic prelude if the source
 /// opts in. Equivalent to `module_with(device, label, source, &[])`.
 ///
-/// `source` is a `&str` or an [`include_wgsl!`] value; only the latter is
+/// `source` is a `&str` or an [`include_wgsl!`](crate::include_wgsl) value; only the latter is
 /// hot reloadable.
 pub fn module<'a>(
     device: &wgpu::Device,
@@ -500,7 +500,7 @@ pub fn module<'a>(
 /// Creates a shader module, expanding the prelude and any of `snippets` the
 /// source opts into.
 ///
-/// With the `shader-hot-reload` feature, an [`include_wgsl!`] source is
+/// With the `shader-hot-reload` feature, an [`include_wgsl!`](crate::include_wgsl) source is
 /// registered with the watcher and compiled from the latest on-disk text once
 /// one has been accepted, instead of the text embedded in the binary.
 pub fn module_with<'a>(

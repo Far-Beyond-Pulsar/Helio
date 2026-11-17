@@ -20,9 +20,9 @@ about 4 EV under sunlit grass; AgX punchy's toe shows that as near black, and 0.
 −2 EV, where it reads as shade. Sunlit grass sits near the pivot and keeps its exposure.
 
 The settings live in `PostProcessSettings` and `GpuPostProcessUniforms` (bytes 192..204, which held the
-removed post-process chromatic aberration). Post-process volumes blend them as properties 84–86
-(`PostProcessProperty::LOCAL_EXPOSURE_*`). In the editor they are the "Local Exposure" category of the
-camera and volume components. Their volume override group (`override_local_exposure`) defaults off,
+removed post-process chromatic aberration). The post plugin's post-process volumes blend them
+(`PostProcessProperty::LOCAL_EXPOSURE_*`, Pulsar-Native `plugins/vendor/post`). In the editor they are the
+"Local Exposure" category of the camera and volume components. Their volume override group (`override_local_exposure`) defaults off,
 like lens flare's: a volume placed for grading or fog does not replace the camera's local exposure.
 
 ## How it works
@@ -61,7 +61,8 @@ Local exposure scales all three colour channels by the same factor, so it never 
 
 ## Cost
 
-These are GPU timestamps on an RTX 3060 (`indoor_cathedral_hlfs --capture` with
+These are GPU timestamps on an RTX 3060, measured 2026-10-21 before the object kinds left Helio
+(`indoor_cathedral_hlfs --capture` with
 `HLFS_POSTPROCESS_COMPUTE_TIMINGS`, `HLFS_POSTPROCESS_TIMINGS`, `HLFS_RESOLUTION`, and
 `HLFS_NO_LOCAL_EXPOSURE` for the off case).
 
@@ -87,5 +88,6 @@ In voxel_craft at 1920 × 1080 (`VOXEL_CRAFT_TIMINGS=120`), the PostProcess pass
   at every position never gives a darker output for a brighter input. Without the isotonic pooling
   this test fails.
 
-`abi_tests.rs` checks that the resolver blends the three properties like the Rust blender, and onto
+`abi_tests.rs` builds the uber shader against the Rust uniform layout. The post plugin's own
+`abi_tests.rs` checks that its resolver blends the three properties like its Rust blender, and onto
 their own bytes.

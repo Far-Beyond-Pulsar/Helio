@@ -412,8 +412,8 @@ fn chain_asset(
 /// How an authored pipeline's secondary views are composed: the frame's
 /// members for the view, lit by the lighting model `asset`'s frame setup
 /// chose (a project's own graph, a shipped one copied and edited). A graph
-/// names its primary view's passes; a capture or an inline view is every
-/// feature placed at the view's slots and phases, as the preset composes it.
+/// names its primary view's passes; a capture is every feature placed at
+/// the view's slots and phases, as the preset composes it.
 pub fn view_graphs_for(asset: &GraphAsset) -> MakeViewAsset {
     let model = asset
         .nodes
@@ -590,10 +590,9 @@ mod tests {
         }
     }
 
-    /// A secondary view is the frame's members for it: a capture renders lit
-    /// and stops before the overlay phase, an inline view draws only the
-    /// G-buffer phase (and its visibility) into its requester's G-buffer, and
-    /// neither runs what is the frame's once (`once_per_frame`).
+    /// A secondary view is the frame's members for it: a capture renders lit,
+    /// stops before the overlay phase and runs nothing that is the frame's
+    /// once (`once_per_frame`).
     #[test]
     fn a_view_is_the_frames_members_for_it_without_its_once_per_frame_work() {
         use helio_feature_api::FeatureRegistrar;
