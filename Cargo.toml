@@ -17,11 +17,12 @@ glam = { version = "0.33", features = ["bytemuck"] }
 # enable them: a crate that uses winit directly gets no backend otherwise, and
 # winit refuses to compile on Linux (Windows and macOS need no feature).
 winit = { version = "0.30.12", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
-# Published Pulsar-Native profiler (including cross-thread scope contexts) -- the same
-# collector that powers the editor flamegraph. Feature-flag aliased below so
-# the fork's `profile_scope!` coexists with the compile-time `profiling`
-# feature already gating helio-core's per-pass CpuProfiler.
-profiling = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Native", rev = "45cda191beb316fee0859ae40d59f0dff986a66a" }
+# The Pulsar profiler (`profile_scope!`, cross-thread scope contexts, the
+# remote channel): the collector the engine's flamegraph drains. Its one home
+# is the public Pulsar-Profiling repository; SceneDB pins it too, and the
+# patch below makes every pin one copy (one `PROFILER`). Pulsar-Native patches
+# the same source onto its submodule of the repository.
+profiling = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling", rev = "5370d7143d0f90754e7922e1e10e507747971b7d" }
 egui = "0.36.1"
 egui-wgpu = { version = "0.36.1", default-features = false }
 egui-winit = { version = "0.36.1", default-features = false }
@@ -96,6 +97,12 @@ wgpu-core-deps-windows-linux-android = { git = "https://github.com/Far-Beyond-Pu
 wgpu-hal = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1" }
 wgpu-naga-bridge = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1" }
 wgpu-types = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1" }
+
+# SceneDB pins an older Pulsar-Profiling rev; without this its scopes would go
+# to a second copy with its own `PROFILER`. The `//` spelling is the same
+# repository as a distinct source, which is what lets a patch name it.
+[patch."https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling"]
+profiling = { git = "https://github.com//Far-Beyond-Pulsar/Pulsar-Profiling", rev = "5370d7143d0f90754e7922e1e10e507747971b7d" }
 
 # The vg_stress build script decompresses and converts ~570 MB of scans; build
 # scripts default to opt-level 0 even in release, which would be glacial.
