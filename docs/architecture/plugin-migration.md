@@ -3420,10 +3420,76 @@ it. A portal is a rigid map between coordinate spaces, never a view:
   kind, the G-buffer pass's coordinate-space ownership, the foliage
   placement's single eye uniform, and the examples' portal recursion through
   the capture budget.
-- **Known gap (virtual geometry)**: virtual geometry does not draw through
-  portals (`virtual_geometry_shows_through_a_portal` fails). Its
-  visibility-buffer pipeline (cluster cull, hardware and software raster,
-  resolve) needs a chain dimension: the cull emitting (cluster, chain), the
-  visibility buffer carrying the chain, and the raster clipping per pixel.
-  That is VG's own phase (Far-Beyond-Pulsar/Pulsar-Native#1747).
+- **Virtual geometry through portals** (Far-Beyond-Pulsar/Pulsar-Native#1747):
+  a second run of the cluster pipeline over virtual instances, drawn at
+  `OCCLUDED_OCCURRENCE_ORDER` (75), after the mask and the classic
+  occurrences.
+  - **The run seam** (`helio_vg_format::VgRun`): every VG pass takes the run
+    it belongs to, which owns its pass names, every graph key it shares
+    (inputs, Hi-Z, cull and raster frame data), where its instances come
+    from (`VgInstanceSource::Scene`, or `Registry` buffers another pass
+    publishes, with a per-instance remap) and its instance tree
+    (`VgRun::tree`: the direct run's BVH; `None` for instances that are
+    already a spatial query's result, whose cull seeds every instance,
+    `VgCullConfig::seeds_instances`, instead of rebuilding a tree each
+    frame). `VgRun::DIRECT` keeps the old names; `VgRun::SECONDARY` names
+    nothing of portals. A `VgRunGate` schedules a run's passes only while
+    its producer is a member.
+  - **Virtual instances** (`VgPortalInstancesPass`, meshes' VG feature): one
+    workgroup per live chain walks the direct run's instance BVH a level at
+    a time (a shared frontier its threads split; a thread walks what the
+    frontier cannot hold) against
+    the chain's volume (`PORTAL_CHAIN_VOLUMES`: the frustum mapped back into
+    the content, the four planes from the camera's place there through the
+    chain's deepest opening, and that opening's plane; composed in f64 on
+    the CPU by the chains pass), and appends each instance whose world
+    sphere passes: its object rows copied with `content_to_drawn · space ·
+    transform` and last frame's `prev_content_to_drawn · space_prev ·
+    prev_transform` (motion vectors carry the chain's motion), the space
+    folded in, the chain's remap per instance. Work follows the BVH nodes the
+    volumes overlap; buffers grow from read-back totals. The kernel reads
+    and writes `StaticObjectRow` through the meshes api's new
+    `OBJECT_ROW_SNIPPET` (`//!use mesh_object_row`), which replaced six
+    WGSL copies of the row (object batch, both scene joins, the VG BVH,
+    the VG cull, authored LOD apply). Its last word, `_skin_pad` in Rust,
+    held the section index the scene join writes and the authored LOD
+    reads under another name: it is `section_index` everywhere now.
+  - **The second run** culls one exact phase against its own Hi-Z of the
+    frame's depth as it stands after the mask and the classic occurrences
+    (`VgHizSource::FrameDepth`, `FLAG_CURRENT_HIZ`), never the direct run's.
+    Its raster clips every pixel to its chain (`vg_chain_clip.wgsl`,
+    `//!use portal_chain`, the mask texture and the stages); its shade's
+    final depth (`fs_remapped`) tags pixels with the chain's remap, so
+    lighting and decals see them in their own world. No Tier 3.
+  - **One cluster store**: the run reads the direct run's stream buffers;
+    its page requests append to the same feedback, read back with the next
+    frame's (one residency owner, no second pool).
+  - **Classic occurrences skip VG-active instances**
+    (`INSTANCE_FLAG_CLASSIC_SUPPRESSED`), as the direct cull does, so a
+    virtual-geometry mesh draws once through a portal.
+  - **Scheduled** only while the frame has live chains and the scene holds
+    VG instances (`SceneContent::holds_rows`); through portals that show no
+    VG while the scene has some, the passes run with no instances (about
+    1.4 ms of VG passes in the test frame below, the largest the shade's
+    full-screen passes at 0.45 ms; the whole live chain costs 1.8 ms over none, as
+    main's inline view did).
+  - **Verified** (`virtual_geometry_acceptance`, against main's inline
+    views, 76f61b459): through one portal VG covers what the classic mesh
+    covers (4791 against 4792 depth texels); through a chain two portals
+    deep it shows (1714 texels; none with the second pair unlinked); a
+    camera moving through a VG portal under TSR differs from its settled
+    frame on 0.059 of the pixels, against 0.060 seen directly; the run's
+    passes are absent without portals, through unlinked portals and in a
+    scene without VG instances. GPU time (`diag_vg_portal_cost`, 96 dense
+    VG spheres, medians of pipelined frames, rounds interleaved, GPU
+    timestamps of the frame and its views): one portal 19.2-19.5 ms against
+    main's 19.2-19.5 (unlinked 12.1 against 12.2-12.4); a depth-2 chain
+    17.5-17.7 against 19.7-20.0; a live chain showing no VG 13.9-14.1
+    against 13.9-14.1. The first build rebuilt a BVH over the virtual
+    instances every frame (a 1-bit radix sort, 4-7 ms whatever the count);
+    seeding the cull removed it.
+  - **Known gap**: the VG cull, raster and BVH of the direct run ignore
+    coordinate spaces (only its shade applies them); the second run folds
+    the space into its rows, but its BVH walk tests the direct tree's
+    space-free node bounds.
 
