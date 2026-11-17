@@ -54,7 +54,7 @@ fn mirror(
     queue: &Arc<wgpu::Queue>,
 ) -> pulsar_scenedb::gpu::GpuMirrorHandle {
     let gpu_context = EngineGpuContext::new(Arc::clone(device), Arc::clone(queue));
-    let mut gpu_store = SceneGpuStore::new(
+    let gpu_store = SceneGpuStore::new(
         &gpu_context,
         SceneGpuConfig {
             classes: Vec::new(),

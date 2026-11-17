@@ -11,7 +11,7 @@ mod common;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use common::{gpu, gpu_serial, is_void, near, Gpu, FORMAT, PIPELINE_CLEAR};
+use common::{gpu_serial, is_void, near, Gpu, PIPELINE_CLEAR};
 use helio::{
     GraphRebuilder, IntoGraph, NamedPipeline, PassBuildContext, PipelineFailure, PipelineStatus,
     Renderer,

@@ -15,10 +15,7 @@
 mod common;
 
 use common::{build_default_renderer_with_context, new_scene_db_with_gpu_mirror};
-use helio::{
-    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, Renderer,
-    RendererConfig,
-};
+use helio::{Camera, Renderer, RendererConfig};
 use pulsar_scenedb::SceneDb;
 
 use winit::{

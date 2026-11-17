@@ -297,16 +297,21 @@ thread_local! {
     static SERIAL_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-struct Serial(Option<std::sync::MutexGuard<'static, ()>>);
+/// `GPU_SERIAL` held for the outermost `Serial`'s life (released on drop).
+struct Serial {
+    _guard: Option<std::sync::MutexGuard<'static, ()>>,
+}
 
 impl Serial {
     fn take() -> Self {
         let held = SERIAL_HELD.with(|n| n.replace(n.get() + 1));
-        Self((held == 0).then(|| {
-            GPU_SERIAL
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-        }))
+        Self {
+            _guard: (held == 0).then(|| {
+                GPU_SERIAL
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+            }),
+        }
     }
 }
 
