@@ -588,7 +588,8 @@ impl Renderer {
                 [0.0, 0.0],
                 eye_camera.view_proj_in(origin),
             )
-            .with_view_id(eye_camera.view_id);
+            .with_view_id(eye_camera.view_id)
+            .with_coordinate_space(eye_camera.coordinate_space);
 
             // `cameras[0]` (the slot every shader samples) is this eye's camera.
             // Writing both slots to the same value keeps the storage buffer

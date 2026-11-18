@@ -3576,3 +3576,11 @@ Selected lights submit a persistent editor debug-line layer through
 full scene selection in double-precision world space, using Helio's shared
 debug primitives. The editor debug pass rebases and draws the layer.
 
+### As built: camera coordinate spaces
+
+The host's optional camera space uses the fourth word of `Camera.view_info`,
+encoded as the slot plus one. This leaves zero as the unrestricted default
+for existing hosts and standalone examples. Kind owners match that slot
+when selecting direct content. The Portals plugin maps camera movement through
+its existing rigid routes using the engine's space producer extension.
+

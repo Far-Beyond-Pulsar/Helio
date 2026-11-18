@@ -246,7 +246,8 @@ impl Renderer {
             camera.jitter,
             previous_projection,
         )
-        .with_view_id(camera.view_id);
+        .with_view_id(camera.view_id)
+        .with_coordinate_space(camera.coordinate_space);
         self.queue
             .write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(&uniforms));
         self.prev_view_proj_by_view.insert(

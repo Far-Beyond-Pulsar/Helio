@@ -24,6 +24,8 @@ pub struct Camera {
     /// Stable view identity. Pass-owned SceneDB components use this to select
     /// their settings without teaching the camera about any rendering effect.
     pub view_id: u32,
+    /// Restrict direct drawing to this authored coordinate space, when set.
+    pub coordinate_space: Option<u32>,
 }
 
 impl Camera {
@@ -46,6 +48,7 @@ impl Camera {
             far,
             jitter: [0.0, 0.0],
             view_id: 0,
+            coordinate_space: None,
         }
     }
 
