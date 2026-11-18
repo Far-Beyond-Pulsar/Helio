@@ -337,3 +337,122 @@ partitioned TLAS (r6) removes. Not built yet: priorities by hit counts and
 geometry budgets (the callers' projections budget their own builds), and
 a scratch pool shared across builds (wgpu allocates scratch per build
 call).
+
+#### Skinned meshes, foliage and culling in the TLAS
+
+**One owner of skinned positions: the skin cache** (the meshes plugin,
+`meshes_component::skin_cache`). One compute pass blends each posed skinned
+instance's palette into its vertices once a frame (`helio_mesh_api::SKIN_CACHE`,
+`SkinnedVertex`: position, snorm8 normal and tangent, previous position; 32
+bytes, the position first so a BLAS builds from it directly) and an instance
+table by entity row (`SKIN_CACHE_ROWS`, the instance rows' `mesh_id`). Every
+drawer that drew a skinned mesh blended the palette in its vertex shader (five
+copies: G-buffer, shadow casters, shadow transmittance, forward, transparent;
+the selection mask through a sixth function); they all read the cache now
+(`//!use mesh_skinning`), so what is rasterised is what is traced, and the
+G-buffer's previous positions are the cache's (the positions it held before
+this frame's pose), not a second blend with a previous palette. The component
+mirrors only its current palette.
+
+- **Cost**: the journal of `SkeletalMeshComponent` says which instances
+  changed; an instance whose palette is bitwise the one it was posed with costs
+  nothing (an animator showing a paused pose each frame). A posed instance is
+  skinned once; on the frame after its last pose it settles once (previous =
+  current, so motion vectors stop with the pose, which the previous-palette
+  path got wrong: a pose shown every other frame kept its motion on the frame
+  in between). No buffer or bind group is made unless the cache, its table or
+  a pool grows. Memory is 32 bytes a vertex of every resident skinned instance.
+- **Why raster moved onto it**: Unreal's GPU skin cache, which its ray tracing
+  requires, is the same split (compute writes positions and tangents and keeps
+  the previous positions; the raster and the ray-tracing geometry read them);
+  Frostbite and Decima pre-skin in compute. Unreal budgets the cache's memory
+  and falls back to vertex-shader skinning past it, a second skinning path;
+  here every resident instance is in the cache, so there is one path, and the
+  lever on memory is a skinned level of detail (open: skeletal meshes load LOD
+  0 only). The vertex shaders lose four palette loads and a blend a vertex a
+  view, which shadows paid per cascade and face.
+
+**Skinned meshes in the TLAS** (the engine world's projection,
+`meshes_component::ray_scene`): a BLAS per instance (they deform
+independently), `Movability::Dynamic`, its segments the mesh's sections from
+the cache (stride 32) and the mesh's index pool. `positions_revision` is the
+cache's revision of the instance, so a pose refits, the acceleration policy
+rebuilds after `refits_per_rebuild` refits, and an unchanged pose records
+nothing. Refits are budgeted in triangles a frame (`ray_tracing`'s
+`skinned_refit_triangles`, 262,144 by default: about 2 ms of refits on an RTX 3060, below), nearest first with each
+frame waited counting as nearer (none waits for ever); one over the budget
+keeps last frame's BLAS, a frame stale. Its rows carry `RAY_INSTANCE_SKINNED`
+and the cache's first vertex (`RayInstance::skinned_vertex`, where the
+transmission's fourth float was): the meshes' tracer reads a skinned triangle's
+corners and normals from the cache (`RAY_SKINNED_VERTICES`, published beside
+the TLAS) and its UVs from the mesh pool, so a hit shades from the skinned
+normal.
+
+**Culling by distance and angle**: both projections leave out an instance
+whose bounding sphere is past `ray_tracing.culling_radius` (300 m) and spans
+less than `culling_angle` (1 degree) from the eye, as Unreal's ray-tracing
+culling does (`r.RayTracing.Culling.Radius` / `.Angle`); a traced instance
+leaves only past 1.1 times both, so one at a threshold does not flicker. The
+traced instances are tested again when the eye has moved a twentieth of the
+radius (and an instance when it moves): never every instance every frame. A
+culled skinned instance drops its BLAS. The standalone projection culls from
+the eye its host gives (`SceneDbRayTracing::set_view`) and traces everything
+without one.
+
+**Foliage**: the foliage plugin places no mesh instances. Its kinds are
+procedural blades and cards and voxel blocks expanded on the GPU each frame
+(`FoliageKind::Mesh` is declared and drawn by nothing), and its feature
+declares its layers untraced (`untraced_geometry`). Trees and bushes placed as
+meshes are mesh instances, traced like any mesh, their leaves non-opaque
+cut-outs alpha-tested at the ray's footprint (mesh rays' `cut_out_surface`).
+Procedural grass is not traced, as in Unreal (landscape grass is out of its
+ray-tracing scene) and the other engines: its blades are sub-pixel occluders
+whose shadowing is a contact term: the deferred lighting's screen-space
+contact visibility (`contact_visibility`, half a metre) and the blades' own
+occlusion from their height (`GBUFFER_TAG_OWN_OCCLUSION`); their bounce is the
+ground's. Wind and vertex animation:
+traced geometry is the rest pose (a mesh's BLAS is built from its pool
+vertices; foliage wind is a vertex-shader offset), the common choice, since a
+refit a frame for every swaying tree would cost the TLAS's whole budget for
+centimetres of motion GI cannot resolve.
+
+**One TLAS owner per scene model**: `meshes_component::ray_scene` projects the
+engine world (mesh components placed by their owners' hierarchy, material
+instances, skinned meshes); `helio_mesh_host::ray_tracing` projects the
+standalone hosts' `StaticObjectComponent` rows (Helio's examples, the plugins'
+GPU tests). They read different data; each gets the culling and the
+statistics; only the engine model has skinned meshes.
+
+**Statistics**: both projections call `BlasManager::report` and
+`TlasManager::report` once a frame (the engine world into its renderer's
+`frame_stats()`; the standalone one once its host hands them over,
+`set_stats`), so `rays.blas_bytes`, `rays.tlas_bytes`, builds, refits and
+compactions are in the frame's stats, with the skin cache's
+(`meshes.skin_cache_bytes`, `_instances`, `_updated`, `_vertices`) and the
+TLAS's instances (`meshes.ray_instances`, `meshes.ray_instances_culled`).
+
+Measured on an RTX 3060 (`meshes_component`'s `skin_cache_cost`, median GPU ms
+over pipelined frames, three in flight; a 10,000-vertex, 19,602-triangle mesh
+on two joints, every instance posed each frame; the CPU column is a debug
+build's recording of the cache's update and the refits):
+
+| Posed instances | Skin pass | BLAS refits (and the policy's rebuilds) | TLAS | CPU |
+|---|---|---|---|---|
+| 1 | 0.010 | 0.024 | 0.033 | 0.72 |
+| 16 | 0.45 | 2.66 | 0.16 | 1.20 |
+| 256 | 7.33 | 40.6 | 0.24 | 9.05 |
+| 256, pose unchanged | 0.001 | 0.001 | 0.001 | 1.85 |
+
+Cost follows the posed instances' vertices and triangles, and an unchanged
+pose costs nothing on the GPU. The refits dominate (about 8 ns a triangle),
+which is why they are budgeted: the default budget is about 2 ms of them on
+this GPU. The skin pass runs at about 350 million vertices a second, far
+under the GPU's bandwidth; a wave per job instead of a search per group, and
+LDS-staged palettes, are where it goes faster (open).
+
+Open: real frames with a skinned character and a tree under GI and
+ray-traced shadows, and the G-buffer A/B of a skinned mesh before and after
+the cache (positions are the vertex shaders' formula, checked in
+`skin_cache.rs`'s test to 1e-5; normals are snorm8 as the mesh's own), were
+not captured: no example or level holds a skinned mesh, and the engine's
+render acceptance suite was not run here.
