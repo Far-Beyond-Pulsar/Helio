@@ -487,6 +487,18 @@ current 32) once the importer writes them (open). The refits dominate
 (about 2 ns a triangle), which is why they are budgeted: the default budget
 of 262,144 triangles is about 0.5 ms of them on this GPU.
 
+Frames (`installed_plugins`' `skinned_frames`: the engine path, a two-joint
+skinned tube, a tree, ground, a sun, GI, ray-traced shadows, TSR at native
+size, 640x360) against the meshes before the skin cache (kept executable):
+lit frames at rest, bent and mid-animation differ by a mean of 0.22 to 0.24
+(8-bit, max channel), the differing pixels on the axis gizmo's line and
+silhouette edges (TSR history); the indirect view by 0.34 to 0.41, the most
+of it the tube's bounce on the ground around its foot, which the earlier
+TLAS did not hold. The bent pose's shadow on a renderer that saw the rest
+pose first matches one that never did (mean 0.19, max 17). Culling the tube,
+then the tree, out of the TLAS by `culling_radius` changes the indirect view
+by 0.48 and 0.38 (max 25 and 15) where their occlusion and bounce were.
+
 Open: real frames with a skinned character and a tree under GI and
 ray-traced shadows, and the G-buffer A/B of a skinned mesh before and after
 the cache (positions are the vertex shaders' formula, checked in
