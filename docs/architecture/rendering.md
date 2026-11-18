@@ -307,6 +307,21 @@ terrain's occlusion rays off by 0.005-0.022, its tree trunks and held mesh
 losing the green bounce both other builds show, so that bisection is
 itself unreliable. Earth and Moon holds stay at 1-2x run-to-run noise.
 
+Carried into r2, which owns each of them:
+
+- **The terrain GI cost** (+0.5 ms on voxel_craft, +1.1 to +1.35 ms on the
+  planets against r0). r2 decides how a hit is shaded by ray class, so the
+  terrain's separate surfaces pass, and the walk's cost in the frame against
+  the same walk in isolation, are measured and settled there. r1 merged with
+  this cost, stated, instead of holding six repositories' branches open.
+- **The sun's visibility of a hit at the ray's footprint.** It waits on why
+  coarse sun-occlusion pages let more light through under canopies than the
+  walk does. That is a fault of the pages, which every reader of them sees,
+  and is to be found before anything reads them at a footprint.
+- **The r0-r1 image difference on voxel_craft.** r0 is not ground truth:
+  both builds approximate. r2's reference path tracer is; the difference is
+  judged against it, on the same poses.
+
 #### Hosts
 
 Ray tracing is the default tier. The engine's device
