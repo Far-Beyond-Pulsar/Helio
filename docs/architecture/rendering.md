@@ -155,6 +155,14 @@ and then sees no other kind.
   consumer that sees none schedules nothing.
 - **Statistics.** `Stream::stat` reports the rays of each stream a frame
   under `rays.<stream>`: the per-signal ray count the rules above ask for.
+- **Runs from one origin** (`Stream::with_run`, `Stream::run`, 1 = none):
+  the consumer states that its rays come in runs of N consecutive rows
+  from row 0 sharing their origin and caster mask (a probe's rays, a hit's
+  shadow rays toward several lights, a pixel's samples). A tracer whose
+  cost has a part that depends on the origin alone pays it once a run; one
+  without (a TLAS query) ignores it. Wavefront tracers recover this
+  coherence by sorting rays; here the consumer that made the rays that way
+  says so.
 
 #### Tracers
 
@@ -165,27 +173,39 @@ and then sees no other kind.
   query has the instance's transform. r2 splits a surface pass off once the
   projections publish a transform a row.
 - **Voxel terrain** (the voxel plugin's `chunks::rays`): the chunk-tree walk
-  the camera uses, entered from any origin. A nearest stream is two passes
-  (entry, which places each ray in its chunk, then the walk) and a surface
-  pass; occlusion keeps entry in its kernel. A ray whose origin is in rock,
-  or on a solid face, reports `INSIDE`. One dispatch a drawn volume: cost is
-  rays times volumes, which a ray-to-volume binning pass would remove when a
-  scene has many volumes. The tracer walks the cut the camera's draw
-  published, so a consumer schedules after the G-buffer phase to see this
-  frame's terrain.
-
-Measured on an RTX 3060, 174,080 probe rays over a voxel planet: entry and
-nearest walk 1.32 ms, surfaces 0.09 ms, occlusion 0.25 ms; the kernel it
-replaced, which could start only from GI's probes, took 1.12 ms.
+  the camera uses, entered from any origin. A nearest stream is an entry,
+  which places each ray in its chunk, then the walk, then a surface pass. A
+  stream in runs (`Stream::run`) places each run's origin once, a thread a
+  run, where the origin is in the volume (where a ray starts depends on its
+  direction only from outside, and those runs enter ray by ray). A ray whose
+  origin is in rock, in a solid cell or on a solid face reports `INSIDE`
+  with no walk. One dispatch a drawn volume: cost is rays times volumes,
+  which a ray-to-volume binning pass would remove when a scene has many
+  volumes. The tracer walks the cut the camera's draw published, so a
+  consumer schedules after the G-buffer phase to see this frame's terrain.
+- **Not built: occlusion at the ray's footprint.** Answering the
+  terrain's part of an occlusion ray along the sun from its sun occlusion
+  pages at the level whose texel is the ray's width (geometry level of
+  detail by ray footprint: Lumen lighting its surface cache from shadow
+  maps and distance fields) cut GI's sun rays on voxel_craft from 0.41 to
+  0.07-0.09 ms, but brightened voxel_craft's shade by 3-8 % with every
+  filter tried, where the same build with the pages off matched the walk
+  inside run-to-run noise (the voxel plugin's `chunk-octree.md`, "Ray
+  streams"). Coarse pages under canopies let more sun through than the
+  walk; until that is understood the terrain walks occlusion rays.
 
 #### GI on ray streams
 
 GI (the GI plugin's `helio-pass-gi`) is a consumer of two streams and knows
 no kind:
 
-- `gi_probe` (nearest, 64 rays a probe updated this frame, up to 174,080)
-  and `gi_shadow` (occlusion: a sun ray and one local light's a probe ray's
-  hit, packed from row 0, the count written on the GPU).
+- `gi_probe` (nearest, 64 rays a probe updated this frame, up to 174,080,
+  each probe's a run from the probe itself: `Stream::with_run(64)`) and
+  `gi_shadow` (occlusion: a sun ray and one local light's a probe ray's
+  hit, packed from row 0, the count written on the GPU). A shadow ray
+  starts as wide as the probe ray's footprint at its hit
+  (`GI_RAY_SPREAD * t` from the probe) and keeps that width, so a tracer
+  may answer it at that level of detail (the meshes test cut-outs at it).
 - One node at `Slot::Geometry` 20, `once_per_frame`, after the G-buffer
   phase (so the terrain's tracer walks this frame's cut): **GI** (the sun,
   probes that came into the clipmap reset, the probe rays) → each kind's
@@ -221,43 +241,71 @@ no kind:
   indirect diffuse offers a few centimetres, and the terrain's own term
   shrinks to contact occlusion with no change to either side.
 
-Measured on an RTX 3060, median GPU ms over pipelined frames:
+Measured on an RTX 3060, median GPU ms over pipelined frames (voxel_craft:
+median of six 240-frame windows, one pose; voxel_flight: the ground holds'
+p50 over 25 s; r0 and the closing build alternated, two runs each,
+2026-11-18; voxel_flight's r0 GI rays in the draw are its VoxelChunks less
+the closing build's, the rest of that pass being the same work):
 
-| Scene | r0 | r1 |
-|---|---|---|
-| Cathedral (meshes) | GI 0.49, GIMeshRays 0.16: 0.65 | GI 0.10, MeshRays gi_probe 0.10, GILight 0.35, MeshRays gi_shadow 0.05, GIIntegrate 0.22: 0.82 |
-| voxel_craft, 1600x900 (median of six 240-frame windows) | GI rays in the voxel draw 1.73-1.95, GI 0.47-0.49, GIMeshRays 0.07-0.08: 2.27-2.52 | GI 0.07, VoxelRays gi_probe 1.61, VoxelRaySurfaces 0.23, MeshRays gi_probe 0.05, GILight 0.39, VoxelRays gi_shadow 0.40, MeshRays gi_shadow 0.03, GIIntegrate 0.13: 2.90 |
-| voxel_flight Earth ground hold, 1600x900 (mean over 25 s) | GI rays in the draw 1.08, GI 0.29: 1.37 (graph 11.62) | GI 0.06, VoxelRays gi_probe 1.56-1.60, surfaces 0.16-0.17, GILight 0.26, VoxelRays gi_shadow 0.33-0.35, GIIntegrate 0.13: 2.53 (graph 12.79) |
-| voxel_flight Moon ground hold | GI rays in the draw 0.97, GI 0.25: 1.22 (graph 9.66) | 1.55 + 0.13 + 0.22 + 0.43 + 0.13 + 0.06: 2.52 (graph 10.97) |
+| Scene | r0 | r1 as first built | r1 closing |
+|---|---|---|---|
+| voxel_craft | rays in the draw 1.78-1.82, GI 0.47, GIMeshRays 0.07: 2.31-2.36 | 2.94 | GI 0.06, VoxelRays gi_probe 1.59, surfaces 0.23, MeshRays gi_probe 0.05, GILight 0.37, VoxelRays gi_shadow 0.40, MeshRays gi_shadow 0.03, GIIntegrate 0.13: 2.87 |
+| voxel_flight Earth | rays in the draw 1.08, GI 0.29: 1.37 | 2.53 | GI 0.07, VoxelRays gi_probe 1.50, surfaces 0.16, GILight 0.26, VoxelRays gi_shadow 0.34, GIIntegrate 0.13: 2.46 |
+| voxel_flight Moon | rays in the draw 0.94, GI 0.25: 1.19 | 2.52 | GI 0.06, VoxelRays gi_probe 1.54, surfaces 0.13, GILight 0.22, VoxelRays gi_shadow 0.46, GIIntegrate 0.13: 2.54 |
 
-On terrain r1 costs 0.4-1.3 ms more. Where it goes: the probe walk from
-any origin (an entry pass, then the walk) against r0's walk from cells the
-CPU placed (1.56-1.61 against 0.97-1.08 on the planets); the sun's
-visibility of each hit as a traced shadow stream (0.33-0.43) where r0 read
-the terrain's sun-occlusion map in the hit's kernel; the surfaces as a pass
-of their own (0.13-0.23); GILight and GIIntegrate against r0's one GI pass.
-None is removed here: a stream binned by tracer, a shared entry for nearest
-and occlusion rays and r5's sampled direct light are where they go.
+Where the first build's cost goes, split by pass (a profiling build timed
+the entry and the walk apart): the probe walk's entry 0.085 ms on
+voxel_craft and 0.11-0.12 on the planets, its walk 1.53 and 1.44; the
+sun's shadow rays 0.36-0.45 (an entry 0.08 and a walk 0.28-0.37 on the
+planets). What changed here: a probe's 64 rays are a run
+(`Stream::with_run`), its origin placed once, and an origin in a solid
+cell is an inside hit with no walk (on GI's 174,080 rays in isolation,
+`stream_rays_cost`: entry 0.166 -> 0.130 ms, walk with entry 1.324 ->
+1.303). The sun's shadow rays answered from the terrain's sun occlusion
+pages at their footprint cost 0.07-0.09 instead of 0.41 but brightened
+voxel_craft's shade by 3-8 % and are not built (Tracers, above).
 
-Final images, r0 against r1: the cathedral's mean |Δ| 0.0005-0.0018, inside
-run-to-run noise. Voxel captures wait for a settled view (the terrain
-generated and its ray kernels compiled: `ChunkPass::settled`) and frames
-after it, never a frame count (a cold shader cache keeps the terrain's
-pipelines compiling for a minute, which the A/B before this one shot
-through). voxel_craft, four poses, 8-frame bursts, mean |Δ| of the burst
-means (RGB, 0-1): r0-r0 0.00009-0.00074, r1-r1 0.00010-0.00123, r0-r1
-0.0010-0.0031 (p99 0.008-0.024); mean luminance r1/r0 -0.4% on the forward
-pose, +0.4 to +0.6% on the others; temporal std unchanged (0.00007-0.00027
-in both). voxel_flight ground holds: Earth r0-r0 0.00058, r1-r1 0.00088,
-r0-r1 0.0011-0.0013; Moon 0.00075, 0.00081, 0.0011-0.0014.
+What remains, measured, against r0: the probe walk itself, 1.44-1.53 ms
+in the frame against r0's whole in-draw GI kernel at 1.05 on the planets
+and 1.78 on voxel_craft. The kernels are the same walk: on identical rays
+in isolation (`stream_rays_cost`, 174,080 probe rays about a ball on an
+Earth) the stream walk with its entry costs 1.30 ms against the old
+kernel's 1.12 with its shading and sun lookup. In the frame the old
+kernel ran inside the chunk pass's own compute pass, beside its shadow and
+denoiser dispatches with no barrier between them, where a stream's passes
+are the GI node's, between barriers on the stream's rows; that the planets'
+gap is lost overlap and not work is the likely reading and is not proven
+(an r0 build dispatching its kernel twice measured the second at 0.8 ms
+with the caches warm, which does not separate the two). The sun's shadow
+rays walked as a stream (0.33-0.45) where r0 read the pages in its kernel;
+the surfaces as a pass of their own (0.13-0.25: the hit shaded as the
+G-buffer shades it at the ray's footprint, where r0 wrote a flat colour
+and face normal); GILight and GIIntegrate with the shadow stream between
+them (0.44-0.58 against r0's one GI pass at 0.25-0.47: a `GiPending` row a
+ray). r2 shades hits by ray class; a ray-to-volume binning and r3's
+radiance cache take probe rays off the walk; the sun's visibility of a
+hit at its footprint waits on the canopy question above.
 
-Open: the voxel r0-r1 difference is outside run-to-run noise on
-voxel_craft (2-10x it, smooth indirect-light tints on lit surfaces and on
-the held mesh). Shading terrain hits as r0 did (flat material colour, the
-cell's face normal) does not remove it, so it is not the surfaces'
-G-buffer shading; the sun-occlusion map against traced shadow rays is the
-untested candidate (an instrumented r0 build to test it did not render).
-The cost above is open too.
+Final images (RGB 0-1, mean |Δ| of 8-frame burst means; voxel_craft four
+poses, no clouds; voxel_flight ground holds):
+
+| | r0-r0 | r1-r1 | r0-r1 (closing build) |
+|---|---|---|---|
+| voxel_craft, 4 poses | 0.00004-0.00046 (p99 0.0015-0.0039) | 0.0006-0.0017 | 0.0010-0.0025 (p99 0.008-0.020); mean luminance r1/r0 -0.2 % on the forward pose, +0.3 to +0.6 % on the others; temporal std 0.00007-0.00027 in both |
+| voxel_flight Earth hold | 0.0006-0.0008 | 0.0008 (closing against first build) | 0.0009-0.0012; luminance 0.4615 / 0.4614 |
+| voxel_flight Moon hold | 0.0008-0.0010 | 0.0011 | 0.0015-0.0016; luminance 0.5264 / 0.5270 |
+
+The r0-r1 image difference on voxel_craft is not explained. Proven here:
+the stream changes of this round (runs, inside origins, probe rays from
+the probe itself) do not move the image (a build with them and without
+the page answers against the build before them: 0.0006-0.0013, inside
+r1-r1 noise); answering the sun's visibility from the sun occlusion pages
+(the candidate: r0 read them) moves voxel_craft further from r0, brighter
+by 3-8 %, not toward it; an instrumented r0 with the terrain's sun
+visibility of GI hits set to 1 rendered differently from r1 with the
+terrain's occlusion rays off by 0.005-0.022, its tree trunks and held mesh
+losing the green bounce both other builds show, so that bisection is
+itself unreliable. Earth and Moon holds stay at 1-2x run-to-run noise.
 
 #### Hosts
 
