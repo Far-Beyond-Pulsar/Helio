@@ -328,6 +328,10 @@ pub const VIEW_REMAPS: &str = "view_remaps";
 /// `GBUFFER_MAX_REMAP`).
 pub const VIEW_REMAP_CHAINS: u64 = 1024;
 pub const VIEW_REMAPS_BYTES: u64 = VIEW_REMAP_CHAINS * 64;
+/// Content-space slot for each [`VIEW_REMAPS`] entry. Slots are packed four
+/// per uniform vector. Slot zero is the unpartitioned world.
+pub const VIEW_REMAP_SPACES: &str = "view_remap_spaces";
+pub const VIEW_REMAP_SPACES_BYTES: u64 = VIEW_REMAP_CHAINS * 4;
 
 /// The sky: what lights a surface from the air above it and what the air
 /// takes from the sun on its way, as other kinds read it: the participating

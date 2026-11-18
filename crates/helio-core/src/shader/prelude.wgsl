@@ -222,6 +222,11 @@ fn gbuffer_remap_of(surface: vec2<f32>) -> i32 {
     return -1;
 }
 
+// Frame contracts in helio_frame_api::lighting: one rigid matrix and one
+// packed coordinate-space slot for each G-buffer remap.
+alias HelioViewRemaps = array<mat4x4<f32>, 1024>;
+alias HelioViewRemapSpaces = array<vec4<u32>, 256>;
+
 // ── Volumetric scattering ───────────────────────────────────────────────────
 
 const HELIO_PI: f32 = 3.14159265359;
