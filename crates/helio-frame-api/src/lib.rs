@@ -86,3 +86,35 @@ pub fn static_name(name: &str) -> &'static str {
     names.insert(leaked);
     leaked
 }
+
+/// What the contracts' build-time tests run in.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::Arc;
+
+    use helio_feature_api::{BuildEnv, FrameDesc};
+
+    /// Runs `test` with a build environment over wgpu's no-op device (the
+    /// contracts tested build nothing on the GPU).
+    pub fn with_env(test: impl FnOnce(&mut BuildEnv<'_>)) {
+        let (device, queue) = wgpu::Device::noop(&Default::default());
+        let (device, queue) = (Arc::new(device), Arc::new(queue));
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let stats = helio_core::FrameStats::new(&device);
+        let frame = FrameDesc {
+            width: 64,
+            height: 64,
+            internal_width: 64,
+            internal_height: 64,
+            surface_format: wgpu::TextureFormat::Rgba8Unorm,
+            xr: false,
+        };
+        let mut env = BuildEnv::new(&device, &queue, frame, &buffer, &buffer, &stats, true);
+        test(&mut env);
+    }
+}

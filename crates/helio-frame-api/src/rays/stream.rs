@@ -16,7 +16,9 @@
 //! adds every tracer's passes for that stream right there in the graph: the
 //! consumer names no kind, a kind names no consumer, and an absent kind is a
 //! tracer that is not there. [`traced`] says whether anything would answer,
-//! for a consumer that builds nothing otherwise.
+//! for a consumer that builds nothing otherwise, and a stream's [`Answers`]
+//! whether every tracer answered in full this frame (none was still
+//! compiling or loading what it traces).
 //!
 //! Why batches instead of one `trace()` function spliced into every
 //! consumer's shader:
@@ -46,6 +48,7 @@
 //! Cost scales with the rays a consumer asks for, never with the scene's
 //! size: a tracer's pass is one indirect dispatch over the stream's count.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
@@ -423,6 +426,58 @@ impl StreamBuffers {
     }
 }
 
+/// Whether a stream's rays were answered in full this frame: by every tracer,
+/// for all the geometry it knows of. A tracer that knows geometry it could
+/// not trace this frame (its kernels still compiling, what it walks not yet
+/// drawn) says so ([`Self::short`]), and its rows then miss that geometry:
+/// a consumer that keeps what its rays find over frames (a radiance cache, a
+/// probe's history) holds instead of taking them ([`Self::complete`]), so a
+/// tracer that is late is not taken for geometry that is not there. Geometry
+/// that is not there (nothing of the kind in the scene, chunks or meshes
+/// still streaming in, whose stand-ins a tracer does trace) is no shortfall.
+///
+/// One a stream a graph ([`answers`]), set on the CPU while the frame
+/// records, in graph order: the consumer's generator pass starts the frame
+/// ([`Self::begin`]) in its `execute`, before the tracers' passes; a
+/// tracer's pass marks it in its `execute`; the consumer's pass that reads
+/// the hits asks in its `execute`, after them.
+#[derive(Debug, Default)]
+pub struct Answers {
+    short: AtomicBool,
+}
+
+impl Answers {
+    /// A new frame's rays: none short yet (the consumer's generator).
+    pub fn begin(&self) {
+        self.short.store(false, Ordering::Relaxed);
+    }
+
+    /// A tracer could not trace geometry it knows of this frame.
+    pub fn short(&self) {
+        self.short.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether every tracer answered in full since [`Self::begin`].
+    pub fn complete(&self) -> bool {
+        !self.short.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Default)]
+struct StreamAnswers(Vec<(&'static str, Arc<Answers>)>);
+
+/// The [`Answers`] of `stream` in the graph being built: the same for its
+/// consumer's passes and every tracer's.
+pub fn answers(env: &mut BuildEnv<'_>, stream: &Stream) -> Arc<Answers> {
+    let all = &mut env.shared(StreamAnswers::default).0;
+    if let Some((_, answers)) = all.iter().find(|(name, _)| *name == stream.name) {
+        return answers.clone();
+    }
+    let answers = Arc::new(Answers::default());
+    all.push((stream.name, answers.clone()));
+    answers
+}
+
 /// A tracer's number in the hits it writes (`scene_nearest`'s `tracer`): 1 and
 /// up, in registration order; 0 is no hit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -448,7 +503,9 @@ pub struct Tracer {
     /// [`RayClass::Occlusion`], what the row lets through times what this
     /// kind's geometry does (`scene_occlusion`). One indirect dispatch over
     /// the header's groups ([`GROUP`] invocations each). On a frame where
-    /// the kind has nothing to trace the pass does nothing.
+    /// the kind has nothing to trace the pass does nothing; on one where it
+    /// knows geometry it cannot trace yet, it marks the stream's
+    /// [`Answers::short`] ([`answers`]).
     pub trace: TracerBuild,
     /// Adds the passes that write the [`SceneSurface`] of every hit whose
     /// tracer is this one, once every tracer has traced
@@ -646,6 +703,26 @@ mod tests {
             c: 0,
         };
         assert_eq!(blocked.through(), [0.0; 3]);
+    }
+
+    #[test]
+    fn a_stream_has_one_answers_a_graph_and_a_short_tracer_marks_it() {
+        crate::test_env::with_env(|env| {
+            let probes = Stream::new("test_probe", RayClass::Nearest, 128);
+            let shadows = Stream::new("test_shadow", RayClass::Occlusion, 128);
+            let consumer = answers(env, &probes);
+            let tracer = answers(env, &probes);
+            assert!(Arc::ptr_eq(&consumer, &tracer));
+            assert!(!Arc::ptr_eq(&consumer, &answers(env, &shadows)));
+            consumer.begin();
+            assert!(consumer.complete());
+            tracer.short();
+            assert!(!consumer.complete());
+            assert!(answers(env, &shadows).complete());
+            // The next frame starts complete.
+            consumer.begin();
+            assert!(consumer.complete());
+        });
     }
 
     #[test]

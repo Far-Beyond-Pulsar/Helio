@@ -187,6 +187,16 @@ impl<'e> BuildEnv<'e> {
         })
     }
 
+    /// Whether the graph being built builds a node of `kind`: the
+    /// [`PlannedNodes`] its builder supplied (a node the graph does not hold,
+    /// or holds bypassed, builds nothing); without them, yes. What a
+    /// preparer asks when what it offers depends on a node of its feature
+    /// building later in the graph.
+    pub fn plans(&self, kind: &str) -> bool {
+        self.setting::<PlannedNodes>()
+            .is_none_or(|planned| planned.0.iter().any(|k| k == kind))
+    }
+
     /// Render size passes are prepared at (`render_scale` applied).
     /// The format the scene-linear colour is lit, fogged and anti-aliased in
     /// up to the tone map: the [`SceneColorFormat`] setting, or
@@ -218,6 +228,12 @@ impl<'e> BuildEnv<'e> {
             .expect("shared state is stored under its own type id")
     }
 }
+
+/// The node kinds a graph builds, in its order, bypassed nodes left out: a
+/// setting the graph's builder supplies before the preparers run
+/// ([`BuildEnv::plans`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlannedNodes(pub Vec<String>);
 
 /// What a node's build function works with.
 pub struct NodeBuild<'a, 'e> {

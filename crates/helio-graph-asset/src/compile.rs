@@ -81,6 +81,12 @@ pub(crate) fn build_graph(
         graph.enable_pipeline_cache_persistence(path);
     }
 
+    env.insert_setting(helio_feature_api::PlannedNodes(
+        plan.order
+            .iter()
+            .map(|&index| flat.nodes[index].kind.clone())
+            .collect(),
+    ));
     for prepare in registry.preparers() {
         prepare(env);
     }

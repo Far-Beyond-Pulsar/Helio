@@ -16,6 +16,6 @@ pub use pins::{PinDesc, PinKind, PinShape, PinType, FRAME_RESOURCE};
 pub use registry::{
     missing, pass_kind, pass_node, BuildEnv, BuildFn, CheckFn, ExtensionPoint, FinishFn, FrameDesc,
     MarkerFn, NodeBuild, NodeDescriptor, NodePins, NodeRegistry, ParamDesc, ParamType, Params,
-    PinTable, PinsFn, PrepareFn, SceneColorFormat, DEFAULT_SCENE_FORMAT,
+    PinTable, PinsFn, PlannedNodes, PrepareFn, SceneColorFormat, DEFAULT_SCENE_FORMAT,
 };
 pub use settings::FeatureSettings;
