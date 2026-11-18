@@ -343,25 +343,54 @@ call).
 **One owner of skinned positions: the skin cache** (the meshes plugin,
 `meshes_component::skin_cache`). One compute pass blends each posed skinned
 instance's palette into its vertices once a frame (`helio_mesh_api::SKIN_CACHE`,
-`SkinnedVertex`: position, snorm8 normal and tangent, previous position; 32
-bytes, the position first so a BLAS builds from it directly) and an instance
+`SkinnedVertex`: position, normal and tangent octahedral at 16 bits an axis
+(the frame's `scene_pack_unit`, the tangent's handedness the vertex's
+bitangent sign), previous position; 32 bytes, the position first so a BLAS
+builds from it directly) and an instance
 table by entity row (`SKIN_CACHE_ROWS`, the instance rows' `mesh_id`). Every
 drawer that drew a skinned mesh blended the palette in its vertex shader (five
 copies: G-buffer, shadow casters, shadow transmittance, forward, transparent;
 the selection mask through a sixth function); they all read the cache now
 (`//!use mesh_skinning`), so what is rasterised is what is traced, and the
-G-buffer's previous positions are the cache's (the positions it held before
-this frame's pose), not a second blend with a previous palette. The component
-mirrors only its current palette.
+G-buffer's previous positions are the cache's. The pass blends the current
+palette and the palette of the pose shown before it (the component mirrors
+both) in one go, so a previous position costs no read of the cache. The
+instance rows lost their skin
+fields (`skin_vertex_offset`, `bone_palette_offset`, `bone_palette_count`):
+a skinned instance is `INSTANCE_FLAG_SKINNED`, set by its draw rows, and
+the scene join reads no skin or palette handles (`StaticObjectRow` 252 to
+240 bytes, `GpuInstanceData` 224 to 208).
 
 - **Cost**: the journal of `SkeletalMeshComponent` says which instances
   changed; an instance whose palette is bitwise the one it was posed with costs
   nothing (an animator showing a paused pose each frame). A posed instance is
-  skinned once; on the frame after its last pose it settles once (previous =
-  current, so motion vectors stop with the pose, which the previous-palette
-  path got wrong: a pose shown every other frame kept its motion on the frame
-  in between). No buffer or bind group is made unless the cache, its table or
-  a pool grows. Memory is 32 bytes a vertex of every resident skinned instance.
+  skinned once; on the frame after its last pose its row is marked settled
+  (`SkinCacheRow::settled`: previous = current, a row write, no pass), so
+  motion vectors stop with the pose, which the vertex-shader path got wrong
+  (a pose shown every other frame kept its motion on the frame in between).
+  The row's `pose` changes with every pose: the shadow pages key a skinned
+  caster on it (`helio-pass-shadow-dirty`), since its transform alone does
+  not change when it moves (the pages re-render with the pose, not because
+  something else happened to invalidate them). No buffer or bind group is made unless the cache, its table or
+  a pool grows.
+- **What is skinned**: only what the frame draws or traces
+  (`skin_cache::SkinView`, from the frame's camera, which host parts now get
+  in `RenderHostPart::publish_frame`): an instance whose bounding sphere is in
+  the camera frustum's side planes, or that the ray-tracing culling keeps
+  (within `culling_radius`, or spanning `culling_angle`; that sphere around
+  the eye covers the shadow casters near it). A pose that changes while
+  nothing wants the instance is kept pending and skinned the frame the
+  instance is wanted, with no motion that frame (its previous pose is
+  stale); a posed instance off-screen and outside the traced range costs a
+  sphere test. An instance unwanted for 300 frames gives its range back; one
+  that is drawn while not resident (a shadow from outside both) draws its
+  rest pose.
+- **Memory**: 32 bytes a vertex of the resident instances plus 16 bytes an
+  entity row up to the highest skinned one. Fifty 30,000-vertex characters in view are 48 MB. The
+  cache doubles when an allocation does not fit (the old contents copied on
+  the GPU) and repacks into a buffer of twice its use once less than a
+  quarter is used (never below 16,384 vertices); a repack moves every range,
+  so the ray-traced scene re-evaluates those instances.
 - **Why raster moved onto it**: Unreal's GPU skin cache, which its ray tracing
   requires, is the same split (compute writes positions and tangents and keeps
   the previous positions; the raster and the ray-tracing geometry read them);
@@ -379,7 +408,7 @@ the cache (stride 32) and the mesh's index pool. `positions_revision` is the
 cache's revision of the instance, so a pose refits, the acceleration policy
 rebuilds after `refits_per_rebuild` refits, and an unchanged pose records
 nothing. Refits are budgeted in triangles a frame (`ray_tracing`'s
-`skinned_refit_triangles`, 262,144 by default: about 2 ms of refits on an RTX 3060, below), nearest first with each
+`skinned_refit_triangles`, 262,144 by default: about 0.5 ms of refits on an RTX 3060, below), nearest first with each
 frame waited counting as nearer (none waits for ever); one over the budget
 keeps last frame's BLAS, a frame stale. Its rows carry `RAY_INSTANCE_SKINNED`
 and the cache's first vertex (`RayInstance::skinned_vertex`, where the
@@ -431,24 +460,32 @@ compactions are in the frame's stats, with the skin cache's
 (`meshes.skin_cache_bytes`, `_instances`, `_updated`, `_vertices`) and the
 TLAS's instances (`meshes.ray_instances`, `meshes.ray_instances_culled`).
 
-Measured on an RTX 3060 (`meshes_component`'s `skin_cache_cost`, median GPU ms
-over pipelined frames, three in flight; a 10,000-vertex, 19,602-triangle mesh
-on two joints, every instance posed each frame; the CPU column is a debug
-build's recording of the cache's update and the refits):
+Measured on an RTX 3060 (`meshes_component`'s `skin_cache_cost`, a release
+build, median GPU ms over pipelined frames, three in flight; a 10,000-vertex,
+19,602-triangle mesh (or a 29,000-vertex one) on two joints, every instance
+posed each frame; the CPU column is the recording of the cache's update and
+the refits). The skin pass column before is the pass that read the previous
+position back from the cache; after, it blends the previous palette:
 
-| Posed instances | Skin pass | BLAS refits (and the policy's rebuilds) | TLAS | CPU |
-|---|---|---|---|---|
-| 1 | 0.010 | 0.024 | 0.033 | 0.72 |
-| 16 | 0.45 | 2.66 | 0.16 | 1.20 |
-| 256 | 7.33 | 40.6 | 0.24 | 9.05 |
-| 256, pose unchanged | 0.001 | 0.001 | 0.001 | 1.85 |
+| Instances | Skin pass before | Skin pass | BLAS refits (and the policy's rebuilds) | TLAS | CPU |
+|---|---|---|---|---|---|
+| 1 x 10k posed | 0.010 | 0.011 | 0.023 | 0.033 | 0.08 |
+| 16 x 10k posed | 0.048 | 0.043 | 0.63 | 0.049 | 0.24 |
+| 50 x 29k posed | 0.606 | 0.529 | 2.68 | 0.057 | 0.58 |
+| 256 x 10k posed | 0.602 | 0.452 | 9.24 | 0.074 | 2.95 |
+| 256 x 10k, pose unchanged | 0.001 | 0.001 | 0.001 | 0.001 | 0.36 |
+| 256 x 10k posed, off-screen and untraced | 0.002 | 0.001 | 0.001 | 0.001 | 0.21 |
 
-Cost follows the posed instances' vertices and triangles, and an unchanged
-pose costs nothing on the GPU. The refits dominate (about 8 ns a triangle),
-which is why they are budgeted: the default budget is about 2 ms of them on
-this GPU. The skin pass runs at about 350 million vertices a second, far
-under the GPU's bandwidth; a wave per job instead of a search per group, and
-LDS-staged palettes, are where it goes faster (open).
+Cost follows the posed, wanted instances' vertices and triangles; an
+unchanged pose, or a posed instance nothing draws or traces, costs nothing
+on the GPU. The skin pass runs at about 5.7 billion vertices a second
+(256 x 10k): one mesh shared by every instance keeps its reads in L2, so
+it is the 32-byte write of each vertex, about 180 GB/s, half this GPU's
+bandwidth. What goes faster next is the input, not the kernel: skin weights
+as four 8-bit joints and four 16-bit weights (12 bytes a vertex for the
+current 32) once the importer writes them (open). The refits dominate
+(about 2 ns a triangle), which is why they are budgeted: the default budget
+of 262,144 triangles is about 0.5 ms of them on this GPU.
 
 Open: real frames with a skinned character and a tree under GI and
 ray-traced shadows, and the G-buffer A/B of a skinned mesh before and after
@@ -456,3 +493,11 @@ the cache (positions are the vertex shaders' formula, checked in
 `skin_cache.rs`'s test to 1e-5; normals are snorm8 as the mesh's own), were
 not captured: no example or level holds a skinned mesh, and the engine's
 render acceptance suite was not run here.
+
+**A second skinning path, recorded**: the skeletal mesh editor's preview
+(`plugins/vendor/skm_editor`, `editor/src/rendering/viewport/skin_gpu.rs`
+and its skinning WGSL) draws through a renderer of its own with its own
+`SkinVertex` and vertex-shader blend. It is the animation plugin's, and goes
+away when the preview draws through an engine-owned Helio runtime (Pulsar's
+`render_runtimes`, which plugins get handles to and never build Helio
+themselves); until then it is a known copy, not the engine's skinning.
