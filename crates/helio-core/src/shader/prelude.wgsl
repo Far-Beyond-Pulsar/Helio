@@ -39,8 +39,12 @@ struct Camera {
     /// its negative side is drawn. Zero for none. See `helio_view_clipped`.
     clip_plane:     vec4<f32>,
     /// x: unused (0), y: flags (`HELIO_VIEW_MIRRORED`, `HELIO_VIEW_CLIPPED`),
-    /// z: depth in views (0 for the frame's own), w: unused (0).
+    /// z: depth in views, w: authored space slot plus one (0: unrestricted).
     view_info:      vec4<u32>,
+}
+
+fn helio_camera_sees_space(camera: Camera, space: u32) -> bool {
+    return camera.view_info.w == 0u || camera.view_info.w == space + 1u;
 }
 
 // ── Views ───────────────────────────────────────────────────────────────────
@@ -221,6 +225,11 @@ fn gbuffer_remap_of(surface: vec2<f32>) -> i32 {
     }
     return -1;
 }
+
+// Frame contracts in helio_frame_api::lighting: one rigid matrix and one
+// packed coordinate-space slot for each G-buffer remap.
+alias HelioViewRemaps = array<mat4x4<f32>, 1024>;
+alias HelioViewRemapSpaces = array<vec4<u32>, 256>;
 
 // ── Volumetric scattering ───────────────────────────────────────────────────
 

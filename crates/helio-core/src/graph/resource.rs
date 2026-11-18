@@ -19,6 +19,7 @@ pub enum ResourceFormat {
     Rg16Float,
     Depth32Float,
     R32Uint,
+    Rg32Uint,
 }
 
 impl ResourceFormat {
@@ -36,6 +37,7 @@ impl ResourceFormat {
             Self::Rg16Float => wgpu::TextureFormat::Rg16Float,
             Self::Depth32Float => wgpu::TextureFormat::Depth32Float,
             Self::R32Uint => wgpu::TextureFormat::R32Uint,
+            Self::Rg32Uint => wgpu::TextureFormat::Rg32Uint,
         }
     }
 }
@@ -55,6 +57,7 @@ impl From<wgpu::TextureFormat> for ResourceFormat {
             wgpu::TextureFormat::Rg16Float => Self::Rg16Float,
             wgpu::TextureFormat::Depth32Float => Self::Depth32Float,
             wgpu::TextureFormat::R32Uint => Self::R32Uint,
+            wgpu::TextureFormat::Rg32Uint => Self::Rg32Uint,
             // Any other format asked for via `write_color_raw` that this
             // transient-resource enum doesn't (yet) have a dedicated variant
             // for would previously have silently aliased to Rgba16Float here

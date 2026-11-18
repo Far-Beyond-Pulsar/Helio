@@ -43,11 +43,21 @@ pub struct GpuCameraUniforms {
     pub clip_plane: [f32; 4],
     /// What view this is: `x` unused (0), `y` flags
     /// ([`crate::view::VIEW_MIRRORED`], [`crate::view::VIEW_CLIPPED`]), `z`
-    /// the view's depth in views (0 for the frame's own), `w` unused.
+    /// the view's depth in views (0 for the frame's own), `w` is the authored
+    /// coordinate-space slot plus one (zero makes the view unrestricted).
     pub view_info: [u32; 4],
 }
 
 impl GpuCameraUniforms {
+    pub fn with_coordinate_space(mut self, space: Option<u32>) -> Self {
+        self.view_info[3] = space.map_or(0, |slot| slot.saturating_add(1));
+        self
+    }
+
+    pub fn coordinate_space(&self) -> Option<u32> {
+        self.view_info[3].checked_sub(1)
+    }
+
     /// Attach a generic view identity without changing the shared camera ABI.
     pub fn with_view_id(mut self, view_id: u32) -> Self {
         self.jitter_frame[3] = f32::from_bits(view_id);

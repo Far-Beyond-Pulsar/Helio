@@ -125,6 +125,17 @@ pub struct DebugBatch<'a> {
 }
 
 impl<'a> DebugBatch<'a> {
+    /// Build a line list for a persistent editor layer using the shared shapes.
+    pub fn collect_lines(draw: impl FnOnce(&mut DebugBatch<'_>)) -> Vec<WorldVertex> {
+        let mut state = DebugDrawState::default();
+        draw(&mut DebugBatch {
+            state: &mut state,
+            lines_changed: false,
+            tris_changed: false,
+        });
+        state.user_lines
+    }
+
     pub fn line(&mut self, from: impl WorldPoint, to: impl WorldPoint, color: [f32; 4]) {
         if self.state.user_lines.len() + 2 > MAX_DEBUG_VERTS as usize {
             return;

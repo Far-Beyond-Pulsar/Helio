@@ -3396,17 +3396,22 @@ it. A portal is a rigid map between coordinate spaces, never a view:
   The clip is `//!use portal_chain`: the outer stage by the mask and its
   plane, each inner stage by the camera's ray through its rectangle, holes
   where a deeper chain draws.
-- **Lighting**: a chain's pixels carry its remap (`gbuffer_remap_tag`), and
-  deferred lighting, water transmission and decals map position and normal
-  back through `VIEW_REMAPS`. G-buffer normals are in the drawn space.
-- **Known gap (lights and shadows through portals)**: content seen through
-  a portal is lit by the lights of its own world, walking the scene's lights
-  (at most 256; the tile lists are the camera's), and is not shadowed: the
-  frame's shadow maps are the camera's world's (deferred lighting skips them
-  for remapped pixels, as it did for p25's views). No light shines through
-  an opening into the other side. Shadow views per chain (or a
-  shared virtual shadow map covering the chains' content) and lights
-  crossing openings are an open design for the user.
+- **Materials and lighting**: a chain's pixels carry its remap
+  (`gbuffer_remap_tag`). Mesh material programs evaluate position, tangent basis
+  and eye in content space. The G-buffer normal stays in drawn space, so its
+  readers recover the original position and normal from `VIEW_REMAPS`.
+  `VIEW_REMAP_SPACES` identifies the destination's authored frame, including
+  slot zero for ordinary world space. The light join reads the same scene
+  hierarchy's space per light owner. Deferred lighting bins compact live-light
+  indices against the visible remapped pixels' content-space bounds and
+  shades each pixel with candidates from its destination space. Overflow
+  falls back to that same compact list without dropping lights. Ordinary
+  remapped surfaces can sample resident local-light shadows and the existing
+  world probe clipmap where the latter covers them.
+- **Remaining lighting limits**: directional cascades, terrain and contact
+  visibility are primary-view data. Local shadow maps and GI probes still
+  lack separate coverage of authored rigid frames, and light transport
+  through an opening is a separate problem.
 - **The coordinate-space table moved to the renderer**
   (`helio::renderer::CoordinateSpaceTable`, published as
   `CoordinateSpacesFrameData`): the G-buffer pass no longer owns it, so it
@@ -3567,4 +3572,19 @@ the post-split sequence.
   black frame). It locks at the config's sizes and its pass declares
   `writes_target`; both examples were run and render (the cube; the debug
   shapes over the grid).
+
+### As built: light selection guides
+
+Selected lights submit a persistent editor debug-line layer through
+`EditorLinesRegistration`. The lights editor builds its geometry from the
+full scene selection in double-precision world space, using Helio's shared
+debug primitives. The editor debug pass rebases and draws the layer.
+
+### As built: camera coordinate spaces
+
+The host's optional camera space uses the fourth word of `Camera.view_info`,
+encoded as the slot plus one. This leaves zero as the unrestricted default
+for existing hosts and standalone examples. Kind owners match that slot
+when selecting direct content. The Portals plugin maps camera movement through
+its existing rigid routes using the engine's space producer extension.
 

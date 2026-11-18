@@ -100,6 +100,24 @@ Each of these means the design is wrong; redesign instead of shipping it:
 - Kind names, `if kind == ...`, or downcasts to a concrete pass in core, the spine, presets or a host.
 - Renderer setters or mailboxes for one kind. Component methods are the only API, and the editor and scripts call the same ones.
 
+**Coordinate spaces**
+
+- World-space producers must carry the object's authored space identity with
+  its position, direction, or bounds. A rigid transform places data. Equal
+  coordinates or equal matrices can describe distinct spaces.
+- When shading a remapped surface, resolve its destination and transform
+  point and directional inputs through the frame's remap contracts. Match
+  local contributors by space before testing spatial influence. Material graph
+  world-space inputs use the content-space eye and surface. Geometry and final
+  G-buffer vectors use the drawn space.
+- World-space overlays and effects must honor the aperture and its depth.
+  Composite camera-side participating media along the ray segment up to the
+  opening. Destination media need their own segment and matching sources.
+  Screen-space bloom and exposure consume the resulting visible radiance.
+- Verify a direct view, a view through an aperture, and overlapping XYZ
+  placements with different space identities. Use optional frame or owner API
+  contracts so consumers work when the producer is absent.
+
 **Per-frame cost and stalls**
 - Per-frame O(all objects) CPU scans, per-frame GPU buffer or bind-group re-creation, or per-frame allocation in hot paths.
 - Blocking readbacks, `device.poll(Wait)` in the frame, sleeps, or "wait N frames" instead of a real readiness signal.
