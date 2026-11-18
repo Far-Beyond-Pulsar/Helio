@@ -47,6 +47,8 @@
 //!
 //! Cost scales with the rays a consumer asks for, never with the scene's
 //! size: a tracer's pass is one indirect dispatch over the stream's count.
+//! A consumer whose rays leave one origin in runs says so
+//! ([`Stream::with_run`]), and a tracer pays its per-origin work once a run.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -320,6 +322,9 @@ pub struct Stream {
     pub class: RayClass,
     /// The most rays it holds.
     pub capacity: u32,
+    /// Rays come in runs of this many rows from one origin ([`Self::run`];
+    /// 1: no runs).
+    pub run: u32,
     /// [`StreamHeader`], one.
     pub header: &'static str,
     /// [`SceneRay`] rows.
@@ -339,11 +344,26 @@ impl Stream {
             name,
             class,
             capacity,
+            run: 1,
             header: resource("ray_header"),
             rays: resource("rays"),
             hits: resource("hits"),
             surfaces: (class == RayClass::Nearest).then(|| resource("surfaces")),
         }
+    }
+
+    /// A stream whose rays come in runs of `run` consecutive rows, from row
+    /// 0 (the last run may be short), the rays of a run sharing their origin
+    /// and caster mask: a probe's rays, a hit's shadow rays toward several
+    /// lights, a pixel's primary and its samples. A tracer whose cost has a
+    /// part that depends on the origin alone (placing it in the kind's own
+    /// structure: a voxel terrain's chunk trees) may pay it once a run; one
+    /// with none (a TLAS query) ignores it. This is the origin coherence a
+    /// wavefront tracer recovers by sorting rays, stated by the consumer
+    /// that made the rays that way.
+    pub fn with_run(mut self, run: u32) -> Self {
+        self.run = run.max(1);
+        self
     }
 
     /// The frame statistic counting this stream's rays (`rays.<name>`): the
@@ -736,5 +756,9 @@ mod tests {
         assert_eq!(occlusion.surfaces, None);
         // The same stream declared twice names the same resources.
         assert_eq!(Stream::new("test_probe", RayClass::Nearest, 128), nearest);
+        // No runs unless the consumer says so; a run is at least one ray.
+        assert_eq!(nearest.run, 1);
+        assert_eq!(nearest.with_run(64).run, 64);
+        assert_eq!(nearest.with_run(0).run, 1);
     }
 }
