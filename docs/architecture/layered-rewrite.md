@@ -253,6 +253,7 @@ and voxel-planet, both sides talk to a spine trait:
 | `GBufferContributor` (draws into the G-buffer, shares depth/MV/material ABI) | voxel chunks, VG, foliage, water surface, portals, decals |
 | `ShadowCaster` (draws into cascades / sun occlusion pages) | meshes, voxel, foliage, VG |
 | `RayProxySource` (TLAS instances, GI/ray-query geometry) | meshes, VG proxies, voxel |
+| Ray-stream `Tracer` (answers any consumer's rays: `rays::stream`, `rendering.md` r1) | meshes (the TLAS), voxel (the chunk walk) |
 | `LightingContributor` (adds radiance / visibility terms) | GI, reflection captures, sky ambient |
 | `ParticipatingMedia` (fog, clouds, underwater) | fog, sky/clouds, water |
 | `PostEffect` (ordered post stack slots) | lens, flare, exposure, fog composite |
@@ -602,7 +603,8 @@ As built (2026-11-02): layer violations 9 → 0.
   ABIs, WGSL snippets, stand-ins; no state): `helio-sky-api` (atmosphere
   frame and sky table, cloud shadow, sun/directional visibility),
   `helio-gi-api` (probe clipmap, rays/hits/irradiance keys, `gi_common` /
-  `gi_sample`), `helio-foliage-api` (the old `contract` module: GPU records,
+  `gi_sample`; since r1 the probes and irradiance only: GI's rays are the
+  frame's ray streams, `rendering.md`), `helio-foliage-api` (the old `contract` module: GPU records,
   packing, placement reference, ground protocol, SceneDB rows, shared WGSL;
   still no wgpu). Deferred lighting, HLFS, fog, water and voxel read these,
   never `helio-pass-sky` / `-gi` / `-foliage-place`. The pass crates
@@ -618,7 +620,8 @@ As built (2026-11-02): layer violations 9 → 0.
   `helio-voxel-data` (the scene's journal and shared names) is voxel's
   public face to hosts; no separate `voxel-api` crate yet, because no other
   feature reads voxel: voxel implements the others' APIs (GI tracer,
-  foliage ground, water's provider), it does not publish one.
+  since r1 a ray-stream tracer; foliage ground, water's provider), it does
+  not publish one.
 - The voxel scene-material reader moved into the voxel crate
   (`chunks::scene::helio_scene_materials`).
 - `voxel_flight` and `water_world` moved to `crates/examples` (hosts):
@@ -649,16 +652,20 @@ As built, step 1 (2026-11-02): features place their own nodes.
   features that meet are joined.
 - The deferred preset is passes by name plus slots; `deferred_graph_asset`
   expands each slot to what the registry holds there.
-- `GiFeature` (helio-pass-gi): update and mesh rays at `Geometry`, resolve
-  at `LightingInputs`; `GiSettings` (probe spacing, `terrain_traced`)
-  replaces `RendererConfig::gi_probe_spacing`.
+- `GiFeature` (helio-pass-gi): the probes' update at `Geometry`, its rays
+  traced through the frame's ray streams (`rendering.md`, r1: GI, each
+  kind's tracer passes, GILight, the tracers again, GIIntegrate), the
+  resolve at `LightingInputs`; `GiSettings` (probe spacing) replaces
+  `RendererConfig::gi_probe_spacing`. (Built here as update and mesh rays
+  at `Geometry` with `GiSettings::terrain_traced`; both went in r1.)
 - `SkyFeature` (helio-pass-sky): the atmosphere tables, and the clouds'
   trace at `LightingInputs`, which the node graph lacked.
 - `VoxelFeature` (helio-pass-voxel-planet): the chunk terrain at `Geometry`
   from a host's `VoxelTerrain` setting (its pass makers). It offers its
   ground through `helio_foliage_api::OfferedGrounds`, and a foliage
   finisher grows placement on it. `helio_default_passes::with_voxel_terrain`
-  sets the terrain and GI's `terrain_traced` together.
+  set the terrain and GI's `terrain_traced` together (gone: step 5, then
+  r1, where the terrain is a tracer of the frame's ray streams).
 - `graph_parity` compares the whole pass list now (GI and clouds were
   filtered out), and with voxel terrain: same passes and declarations as
   the legacy factory, foliage on the terrain's ground.
@@ -760,9 +767,10 @@ kinds.**
 As built, step 5 (2026-11-02): the presets name no feature pair.
 - Features declare what they need of the others in their own preparers:
   the voxel feature, while it has terrain, inserts
-  `helio_gi_api::TerrainTracer` (GI then updates without a TLAS and spaces
-  probes for open ground) and `helio_pass_tsr::StochasticSamples` (TSR
-  reads the stochastic mask). `GiSettings::terrain_traced`,
+  `helio_pass_tsr::StochasticSamples` (TSR reads the stochastic mask); it
+  inserted `helio_gi_api::TerrainTracer` too (GI updated without a TLAS),
+  which r1 deleted: the terrain registers a ray-stream tracer, and GI
+  builds wherever `stream::traced` > 0 (`rendering.md`). `GiSettings::terrain_traced`,
   `with_voxel_terrain` and the presets' voxel check are gone; a host adds a
   feature setting with the generic `RendererConfig::with_feature`.
 - Water's terrain seam is `helio-water-api::WaterTerrainProvider`; the
@@ -889,7 +897,7 @@ the Helio repo keeps no voxel crate.
   - `world` (`helio-voxel-world`): the GPU-free world system (grid,
     generators, edits, queries, planet maps, features) and its WGSL mirror.
   - `feature` (`helio-pass-voxel-planet`): the Helio feature
-    (`VoxelFeature`: chunk passes, residency, sun pages, drawers, GI tracer,
+    (`VoxelFeature`: chunk passes, residency, sun pages, drawers, ray-stream tracer,
     foliage ground, water terrain), its shaders and GPU tests
     (`tests/presets.rs` is graph_parity's voxel case; `tests/wgsl.rs`
     validates its shaders).

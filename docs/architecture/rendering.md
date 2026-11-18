@@ -178,6 +178,87 @@ Measured on an RTX 3060, 174,080 probe rays over a voxel planet: entry and
 nearest walk 1.32 ms, surfaces 0.09 ms, occlusion 0.25 ms; the kernel it
 replaced, which could start only from GI's probes, took 1.12 ms.
 
+#### GI on ray streams
+
+GI (the GI plugin's `helio-pass-gi`) is a consumer of two streams and knows
+no kind:
+
+- `gi_probe` (nearest, 64 rays a probe updated this frame, up to 174,080)
+  and `gi_shadow` (occlusion: a sun ray and one local light's a probe ray's
+  hit, packed from row 0, the count written on the GPU).
+- One node at `Slot::Geometry` 20, `once_per_frame`, after the G-buffer
+  phase (so the terrain's tracer walks this frame's cut): **GI** (the sun,
+  probes that came into the clipmap reset, the probe rays) → each kind's
+  trace and surface passes → **GILight** (a hit's light from its
+  `SceneSurface`: the sun's and one local light's, each pending on a
+  shadow ray, and the rest: the probes' irradiance at the hit, through it,
+  what it emits; a miss takes the sky) → each kind's trace of the shadow
+  stream → **GIIntegrate**. The probes take this frame's rays in this frame;
+  the resolve (`GIResolve`, `Slot::LightingInputs`) reads them for the
+  lighting.
+- A miss takes the sky through the atmosphere's published sky frame and
+  table (`lighting::sky`), the sun its illuminance through the air; without
+  an atmosphere, the lights' first directional light and the renderer's
+  ambient.
+- A tracer that knows geometry it could not trace this frame says so on
+  the stream (`stream::Answers::short`: the terrain while its ray kernels
+  compile or before its first draw), and GIIntegrate holds the probes that
+  frame. Without it, a scene whose meshes answered before the terrain
+  taught the probes a world without ground, which their history kept for
+  hundreds of frames (the probes over open ground held 0.18 of light from
+  below where their rays found 0.26).
+- **The indirect diffuse's occlusion distance**
+  (`lighting::indirect_occlusion`): the smallest distance at which the
+  graph's indirect diffuse resolves occlusion. A kind that lights its own
+  surfaces adds the occlusion nearer than that itself and leaves the rest
+  to the indirect diffuse. GI offers twice its finest probe spacing, through
+  a preparer evaluated when a consumer asks (the terrain's draw builds
+  before GI's node), and offers nothing where it will not build (nothing
+  traces, a forward lighting model, its node absent or bypassed:
+  `BuildEnv::plans`). The terrain's per-pixel sky rays stop there; with no
+  offer they keep their own reach (48 cells). The setting that held this
+  distance per host (`voxels.sky_reach`) is gone. r3's traced per-pixel
+  indirect diffuse offers a few centimetres, and the terrain's own term
+  shrinks to contact occlusion with no change to either side.
+
+Measured on an RTX 3060, median GPU ms over pipelined frames:
+
+| Scene | r0 | r1 |
+|---|---|---|
+| Cathedral (meshes) | GI 0.49, GIMeshRays 0.16: 0.65 | GI 0.10, MeshRays gi_probe 0.10, GILight 0.35, MeshRays gi_shadow 0.05, GIIntegrate 0.22: 0.82 |
+| voxel_craft, 1600x900 (median of six 240-frame windows) | GI rays in the voxel draw 1.73-1.95, GI 0.47-0.49, GIMeshRays 0.07-0.08: 2.27-2.52 | GI 0.07, VoxelRays gi_probe 1.61, VoxelRaySurfaces 0.23, MeshRays gi_probe 0.05, GILight 0.39, VoxelRays gi_shadow 0.40, MeshRays gi_shadow 0.03, GIIntegrate 0.13: 2.90 |
+| voxel_flight Earth ground hold, 1600x900 (mean over 25 s) | GI rays in the draw 1.08, GI 0.29: 1.37 (graph 11.62) | GI 0.06, VoxelRays gi_probe 1.56-1.60, surfaces 0.16-0.17, GILight 0.26, VoxelRays gi_shadow 0.33-0.35, GIIntegrate 0.13: 2.53 (graph 12.79) |
+| voxel_flight Moon ground hold | GI rays in the draw 0.97, GI 0.25: 1.22 (graph 9.66) | 1.55 + 0.13 + 0.22 + 0.43 + 0.13 + 0.06: 2.52 (graph 10.97) |
+
+On terrain r1 costs 0.4-1.3 ms more. Where it goes: the probe walk from
+any origin (an entry pass, then the walk) against r0's walk from cells the
+CPU placed (1.56-1.61 against 0.97-1.08 on the planets); the sun's
+visibility of each hit as a traced shadow stream (0.33-0.43) where r0 read
+the terrain's sun-occlusion map in the hit's kernel; the surfaces as a pass
+of their own (0.13-0.23); GILight and GIIntegrate against r0's one GI pass.
+None is removed here: a stream binned by tracer, a shared entry for nearest
+and occlusion rays and r5's sampled direct light are where they go.
+
+Final images, r0 against r1: the cathedral's mean |Δ| 0.0005-0.0018, inside
+run-to-run noise. Voxel captures wait for a settled view (the terrain
+generated and its ray kernels compiled: `ChunkPass::settled`) and frames
+after it, never a frame count (a cold shader cache keeps the terrain's
+pipelines compiling for a minute, which the A/B before this one shot
+through). voxel_craft, four poses, 8-frame bursts, mean |Δ| of the burst
+means (RGB, 0-1): r0-r0 0.00009-0.00074, r1-r1 0.00010-0.00123, r0-r1
+0.0010-0.0031 (p99 0.008-0.024); mean luminance r1/r0 -0.4% on the forward
+pose, +0.4 to +0.6% on the others; temporal std unchanged (0.00007-0.00027
+in both). voxel_flight ground holds: Earth r0-r0 0.00058, r1-r1 0.00088,
+r0-r1 0.0011-0.0013; Moon 0.00075, 0.00081, 0.0011-0.0014.
+
+Open: the voxel r0-r1 difference is outside run-to-run noise on
+voxel_craft (2-10x it, smooth indirect-light tints on lit surfaces and on
+the held mesh). Shading terrain hits as r0 did (flat material colour, the
+cell's face normal) does not remove it, so it is not the surfaces'
+G-buffer shading; the sun-occlusion map against traced shadow rays is the
+untested candidate (an instrumented r0 build to test it did not render).
+The cost above is open too.
+
 #### Hosts
 
 Ray tracing is the default tier. The engine's device
