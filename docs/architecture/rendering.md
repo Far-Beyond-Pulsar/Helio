@@ -1144,19 +1144,70 @@ material evaluated is the row's colour the flat path wrote; where a
 texture speaks the bounce takes it (the acceptance suite's textured wall).
 Images: `C:/t/r2m/cathedral_{base,new}_{1,2,3}.png`.
 
-The binned path, synthetic (`mesh_rays_gpu`'s `hit_surface_cost`, 174,080
-rays onto 81 textured, normal-mapped quads, surface passes alone, idle
-between frames): the table-driven program alone 0.09 ms (`Diffuse`) and
-0.12-0.13 ms (`Full`); with binning, 2.1 ms with one used bin, 2.7-3.0 ms
-for 2 programs, 3.7-4.1 ms for 8, 7.6-8.7 ms for 64 (72, eight past the
-bound: the same as 64). Skipping stages located the cost: the count and
-offsets passes are small, the scatter and the shading kernels over the
-scattered list are not. These figures come from timestamps around passes
-that leave the GPU idle between frames on a GPU other agents were using
-(the table-alone figure ranged 0.09 to 1.4 ms across runs), and a
-throughput harness that keeps the GPU loaded is written but was not run;
-they show that binning costs a large multiple of the shading it bins on
-this shape, not its exact size.
+The binned path (`mesh_rays_gpu`'s `hit_surface_cost`, release build: 174,080
+incoherent rays onto 81 textured, normal-mapped quads, one 256-square mipped
+texture as base colour, normal map and ORM; the surface passes alone, 24
+pipelined frames of 16 runs each, the last two runs of each frame stamped at
+every pass end; a stage is the time between pass ends, since a beginning
+stamp may be written before the work ahead drains; the median frame; two
+interleaved runs a build, ranges across them; ms):
+
+| Programs present (bins) | Count | Prefix | Scatter | Binning | Shading, Diffuse | Shading, Full |
+|---|---|---|---|---|---|---|
+| table alone (1) | - | - | - | - | 0.084-0.090 | 0.119-0.130 |
+| table, an unused program present: before (2) | 0.030 | 0.010 | 0.020 | 0.060 | 0.096 | 0.127 |
+| the same, after (1) | - | - | - | - | 0.084-0.085 | 0.119-0.120 |
+| 64 present, 2 with hits, after (2) | 0.030 | 0.011 | 0.021 | 0.061 | 0.130 | 0.162 |
+| 2 programs (2) | 0.030 | 0.010 | 0.020 | 0.060 | 0.130 | 0.162 |
+| 8 programs (8) | 0.032-0.042 | 0.012-0.015 | 0.025-0.031 | 0.069-0.088 | 0.30-0.42 | 0.47-0.61 |
+| 64 programs (64) | 0.19-0.20 | 0.034-0.038 | 0.10-0.11 | 0.33-0.35 | 3.58-3.70 | 3.81-4.04 |
+
+The figures first published here (2 to 8.7 ms) came from a debug test
+binary with the GPU idle between frames: they were the harness's.
+
+**What the time is.** Binning is 0.06 ms for up to a few programs and
+grows to about 0.34 ms at 64 bins (the scatter's writes spread over 64
+lists; the count's rise is not contention on the bin counters: 32
+counters a bin changed nothing and were dropped). The shading is not:
+each bin with hits costs about the same whatever its size. Timed in a pass
+of its own, a bin takes 74-95 us (`Diffuse`) and 79-107 us (`Full`) with
+20,000 hits (8 programs) and with 4,000 (64): a dispatch's time here is its
+kernel's latency, not its work (the whole stream, 174,080 hits, is
+0.085 ms in one dispatch). Bin dispatches cannot overlap: each writes the
+stream's surfaces (read-write storage), and wgpu puts a barrier between
+two dispatches that use one buffer read-write, a full compute drain on
+Vulkan; and each indirect dispatch is preceded by wgpu's indirect-call
+validation (a dispatch of its own and two barriers), which alone is about a
+quarter of it (64 programs with the validation off: 2.8 ms `Diffuse`).
+Distinct pipelines cost nothing measurable (64 bins on one pipeline: the
+same 3.6 ms). So the cost per extra program with hits is a fixed
+0.03-0.06 ms on this GPU, about one kernel latency, and the total follows
+the programs with hits, not the hits.
+
+**What changed.** A program whose hits were counted zero takes no bin: the
+bins' counts are read back without waiting (three slots in flight) and
+read at the next `set_programs`, so a program present in the frame but
+hit by none of the stream's rays costs nothing after a frame or two
+(before, 0.06 ms of binning and 0.012 ms of the binned list's indirection
+for the table's hits: the second and third rows), and 64 programs present with 2 hit cost what 2
+programs do. The binning pipelines skip workgroup zeroing (every variable
+is written before it is read; not measurable here). **Diffuse against
+Full** on these textured, normal-mapped materials: 0.084-0.090 against
+0.119-0.130 ms for the table's evaluation over the whole stream (about 30 %
+less), 0.130 against 0.162 for 2 programs; past 8 programs both are the
+bins' latencies.
+
+**The fixed cost's structural fixes**, which are not this step's: bins
+that overlap. The wavefront renderers' per-material dispatches run back to
+back without barriers between them (on D3D12 and Vulkan an application
+omits the barrier between dispatches writing disjoint rows); wgpu cannot
+say that. Either the wgpu fork gains a pass-level way to issue dispatches
+writing disjoint ranges of one buffer without barriers and to skip
+indirect validation for arguments a GPU pass computed (an engine-wide
+decision: every Helio pass would gain), or the programs present compile
+into one pipeline that switches on the bin (Falcor's material dispatch:
+one dispatch, the cost follows the hits, but a module recompiled whenever
+the set of programs changes and registers at the widest program's).
 
 **Acceptance on the engine path** (`installed_plugins`' `ray_tier_acceptance`,
 the editor's headless renderer, the shipped deferred graph, a ray-query
@@ -1182,13 +1233,11 @@ standalone host because the engine registers no test feature in its graph.
 
 **Open**
 
-- **The binned path's cost** (above): measured large, not understood. The
-  candidates are the list's memory pattern (the kernels read hits, rays and
-  surfaces through the list) and the scatter. Until it is found, a frame
-  pays it only where its rows name more than the table-driven program (a
-  graph or a non-default class among traced materials); the table-only
-  frame is one dispatch. Next: the loaded throughput harness, then Nsight
-  on the scatter and one bin's kernel.
+- **The binned path's fixed cost per program** (above): understood, 0.03-0.06
+  ms a program with hits on an RTX 3060, from barriers that serialise the
+  bins; the fix is bins that overlap (a wgpu fork change or one pipeline
+  over the programs present), a decision beyond this step. A frame pays it
+  only for programs its rays hit; the table-only frame is one dispatch.
 - **The voxel publish's leaf transmission** (`chunk_draw.wgsl`,
   `surface_with_transmission(surface, albedo)` in the raster) is the voxel
   plugin's to move to `material_transmitted`; its hits already carry the
