@@ -101,6 +101,31 @@ pub const SURFACE_MARKER: &str = "//!use frame_surface";
 pub const SURFACE_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(SURFACE_MARKER, "shaders/gbuffer_surface.wgsl");
 
+/// Marker opting a shader into [`BSDF_SNIPPET`].
+pub const BSDF_MARKER: &str = "//!use frame_bsdf";
+/// How a surface reflects light (`shaders/surface_bsdf.wgsl`, with
+/// [`SURFACE_SNIPPET`]): `bsdf_eval(s, wo, wi)` (the BSDF times the cosine:
+/// the engine's GGX and Lambert lighting model as the deferred lighting
+/// evaluated it before, with three energy fixes), `bsdf_pdf` and
+/// `bsdf_sample` (GGX's visible normals, cosine diffuse, the light a thin
+/// two-sided surface lets through; weights `eval / pdf`, so unbiased for that
+/// model), `bsdf_prepare` / `bsdf_eval_prepared` (the frame made once for
+/// many lights), `bsdf_facing` (a two-sided surface turned toward the side a hit
+/// sees), and the split sum an environment's radiance is weighted by
+/// (`bsdf_environment_split_sum`, `bsdf_fresnel_roughness`).
+///
+/// It belongs with [`SURFACE_SNIPPET`]: a `SurfaceData`'s fields (roughness,
+/// reflectance, anisotropy, subsurface, the share let through) mean
+/// something only under one reflectance model, and every reader of the
+/// surface (the lighting models over the G-buffer, the ray streams' hit
+/// consumers, the reference path tracer, a shading-cost probe) lights it
+/// with that model. A lighting model owns how light arrives (its lights,
+/// shadows and indirect inputs), not how the surface returns it, so two
+/// lighting models over one G-buffer cannot disagree about a surface, and
+/// the reference judges the real-time image with the same reflectance.
+pub const BSDF_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(BSDF_MARKER, "shaders/surface_bsdf.wgsl");
+
 /// [`TARGETS`]' formats, in location order.
 pub const TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
     ALBEDO_FORMAT.to_wgpu(),

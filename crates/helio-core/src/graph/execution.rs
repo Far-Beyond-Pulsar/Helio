@@ -213,6 +213,11 @@ pub struct RenderGraph {
     /// [`RenderPass::is_member`]), with their build-order slots.
     dormant: Vec<(usize, Box<dyn RenderPass>)>,
     next_slot: usize,
+    /// The gate of each build-order slot's pass, if it was added under one
+    /// ([`Self::set_member_gate`]).
+    member_gates: Vec<Option<crate::graph::MemberGate>>,
+    /// The gate passes added now are put under.
+    current_gate: Option<crate::graph::MemberGate>,
     /// Per-frame membership answers, kept to avoid an allocation a frame.
     membership_scratch: Vec<bool>,
     /// The readers behind [`SceneContent`](crate::graph::SceneContent).
@@ -415,6 +420,8 @@ impl RenderGraph {
             member_slots: Vec::new(),
             dormant: Vec::new(),
             next_slot: 0,
+            member_gates: Vec::new(),
+            current_gate: None,
             membership_scratch: Vec::new(),
             scene_rows: Default::default(),
             pass_index_map: HashMap::new(),
@@ -788,8 +795,32 @@ impl RenderGraph {
             .or_insert(self.passes.len());
         self.passes.push(pass);
         self.member_slots.push(self.next_slot);
+        self.member_gates.push(self.current_gate.clone());
         self.next_slot += 1;
         self.gpu_render_bundles.push(None);
+    }
+
+    /// Puts the passes added from now on under `gate` (none: no gate) and
+    /// returns the gate they were put under before: a pass under a gate is a
+    /// member only while the gate is open and the pass is one
+    /// ([`RenderPass::is_member`]); while it is closed the pass is not asked,
+    /// prepared, executed or given textures (module docs of
+    /// [`MemberGate`](crate::graph::MemberGate)).
+    pub fn set_member_gate(
+        &mut self,
+        gate: Option<crate::graph::MemberGate>,
+    ) -> Option<crate::graph::MemberGate> {
+        std::mem::replace(&mut self.current_gate, gate)
+    }
+
+    /// The gate passes added now are put under ([`Self::set_member_gate`]).
+    pub fn member_gate(&self) -> Option<crate::graph::MemberGate> {
+        self.current_gate.clone()
+    }
+
+    /// Whether the gate of build-order slot `slot` (if any) is open.
+    fn gate_open(gates: &[Option<crate::graph::MemberGate>], slot: usize) -> bool {
+        gates.get(slot).and_then(|g| g.as_ref()).is_none_or(|g| g())
     }
 
     /// Append a pass to a graph that may already be locked, for passes that
@@ -2530,15 +2561,17 @@ impl RenderGraph {
         assert!(!self.locked, "RenderGraph::lock() called twice");
         self.set_size(size);
         let mut content = self.scene_rows.content(None, None, None, self.frame_count);
+        let gates = &self.member_gates;
         let stay: Vec<bool> = self
             .passes
             .iter_mut()
-            .map(|pass| pass.is_member(&mut content))
+            .zip(&self.member_slots)
+            .map(|(pass, &slot)| Self::gate_open(gates, slot) && pass.is_member(&mut content))
             .collect();
         let join: Vec<bool> = self
             .dormant
             .iter_mut()
-            .map(|(_, pass)| pass.is_member(&mut content))
+            .map(|(slot, pass)| Self::gate_open(gates, *slot) && pass.is_member(&mut content))
             .collect();
         // Nothing has run yet, so nothing leaves.
         self.repartition(&stay, &join, false);
@@ -2592,14 +2625,15 @@ impl RenderGraph {
         );
         let mut changed = false;
         self.membership_scratch.clear();
-        for pass in self.passes.iter_mut() {
-            let stays = pass.is_member(&mut content);
+        let gates = &self.member_gates;
+        for (pass, &slot) in self.passes.iter_mut().zip(&self.member_slots) {
+            let stays = Self::gate_open(gates, slot) && pass.is_member(&mut content);
             changed |= !stays;
             self.membership_scratch.push(stays);
         }
         let members = self.passes.len();
-        for (_, pass) in self.dormant.iter_mut() {
-            let joins = pass.is_member(&mut content);
+        for (slot, pass) in self.dormant.iter_mut() {
+            let joins = Self::gate_open(gates, *slot) && pass.is_member(&mut content);
             changed |= joins;
             self.membership_scratch.push(joins);
         }
