@@ -663,7 +663,10 @@ pub struct Tracer {
     pub trace: TracerBuild,
     /// Adds the passes that write the [`SceneSurface`] of every hit whose
     /// tracer is this one, once every tracer has traced
-    /// ([`RayClass::Nearest`] streams only).
+    /// ([`RayClass::Nearest`] streams only). A tracer may instead write a
+    /// hit's surface in its trace pass as it takes the hit (then it adds no
+    /// surface pass): a tracer that takes the row later writes its own, so
+    /// every row holds the surface of the tracer it names either way.
     pub surface: TracerBuild,
 }
 
