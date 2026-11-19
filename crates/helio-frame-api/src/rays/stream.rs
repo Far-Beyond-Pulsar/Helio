@@ -39,7 +39,7 @@
 //!   consumer can hold a ray budget per frame (Call of Duty's variable-rate
 //!   ray tracing) and the frame can report rays per signal.
 //!
-//! What it costs: a ray is 48 bytes, a hit 16, a surface 32, written and
+//! What it costs: a ray is 32 bytes, a hit 16, a surface 32, written and
 //! read once each, and a stream's hit arrives in the same frame only after
 //! the tracers' passes ran. A consumer that needs one visibility test per
 //! pixel against triangles alone can still query the TLAS inline
@@ -84,8 +84,8 @@ pub const GROUP: u32 = 64;
 pub const MASK_STATIC: u8 = 1;
 /// TLAS instance and ray mask bit: casters that may move.
 pub const MASK_MOVABLE: u8 = 2;
-/// A ray that sees every caster.
-pub const MASK_ALL: u8 = 0xff;
+/// A ray that sees every caster (a ray's mask holds four bits).
+pub const MASK_ALL: u8 = 0x0f;
 
 /// Tracers a frame can hold: a hit names its tracer in four bits, 0 being
 /// none.
@@ -112,7 +112,7 @@ impl StreamHeader {
     }
 }
 
-/// `SceneRay` (frame space; see the WGSL), 48 bytes.
+/// `SceneRay` (frame space; see the WGSL), 32 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct SceneRay {
@@ -120,69 +120,76 @@ pub struct SceneRay {
     /// The most distance the ray travels; 0 or less: no ray in this row.
     pub t_max: f32,
     pub dir: [f32; 3],
-    /// The ray's cone ([`Self::cone`]): spread, caster mask and width.
+    /// The ray's cone ([`Self::cone`]), caster mask and coordinate space
+    /// ([`Self::in_space`]).
     pub cone: u32,
-    /// The coordinate space it travels in ([`SPACE_ANY`], or
-    /// [`space_of_slot`]): the encoding of a camera's `view_info.w`.
-    pub space: u32,
-    /// The row's alignment (WGSL rounds the struct to 16 bytes): zero.
-    pad: [u32; 3],
 }
 
-/// [`SceneRay::space`] of a ray that sees every coordinate space (as an
-/// unrestricted camera, `view_info.w` 0, does).
+/// A ray's coordinate space ([`SceneRay::space`]) when it sees every space
+/// (as an unrestricted camera, `view_info.w` 0, does).
 pub const SPACE_ANY: u32 = 0;
 
-/// [`SceneRay::space`] of a ray in authored space slot `slot` (0: the
-/// world): `slot + 1`, a camera's `view_info.w`
+/// A ray's coordinate space ([`SceneRay::space`]) in authored space slot
+/// `slot` (0: the world): `slot + 1`, a camera's `view_info.w`
 /// (`helio_core::GpuCameraUniforms::with_coordinate_space`).
 pub const fn space_of_slot(slot: u32) -> u32 {
     slot + 1
 }
 
+/// Where a ray's cone holds its space (9 bits: up to slot 255 plus one).
+const SPACE_SHIFT: u32 = 15;
+const SPACE_BITS: u32 = 0x1ff;
+
 impl SceneRay {
     pub const BYTES: u64 = std::mem::size_of::<Self>() as u64;
 
     /// A ray from `origin` along unit `dir`, at most `t_max` long, with
-    /// cone `cone`, seeing every coordinate space.
+    /// cone `cone` ([`Self::cone`]).
     pub fn new(origin: [f32; 3], t_max: f32, dir: [f32; 3], cone: u32) -> Self {
         Self {
             origin,
             t_max,
             dir,
             cone,
-            space: SPACE_ANY,
-            pad: [0; 3],
         }
     }
 
-    /// The ray in coordinate space `space` (its encoding, [`SPACE_ANY`] or
-    /// [`space_of_slot`]).
+    /// `scene_cone_in_space`: the ray in coordinate space `space` (its
+    /// encoding, [`SPACE_ANY`] or [`space_of_slot`]).
     pub fn in_space(mut self, space: u32) -> Self {
-        self.space = space;
+        self.cone =
+            (self.cone & !(SPACE_BITS << SPACE_SHIFT)) | ((space & SPACE_BITS) << SPACE_SHIFT);
         self
+    }
+
+    /// `scene_ray_space`: the coordinate space it travels in.
+    pub fn space(&self) -> u32 {
+        (self.cone >> SPACE_SHIFT) & SPACE_BITS
     }
 
     /// `scene_ray_sees_space`: whether the ray sees geometry authored in
     /// space slot `slot`.
     pub fn sees_space(&self, slot: u32) -> bool {
-        self.space == SPACE_ANY || self.space == slot + 1
+        let space = self.space();
+        space == SPACE_ANY || space == slot + 1
     }
 
     /// `scene_ray_cone`: a footprint `width` across at the origin that grows
-    /// by `spread` a metre, seeing the casters of `mask`.
+    /// by `spread` a metre, seeing the casters of `mask` (four bits), in
+    /// every coordinate space.
     pub fn cone(width: f32, spread: f32, mask: u8) -> u32 {
         let w = if width > 0.0 {
             (width.log2() * 8.0 + 160.0).round().clamp(1.0, 255.0) as u32
         } else {
             0
         };
-        u32::from(half_bits(spread)) | (u32::from(mask) << 16) | (w << 24)
+        let s = ((u32::from(half_bits(spread)) + 8) >> 4).min(0x7bf);
+        s | ((u32::from(mask) & 0xf) << 11) | (w << 24)
     }
 
     /// `scene_ray_spread`.
     pub fn spread(&self) -> f32 {
-        half_value(self.cone as u16)
+        half_value(((self.cone & 0x7ff) << 4) as u16)
     }
 
     /// `scene_ray_width`.
@@ -195,7 +202,7 @@ impl SceneRay {
 
     /// `scene_ray_mask`.
     pub fn mask(&self) -> u8 {
-        (self.cone >> 16) as u8
+        ((self.cone >> 11) & 0xf) as u8
     }
 }
 
@@ -742,7 +749,7 @@ mod tests {
     #[test]
     fn rows_have_their_contract_sizes() {
         assert_eq!(StreamHeader::BYTES, 16);
-        assert_eq!(SceneRay::BYTES, 48);
+        assert_eq!(SceneRay::BYTES, 32);
         assert_eq!(SceneHit::BYTES, 16);
         assert_eq!(SceneSurface::BYTES, 32);
     }
@@ -755,7 +762,12 @@ mod tests {
             [0.0, 1.0, 0.0],
             SceneRay::cone(0.0, 0.443, MASK_ALL),
         );
-        assert!((ray.spread() - 0.443).abs() < 2e-4, "{}", ray.spread());
+        // The spread within its 6 mantissa bits (0.8%).
+        assert!(
+            (ray.spread() / 0.443 - 1.0).abs() < 0.008,
+            "{}",
+            ray.spread()
+        );
         assert_eq!(ray.mask(), MASK_ALL);
         assert_eq!(ray.width(), 0.0);
         // Widths keep within their step (2^(1/16) either way), from a
@@ -773,8 +785,9 @@ mod tests {
                 "{width} -> {}",
                 ray.width()
             );
-            assert!((ray.spread() - 0.01).abs() < 1e-5);
+            assert!((ray.spread() / 0.01 - 1.0).abs() < 0.008);
             assert_eq!(ray.mask(), MASK_STATIC);
+            assert_eq!(ray.space(), SPACE_ANY);
         }
         // Halves round to nearest and survive their range's ends.
         assert_eq!(half_value(half_bits(1.0)), 1.0);
@@ -784,6 +797,16 @@ mod tests {
         assert_eq!(half_bits(0.0), 0);
         let tiny = half_value(half_bits(1e-6));
         assert!((tiny - 1e-6).abs() < 6e-8, "{tiny}");
+        // A spread past the largest the cone holds: the largest.
+        let wide = SceneRay::new([0.0; 3], 1.0, [0.0, 1.0, 0.0], SceneRay::cone(0.0, 1e9, 0));
+        assert_eq!(wide.spread(), 65024.0);
+        // A space takes its bits and leaves the cone's.
+        let placed = wide.in_space(space_of_slot(255));
+        assert_eq!(placed.space(), 256);
+        assert_eq!(placed.spread(), wide.spread());
+        assert_eq!(placed.width(), wide.width());
+        assert_eq!(placed.mask(), 0);
+        assert_eq!(placed.in_space(SPACE_ANY), wide);
     }
 
     #[test]
@@ -911,8 +934,13 @@ mod tests {
     /// overlapping places in two spaces are told apart by it alone.
     #[test]
     fn a_ray_sees_the_spaces_a_camera_would() {
-        let ray = SceneRay::new([1.0, 2.0, 3.0], 10.0, [0.0, 1.0, 0.0], 0);
-        assert_eq!(ray.space, SPACE_ANY);
+        let ray = SceneRay::new(
+            [1.0, 2.0, 3.0],
+            10.0,
+            [0.0, 1.0, 0.0],
+            SceneRay::cone(0.5, 0.25, MASK_ALL),
+        );
+        assert_eq!(ray.space(), SPACE_ANY);
         assert!(ray.sees_space(0) && ray.sees_space(7));
         let world = ray.in_space(space_of_slot(0));
         assert!(world.sees_space(0) && !world.sees_space(7));

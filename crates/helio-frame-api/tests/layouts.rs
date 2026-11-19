@@ -63,7 +63,8 @@ fn the_ray_stream_rows_have_their_contract_sizes() {
              if id.x >= header.count { return; }
              var ray = rays[id.x];
              ray.cone = scene_ray_cone(scene_ray_width(ray), scene_ray_spread(ray), RAY_MASK_ALL);
-             if !scene_ray_sees_space(ray, 3u) { ray.space = scene_space_of_slot(0u); }
+             if !scene_ray_sees_space(ray, 3u) { ray.cone = scene_cone_in_space(ray.cone, scene_space_of_slot(0u)); }
+             if scene_ray_space(ray) == SCENE_SPACE_ANY { return; }
              let reach = scene_hit_reach(ray, hits[id.x]);
              let n = scene_unpack_unit(scene_pack_unit(ray.dir));
              hits[id.x] = scene_nearest(1u, reach, false, scene_ray_mask(ray), 0u, 0u);

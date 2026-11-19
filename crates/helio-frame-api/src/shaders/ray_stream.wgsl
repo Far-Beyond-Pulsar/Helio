@@ -15,36 +15,37 @@ struct RayStreamHeader {
     count: u32,
 }
 
-// A ray: its origin and the most distance it travels (0 or less: no ray in
-// this row), its unit direction, `cone`, and the coordinate space it is in.
-// A tracer traces from the origin itself, from distance 0: the consumer
-// starts a ray off the surface it leaves.
+// A ray, 32 bytes: its origin and the most distance it travels (0 or less:
+// no ray in this row), its unit direction, and `cone`: the ray's cone, the
+// casters it sees and the coordinate space it travels in. A tracer traces
+// from the origin itself, from distance 0: the consumer starts a ray off the
+// surface it leaves.
 //
-// `cone` is the ray's cone (Akenine-Moller et al., "Texture Level of Detail
-// Strategies for Real-Time Ray Tracing", Ray Tracing Gems): its footprint is
-// `width` across at the origin and grows by `spread` a metre, so a tracer
-// reads textures and tests cut-outs at the detail the ray can resolve
-// (`scene_ray_footprint`). Bits 0..16: the spread, a half float. Bits
-// 16..24: the caster mask the ray sees (`RAY_MASK_*`). Bits 24..32: the
-// width, 0 for none, else `2^((bits - 160) / 8)` metres (a micrometre to
-// kilometres in steps of 9%). A camera or probe ray has no width; a ray
-// that leaves a hit starts as wide as the ray that found the hit was there.
+// The cone (Akenine-Moller et al., "Texture Level of Detail Strategies for
+// Real-Time Ray Tracing", Ray Tracing Gems): its footprint is `width`
+// across at the origin and grows by `spread` a metre, so a tracer reads
+// textures and tests cut-outs at the detail the ray can resolve
+// (`scene_ray_footprint`). A camera or probe ray has no width; a ray that
+// leaves a hit starts as wide as the ray that found the hit was there.
 //
-// `space` is the authored coordinate space the ray travels in, encoded as a
-// camera's (`Camera.view_info.w`): the space's slot plus one, or
-// `SCENE_SPACE_ANY` (0) for a ray that sees every space, as an unrestricted
-// camera does. A tracer answers only with geometry of that space
-// (`scene_ray_sees_space`). A ray serving a view takes the view's
-// (`cameras[0].view_info.w`); a ray leaving a hit keeps its parent's, or the
-// hit's content space where a remap put the hit in another
-// (`helio_frame_api::lighting::VIEW_REMAP_SPACES`). 48 bytes: 12 bytes past
-// `space` are the row's alignment, and stay zero.
+// The space is the authored coordinate space, encoded as a camera's
+// (`Camera.view_info.w`): the space's slot plus one, or `SCENE_SPACE_ANY`
+// (0) for a ray that sees every space, as an unrestricted camera does. A
+// tracer answers only with geometry of that space (`scene_ray_sees_space`).
+// A ray serving a view takes the view's (`cameras[0].view_info.w`); a ray
+// leaving a hit keeps its parent's, or the hit's content space where a remap
+// put the hit in another (`helio_frame_api::lighting::VIEW_REMAP_SPACES`).
+//
+// `cone`'s bits: 0..11 the spread (a half float's top 11 bits: its 5
+// exponent bits and 6 of its mantissa, 0.8% at worst), 11..15 the caster
+// mask the ray sees (`RAY_MASK_*`), 15..24 the space, 24..32 the width (0
+// for none, else `2^((bits - 160) / 8)` metres: a micrometre to kilometres
+// in steps of 9%).
 struct SceneRay {
     origin: vec3<f32>,
     t_max: f32,
     dir: vec3<f32>,
     cone: u32,
-    space: u32,
 }
 
 // `SceneRay::space` of a ray that sees every coordinate space.
@@ -55,24 +56,42 @@ fn scene_space_of_slot(slot: u32) -> u32 {
     return slot + 1u;
 }
 
+// The coordinate space `ray` travels in (`SCENE_SPACE_ANY`, or a slot plus
+// one).
+fn scene_ray_space(ray: SceneRay) -> u32 {
+    return (ray.cone >> 15u) & 0x1ffu;
+}
+
+// `cone` (`scene_ray_cone`) for a ray in coordinate space `space`.
+fn scene_cone_in_space(cone: u32, space: u32) -> u32 {
+    return (cone & ~(0x1ffu << 15u)) | ((space & 0x1ffu) << 15u);
+}
+
 // Whether `ray` sees geometry authored in space slot `slot`
 // (`helio_camera_sees_space` for rays).
 fn scene_ray_sees_space(ray: SceneRay, slot: u32) -> bool {
-    return ray.space == SCENE_SPACE_ANY || ray.space == slot + 1u;
+    let space = scene_ray_space(ray);
+    return space == SCENE_SPACE_ANY || space == slot + 1u;
 }
 
-// Casters that never move, casters that may, and every caster.
+// Casters that never move, casters that may, and every caster (the mask
+// holds four bits).
 const RAY_MASK_STATIC: u32 = 1u;
 const RAY_MASK_MOVABLE: u32 = 2u;
-const RAY_MASK_ALL: u32 = 0xffu;
+const RAY_MASK_ALL: u32 = 0xfu;
 
+// The cone of a footprint `width` across at the origin, growing by
+// `spread` a metre, seeing the casters of `mask`, in every coordinate space
+// (`scene_cone_in_space` puts it in one).
 fn scene_ray_cone(width: f32, spread: f32, mask: u32) -> u32 {
     let w = select(0u, u32(clamp(round(log2(max(width, 1e-30)) * 8.0 + 160.0), 1.0, 255.0)), width > 0.0);
-    return (pack2x16float(vec2<f32>(spread, 0.0)) & 0xffffu) | ((mask & 0xffu) << 16u) | (w << 24u);
+    let half = pack2x16float(vec2<f32>(max(spread, 0.0), 0.0)) & 0x7fffu;
+    let s = min((half + 8u) >> 4u, 0x7bfu);
+    return s | ((mask & 0xfu) << 11u) | (w << 24u);
 }
 
 fn scene_ray_spread(ray: SceneRay) -> f32 {
-    return unpack2x16float(ray.cone & 0xffffu).x;
+    return unpack2x16float((ray.cone & 0x7ffu) << 4u).x;
 }
 
 fn scene_ray_width(ray: SceneRay) -> f32 {
@@ -86,7 +105,7 @@ fn scene_ray_footprint(ray: SceneRay, t: f32) -> f32 {
 }
 
 fn scene_ray_mask(ray: SceneRay) -> u32 {
-    return (ray.cone >> 16u) & 0xffu;
+    return (ray.cone >> 11u) & 0xfu;
 }
 
 // A hit, one a ray. Of a nearest-hit stream: the distance to the nearest
