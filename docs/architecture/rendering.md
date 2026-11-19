@@ -1128,9 +1128,14 @@ tracer over the streams and light batches, knowing no kind:
   bounce starts as wide as the footprint that found the hit and spreads by
   its lobe, twice the GGX alpha for a specular sample and a 90-degree cone
   for a diffuse one (Akenine-Moller et al., RTG II, 2021).
-- **Restart**: the sum restarts when the camera (its unjittered
-  clip-to-frame transform and eye), the frame's origin, the image size or
-  the scene's buffers (`SceneBufferProjection::content_signature`) change.
+- **Restart**: the sum restarts when the camera (the renderer's
+  `camera_generation`, which the per-frame jitter does not move; a key of
+  the unjittered matrices rounded differently every frame and restarted
+  voxel_craft's sum each frame), the frame's origin, the image size or the
+  scene's buffers (`SceneBufferProjection::content_signature`) change. A
+  host that rewrites rows unchanged every frame restarts it too (a write
+  marks a row changed even when equal): the voxel examples now leave an
+  unchanged light, object and interactor alone.
   There is no frame-level history-invalidation seam in Helio; this is what
   the frame offers, and it does not see a kind's state outside SceneDB (a
   voxel edit, a TLAS payload by itself).

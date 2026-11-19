@@ -32,7 +32,8 @@
 //!    chose the reference's debug view ([`REFERENCE_VIEW`],
 //!    [`REFERENCE_DIFFUSE_VIEW`]).
 //!
-//! The sum restarts when the camera, the frame's origin, the image or what
+//! The sum restarts when the camera (`camera_generation`), the frame's
+//! origin, the image or what
 //! the scene's buffers hold changes (`SceneBufferProjection::content_signature`).
 //! Outside its views every pass records nothing and holds no buffer.
 //!
@@ -710,12 +711,11 @@ impl RenderPass for ReferenceBegin {
         let camera = ctx.camera_data;
         let clip = clip_to_frame(camera);
         let origin = ctx.world_origin;
-        let mut key: Vec<u64> = clip
-            .to_cols_array()
-            .iter()
-            .chain(&camera.position_near)
-            .map(|v| u64::from(v.to_bits()))
-            .collect();
+        // The camera as its host supplied it (`camera_generation`: the
+        // renderer's jitter moves the uploaded matrices every frame and is
+        // not a camera change; unjittering them on the GPU's side rounds
+        // differently each frame).
+        let mut key: Vec<u64> = vec![ctx.camera_generation];
         key.extend([origin.x, origin.y, origin.z].map(f64::to_bits));
         key.extend([
             u64::from(size[0]),
