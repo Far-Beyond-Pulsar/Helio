@@ -109,7 +109,8 @@ pub const BSDF_MARKER: &str = "//!use frame_bsdf";
 /// evaluated it before, with three energy fixes), `bsdf_pdf` and
 /// `bsdf_sample` (GGX's visible normals, cosine diffuse, the light a thin
 /// two-sided surface lets through; weights `eval / pdf`, so unbiased for that
-/// model), `bsdf_facing` (a two-sided surface turned toward the side a hit
+/// model), `bsdf_prepare` / `bsdf_eval_prepared` (the frame made once for
+/// many lights), `bsdf_facing` (a two-sided surface turned toward the side a hit
 /// sees), and the split sum an environment's radiance is weighted by
 /// (`bsdf_environment_split_sum`, `bsdf_fresnel_roughness`).
 ///

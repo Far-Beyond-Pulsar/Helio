@@ -11,6 +11,11 @@
 //                             `wi` with (for multiple importance sampling)
 //   bsdf_sample(s, wo, u)     one direction from three uniform numbers, its
 //                             weight `bsdf_eval / bsdf_pdf` and its density
+//   bsdf_prepare(s), bsdf_eval_prepared(p, wo, wi)
+//                             `bsdf_eval` with the surface's frame made once,
+//                             for a model that lights a point by many lights
+//                             (the deferred lighting: building the frame a
+//                             light cost it 0.1 ms in indoor_cathedral_gi)
 //
 // `wo` and `wi` are unit vectors leaving the surface (toward the eye, toward
 // the light), about the surface's normal as it is: a writer that knows the
@@ -172,19 +177,34 @@ fn bsdf_diffuse_loss(s: SurfaceData, cos_o: f32) -> f32 {
     return 0.0385 * reflectance * by_roughness * by_view;
 }
 
+// A surface with its frame, made once where many lights light it (a
+// lighting model's pixel): `bsdf_eval_prepared` then builds no frame a
+// light. `bsdf_eval(s, ...)` is `bsdf_eval_prepared(bsdf_prepare(s), ...)`.
+struct BsdfPrepared {
+    s: SurfaceData,
+    frame: BsdfFrame,
+}
+
+fn bsdf_prepare(s: SurfaceData) -> BsdfPrepared {
+    return BsdfPrepared(s, bsdf_frame(s));
+}
+
 // GGX's specular lobe times the cosine, `F` given, the half vector `h`.
-fn bsdf_specular(s: SurfaceData, cos_o: f32, cos_i: f32, h: vec3<f32>, f: vec3<f32>) -> vec3<f32> {
+fn bsdf_specular(p: BsdfPrepared, cos_o: f32, cos_i: f32, h: vec3<f32>, f: vec3<f32>) -> vec3<f32> {
+    let s = p.s;
     let n = s.normal;
     let cos_h = max(dot(n, h), 0.0);
     var d: f32;
     var g: f32;
     if (s.flags & SURFACE_FLAG_ANISOTROPIC) != 0u {
-        let frame = bsdf_frame(s);
-        let phi = atan2(dot(h, frame.b), dot(h, frame.t));
+        // `c^2 + (1 - c^2)(cos^2 phi / ax^2 + sin^2 phi / ay^2)` with phi the
+        // half vector's angle about the normal: its tangent and bitangent
+        // components carry `sin theta cos phi` and `sin theta sin phi`.
+        let ht = dot(h, p.frame.t);
+        let hb = dot(h, p.frame.b);
         let ax = s.roughness_aniso_x;
         let ay = s.roughness_aniso_y;
-        let c2 = cos_h * cos_h;
-        let e = c2 + (1.0 - c2) * (cos(phi) * cos(phi) / (ax * ax) + sin(phi) * sin(phi) / (ay * ay));
+        let e = cos_h * cos_h + ht * ht / (ax * ax) + hb * hb / (ay * ay);
         d = 1.0 / (BSDF_PI * ax * ay * e * e + 0.0001);
         g = cos_o / (cos_o + sqrt(ax * ax + (1.0 - ax * ax) * cos_o * cos_o) + 0.0001)
             * (cos_i / (cos_i + sqrt(ay * ay + (1.0 - ay * ay) * cos_i * cos_i) + 0.0001));
@@ -206,6 +226,11 @@ fn bsdf_wrap(s: SurfaceData) -> f32 {
 }
 
 fn bsdf_eval(s: SurfaceData, wo: vec3<f32>, wi: vec3<f32>) -> vec3<f32> {
+    return bsdf_eval_prepared(bsdf_prepare(s), wo, wi);
+}
+
+fn bsdf_eval_prepared(p: BsdfPrepared, wo: vec3<f32>, wi: vec3<f32>) -> vec3<f32> {
+    let s = p.s;
     let n = s.normal;
     let cos_i = dot(n, wi);
     if cos_i <= 0.0 {
@@ -218,7 +243,7 @@ fn bsdf_eval(s: SurfaceData, wo: vec3<f32>, wi: vec3<f32>) -> vec3<f32> {
     let cos_o = max(dot(n, wo), 0.0);
     let h = normalize(wo + wi);
     let f = bsdf_fresnel(max(dot(h, wo), 0.0), s.specular_f0);
-    let specular = bsdf_specular(s, cos_o, cos_i, h, f);
+    let specular = bsdf_specular(p, cos_o, cos_i, h, f);
     let left = (1.0 - f) * (1.0 - s.metallic) * (1.0 - bsdf_diffuse_loss(s, cos_o));
     if (s.flags & SURFACE_FLAG_SUBSURFACE) != 0u {
         // Fix 3: the wrapped lobe normalised over the hemisphere it lights,
