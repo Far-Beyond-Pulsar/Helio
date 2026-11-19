@@ -116,10 +116,13 @@ fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
-// How far a ray leaving frame point `p` starts off its surface: a few ulps
-// of f32 there, and 0.1 mm.
-fn ray_offset(p: vec3<f32>) -> f32 {
-    return 1e-4 + 4e-6 * max(abs(p.x), max(abs(p.y), abs(p.z)));
+// How far a ray leaving frame point `p` starts off the surface a ray of
+// footprint `width` found there: a few ulps of f32 at the point, 2 mm, and a
+// hundredth of the footprint (a tracer resolves geometry about as fine as
+// the footprint, a terrain at a level of cells about that wide, and takes an
+// origin within a thousandth of a cell of a solid face for an inside).
+fn ray_offset(p: vec3<f32>, width: f32) -> f32 {
+    return 0.002 + 4e-6 * max(abs(p.x), max(abs(p.y), abs(p.z))) + 0.01 * width;
 }
 
 // The sky's radiance along unit `d` from frame point `p`: the
@@ -241,7 +244,7 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
                     let alpha = bsdf_alphas(s);
                     let lobe = select(2.0, 2.0 * sqrt(alpha.x * alpha.y), b.lobe == BSDF_LOBE_SPECULAR);
                     let cone = scene_cone_in_space(scene_ray_cone(footprint, scene_ray_spread(ray) + lobe, RAY_MASK_ALL), scene_ray_space(ray));
-                    next = SceneRay(at + face * (sign(side_i) * ray_offset(at)), REFERENCE_REACH, b.wi, cone);
+                    next = SceneRay(at + face * (sign(side_i) * ray_offset(at, footprint)), REFERENCE_REACH, b.wi, cone);
                     want_next = true;
                 }
             }
@@ -322,12 +325,13 @@ fn reference_shadow(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local
             }
             let c = o.throughput * bsdf_eval(s, wo, dir) * light_sample_radiance(sample) * weight;
             if luminance(c) > 0.0 && (!crosses || (s.flags & SURFACE_FLAG_TWO_SIDED) != 0u) {
-                let off = ray_offset(at);
+                let footprint = scene_ray_footprint(ray, hit.t);
+                let off = ray_offset(at, footprint);
                 let distance = light_sample_distance(sample);
                 let reach = select(max(distance - 2.0 * off, 1e-4), REFERENCE_REACH, distance >= LIGHT_SAMPLE_FAR);
                 // As wide as the footprint that found the hit, with no
                 // spread: it stands for that patch of surface.
-                let cone = scene_cone_in_space(scene_ray_cone(scene_ray_footprint(ray, hit.t), 0.0, RAY_MASK_ALL), scene_ray_space(ray));
+                let cone = scene_cone_in_space(scene_ray_cone(footprint, 0.0, RAY_MASK_ALL), scene_ray_space(ray));
                 shadow = SceneRay(at + face * (sign(side_i) * off), reach, dir, cone);
                 light = vec4<u32>(bitcast<vec3<u32>>(c), o.path);
                 want = true;
