@@ -1140,7 +1140,13 @@ sun's rays (0.41 -> 0.21); on the planets 0.06-0.2 under r1, and still
 about 1 ms over r0, the probe walk (1.57-1.58 against r0's in-draw kernel's
 0.95-1.21 with its shading) being the remainder (open, below).
 
-Images: voxel_craft 4-pose burst A/B against r1's final exe: not captured here (the shared GPU lock was held by other sessions' runs past the end of this work); the canopy gate above stands for the footprint answer's agreement with the walk, and the Full kernel changes no image (it serves no consumer yet). Earth and Moon hold images: not compared.
+Images (voxel_craft, four poses, 8-frame burst means, no clouds, RGB 0-1
+mean |difference|): r1-r1 0.0003-0.0012; r1-r2 0.0004-0.0007 and
+0.0007-0.0015 against the two r1 runs, luminance -0.05 to -0.16 %: inside
+run-to-run noise, slightly darker (the footprint answer keeps the shade the
+walk gives; the leaf share now in the surface). r2-r2 and the Earth and
+Moon hold images were not compared (the shared GPU was held by the other
+sessions' runs).
 
 The **contract** changed in one doc comment (`Tracer::surface`): a tracer
 may write a hit's surface in its trace pass as it takes the hit, adding no
@@ -1164,6 +1170,12 @@ Open:
   the appearance table's colours at hits until the ray kernels take the
   scene variant and its groups 2 and 3.
 - A volume of another space still dispatches over a stream (above).
+- **Startup**: the terrain's draw pipelines took 41-74 s to come up in this
+  build's test and voxel_craft runs (every run: no driver cache hit), the
+  r2 contract build's 52 s once and 9 s after (`publish_shows_hits_only_in_front_of_meshes`
+  wall time, same machine; the NVIDIA shader cache at its 1.1 GB size with
+  three sessions compiling). Not bisected: which of this change's draw
+  pipelines misses the cache, or whether it is the cache's size.
 - Fog reads the pages with a texel's bias from points in the air
   (`sun_occlusion_point`, the lights plugin's): under a canopy it takes
   sun within a texel of leaves; a point in the air could read with none.
