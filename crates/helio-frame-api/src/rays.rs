@@ -14,7 +14,9 @@
 //! The TLAS holds triangles only. What traces every kind of geometry (a
 //! voxel terrain is no BLAS) is a ray stream ([`stream`]): the kinds'
 //! tracers answer a consumer's batch of rays, the meshes' by querying this
-//! TLAS.
+//! TLAS. What samples every kind of light at a batch of points is
+//! [`light_samples`]: the lights' kinds' samplers answer it, and a consumer
+//! traces the samples' shadow rays as an occlusion stream.
 //!
 //! How others do it: Unreal's `FRayTracingScene` and Bevy Solari's
 //! `RaytracingSceneBindings` are built from the scene's primitives inside the
@@ -22,6 +24,7 @@
 //! the builder is the kind's, the TLAS is the frame's, so a second kind of
 //! traced content joins the same TLAS without a renderer setter.
 
+pub mod light_samples;
 pub mod stream;
 
 /// The frame's TLAS and the buffers that follow it, for one frame.

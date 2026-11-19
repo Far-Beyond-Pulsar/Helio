@@ -75,9 +75,31 @@ pub const TARGETS: [(&str, ResourceFormat); 8] = [
 pub const OUTPUT_MARKER: &str = "//!use gbuffer_output";
 /// `GBufferOutput` (the fragment outputs for [`TARGETS`], in location order)
 /// and `GBufferDepthOutput` (the same with `frag_depth`): every G-buffer
-/// drawer's fragment returns one, so the layout has one owner.
+/// drawer's fragment returns one, so the layout has one owner. With
+/// [`SURFACE_SNIPPET`], `gbuffer_output(surface, tag, motion)` and
+/// `gbuffer_depth_output` fill them from a `SurfaceData`.
 pub const OUTPUT_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(OUTPUT_MARKER, "shaders/gbuffer_output.wgsl");
+
+/// Marker opting a shader into [`SURFACE_SNIPPET`].
+pub const SURFACE_MARKER: &str = "//!use frame_surface";
+/// The surface at a lit point (`shaders/gbuffer_surface.wgsl`): `SurfaceData`
+/// and its `SURFACE_FLAG_*`, what a material makes of a point, a G-buffer
+/// texel holds, a ray stream's hit holds ([`crate::rays::stream::SceneSurface`])
+/// and a lighting model lights. One struct, two encodings, one encode and one
+/// decode each: `gbuffer_surface_texels` / `gbuffer_surface_at` for the
+/// G-buffer's targets (table in the file), `scene_surface_pack` /
+/// `scene_surface_unpack` for a stream's rows
+/// ([`crate::rays::stream::SURFACE_SNIPPET`]). `surface_data(albedo, normal,
+/// roughness, metallic, emissive)` is a plain surface for a kind without a
+/// material table; `surface_with_transmission` makes it a thin two-sided one.
+///
+/// The frame owns it, not the materials plugin that fills it: the G-buffer
+/// is the frame's, the lighting models and the ray streams' consumers read
+/// it without any material, and a kind with no material (a plain-coloured
+/// voxel) writes one too.
+pub const SURFACE_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(SURFACE_MARKER, "shaders/gbuffer_surface.wgsl");
 
 /// [`TARGETS`]' formats, in location order.
 pub const TARGET_FORMATS: [wgpu::TextureFormat; 8] = [

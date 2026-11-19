@@ -949,6 +949,7 @@ dependencies = [
  "helio-core",
  "helio-feature-api",
  "naga",
+ "pollster",
  "wgpu",
 ]
 

@@ -5,8 +5,9 @@
 //!   feature places its nodes at a slot, or registers **drawers** into a phase
 //!   (and compute that must run before it); a preset lists slots and phases,
 //!   never a feature's nodes.
-//! - [`gbuffer`]: the G-buffer layout every GBuffer drawer writes, and its
-//!   surface tags.
+//! - [`gbuffer`]: the G-buffer layout every GBuffer drawer writes, its
+//!   surface tags, and the surface at a lit point (`SurfaceData`) that a
+//!   texel and a ray's hit both encode.
 //! - [`depth`]: the frame's depth resources (full-resolution depth, Hi-Z).
 //! - [`color`]: the scene colour chain post features read and advance.
 //! - [`media`]: the participating medium integrated along view rays, for
@@ -19,8 +20,10 @@
 //! - [`view`]: the views a frame renders (its camera and the captures
 //!   features ask for) as a drawer sees them when it builds.
 //! - [`rays`]: the frame's TLAS and the buffers that follow it, published by
-//!   whatever builds it; and [`rays::stream`], the ray streams every kind's
-//!   tracer answers, so a consumer traces the whole scene knowing no kind.
+//!   whatever builds it; [`rays::stream`], the ray streams every kind's
+//!   tracer answers, so a consumer traces the whole scene knowing no kind;
+//!   and [`rays::light_samples`], the direct light at a batch of points every
+//!   kind of light's sampler answers.
 //! - [`static_names`]: the read lists of a pass whose reads are what a
 //!   publisher named (media, the sun's transmittance).
 //! - [`host_input`]: resources a host supplies every frame, declared by the

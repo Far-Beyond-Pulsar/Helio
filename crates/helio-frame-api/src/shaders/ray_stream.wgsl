@@ -16,9 +16,9 @@ struct RayStreamHeader {
 }
 
 // A ray: its origin and the most distance it travels (0 or less: no ray in
-// this row), its unit direction, and `cone`. A tracer traces from the origin
-// itself, from distance 0: the consumer starts a ray off the surface it
-// leaves.
+// this row), its unit direction, `cone`, and the coordinate space it is in.
+// A tracer traces from the origin itself, from distance 0: the consumer
+// starts a ray off the surface it leaves.
 //
 // `cone` is the ray's cone (Akenine-Moller et al., "Texture Level of Detail
 // Strategies for Real-Time Ray Tracing", Ray Tracing Gems): its footprint is
@@ -29,11 +29,36 @@ struct RayStreamHeader {
 // width, 0 for none, else `2^((bits - 160) / 8)` metres (a micrometre to
 // kilometres in steps of 9%). A camera or probe ray has no width; a ray
 // that leaves a hit starts as wide as the ray that found the hit was there.
+//
+// `space` is the authored coordinate space the ray travels in, encoded as a
+// camera's (`Camera.view_info.w`): the space's slot plus one, or
+// `SCENE_SPACE_ANY` (0) for a ray that sees every space, as an unrestricted
+// camera does. A tracer answers only with geometry of that space
+// (`scene_ray_sees_space`). A ray serving a view takes the view's
+// (`cameras[0].view_info.w`); a ray leaving a hit keeps its parent's, or the
+// hit's content space where a remap put the hit in another
+// (`helio_frame_api::lighting::VIEW_REMAP_SPACES`). 48 bytes: 12 bytes past
+// `space` are the row's alignment, and stay zero.
 struct SceneRay {
     origin: vec3<f32>,
     t_max: f32,
     dir: vec3<f32>,
     cone: u32,
+    space: u32,
+}
+
+// `SceneRay::space` of a ray that sees every coordinate space.
+const SCENE_SPACE_ANY: u32 = 0u;
+
+// `SceneRay::space` of a ray in authored space slot `slot` (0: the world).
+fn scene_space_of_slot(slot: u32) -> u32 {
+    return slot + 1u;
+}
+
+// Whether `ray` sees geometry authored in space slot `slot`
+// (`helio_camera_sees_space` for rays).
+fn scene_ray_sees_space(ray: SceneRay, slot: u32) -> bool {
+    return ray.space == SCENE_SPACE_ANY || ray.space == slot + 1u;
 }
 
 // Casters that never move, casters that may, and every caster.
@@ -122,45 +147,8 @@ fn scene_occlusion(through: vec3<f32>) -> SceneHit {
     return SceneHit(select(0.0, 1.0, blocked), 0u, stopped.x | (stopped.y << 10u) | (stopped.z << 20u), 0u);
 }
 
-// The surface at a nearest hit, written by the tracer that found it: the
-// shading normal and the face's (both on the side the ray met, packed by
-// `scene_pack_unit`), base colour (RGB8) and metalness (alpha), `params`
-// (roughness in bits 0..8, the share of light the surface lets through from
-// its far side, tinted by its base colour, in bits 8..16: leaves), and the
-// radiance it emits (`scene_pack_radiance`).
-struct SceneSurface {
-    normal: u32,
-    face: u32,
-    base_color: u32,
-    params: u32,
-    emissive: u32,
-}
-
-fn scene_surface(normal: vec3<f32>, face: vec3<f32>, base_color: vec3<f32>, metallic: f32, roughness: f32, transmission: f32, emissive: vec3<f32>) -> SceneSurface {
-    return SceneSurface(
-        scene_pack_unit(normal),
-        scene_pack_unit(face),
-        pack4x8unorm(vec4<f32>(base_color, metallic)),
-        pack4x8unorm(vec4<f32>(roughness, transmission, 0.0, 0.0)),
-        scene_pack_radiance(emissive),
-    );
-}
-
-fn scene_surface_base_color(surface: SceneSurface) -> vec3<f32> {
-    return unpack4x8unorm(surface.base_color).rgb;
-}
-
-fn scene_surface_metallic(surface: SceneSurface) -> f32 {
-    return unpack4x8unorm(surface.base_color).a;
-}
-
-fn scene_surface_roughness(surface: SceneSurface) -> f32 {
-    return unpack4x8unorm(surface.params).x;
-}
-
-fn scene_surface_transmission(surface: SceneSurface) -> f32 {
-    return unpack4x8unorm(surface.params).y;
-}
+// The surface at a nearest hit is a `SceneSurface` row
+// (`//!use frame_ray_surface`, with `//!use frame_surface`).
 
 // A unit vector in 32 bits (octahedral, 16 bits an axis).
 fn scene_pack_unit(n: vec3<f32>) -> u32 {

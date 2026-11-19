@@ -39,7 +39,7 @@
 //!   consumer can hold a ray budget per frame (Call of Duty's variable-rate
 //!   ray tracing) and the frame can report rays per signal.
 //!
-//! What it costs: a ray is 32 bytes, a hit 16, a surface 20, written and
+//! What it costs: a ray is 48 bytes, a hit 16, a surface 32, written and
 //! read once each, and a stream's hit arrives in the same frame only after
 //! the tracers' passes ran. A consumer that needs one visibility test per
 //! pixel against triangles alone can still query the TLAS inline
@@ -60,9 +60,21 @@ use helio_feature_api::{BuildEnv, FeatureRegistrar, NodeBuild};
 /// Marker opting a shader into [`SNIPPET`].
 pub const MARKER: &str = "//!use frame_ray_stream";
 /// The rows' WGSL (`shaders/ray_stream.wgsl`): `RayStreamHeader`,
-/// `SceneRay`, `SceneHit`, `SceneSurface`, and the functions that pack and
-/// read them.
+/// `SceneRay` (and its coordinate space), `SceneHit`, and the functions that
+/// pack and read them (unit vectors, radiance).
 pub const SNIPPET: ShaderSnippet = helio_core::wgsl_snippet!(MARKER, "../shaders/ray_stream.wgsl");
+
+/// Marker opting a shader into [`SURFACE_SNIPPET`].
+pub const SURFACE_MARKER: &str = "//!use frame_ray_surface";
+/// A nearest-hit stream's surface rows (`shaders/ray_surface.wgsl`, with
+/// [`SNIPPET`] and the frame's `frame_surface`,
+/// [`crate::gbuffer::SURFACE_SNIPPET`]): `SceneSurface`,
+/// `scene_surface_pack(surface, face)`, `scene_surface_unpack(row)` and
+/// `scene_surface_face(row)`, the ray side's encode and decode of the
+/// frame's `SurfaceData`. Apart from [`SNIPPET`] so a shader reading rays or
+/// the packings alone needs no `SurfaceData`.
+pub const SURFACE_SNIPPET: ShaderSnippet =
+    helio_core::wgsl_snippet!(SURFACE_MARKER, "../shaders/ray_surface.wgsl");
 
 /// Invocations of a tracer's workgroup: [`StreamHeader::groups`] is the
 /// dispatch for workgroups this size (`RAY_STREAM_GROUP` in WGSL).
@@ -100,7 +112,7 @@ impl StreamHeader {
     }
 }
 
-/// `SceneRay` (frame space; see the WGSL).
+/// `SceneRay` (frame space; see the WGSL), 48 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct SceneRay {
@@ -110,10 +122,52 @@ pub struct SceneRay {
     pub dir: [f32; 3],
     /// The ray's cone ([`Self::cone`]): spread, caster mask and width.
     pub cone: u32,
+    /// The coordinate space it travels in ([`SPACE_ANY`], or
+    /// [`space_of_slot`]): the encoding of a camera's `view_info.w`.
+    pub space: u32,
+    /// The row's alignment (WGSL rounds the struct to 16 bytes): zero.
+    pad: [u32; 3],
+}
+
+/// [`SceneRay::space`] of a ray that sees every coordinate space (as an
+/// unrestricted camera, `view_info.w` 0, does).
+pub const SPACE_ANY: u32 = 0;
+
+/// [`SceneRay::space`] of a ray in authored space slot `slot` (0: the
+/// world): `slot + 1`, a camera's `view_info.w`
+/// (`helio_core::GpuCameraUniforms::with_coordinate_space`).
+pub const fn space_of_slot(slot: u32) -> u32 {
+    slot + 1
 }
 
 impl SceneRay {
     pub const BYTES: u64 = std::mem::size_of::<Self>() as u64;
+
+    /// A ray from `origin` along unit `dir`, at most `t_max` long, with
+    /// cone `cone`, seeing every coordinate space.
+    pub fn new(origin: [f32; 3], t_max: f32, dir: [f32; 3], cone: u32) -> Self {
+        Self {
+            origin,
+            t_max,
+            dir,
+            cone,
+            space: SPACE_ANY,
+            pad: [0; 3],
+        }
+    }
+
+    /// The ray in coordinate space `space` (its encoding, [`SPACE_ANY`] or
+    /// [`space_of_slot`]).
+    pub fn in_space(mut self, space: u32) -> Self {
+        self.space = space;
+        self
+    }
+
+    /// `scene_ray_sees_space`: whether the ray sees geometry authored in
+    /// space slot `slot`.
+    pub fn sees_space(&self, slot: u32) -> bool {
+        self.space == SPACE_ANY || self.space == slot + 1
+    }
 
     /// `scene_ray_cone`: a footprint `width` across at the origin that grows
     /// by `spread` a metre, seeing the casters of `mask`.
@@ -226,7 +280,9 @@ impl SceneHit {
     }
 }
 
-/// `SceneSurface` (see the WGSL).
+/// `SceneSurface` (see the WGSL): a `SurfaceData` (the frame's surface at a
+/// lit point, `crate::gbuffer::SURFACE_SNIPPET`) and the face's normal, in
+/// 32 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
 pub struct SceneSurface {
@@ -235,6 +291,19 @@ pub struct SceneSurface {
     pub base_color: u32,
     pub params: u32,
     pub emissive: u32,
+    pub specular: u32,
+    pub subsurface: u32,
+    pub anisotropy: u32,
+}
+
+/// `SurfaceData::flags` (`SURFACE_FLAG_*` in WGSL).
+pub mod surface_flags {
+    pub const SUBSURFACE: u32 = 1;
+    pub const ANISOTROPIC: u32 = 2;
+    pub const LOW_SPECULAR: u32 = 4;
+    /// A thin two-sided surface: `subsurface` is the share of the light
+    /// behind it that passes through, by colour.
+    pub const TWO_SIDED: u32 = 8;
 }
 
 impl SceneSurface {
@@ -251,9 +320,29 @@ impl SceneSurface {
         (self.params & 0xff) as f32 / 255.0
     }
 
-    /// The share of light let through from the far side.
-    pub fn transmission(&self) -> f32 {
+    /// The material's own occlusion.
+    pub fn ao(&self) -> f32 {
         ((self.params >> 8) & 0xff) as f32 / 255.0
+    }
+
+    /// `SurfaceData::flags` ([`surface_flags`]).
+    pub fn flags(&self) -> u32 {
+        self.params >> 24
+    }
+
+    /// Reflectance at normal incidence.
+    pub fn specular_f0(&self) -> [f32; 3] {
+        [0, 10, 20].map(|shift| ((self.specular >> shift) & 1023) as f32 / 1023.0)
+    }
+
+    /// The share of the light behind the surface that passes through, by
+    /// colour ([`surface_flags::TWO_SIDED`]; none: zero).
+    pub fn transmission(&self) -> [f32; 3] {
+        if self.flags() & surface_flags::TWO_SIDED != 0 {
+            unpack_radiance(self.subsurface)
+        } else {
+            [0.0; 3]
+        }
     }
 }
 
@@ -313,6 +402,32 @@ pub enum RayClass {
     Occlusion,
 }
 
+/// How much of the surface at a hit a nearest-hit stream needs
+/// ([`Stream::detail`]). A tracer answers at least what a stream asks, and
+/// may use a cheaper kernel for a lower level; every level writes a whole
+/// [`SceneSurface`], a lower one leaving what it does not evaluate at
+/// `surface_data`'s neutral values.
+///
+/// A property of the stream, not of each ray: a tracer picks its kernel per
+/// stream when the graph is built (no per-ray branch over material code, no
+/// bit in a full ray row), and a consumer with rays of several classes (a
+/// path tracer's camera rays and its diffuse bounces) writes them into a
+/// stream per class, which is how ray classes are budgeted anyway.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum SurfaceDetail {
+    /// What a diffuse consumer lights (probes, a radiance cache, diffuse
+    /// bounces): base colour, emission, the shading normal and the share let
+    /// through from behind, at the ray's footprint (`scene_ray_footprint`:
+    /// textures at the mip the cone covers); roughness and metalness as the
+    /// material's constants.
+    Diffuse,
+    /// The material in full, as the G-buffer's drawers evaluate it (its
+    /// template or graph, normal maps, every `SurfaceData` field), at the
+    /// ray's footprint: reflections, a specular consumer, the reference.
+    #[default]
+    Full,
+}
+
 /// A batch of rays a consumer writes each frame and the kinds' tracers
 /// answer (module docs). Its buffers are graph resources under these names;
 /// the consumer owns them ([`StreamBuffers`]).
@@ -325,6 +440,10 @@ pub struct Stream {
     /// Rays come in runs of this many rows from one origin ([`Self::run`];
     /// 1: no runs).
     pub run: u32,
+    /// What a nearest-hit stream needs of each hit's surface
+    /// ([`Self::with_detail`]; [`SurfaceDetail::Full`] unless the
+    /// consumer asks for less; occlusion streams write none).
+    pub detail: SurfaceDetail,
     /// [`StreamHeader`], one.
     pub header: &'static str,
     /// [`SceneRay`] rows.
@@ -345,6 +464,7 @@ impl Stream {
             class,
             capacity,
             run: 1,
+            detail: SurfaceDetail::Full,
             header: resource("ray_header"),
             rays: resource("rays"),
             hits: resource("hits"),
@@ -353,8 +473,8 @@ impl Stream {
     }
 
     /// A stream whose rays come in runs of `run` consecutive rows, from row
-    /// 0 (the last run may be short), the rays of a run sharing their origin
-    /// and caster mask: a probe's rays, a hit's shadow rays toward several
+    /// 0 (the last run may be short), the rays of a run sharing their origin,
+    /// caster mask and coordinate space: a probe's rays, a hit's shadow rays toward several
     /// lights, a pixel's primary and its samples. A tracer whose cost has a
     /// part that depends on the origin alone (placing it in the kind's own
     /// structure: a voxel terrain's chunk trees) may pay it once a run; one
@@ -363,6 +483,13 @@ impl Stream {
     /// that made the rays that way.
     pub fn with_run(mut self, run: u32) -> Self {
         self.run = run.max(1);
+        self
+    }
+
+    /// A stream whose hits need only `detail` of their surface
+    /// ([`SurfaceDetail`]).
+    pub fn with_detail(mut self, detail: SurfaceDetail) -> Self {
+        self.detail = detail;
         self
     }
 
@@ -615,27 +742,31 @@ mod tests {
     #[test]
     fn rows_have_their_contract_sizes() {
         assert_eq!(StreamHeader::BYTES, 16);
-        assert_eq!(SceneRay::BYTES, 32);
+        assert_eq!(SceneRay::BYTES, 48);
         assert_eq!(SceneHit::BYTES, 16);
-        assert_eq!(SceneSurface::BYTES, 20);
+        assert_eq!(SceneSurface::BYTES, 32);
     }
 
     #[test]
     fn a_cone_keeps_its_spread_mask_and_width() {
-        let ray = SceneRay {
-            cone: SceneRay::cone(0.0, 0.443, MASK_ALL),
-            ..Default::default()
-        };
+        let ray = SceneRay::new(
+            [0.0; 3],
+            1.0,
+            [0.0, 1.0, 0.0],
+            SceneRay::cone(0.0, 0.443, MASK_ALL),
+        );
         assert!((ray.spread() - 0.443).abs() < 2e-4, "{}", ray.spread());
         assert_eq!(ray.mask(), MASK_ALL);
         assert_eq!(ray.width(), 0.0);
         // Widths keep within their step (2^(1/16) either way), from a
         // micrometre to kilometres; the other fields are untouched.
         for width in [1e-6f32, 0.002, 0.1, 1.0, 37.5, 3000.0] {
-            let ray = SceneRay {
-                cone: SceneRay::cone(width, 0.01, MASK_STATIC),
-                ..Default::default()
-            };
+            let ray = SceneRay::new(
+                [0.0; 3],
+                1.0,
+                [0.0, 1.0, 0.0],
+                SceneRay::cone(width, 0.01, MASK_STATIC),
+            );
             let ratio = ray.width() / width;
             assert!(
                 (0.957..1.045).contains(&ratio),
@@ -760,5 +891,35 @@ mod tests {
         assert_eq!(nearest.run, 1);
         assert_eq!(nearest.with_run(64).run, 64);
         assert_eq!(nearest.with_run(0).run, 1);
+    }
+
+    /// A stream asks for the material in full unless its consumer asks for
+    /// less.
+    #[test]
+    fn a_stream_asks_for_its_surface_detail() {
+        let nearest = Stream::new("test_probe", RayClass::Nearest, 128);
+        assert_eq!(nearest.detail, SurfaceDetail::Full);
+        let diffuse = nearest.with_detail(SurfaceDetail::Diffuse);
+        assert_eq!(diffuse.detail, SurfaceDetail::Diffuse);
+        assert!(SurfaceDetail::Diffuse < SurfaceDetail::Full);
+        // Another detail is another stream's permutation, same resources.
+        assert_ne!(diffuse, nearest);
+        assert_eq!(diffuse.rays, nearest.rays);
+    }
+
+    /// A ray's space is a camera's encoding: any space, or a slot plus one;
+    /// overlapping places in two spaces are told apart by it alone.
+    #[test]
+    fn a_ray_sees_the_spaces_a_camera_would() {
+        let ray = SceneRay::new([1.0, 2.0, 3.0], 10.0, [0.0, 1.0, 0.0], 0);
+        assert_eq!(ray.space, SPACE_ANY);
+        assert!(ray.sees_space(0) && ray.sees_space(7));
+        let world = ray.in_space(space_of_slot(0));
+        assert!(world.sees_space(0) && !world.sees_space(7));
+        let pocket = ray.in_space(space_of_slot(7));
+        assert!(pocket.sees_space(7) && !pocket.sees_space(0));
+        assert_eq!(pocket.origin, world.origin);
+        // The highest slot (255) still encodes.
+        assert!(ray.in_space(space_of_slot(255)).sees_space(255));
     }
 }
