@@ -1014,3 +1014,184 @@ step changes encodings, not shading.
   covered by compilation and the tracer's own GPU test, not by frames);
   Earth and Moon holds (voxel_flight), whose terrain code changed only in
   its rows' packing; the engine's render acceptance suite.
+
+#### Materials at mesh hits
+
+A mesh hit's surface is its material, evaluated at the hit as the G-buffer's
+drawers evaluate it. `mesh_rays_surface` (the row's flat colour and the
+material's constants) and the projections' texture means are deleted.
+
+**The row and the programs** (`helio-mesh-api`). `RayInstance` lost
+`base_color` and `emissive` (64 to 48 bytes) and names the program its
+material is evaluated by (`program`): an index of the frame's `RayPrograms`,
+a `PayloadContract` (`RAY_PROGRAMS`) both projections publish with the TLAS.
+A program is the drawers' material key without raster flags
+(`RayProgram { template, graph_hash }`); entry 0 is always the table-driven
+evaluation (`RayProgram::TABLE`: the default class, no graph). The engine
+projection reads each instance's resolved row and key through
+`helio_mats::instance::resolved_row` / `resolved_key` (the mirror's CPU
+shadow as an explicit API; it never resolves under the scene lock); the
+standalone one from its object rows, and now traces graph materials.
+`mesh_ray_rows` (the rows, transforms and space groups) was split from
+`mesh_ray_surface` (the pools, triangles, `ray_triangle_tangent`,
+`mesh_ray_normals`) so a pass reading rows alone binds no pool.
+
+**One evaluator, lowered for compute** (`helio-mats`). A hit program is the
+meshes' `HIT_PROGRAM` (`mesh_hit_surface.wgsl`) with the class's template and
+the graph composed in by `RadiantTemplate::compose`, the drawers' own
+composition, then lowered by `helio_mats::shader::explicit_gradients`: every
+texture read of the evaluator at the gradients the stage sets
+(`//!use material_gradients`, through each slot's UV transform), a graph's
+own samples at the UV gradients, specular anti-aliasing's normal derivatives
+as the stage's, other derivatives zero. Virtual geometry's visibility-buffer
+shade had a private copy of this lowering (`gradient_sampling`); it now uses
+the materials' one. A material is thus read alike on the raster, in a
+visibility buffer and at a hit.
+
+**Texture detail from the ray's cone.** The cone at the hit
+(`scene_ray_footprint`) meets the triangle's plane in an ellipse; its two
+axes, along the slope toward the ray and across it, each spanning the
+footprint's width seen along the ray (Akenine-Moller et al., "Improved
+Shader and Texture Level of Detail Using Ray Cones", JCGT 2021, the
+anisotropic formulation Ray Tracing Gems II ch. 7 builds on), give the
+barycentrics of their ends, hence UV0 gradients and the shading normal's
+turn across the footprint. `textureSampleGrad` then picks each texture's
+level by its own size and UV transform, anisotropically where the sampler
+allows; a head-on cone one, four and sixteen texels wide reads mips 0, 2
+and 4, and a slanted one a coarser level along its slope
+(`textures_are_read_at_the_ray_cone_s_footprint`). The axes are the full
+width (a pixel's derivatives are a pixel apart), so a camera ray as wide as
+its pixel reads the level the raster read there.
+
+**Detail.** `default_pbr_surface` reads the pipeline constant
+`MATERIAL_SURFACE_DIFFUSE` (false for every drawer): set, it returns base
+colour and emission at the footprint, the vertex normal, and the material's
+constant roughness and metalness, with no normal, ORM, occlusion or specular
+texture read and no specular anti-aliasing. One module a program, two
+pipelines (one a `SurfaceDetail`); the compiler drops what the diffuse one
+does not read. A program still runs at `Diffuse`, so a graph's base colour
+is the graph's in GI.
+
+**Binning** (`helio_pass_mesh_rays::surfaces`). Where the frame's only
+program is the table's (no other present, or none compiled yet) one dispatch
+over the stream's rows shades every meshes hit, the shape of the deleted
+pass. Otherwise three passes bin the hits (`mesh_hit_bins.wgsl`): a count
+(each hit takes its bin, `remap[program]`, and a rank, from a workgroup-local
+histogram added to the bin once a workgroup, not an atomic a ray), a prefix
+over the bins in one workgroup (an invocation a bin: offsets, indirect
+dispatch arguments, counters cleared for the next frame), a scatter into
+the list (a buffer of its own: the arguments buffer holds arguments only);
+then
+one indirect dispatch a bin of its program over its own hits (empty bins
+dispatch nothing). This is the wavefront renderers' sort by material (Laine,
+Karras and Aila 2013; Cycles X sorts by shader) and what SER does in
+hardware, as bins: a hit's program is known before shading, the bins are few
+and bounded, so a counting pass beats a radix sort. **Bound and fallback**:
+at most `MAX_HIT_PROGRAMS` (64) bins a frame, bin 0 the table's; a program
+compiling (`helio_core::compile::Compiling`, started the first frame a row
+names it, never on the frame), one whose graph is not registered yet, one
+that failed, and programs past the bound are evaluated by the table-driven
+program (the row's factors and textures): a defined surface, never a hole.
+The table-driven program is built with the graph, as the trace kernels are.
+
+**Vertex attributes at a hit**: UV0 and the tangent frame (the vertex
+tangents and the bitangent's sign, turned with a two-sided back face as the
+G-buffer's fragment turns them; a skinned instance's normals and tangents
+from the skin cache; a proxy's tangent from its triangle's UV directions).
+Meshes carry no vertex colour (`PackedVertex` has none, and no drawer reads
+one), so neither does a hit.
+
+**Virtual-geometry proxies** (Pulsar-Native#1744). A proxy LOD keeps its
+triangles grouped by material section (`helio_vg_stream::ProxySection`: the
+clusters' `material_slot`, the mesh's section ordinal); the engine
+projection makes each section a BLAS segment with its own row and material,
+the standalone one traces the section its object row draws. A hit on a proxy
+is shaded by its section's material with the proxy's UVs (textures and
+normal maps included).
+
+**The leaf's back.** What leaves the back of a thin two-sided surface lit
+from the front is what it transmits: its transmission share of its colour
+(`helio_mats` `material_transmitted`, `surface_with_transmission`), not its
+reflectance. A leaf whose back gave off its full albedo while its front
+reflects the same albedo returns up to twice the light that reaches it. The
+foliage template now describes its leaf with `material_transmitted`, the
+description a hit already carried; the raster and a hit agree. No shipped
+scene draws a mesh with the foliage class: voxel_craft's leaves are the voxel
+publish's (which still writes the full albedo in the raster, `chunk_draw.wgsl`
+`surface_with_transmission(surface, albedo)`, and the share at hits: the
+voxel plugin's to change to `material_transmitted`), its grass the foliage
+plugin's procedural blades (no transmission). voxel_craft's raster image is
+unchanged by this step.
+
+**Measured** (RTX 3060, the GPU shared with two other agents' runs).
+
+`indoor_cathedral_gi` (all-mesh, flat materials, every hit the table-driven
+program, one dispatch, `Diffuse`), the build before this step (kept
+executable) against this one, interleaved, three runs each, median of the
+frames from 60 to the capture:
+
+| | before (flat colour) | after (material at the hit) |
+|---|---|---|
+| MeshRaySurfaces / MeshHitSurfaces gi_probe | 0.0696-0.0727 | 0.0778-0.0819 |
+| GI / MeshRays gi_probe / GILight / GIIntegrate | 0.115 / 0.115 / 0.383 / 0.246 | 0.118 / 0.114 / 0.378 / 0.246 |
+| Image at frame 240 (RGB 0-1, mean abs difference) | base-base 0.0005-0.0010 | new-new 0.0003-0.0004; base-new 0.0002-0.0010 |
+| Mean luminance | 0.1790-0.1800 | 0.1790-0.1792 |
+
+The material evaluation costs about 0.009 ms (12 %) over the flat row on
+the cathedral's 174,080 probe rays. The image does not change beyond
+run-to-run noise: the cathedral's materials are untextured, so a hit's
+material evaluated is the row's colour the flat path wrote; where a
+texture speaks the bounce takes it (the acceptance suite's textured wall).
+Images: `C:/t/r2m/cathedral_{base,new}_{1,2,3}.png`.
+
+The binned path, synthetic (`mesh_rays_gpu`'s `hit_surface_cost`, 174,080
+rays onto 81 textured, normal-mapped quads, surface passes alone, idle
+between frames): the table-driven program alone 0.09 ms (`Diffuse`) and
+0.12-0.13 ms (`Full`); with binning, 2.1 ms with one used bin, 2.7-3.0 ms
+for 2 programs, 3.7-4.1 ms for 8, 7.6-8.7 ms for 64 (72, eight past the
+bound: the same as 64). Skipping stages located the cost: the count and
+offsets passes are small, the scatter and the shading kernels over the
+scattered list are not. These figures come from timestamps around passes
+that leave the GPU idle between frames on a GPU other agents were using
+(the table-alone figure ranged 0.09 to 1.4 ms across runs), and a
+throughput harness that keeps the GPU loaded is written but was not run;
+they show that binning costs a large multiple of the shading it bins on
+this shape, not its exact size.
+
+**Acceptance on the engine path** (`installed_plugins`' `ray_tier_acceptance`,
+the editor's headless renderer, the shipped deferred graph, a ray-query
+device; skipped without one): GI's bounce on the ground before a wall drawn
+with a graph sampling a red texture is red (0.193, 0.010, 0.0), before a
+procedural graph's green wall green (0.049, 0.233, 0.023), before a grey
+wall grey (0.115, 0.143, 0.111), with three programs in three bins; a
+cut-out card shadows the ground by its leaves (0.05) and not its holes
+(0.42). The engine's graph materials carry their own class
+(`MATERIAL_CLASS_CUSTOM`), which no template registry holds: a graph program
+of that class composes over the default class's template, as the drawers
+do (before that, a graph's hits took the table's evaluation of its fallback
+row, which the first runs of this suite caught). `skinned_frames` now
+asserts and runs in local gates (rest against bent 1.84, bent after rest
+against bent fresh 0.19, tracing the tube 0.48 and the tree 0.38, 8-bit).
+The one-surface test is the meshes' `a_hit_s_surface_is_the_g_buffer_s_at_the_same_pixel`
+(a standalone Helio host: the deferred graph's G-buffer decoded with
+`gbuffer_surface_at` against camera rays through the same pixels, a `Full`
+stream, two programs binned): base colour, metalness and roughness within
+2-3/255, normals within 0.01 rad, emission within 2 %, over 82 floor, 58
+normal-mapped metallic wall and 9 emissive samples. It runs on the meshes'
+standalone host because the engine registers no test feature in its graph.
+
+**Open**
+
+- **The binned path's cost** (above): measured large, not understood. The
+  candidates are the list's memory pattern (the kernels read hits, rays and
+  surfaces through the list) and the scatter. Until it is found, a frame
+  pays it only where its rows name more than the table-driven program (a
+  graph or a non-default class among traced materials); the table-only
+  frame is one dispatch. Next: the loaded throughput harness, then Nsight
+  on the scatter and one bin's kernel.
+- **The voxel publish's leaf transmission** (`chunk_draw.wgsl`,
+  `surface_with_transmission(surface, albedo)` in the raster) is the voxel
+  plugin's to move to `material_transmitted`; its hits already carry the
+  share.
+- **Deforming static meshes in the engine TLAS** (Pulsar-Native#1744's last
+  item) are not part of this step.
