@@ -61,11 +61,11 @@ mod stages;
 pub use stages::{ReferenceAccumulate, ReferenceDisplay, ReferenceImage, ReferenceStage, Step};
 
 /// The debug view of the reference's image.
-pub const REFERENCE_VIEW: u32 = 60;
+pub const REFERENCE_VIEW: u32 = 62;
 /// The debug view of its indirect diffuse: the light that reached the
 /// camera's hit by a first bounce off a diffuse lobe (what a real-time
 /// indirect diffuse, the deferred lighting's own debug view 23, holds).
-pub const REFERENCE_DIFFUSE_VIEW: u32 = 61;
+pub const REFERENCE_DIFFUSE_VIEW: u32 = 63;
 
 /// The most stages a graph unrolls.
 pub const MAX_DEPTH: u32 = 12;
@@ -506,7 +506,7 @@ impl Feature for ReferenceFeature {
                 "Debug: Reference Path Tracer",
                 "Passes: Debug",
                 "A brute-force path tracer over every kind's ray tracer and light sampler, shown \
-                 by its debug views (60: the image, 61: its indirect diffuse). Records nothing \
+                 by its debug views (62: the image, 63: its indirect diffuse). Records nothing \
                  while neither is shown; builds nothing where nothing traces rays.",
                 build,
             )

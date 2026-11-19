@@ -23,6 +23,8 @@ pub struct ReferenceStage {
     shared: Arc<Shared>,
     depth: u32,
     step: Step,
+    /// `ReferenceShade d<depth>` and so on: a timing a stage.
+    name: &'static str,
     reads: &'static [&'static str],
     writes: &'static [&'static str],
 }
@@ -53,7 +55,13 @@ impl ReferenceStage {
                 reads.extend([s.shadows[d].header, s.shadows[d].hits]);
             }
         }
+        let step_name = match step {
+            Step::Shade => "ReferenceShade",
+            Step::Shadow => "ReferenceShadow",
+            Step::Resolve => "ReferenceResolve",
+        };
         Self {
+            name: helio_frame_api::static_name(&format!("{step_name} d{depth}")),
             reads: helio_frame_api::static_names(&reads),
             writes: helio_frame_api::static_names(&writes),
             shared,
@@ -65,11 +73,7 @@ impl ReferenceStage {
 
 impl RenderPass for ReferenceStage {
     fn name(&self) -> &'static str {
-        match self.step {
-            Step::Shade => "ReferenceShade",
-            Step::Shadow => "ReferenceShadow",
-            Step::Resolve => "ReferenceResolve",
-        }
+        self.name
     }
 
     fn reads(&self) -> &'static [&'static str] {
