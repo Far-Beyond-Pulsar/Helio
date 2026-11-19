@@ -1027,8 +1027,10 @@ Cycles walk a light BVH with a bounded-importance traversal (Conty and
 Kulla 2018). The screen-tile lists the lights already build (the deferred
 lighting's binning, HLFS's grids) cover what the camera sees and nothing
 else: a bounce, a probe or a reflection's hit is off the screen as often as
-on it, so the sampler builds its own world-space structure, once a frame,
-before the first batch a graph samples:
+on it, so the sampler builds its own world-space structure before the first
+batch a graph samples, again only when the light list's contents or size,
+the eye's finest cell or the frame's origin change (indoor_cathedral_gi with
+its lights untouched: 0.003 ms, against 0.06 a rebuild):
 
 - **The grid**: six nested levels of 32^3 cubic cells about the eye, level
   `l`'s cells `2^l` m across (32 m to 1 km wide). A local light lives in the
@@ -1059,7 +1061,9 @@ before the first batch a graph samples:
   matches them: a light of slot `s` reaches a query whose space is
   `SCENE_SPACE_ANY` or `s + 1` (`light_query_sees_space`).
 - **What scales with what**: the build is linear in the light list's rows
-  and the grid's cells, once a frame however many batches ask; a point
+  and the grid's cells, once however many batches ask (and a member only
+  while one of them can be: a batch added under a member gate leaves the
+  grid with it); a point
   costs the lights that can reach it (the globals and one cell a level),
   not every light. What the grid does not bound: many lights whose ranges
   exceed a kilometre, or lights far from the eye, which are globals every
@@ -1087,19 +1091,75 @@ light arrives (its lights, shadows, indirect inputs), not how the surface
 returns it, so two models over one G-buffer cannot disagree about a surface
 and the reference judges the real-time image with the same reflectance.
 `bsdf_eval(s, wo, wi)` (the BSDF times the cosine), `bsdf_pdf`,
-`bsdf_sample(s, wo, u)`, and the split sum an environment is weighted by
-(`bsdf_environment_split_sum`, `bsdf_fresnel_roughness`). The model: GGX
-with alpha = roughness^2 (anisotropic alphas along the turned tangent),
-Smith's height-correlated G2 (the deferred lighting's Schlick-k remapping of
-roughness was a raster-only approximation), Schlick's Fresnel with a
-grazing reflectance of 0 under 2% F0 (Unreal's `F_Schlick`: F0 0 is purely
-diffuse), sampled by its visible normals (Dupuy and Benyoub 2023); Lambert
-weighted by `(1 - metallic)(1 - F(wo.h))`, wrapped for subsurface surfaces;
-a thin two-sided surface's back passing `subsurface_color / pi`. The lobes
-are drawn in proportion to an estimate of what each reflects and every
-density is the mixture's. The materials' `pbr_eval.wgsl` (its terms, which
-the deferred lighting composed, and the shading-cost probe's own
-Cook-Torrance copy) is deleted.
+`bsdf_sample(s, wo, u)`, `bsdf_prepare` / `bsdf_eval_prepared` (the
+surface's frame made once where many lights light it), `bsdf_facing` (a
+two-sided surface turned toward the side a hit sees, as a drawer turns it by
+`front_facing`), and the split sum an environment is weighted by
+(`bsdf_environment_split_sum`, `bsdf_fresnel_roughness`).
+
+- **The model is the one the engine lit with**: `bsdf_eval` is the deleted
+  `pbr_eval.wgsl` and the deferred lighting's `pbr_direct_light`, term for
+  term: GGX with alpha = roughness^2 and its `+1e-4`, Smith-Schlick masking
+  with Karis's remapping `k = (roughness + 1)^2 / 8`, `D G F / (4 n.wo n.wi +
+  1e-4)`, the anisotropic distribution and masking of
+  `roughness_aniso_x/_y`, Schlick's Fresnel at `wo.h`, Lambert weighted by
+  `(1 - F)(1 - metallic)`, the wrapped subsurface lobe mixed with
+  `subsurface_color / pi`, a thin two-sided surface's back passing
+  `subsurface_color / pi`. A first version of this contract replaced the
+  model (Smith's height-correlated G2, an F90 rule, a flip of two-sided
+  normals); moving the evaluation must not change it, so it was put back
+  (the table below measures each term).
+- **Changed only where it gained energy** (the furnace, below): (1) the
+  grazing reflectance is 0 under 2% F0 (Unreal's `F_Schlick`; F0 0 gained
+  4.8% from a grazing specular lobe on a full diffuse one); (2) the diffuse
+  lobe is scaled by `1 - bsdf_diffuse_loss`, a bound measured by quadrature
+  of this model on what `1 - F(wo.h)` over-counts (1.8% gained at F0 4%,
+  3.4% at 2%, roughness 0.3, n.wo 0.2; zero at normal views, smooth and
+  rough surfaces and F0 past 7%); (3) the wrapped lobe is normalised (it
+  returned `(1 + 2w) / (1 + w)`, up to 37% more), its specular part keeps
+  its own cosine and the scattered light is what the specular lobe leaves.
+  The principled replacement of (2) is a multiple-scattering GGX with its
+  directional albedo tabulated (Kulla and Conty 2017; Filament's energy
+  compensation): a change of the engine's look, not of where it is
+  evaluated, so not here.
+- **Sampling**: the diffuse and through lobes by the cosine, the specular
+  lobe by GGX's visible normals (Dupuy and Benyoub 2023, alpha floored at
+  0.045^2), lobes drawn in proportion to an estimate of what each reflects,
+  every density the mixture's and every weight `bsdf_eval / bsdf_pdf`: an
+  estimator is unbiased for whatever `f` is evaluated, so the sampler need
+  not be the model.
+
+How each term changed voxel_craft's image against r1's merged build (four
+poses, a burst of four frames each, clouds off; mean |difference| of RGB 0-1
+and luminance ratio; terms put back one at a time from the first version,
+from disk with `HELIO_SHADER_FROM_DISK`):
+
+| step | mean \|d\| | luminance |
+|---|---|---|
+| r1 against r1 (noise) | 0.0003 | 1.0003 |
+| r2's base build against r1 | 0.0007 | 1.0000 |
+| first version (exact Smith G2, F90 rule, two-sided flip, no faint-light cut) | 0.0022 | 1.0028 |
+| + the old Fresnel (F90 1) | 0.0020 | 1.0032 |
+| + the old specular and diffuse terms (Smith-Schlick, the epsilons) | 0.0003 | 1.0004 |
+| + no two-sided flip | 0.0008 | 1.0004 |
+| + the faint-light cut (all old terms) | 0.0006 | 1.0004 |
+| the three energy fixes on the old terms (from disk) | 0.0003 | 1.0002 |
+| as built (release) | 0.0009 | 1.0000 |
+
+So the masking term carried the change (the height-correlated G2 against the
+remapped Smith-Schlick), the F90 rule none (voxel_craft has no F0 under 2%),
+the flip and the cut nothing measurable. The +10.7% reported before compared
+a kept r1 capture with a fresh run of another setup; interleaved and alike,
+the first version was +0.28%. indoor_cathedral_gi (frame 240, two runs
+each): before-before 0.0005, after-after 0.0007, before-after 0.0008-0.0009,
+luminance +0.3% (the chandeliers flicker by wall time).
+
+The cost: `DeferredLight` took 0.58-0.62 ms in indoor_cathedral_gi against
+0.50 before. Not the math (the old shader run from disk in this build: 0.49-
+0.52; the old formula inline in the new shader: 0.51) but the anisotropic
+frame `bsdf_eval` built a light (with the anisotropic branch removed: 0.50);
+`bsdf_prepare` builds it once a pixel: 0.50-0.52 ms as built, against
+0.49-0.53 for r2's base build.
 
 **The reference path tracer** (`helio-pass-reference`, a Helio pass crate in
 the feature layer: it needs only frame contracts, so it lives below every
@@ -1119,15 +1179,29 @@ tracer over the streams and light batches, knowing no kind:
   `ReferenceResolve`. Two nearest streams, one batch and one shadow stream
   serve every depth (the stages alternate them). `ReferenceAccumulate` sums
   each pixel's paths in 32-bit floats (a path that came back not finite is
-  counted as no light); no cache, no denoiser, no clamp.
+  counted as no light); no cache, no denoiser, no clamp. A frame any tracer
+  answered short of (`stream::Answers`: geometry it could not trace yet) is
+  traced but not summed.
 - **The sky** on a miss is the atmosphere's sky table back to radiance
   (GI's probe rays take it the same way); the sun's disc is not in it, the
   sun being a delta light the sampler samples, so it is counted once.
   Emissive surfaces are emission at hits (no sampler offers them), weight 1.
 - **Ray cones**: a camera ray starts with no width and a pixel's spread; a
-  bounce starts as wide as the footprint that found the hit and spreads by
-  its lobe, twice the GGX alpha for a specular sample and a 90-degree cone
-  for a diffuse one (Akenine-Moller et al., RTG II, 2021).
+  bounce leaves its hit as a point and spreads by its lobe, twice the GGX
+  alpha for a specular sample and a 90-degree cone for a diffuse one
+  (Akenine-Moller et al., RTG II, 2021); a shadow ray is a point's
+  visibility, no width and no spread. Shadow rays as wide as the camera's
+  footprint at the hit (the first version) were all stopped leaving
+  voxel_craft's meadow: the terrain came out black. Proof, by single-change
+  runs of the reference at one pose: shadows ignored, the terrain is lit;
+  shadow rays offset 0.25 m, lit; shadow rays of zero width, lit, with the
+  trees' shadows; the first version's rays with the meadow's foliage off
+  (`VOXEL_CRAFT_NO_FOLIAGE`), lit. Of the tracers only the meshes' reads a
+  ray's width (cut-outs tested at the mip of the footprint); which geometry
+  of the meadow stops a wide ray was not found.
+- **Ray offsets**: a reference ray starts `0.002 + 4e-6 |p| + footprint /
+  100` off the surface it leaves, along the hit's face (the terrain takes an
+  origin within 1/1024 of a cell of a solid face for an inside hit).
 - **Restart**: the sum restarts when the camera (the renderer's
   `camera_generation`, which the per-frame jitter does not move; a key of
   the unjittered matrices rounded differently every frame and restarted
@@ -1139,45 +1213,44 @@ tracer over the streams and light batches, knowing no kind:
   There is no frame-level history-invalidation seam in Helio; this is what
   the frame offers, and it does not see a kind's state outside SceneDB (a
   voxel edit, a TLAS payload by itself).
-- **How it shows**: debug views 62 (`REFERENCE_VIEW`, the image) and 63
-  (`REFERENCE_DIFFUSE_VIEW`, the light that reached the camera's hit by a
-  first bounce off a diffuse lobe), registered like every pass's debug
-  views; the mean covers the scene colour at `Slot::Lighting` 900 and goes
-  through the rest of the chain. Outside them every pass records nothing and
-  holds no buffer (the passes stay in the graph: Helio has no rebuild on a
-  debug view's change). `ReferenceDisplay::image` gives a host or test the
-  sums (`vec4` a pixel, rgb and count) and, once asked for
-  (`request_snapshot`), the real-time scene colour at the same pixels.
+- **Only while shown**: `RenderGraph::set_member_gate` (helio-core) puts
+  the passes added under a gate out of the schedule while the gate is
+  closed. The reference's node adds its passes, its streams' tracer passes
+  (`stream::trace`) and its batches' sampler passes
+  (`light_samples::sample`) under one gate, open while debug view 62
+  (`REFERENCE_VIEW`, the image) or 63 (`REFERENCE_DIFFUSE_VIEW`, the light
+  that reached the camera's hit by a first bounce off a diffuse lobe) is
+  shown; its buffers are freed when it leaves. The light grid, shared by
+  every batch, is a member while any of its batches can be. indoor_cathedral_gi
+  with the reference off: 35 passes scheduled and 55 dormant, against 80
+  scheduled in the first version; the 45 that left are the reference's own
+  39 (each idle at the timer's 0.003 ms floor before) and its batches' 6
+  sampler passes; the GI passes' and `DeferredLight`'s timings
+  are those of r2's base build (table below). `ReferenceDisplay::image`
+  gives a host or test the sums (`vec4` a pixel, rgb and count) and, once
+  asked for (`request_snapshot`), the real-time scene colour at the same
+  pixels.
 - **Settings**: `ReferenceSettings` (resolution scale, paths a frame,
   bounces), described for hosts as `helio_pass_reference::REFERENCE`.
 - **Runs**: the camera stream is the first real stream in runs. The
   terrain's run entry places a run's origin with one thread and reads a
   start row a run (`rows / run` rows), nothing sized by the run's length, so
   a run of 2^19 rays costs one thread; nothing needed changing.
-- **Ray offsets**: a reference ray starts `0.002 + 4e-6 |p| + footprint /
-  100` off the surface it leaves. 0.1 mm made every bounce and shadow ray
-  from voxel_craft's terrain an inside hit (the terrain takes an origin
-  within 1/1024 of a cell of a solid face for one, and a cell is about a
-  footprint wide). That was one cause of a black terrain in the reference;
-  it is not the only one (see Open).
 
 **Verified** (RTX 3060):
 
 - The BSDF (`helio-frame-api` `tests/bsdf_gpu.rs`, 2M directions a case,
-  eight surfaces at three view angles): the evaluated integral and the
-  sampled estimate agree within five standard errors everywhere; a white
-  Lambertian surface (F0 0) reflects 1.0000, white metals 0.31 to 0.99
-  (single-scattering GGX loses energy with roughness); `bsdf_pdf`
-  integrates to 0.97..1.03; a specular weight never exceeds 1. Found, not
-  fixed: a white *dielectric* returns more than it receives at grazing
-  views, 1.015 at roughness 0.8 and n.wo 0.1 and, measured offline, up to
-  1.53 at roughness 0.1, because the diffuse lobe is weighted by
-  `1 - F(wo.h)` (the deferred lighting's coupling before this change too).
-  The fix is the specular lobe's directional albedo `E(n.wo, roughness)`
-  (Kulla and Conty 2017; Filament's energy compensation), diffuse weighted
-  by `1 - E`; it needs a table every BSDF reader binds (a polynomial fit
-  was 2-6% off at grazing smooth surfaces), which touches every lighting
-  model's bindings, so it is left to the phase that owns them (r5).
+  twelve surfaces at n.wo 1, 0.5, 0.2 and 0.05, against the function the
+  deferred lighting calls): the evaluated integral and the sampled estimate
+  agree within five standard errors everywhere; a white Lambertian surface
+  (F0 0) reflects 1.0000; white dielectrics at F0 4% and 2% and roughness
+  0.3 and 0.45 (where the old model gained most) 0.971 to 0.998, a white
+  rough dielectric 0.978 to 0.982, a white subsurface surface 0.977 to
+  0.995, white metals 0.16 to 0.85 (single-scattering GGX with Smith-Schlick
+  loses energy); `bsdf_pdf` integrates to 1 within its standard error. The
+  old model, by quadrature (`C:/t/r2d/ab/need.py`): a white dielectric of F0
+  4% at roughness 0.3 and n.wo 0.2 returned 1.018, of F0 0 up to 1.048, the
+  wrapped lobe up to 1.375.
 - The sampler (`tests/sampler_gpu.rs`): over 48 point lights of ranges
   0.6 m to 70 m, a spot, a global 900 m light, two suns and dead rows, at
   points inside the grid, outside its finest levels and outside every
@@ -1200,80 +1273,104 @@ tracer over the streams and light batches, knowing no kind:
   out of bounds), and a stage bound its count buffer for writing while
   dispatching indirectly from it, which wgpu rejects (a stage now
   dispatches over the frame's paths, its lanes returning past its count).
+- Member gates (`helio-core` `tests/scene_membership.rs`): gated passes are
+  neither scheduled nor prepared while closed, join in build order when
+  open, and leave (told once) when it closes again.
 - GI's suites (lib, `probes`, `mesh_gi_graph`, `vg_ray_proxies`) pass on the
   lights' sampler; the sampler's, the deferred lighting's (the texture
-  count test included: 14) and HLFS's unit tests pass; Helio's layer gate,
-  fmt, the frame-api tests; `one_owner`; `api_statics`.
+  count test included: 14), HLFS's and the materials' unit tests pass;
+  Helio's layer gate, fmt, the frame-api tests; `one_owner`.
 
 **indoor_cathedral_gi** (960x540 internal, its capture at frame 240; r2's
 contract build `C:/t/int/indoor_cathedral_gi_r2.exe` interleaved with this
-one, two runs each; GPU medians in ms over frames 60 to 240):
+one, two runs each; GPU medians in ms):
 
 | | before | after |
 |---|---|---|
-| GI, GILight, GIIntegrate | 0.110, 0.32-0.40, 0.23-0.24 | 0.096-0.099, 0.29-0.30, 0.22-0.23 |
-| LightSampleGrid, LightSamples, GIShadow (new) | | 0.055-0.057, 0.074-0.078, 0.057-0.058 |
-| GI's passes in all | 0.66-0.75 | 0.80-0.82 |
-| DeferredLight | 0.50-0.51 | 0.58-0.60 |
+| GI (probe rays) | 0.109-0.118 | 0.098-0.106 |
+| GILight | 0.385-0.407 | 0.307-0.337 |
+| LightSampleGrid (fixed, a rebuild) | | 0.057-0.063 |
+| LightSamples (a query a probe-ray hit) | | 0.057-0.063 |
+| GIShadow (a sample into a shadow ray) | | 0.057-0.064 |
+| GIIntegrate | 0.230-0.248 | 0.229-0.249 |
+| GI's passes in all | 0.72-0.77 | 0.81-0.88 |
+| DeferredLight | 0.49-0.53 | 0.50-0.52 |
 
-The cathedral pays 0.1 ms for GI on the contract (the grid, the batch and
-a pass of its own for the shadow rays, against GILight's loop over its 256
-gathered lights) and 0.08 ms in the deferred lighting for the frame's
-BSDF (Smith's exact masking, two square roots a light, against the
-Schlick-k approximation). Images (frame 240, RGB 0-1, mean |difference|):
-before-before 0.0005, after-after 0.0009, before-after 0.0007-0.0010,
-luminance +0.07% to +0.3%: inside run-to-run noise (the chandeliers
-flicker by wall time).
+Where GI's 0.1 ms goes: GILight lost its loop over its 256 gathered lights
+(-0.08) and gained a pass a stage of the contract: the grid (fixed a
+rebuild: the cathedral's chandeliers flicker, so its light rows change every
+frame; untouched lights cost 0.003, the timer's floor), the batch (one
+query a probe-ray hit) and GIShadow (one shadow ray a sample, a pass of its
+own because the samples arrive from another pass). The grid is rebuilt
+only when lights change, and leaves the schedule with its last user; the
+other two are the price of a shared sampler, a dispatch each.
 
 The reference against the real-time image (the scene held still,
 `HELIO_STILL`; linear, at the lighting's output before fog, transparency and
-the tone map; 2340 paths a pixel, six bounces): real-time luminance 0.815
-of the reference's, mean |error| 0.0055 (p99 0.063), mean relative error
-18%. The real-time image is darker by a fifth: the reference's
+the tone map; 1440 paths a pixel, six bounces): real-time luminance 0.761
+of the reference's, mean |error| 0.0061 (p99 0.069), mean relative error
+20%. The real-time image is darker by a quarter: the reference's
 interreflections between the stone walls (albedo near 0.5) carry more light
 than the probes' irradiance gives the deferred lighting. The indirect
 diffuse alone (the deferred lighting's view 23 against the reference's 63,
-final images at the same fixed exposure): luminance 0.957, mean |error|
-0.0035. At 2340 paths the reference still shows fireflies (paths that find
-a candle through a bounce); its p99 errors are theirs.
+final images at the same fixed exposure): luminance 0.863, mean |error|
+0.0035. The reference still shows fireflies (paths that find a candle
+through a bounce); its p99 errors are theirs.
 
 A reference frame (518,400 paths, six stages, the cathedral's meshes
 traced through the TLAS): about 7.5 ms on the RTX 3060, by stage: camera
-rays 0.43; each depth's trace, surfaces, shade, samples, shadow rays,
-shadow trace and resolve 1.5 ms at depths 0 to 2 falling to 0.4 ms at depth
-5 as Russian roulette and misses end paths; the sums 0.18; the display
-0.06. Out of its views it records nothing.
+rays 0.41; each depth's trace, surfaces, shade, samples, shadow rays,
+shadow trace and resolve about 1.5 ms at depths 0 to 2 falling to 0.4 ms at
+depth 5 as Russian roulette and misses end paths; the sums 0.18; the
+display 0.06.
 
-**voxel_craft** (one pose, its burst at 1500 frames; r1's merged exe and
-r0's baseline against this build): not answered. The reference renders
-voxel_craft's terrain and trees as silhouettes, near black under the fog
-(`C:/t/r2d/compare/craft/r1_vs_reference_side_by_side.png`), while its
-meshes are lit, so its numbers (r0 and r1 luminance 0.71 and 0.70 of the
-reference's, indirect 0.82 and 0.81) measure that fault, not r0 or r1.
-What was measured: GI's irradiance (view 23) on the contract against r1's,
-luminance 0.998 (GI on the sampler does not change voxel_craft's indirect
-light); the final image against r1's, mean |difference| 0.026, luminance
-+10.7% (the frame's BSDF: Smith's exact masking and the F90 rule brighten
-the outdoor deferred lighting). Every comparison here is to be rerun at
-integration with `scripts/r2/rerun_reference.sh` (`PART=cathedral` or
-`PART=craft`).
+**voxel_craft** (the tour's first pose; the reference summed over 1500
+frames, against bursts of eight frames of r1's merged build and r0's baseline;
+`scripts/r2/rerun_reference.sh PART=craft`). The meadow's grass is
+procedural foliage, which no tracer traces: it covers 26% of the image by
+more than 0.05 (40% by more than 0.02), where the reference shows bare turf.
+So the comparison runs every build with the grass off (`NO_FOLIAGE=1`):
+
+| against the reference | final image mean \|err\| | p99 | luminance | indirect (23 vs 63) mean \|err\| | luminance |
+|---|---|---|---|---|---|
+| r0 | 0.0284 | 0.117 | 1.493 | 0.0069 | 1.314 |
+| r1 | 0.0281 | 0.116 | 1.488 | 0.0069 | 1.306 |
+
+(With the grass: r0 0.0396 / 1.550, r1 0.0395 / 1.547; indirect 0.0103 /
+1.93 and 0.0102 / 1.91.) r1 is nearer than r0 on every number, by 1% of
+the error: r0 and r1 light this pose almost alike, and both are far from
+the reference, which is darker by a third. That gap is not yet the
+lighting's: the terrain's hit surfaces are not its G-buffer's. At the same
+pose the reference's first-hit albedo (from the terrain's `ray_surface`)
+against the G-buffer's albedo view: ground 0.37 0.40 0.21 against 0.28
+0.40 0.18, canopy 0.55 0.41 0.29 against 0.34 0.41 0.27 (the leaves come
+out orange). Until the terrain's `Full` surfaces match its publish, the
+reference judges a different material, so r0 against r1 is answered only as
+"alike, r1 marginally nearer". Every comparison here is to be rerun at
+integration with `scripts/r2/rerun_reference.sh`.
 
 **Open**:
 
-- voxel_craft's terrain in the reference: hits are found (the silhouettes)
-  and the voxel `ray_surface` fills a surface for any stream of its tracer
-  and volume, yet the terrain returns almost no light. Not yet separated:
-  surfaces never written for the reference's streams, every NEE ray from
-  the terrain occluded, or inside hits. The grass (foliage) is not traced at
-  all. Until this is fixed the r0-against-r1 question has no answer.
-- The dielectric BSDF's energy at grazing views (above).
+- The terrain's hit surfaces (voxel `ray_surface`, the hit-surface
+  contract's `Full` detail) differ from its G-buffer publish in albedo
+  (above): its owners'.
+- Grass is not traced: the reference and GI see bare turf under it.
+- Which geometry of voxel_craft's meadow stops shadow rays as wide as a
+  footprint (above). GI's shadow rays carry the probe ray's footprint as
+  their width too; whether GI's sun on the terrain is stopped the same way
+  was not measured (GI's irradiance matches r1's, which had the same rays).
 - `HELIO_STILL=2` (rows written once) culls the cathedral's objects: Hi-Z
   history faults when nothing writes a row; the comparisons use
   `HELIO_STILL=1` (rows rewritten unchanged).
 - Emissive surfaces are not light samples: paths find them only by
-  bouncing, the fireflies at 2340 paths.
-- HLFS still evaluates its lights itself rather than through
-  `light_incidence`.
+  bouncing, the fireflies.
+- HLFS still evaluates its lights itself (its compacted light rows, its own
+  BRDF, no IES or light-function bindings), a second copy of
+  `light_incidence`'s and `bsdf_eval`'s jobs. Moving it onto them changes
+  its bindings and its image, so it is not a local change; owner: the
+  lights plugin, the phase that reworks HLFS.
+- The wrapped (subsurface) lobe's weights reach 90 near the horizon (the
+  cosine sampling's density goes to zero where the wrap does not): fireflies
+  in the reference on subsurface surfaces.
 - The reference restarts on SceneDB content and the camera; state outside
   SceneDB (a voxel edit, a GI setting) does not restart it.
-- Its passes stay in the graph, idle, when no view shows it.
