@@ -334,10 +334,17 @@ Carried into r2, which owns each of them:
   terrain's separate surfaces pass, and the walk's cost in the frame against
   the same walk in isolation, are measured and settled there. r1 merged with
   this cost, stated, instead of holding six repositories' branches open.
+  r2 (section 4, "The terrain's surfaces"): the surfaces pass stays a pass
+  by measurement, the sun's rays are answered at their footprint, and the
+  walk's in-frame excess is the frame's rays' work, not overlap or cache.
 - **The sun's visibility of a hit at the ray's footprint.** It waits on why
   coarse sun-occlusion pages let more light through under canopies than the
   walk does. That is a fault of the pages, which every reader of them sees,
   and is to be found before anything reads them at a footprint.
+  r2 (section 4, "The terrain's surfaces"): found. The pages hold the
+  walk's occluders; their read's bias of a texel hid every occluder within a
+  texel of a receiver finer than its footprint. The sun's rays now walk
+  that band and read the pages past it.
 - **The r0-r1 image difference on voxel_craft.** r0 is not ground truth:
   both builds approximate. r2's reference path tracer is; the difference is
   judged against it, on the same poses.
@@ -1244,3 +1251,173 @@ standalone host because the engine registers no test feature in its graph.
   share.
 - **Deforming static meshes in the engine TLAS** (Pulsar-Native#1744's last
   item) are not part of this step.
+
+#### The terrain's surfaces
+
+The voxel plugin's tracer (`chunks::rays`, chunk_draw.wgsl 8, the plugin's
+`docs/chunk-octree.md`, "Ray streams") answers both `SurfaceDetail` levels,
+picked per stream when the graph builds (`StreamTracer::with_detail`), and
+the sun's occlusion rays at their footprint.
+
+- **One shading of a face** (`voxel_surface`). The G-buffer's publish
+  calls it at a pixel's footprint and multiplies in the screen's sky
+  samples; a `Full` stream's surface pass (`ray_surface_full`) calls it at
+  the ray's footprint, the material boundaries' jitter keyed by the ray's
+  row as a pixel's is by the pixel. Materials and their patches, per-voxel
+  pigment, corner occlusion and edges, the host's scene materials, the
+  shore's swash, emission, a leaf's share let through: there is no second
+  copy of the terrain's material code. `full_stream_surfaces_are_the_gbuffer_texels`
+  (as the contract's test does for meshes): every second pixel of a view of
+  the ground and a glowing, translucent brick ball, traced as a ray from
+  the eye with the pixel's footprint, decodes to the surface the publish
+  wrote there in every field within the encodings' precision: 0 of 4,649
+  differ, worst normal cosine 0.9999999; with a block of leaves added, 0 of
+  4,746, its 97 leaf texels and 801 two-sided ones letting through their
+  transmission share of their colour (`material_transmission` times the
+  albedo, the materials' rule), never their whole colour. Two of the publish's inputs a hit
+  did not have moved into the surface: a natural step lights with its own
+  stored slope before the one a neighbouring shading sample lends (34 of
+  the 4,649 normals were up to 4 degrees off; `face_rule`'s comment said
+  stored first), and a leaf's share let through is in its surface
+  (`subsurface_color = albedo * transmission`) instead of in the shading
+  pass's sun visibility of a back-lit leaf: the same sun light, and local
+  lights and GI behind a leaf now take the share too.
+- **`Diffuse`** (`ray_surface`, GI's probes): the material's colour,
+  patches and clumps at the footprint from the cell's centre, no pigment,
+  corner occlusion or textures (at GI's footprints the publish fades those
+  out too), the face rule's normal, emission and the share let through.
+  Inline or a pass, by measurement: written by the walk as it takes each
+  hit (the contract allows it; its wording now says so, below), the walk's
+  kernel took 1.553 ms on GI's 174,080 rays in isolation against 1.327 +
+  0.094 for walk and pass, and 2.01-2.06 in voxel_craft against 1.61-1.62
+  + 0.24: the shading's registers slow every ray of the walk. It stays a
+  pass. `Full`'s pass costs 0.176 ms on the same rays.
+- **The sun's rays at their footprint** (`paged_occlusion`).
+  `sun_pages_under_a_canopy` (a forest planet, 2,573 receivers shaped as
+  GI's probe-ray hits, each against the walk along the epoch's sun, every
+  level 0..12 about the eye) found the cause of r1's 3-8 % brightening:
+  the pages hold the right occluder (each receiver's nearest texel's centre
+  ray, walked, meets what the texel stores at 99.8-100 % of texels on every
+  level), and every receiver the pages light that the walk shades lies
+  within the read's bias of its occluder: a texel, plus the receiver's
+  slope across the 2x2 filter. The bias keeps a surface from shadowing
+  itself and fits a receiver whose own surface is the texel's size (the
+  shading pass reads the pages for cells under a pixel and a half, at the
+  pixel's footprint); from a GI hit, finer than its footprint, it hides
+  every leaf less than a texel over it: the pages lit 0.75 (level 3), 0.80
+  (4), 0.89 (5) of the receivers where the walk lit 0.61. The pages were
+  not wrong; reading them from the surface at a texel's bias was. An
+  occlusion ray along the sun at least a finest texel wide, seeing every
+  caster and every volume the pages hold, now walks the first two texels of
+  the finest level resident at its origin up to its footprint's in each
+  volume and takes what the pages let through from a texel up the sun on:
+  the band the bias hides was walked, and the receiver's own surface
+  (slopes to 1.3 over the filter) stays its own. On the same receivers it
+  lets through 0.600 where the walk does 0.607 (59 of 2,573 differ, every
+  level within 0.02). Decided by the ray's width and page residency, never
+  by the consumer. Rays ask for no pages (asked for at GI's footprints the
+  page tracer cost 0.19 ms a frame on voxel_craft, where it costs 0.01);
+  the pixels' pages and the always-resident ones about the eye answer
+  them.
+- **The walk's cost in the frame.** In voxel_craft the probe walk with its
+  entry takes 1.61-1.64 ms, as r1's (1.61-1.72 in the same runs); in
+  isolation (a ball on bare ground) 1.33. Not lost overlap: a stream's pass
+  runs between barriers, so its own timestamps time its work alone, and
+  overlap lost with neighbours would show in the frame's total, not in the
+  pass. Not cache state after the G-buffer or a first dispatch's cost: the
+  same rays walked a second time right after (a measurement build, rows
+  already holding their hits, so the same cells walked to the same hit)
+  took 1.64-1.75 against 1.65-1.68 for the first, and the isolated walk
+  costs the same recorded before or after the draw (1.327 / 1.327). The
+  remainder is the work of the frame's rays: voxel_craft's probes sit among
+  trees and walls whose cells the bare-ground benchmark does not have. r0's
+  in-draw kernel on voxel_craft took 1.78-1.82 ms; the stream walk takes
+  less there. Open: the planets' (below).
+- **Coordinate spaces**: verified against the skill's rules.
+  `stream_rays_see_only_volumes_of_their_space`: two blocks at the same
+  place in authored spaces 2 and 3 over the world's ground; the world's
+  rays meet only the ground (through both blocks), each space's only its
+  own block, and a direct ray (every space) the nearest of all three, each
+  against CPU casts over the volumes it may see. The paged answer serves a
+  ray only where the pages hold volumes of its space alone (or it sees
+  every space). Each volume's dispatch still runs for a stream of another
+  space (its rays leave at the space test; a nearest stream's entry writes
+  a miss row a ray, 64 bytes): no walk, but rays x volumes threads. Open:
+  the stream's space known on the CPU would let a volume of another space
+  skip its dispatch (the consumer knows it, GI's `GiTrace.info.y`; the
+  contract has no CPU-side per-frame field for it).
+
+Costs, RTX 3060, GPU medians over pipelined frames (voxel_craft: one pose,
+the last six 240-frame windows with the terrain drawn; runs alternated with
+r1's final exe):
+
+| | r1 final | r2 |
+|---|---|---|
+| voxel_craft, GI's passes in all | 2.92-2.96 | 2.73-2.77 |
+| of which VoxelRays gi_probe / VoxelRaySurfaces gi_probe | 1.61-1.64 / 0.233-0.237 | 1.61-1.62 / 0.239-0.246 |
+| VoxelRays gi_shadow | 0.409-0.422 | 0.202-0.225 |
+| VoxelChunks (its sun occlusion pages) | 4.20-4.26 (0.013) | 4.22-4.36 (0.02) |
+| `stream_rays_cost`: nearest with entry / Diffuse / Full surfaces | 1.33 / 0.094 / none | 1.327 / 0.095 / 0.176 |
+| its sun rays (45,466 from the probe rays' hits): walked / at the footprint | 0.60 / none | 0.60 / 0.14-0.15 |
+
+voxel_flight ground holds (p50 over the hold; r0's GI rays in the draw are
+its VoxelChunks less r2's, the rest of that pass being the same work):
+
+| | r0 | r1 closing | r2 |
+|---|---|---|---|
+| Earth (r0 three runs, r2 three) | rays in the draw 1.06-1.10, GI 0.28-0.29: 1.35-1.39 | 2.46 | GI 0.06-0.07, VoxelRays gi_probe 1.56-1.58, surfaces 0.17, GILight 0.25-0.26, VoxelRays gi_shadow 0.21-0.22, GIIntegrate 0.13: 2.38-2.43 |
+| Moon (r0 three runs, r2 three) | rays in the draw 0.84-0.96, GI 0.26: 1.10-1.22 | 2.54 | GI 0.06-0.07, VoxelRays gi_probe 1.57-1.63, surfaces 0.13-0.14, GILight 0.22-0.23, VoxelRays gi_shadow 0.23-0.24, GIIntegrate 0.13: 2.34-2.41 |
+
+On voxel_craft the terrain's GI is 0.15-0.2 ms under r1's, all of it the
+sun's rays (0.41 -> 0.21); on the planets 0.03-0.2 under r1, and still
+about 1.0-1.2 ms over r0, the probe walk (1.56-1.63 against r0's in-draw
+kernel's 0.84-1.10 with its shading) being the remainder (open, below).
+The holds' images were not compared.
+
+Images (voxel_craft, four poses, 8-frame burst means, no clouds, RGB 0-1
+mean |difference|): r1-r1 0.0003-0.0012; r1-r2 0.0004-0.0007 and
+0.0007-0.0015 against the two r1 runs, luminance -0.05 to -0.16 %: inside
+run-to-run noise, slightly darker (the footprint answer keeps the shade the
+walk gives; the leaf share now in the surface). r2-r2 and the Earth and
+Moon hold images were not compared (the shared GPU was held by the other
+sessions' runs).
+
+The **contract** changed in one doc comment (`Tracer::surface`): a tracer
+may write a hit's surface in its trace pass as it takes the hit, adding no
+surface pass; a tracer that takes the row later writes its own.
+
+Open:
+- The planets' probe walk against r0's in-draw kernel (r1: 1.44-1.53 ms
+  against 1.05): measured here only on voxel_craft, where the stream walk
+  is cheaper than r0's. The planets' probe walk is 1.57-1.58 ms in the frame where
+  r0's in-draw kernel cost 0.95-1.21 with its shading and sun lookup; the
+  same proof as on voxel_craft (pass timestamps between barriers, a second
+  identical walk costing the same) was run on voxel_craft only. r0's kernel
+  walked from cells its CPU placed and shared the draw's registers'
+  footprint; the stream walk pays a placed entry a ray (0.19 ms on GI's
+  rays in isolation) and a start row's read. A ray-to-volume binning and r3's
+  radiance cache take probe rays off the walk.
+- Scene materials at `Full` hits: `voxel_surface` reads them, but the ray
+  kernels are compiled from the draw source without the scene-material
+  splice (no host maps voxel materials to scene materials today:
+  `ChunkPass::set_scene_materials` has no caller); a host that does gets
+  the appearance table's colours at hits until the ray kernels take the
+  scene variant and its groups 2 and 3.
+- A volume of another space still dispatches over a stream (above).
+- **Startup** (closed, not this change's): the time to a settled test view
+  (`publish_shows_hits_only_in_front_of_meshes`, wall time, holding the
+  build slot and the GPU lock) is the NVIDIA driver's shader cache, keyed by
+  the executable: the contract build's test exe at its old path 4.5 s then
+  2.7 s; the same file copied to a new path 72.6, 63.7 and 31.0 s over three
+  runs; this build's 58.0, 33.7 and 45.9 s. The warm runs' slow pipelines
+  include generation kernels this change does not touch
+  (`feature_block_candidates_main` 17.5 s, `chunk_columns_main` 4.7 s), and
+  the draw module grew 6 % (`chunk_draw.wgsl` 239,327 to 253,795 bytes, 38
+  to 39 entry points, the composed module 327,840 bytes; one module a form,
+  as before). The cache (1.1 GB, at its limit with several sessions
+  compiling) keeps a new executable's pipelines only partly from run to
+  run.
+- Fog reads the pages with a texel's bias from points in the air
+  (`sun_occlusion_point`, the lights plugin's): under a canopy it takes
+  sun within a texel of leaves; a point in the air could read with none.
+  The fog's and the lights' owners decide.
