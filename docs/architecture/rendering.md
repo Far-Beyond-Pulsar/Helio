@@ -129,11 +129,14 @@ and then sees no other kind.
 
 - **Rows.** `StreamHeader` (16 bytes: indirect dispatch groups of
   `GROUP` = 64 rays, and the count), `SceneRay` (32), `SceneHit` (16),
-  `SceneSurface` (20). Layout tests cover Rust against WGSL.
+  `SceneSurface` (20; 32 since r2, the frame's `SurfaceData`, section 4).
+  Layout tests cover Rust against WGSL.
 - **A ray's cone** (`SceneRay::cone`, `scene_ray_cone`): the spread a metre
-  (half float), the caster mask (`MASK_STATIC`, `MASK_MOVABLE`), and a
-  starting width (8 bits, a micrometre to kilometres in steps of 9%), so a
-  ray that leaves a hit starts as wide as the footprint that found it.
+  (half float; 11 bits since r2), the caster mask (`MASK_STATIC`,
+  `MASK_MOVABLE`; 4 bits since r2, beside the ray's coordinate space,
+  section 4), and a starting width (8 bits, a micrometre to kilometres in
+  steps of 9%), so a ray that leaves a hit starts as wide as the footprint
+  that found it.
   `scene_ray_footprint(ray, t)` is what a tracer reads textures and tests
   cut-outs at.
 - **A tracer traces from the ray's origin**, from distance 0. The consumer
@@ -170,9 +173,9 @@ and then sees no other kind.
 - **Meshes** (`helio-pass-mesh-rays`, the meshes plugin): one compute pass
   a stream over the frame's TLAS with a ray query. Cut-outs are tested at
   the ray's footprint (the alpha mip that footprint covers; stochastic past
-  mip 0). The surface is written in the same pass: only the committed ray
-  query has the instance's transform. r2 splits a surface pass off once the
-  projections publish a transform a row.
+  mip 0). The surface was written in the same pass (only the committed ray
+  query had the instance's transform); r2 split a surface pass off on the
+  instances' transforms the projections now publish (section 4).
 - **Voxel terrain** (the voxel plugin's `chunks::rays`): the chunk-tree walk
   the camera uses, entered from any origin. A nearest stream is an entry,
   which places each ray in its chunk, then the walk, then a surface pass. A
@@ -608,47 +611,406 @@ ground truth.
 
 ### How others do it
 
-- **Unreal**: a hit runs the material's hit shader (ray-tracing pipelines),
-  cheaper variants by ray type (`r.RayTracing` material LOD and the
-  "simplified material" modes; Lumen picks between its surface cache and
-  full hit lighting for reflections by roughness). Its path tracer is the
-  in-editor reference every real-time path is compared with.
+- **Unreal**: a hit runs the material's closest-hit shader from the
+  ray-tracing pipeline's shader table, with cheaper variants by ray type
+  (ray-tracing material LOD, "simplified" materials for shadow and GI rays,
+  `r.RayTracing.*.EnableMaterials`); Lumen lights reflection hits either from
+  its surface cache (cheap, coarse) or with full hit lighting (material and
+  direct light at the hit) by roughness, its hit lighting one shading model
+  shared with the deferred pass. Its path tracer is the in-editor reference,
+  sharing the material graph through the same hit shaders. What it costs: a
+  shader table permutation per material and ray type, and hit-shader
+  divergence that SER (NVIDIA only) recovers.
 - **RTXPT and the 2026 NVIDIA guidance**: material LOD by ray class
-  (primary, specular bounce, diffuse bounce, shadow), texture detail from ray
-  cones, shader execution reordering to bring hits of one material together.
-- **Wavefront renderers**: hits are sorted by material and each material's
-  kernel runs over its hits.
+  (primary, specular bounce, diffuse bounce, shadow), texture LOD from ray
+  cones, SER to bring hits of one material together; next-event estimation
+  through one light-sampling interface (ReSTIR DI, a light BVH or power
+  sampling) that returns a sample and its pdf for MIS against the BSDF
+  sample; the reference path tracer and the real-time path share the
+  material model and the light sampler.
+- **Wavefront renderers** (Laine, Karras and Aila, HPG 2013; Cycles X;
+  the production GPU renderers): rays, hits, shading requests and shadow
+  queries are rows; hits are sorted (or binned with an atomic counter a
+  bin) by material and each material's kernel runs over its own hits; a
+  light-sampling stage writes shadow rays that the same traversal answers.
+- **Coordinate spaces in traversal**: hardware ray tracing filters
+  instances by an 8-bit instance mask against a ray cull mask (DXR
+  `InstanceMask`, Vulkan `mask`), with no other per-instance test before
+  any-hit; engines that need more groups than eight bits force candidates
+  to any-hit for the rays that need it (Unreal's per-instance visibility
+  for shadow-only and hidden-in-game primitives uses masks first).
+- **G-buffer and hit payload**: Unreal's `FGBufferData` is decoded once
+  from the targets and the ray-tracing material payload is encoded and
+  decoded to the same struct, so lighting code takes one input; Frostbite
+  and Decima pack a surface the same way for their hit lighting.
 
-### The design frame
+wgpu has ray queries only: no shader table, no SER. A stream's hits are
+rows a pass bins by tracer and material, which is the wavefront answer.
 
-Filled in, with what was decided and measured, as the phase lands.
+### The design
 
-- **A stream states the detail it needs.** A nearest stream asks for a
-  surface at one of a few levels (a diffuse consumer: base colour, emission
-  and a normal at the ray's footprint; a specular consumer or the reference:
-  the material in full). A tracer may answer a lower level with a cheaper
-  kernel; it never answers less than asked.
-- **A hit's surface is what a G-buffer texel is.** `SceneSurface` holds what
-  the frame's G-buffer holds for a pixel (`gbuffer.rs`), packed as a row, so
-  one lighting evaluation serves a pixel and a hit. What the G-buffer cannot
-  say for a hit (the lighting model a material class asks for) it does not
-  say for a hit either, until the G-buffer does.
-- **Materials run at hits through the materials' evaluator**, the one the
-  drawers use, with texture detail from the ray's cone. A table-driven
-  material is one kernel; material programs are kernels of their own, run
-  over the hits binned to them (the stream is the shader table as data).
-- **A ray carries its coordinate space** (the authored space identity `main`
-  gave cameras and objects), and a tracer answers with the geometry of that
-  space. Crossing an aperture into another space is the portals' to add on
-  this contract.
-- **Direct light at a point is a contract**: a kind of light answers a batch
-  of points with a sample (direction, distance, radiance over probability).
-  GI's own reading of the lights' rows goes; r5 replaces how a sample is
-  chosen, behind the same contract.
-- **The reference path tracer** is a consumer of streams and of that
-  contract, with no cache and no denoiser: camera rays in a run from the
-  eye, bounces with next-event estimation, accumulated over frames. A
-  technique is judged by its error against the reference on fixed poses.
-- **Carried from r1** (section 3, GI on ray streams): the terrain's surface
-  pass and walk cost, the sun-occlusion pages' leak under canopies, the
-  voxel_craft image difference, an acceptance suite on a ray-query device.
+#### A stream states the surface detail it needs
+
+`Stream::detail` (`SurfaceDetail`): **`Diffuse`** (base colour, emission,
+the shading normal, the share let through from behind, at the ray's
+footprint; roughness and metalness as the material's constants; what a
+probe, a radiance cache's update or a diffuse bounce lights) and **`Full`**
+(the material evaluated as the G-buffer's drawers evaluate it: its template
+or graph, normal maps, every `SurfaceData` field, at the ray's footprint;
+reflections, a specular bounce, the reference). A tracer answers at least
+the level asked and may use a cheaper kernel for a lower one; every level
+writes a whole row, a lower level leaving what it does not evaluate at
+`surface_data`'s neutral values. The default is `Full`: a consumer that does
+not say gets the most, never less. GI's probe stream asks `Diffuse`.
+
+Detail is the stream's, not the ray's. A tracer then picks its kernel when
+the graph is built: no per-ray branch over material code (which would keep
+the most expensive kernel's registers for every ray of a wave), no bit in a
+row that is full. A consumer with rays of several classes writes a stream a
+class (a path tracer's camera rays and its diffuse bounces), which is how
+ray classes are budgeted (section 1) anyway.
+
+#### One surface, two encodings
+
+The one owner of "the surface a lighting model takes" was nobody: the
+materials plugin's `SurfaceData` was what a template returned, each of four
+G-buffer drawers (meshes, foliage, the voxel terrain's publish, virtual
+geometry's shade) wrote the targets field by field from its own copy of the
+layout, the deferred lighting read them back field by field, and the ray
+stream's 20-byte `SceneSurface` was a third, thinner description. The
+G-buffer is the frame's (Helio core owns its layout), the lighting models and
+the streams' consumers read it with no material, and a kind with no material
+table (a plain-coloured voxel) writes one: the frame owns it.
+
+- **`SurfaceData`** (`helio_frame_api::gbuffer::SURFACE_SNIPPET`,
+  `//!use frame_surface`) moved from the materials plugin to the frame, its
+  fields and `SURFACE_FLAG_*` unchanged, so every template and graph keeps
+  compiling. A template returns it; a kind without a table builds one with
+  `surface_data(albedo, normal, roughness, metallic, emissive)`, a thin
+  two-sided surface with `surface_with_transmission`.
+- **The G-buffer's encoding**: `gbuffer_surface_texels` (encode; drawers call
+  `gbuffer_output(surface, tag, motion)` or `gbuffer_depth_output`) and
+  `gbuffer_surface_at` (decode; the deferred lighting's `fs_main`).
+- **The ray's encoding**: `SceneSurface`, 32 bytes, `scene_surface_pack`
+  (a tracer) and `scene_surface_unpack` (a consumer), every G-buffer field
+  plus the face's normal a hit needs to leave its surface.
+
+So a pixel and a hit carry the same fields and the lighting that takes a
+`SurfaceData` lights either. What the G-buffer does not hold (a lighting
+model a material class would need beyond these fields) a hit does not hold
+either, until the G-buffer does.
+
+#### A ray carries its coordinate space
+
+A ray's space is a camera's encoding of the authored space slot
+(`view_info.w`: the slot plus one, or 0 for every space). A ray serving a
+view takes the view's (GI: `cameras[0].view_info.w`, so its probes see what
+the camera draws directly); a ray leaving a hit keeps its parent's, or the
+content space of a remapped pixel (`VIEW_REMAP_SPACES`). A tracer answers only
+with geometry of the ray's space (`scene_ray_sees_space`).
+
+Where the space goes was decided by measurement. The row was full (32
+bytes: origin, `t_max`, direction, the cone word).
+
+- **Directions as two 16-bit octahedral words** would free 8 bytes, but
+  their worst angular error is 6.4e-5 rad (400,000 directions): 0.12 px at
+  1080p and 60 degrees, 1.4 px at 4K and 10 degrees, 5.6 px at 8K and 5
+  degrees, and 6.4 cm at a kilometre (a 10 cm voxel world seen from 1 km).
+  The reference path tracer's camera rays need well under a pixel, and a
+  long sun ray must stay in its cell. Rejected.
+- **A 48-byte row** (WGSL rounds a struct holding a `vec3` to 16 bytes) was
+  built and measured: GI's ray generator went from 0.114 to 0.153 ms in
+  `indoor_cathedral_gi` (a 48-byte stride touches about 2.25 times the cache
+  lines of a 32-byte one: three 16-byte stores a row over a wider span), the
+  terrain's entry from 0.127 to 0.134 ms on 174,080 rays. Writing the
+  padding as well, so each row is written whole, was slower still (0.21 ms).
+  Rejected.
+- **The cone word holds it**: the spread in 11 bits instead of a half
+  float's 16 (its 5 exponent bits and 6 of its 10 mantissa bits: 0.8%
+  relative at worst, about 0.01 of a mip in a texture or cut-out lookup,
+  where the cone itself is an estimate), the caster mask in 4 bits (two
+  classes are used), the space in 9 (slot 255 plus one), the width in 8 as
+  before. The row stays 32 bytes, and costs what r1's did (measured below).
+
+**The meshes** filter through the TLAS mask: an instance's mask is one bit,
+its caster class (static, movable) in its space's group, `1 << (2 * group +
+class)`; four groups of two classes fill eight bits. Group 0 is the world's
+alone (its bits are the frame's `MASK_STATIC` / `MASK_MOVABLE`, so every
+inline query of the TLAS keeps its meaning for world geometry); up to three
+other traced spaces take a group each; a ray restricted to one space is
+traced with that group's bits alone, culled by the hardware with no
+per-candidate work. Past three other traced spaces they share groups
+(`RAY_SPACE_SHARED`); a ray of a shared group's space is traced with every
+candidate forced to the any-hit loop (`FORCE_NON_OPAQUE`), where a row of
+another space is passed and an opaque row of its own confirmed. That is
+correct at any count of spaces, and costs only those rays the any-hit loop,
+never the world's or an unshared group's. Instance custom data (24 bits)
+stays the row index: stealing 8 bits for the space would cap rows at 65,536.
+
+**The voxel terrain** filters by the space each volume is authored in
+(`VoxelVolume::space`, from `pulsar_scene_model::frames::space_of`; its ray
+parameters carry it): a volume of another space is not walked.
+
+**Crossing an aperture (the portals' seam)**, not built here: the portals
+register a tracer whose trace pass answers a ray's nearest aperture of its
+space as a hit (its own tracer id, the chain in its payload) and whose
+surface pass, instead of a surface, re-emits the ray past the aperture in
+place: origin and direction through the chain's drawn-to-content matrix,
+the space the destination's (`scene_cone_in_space`), `t_max` what is left,
+the hit row cleared, and the distance travelled to the aperture and the
+chain kept in a buffer of the portals' own, a row a ray, for a consumer that
+wants its hit back in its own space (the frame's remap contract,
+`VIEW_REMAPS`, names the chain's matrix). `stream::trace` then needs one more thing from the frame: a stream
+re-traced while any of its rays was re-emitted (an indirect count the
+portals' surface pass writes, a few rounds at most), so a consumer gets the
+hit beyond the aperture without knowing portals. Who owns what: the frame
+owns the re-trace rounds; the portals own the crossing and the remap.
+
+#### Direct light at a point
+
+`helio_frame_api::rays::light_samples`, beside the streams. A consumer
+declares a `LightBatch` (points: `LightQuery` rows) and a kind of light
+registers a `LightSampler`; `light_samples::sample(build, &batch)` adds every
+sampler's pass at that point of the graph. Each sampler offers one sample of
+its own lights at each point (it chooses among them uniformly or by power;
+r5 replaces the choice behind the same contract) and merges it into the row
+by weighted reservoir sampling over the samplers' offers (weight: the offer's
+luminance), so the row is one unbiased sample of every registered kind's
+light. The consumer turns it into an occlusion-stream ray and weights what
+gets through by its own BSDF: `bsdf * cos * light_sample_radiance(s) *
+visibility`; `light_sample_pdf(s)` is the direction's solid-angle density,
+the choices included, for MIS against its BSDF sample, 0 for a delta light.
+Emissive surfaces stay emission at hits (a BSDF sample finds them; they are
+no sampler yet), so nothing is counted twice; an area or emissive light kind
+adds a sampler and the pdf query its BSDF hits need (r5).
+
+#### Materials at hits: what a binned surface pass needs
+
+r1's meshes' tracer wrote a hit's surface inside the trace pass, because
+only the committed ray query held the instance's transform. Now each
+`RayInstance` names its TLAS instance (`instance`) and both projections
+publish every instance's object-to-frame transform beside the TLAS
+(`RAY_INSTANCE_TRANSFORMS`, a `RayTransform` an instance, 48 bytes), so a
+surface pass needs no ray query: the meshes' surface is a pass of its own
+(`mesh_rays_surface`, the tracer's `surface` build), writing only the hits
+that stayed the meshes'. A hit's payload is its row (27 bits), triangle and
+barycentrics; the row gives the material (`RayInstance::material`), mesh
+pools, flags and instance.
+
+The binning key is the material's **program**: a table-driven material
+class (its `material_class`, `MATERIAL_CLASS_*`, one template) or a material
+graph (`MATERIAL_FLAG_HAS_CUSTOM_SHADER`, its graph's hash, the key the
+drawers compile a program by: `RadiantShaderKey { template_id, graph_hash }`).
+The surface pass becomes: a binning pass counting the stream's meshes hits a
+program (`atomicAdd` into a bin's count, a list of row indices), an indirect
+dispatch a bin running that program's kernel (the template composed into a
+hit program by the materials' `RadiantTemplate::compose`, as into a drawer's),
+texture LOD from the ray's cone instead of derivatives.
+
+#### The reference path tracer
+
+A consumer of streams and of light samples with no cache and no denoiser:
+camera rays in a run from the eye (`Stream::with_run`, `SurfaceDetail::Full`,
+in the camera's space), bounces as streams of their own (diffuse bounces
+`Diffuse` where the reference allows, `Full` by default), next-event
+estimation through `light_samples` and occlusion streams, MIS against the
+BSDF sample, Russian roulette after a few bounces, accumulated over frames
+while the camera holds still. A technique is judged by its error against the
+reference on fixed poses.
+
+#### What scales with what
+
+- Rays: 32 bytes a ray, 16 a hit, 32 a surface (80 a nearest ray, written
+  and read once each); cost follows the rays a consumer asks for, never the
+  scene.
+- Surfaces: the surface pass runs over the stream's rows once a tracer,
+  writing only its own hits; the binned material passes will scale with hits
+  a program, never with programs that have none.
+- Spaces: the space groups cost nothing per ray up to three traced spaces
+  besides the world; past that, only rays of a shared group's space pay the
+  any-hit loop. Building the groups is linear in traced instances, and runs
+  only when the traced set changes.
+- Transforms: 48 bytes a TLAS instance, written for the instances that moved
+  (all of them only when the rows are laid out again or the origin moves).
+- Light samples: points times samplers (one in practice), each sampler's
+  choice its own cost.
+
+### As built
+
+#### The contract
+
+**Rows** (`helio_frame_api`; layout tests `tests/layouts.rs`, Rust against
+WGSL, and a GPU round trip of both surface encodings, `tests/surface_gpu.rs`):
+
+| Row | Bytes | Fields |
+|---|---|---|
+| `SceneRay` | 32 | `origin: vec3<f32>`, `t_max: f32`, `dir: vec3<f32>`, `cone: u32`: bits 0..11 the spread (a half float's top 11 bits), 11..15 the caster mask (`RAY_MASK_STATIC` 1, `RAY_MASK_MOVABLE` 2, `RAY_MASK_ALL` 0xf), 15..24 the space (`SCENE_SPACE_ANY` 0, or slot + 1), 24..32 the width (0 none, else `2^((bits - 160) / 8)` m) |
+| `SceneHit` | 16 | unchanged |
+| `SceneSurface` | 32 | `normal` (shading, `scene_pack_unit`), `face` (same), `base_color` (RGBA8: albedo, metallic), `params` (RGBA8: roughness, ao, subsurface radius as r / (1 + r), flags), `emissive` (RGB9E5), `specular` (F0 10:10:10 unorm), `subsurface` (RGB9E5: subsurface colour, or the share let through from behind with `SURFACE_FLAG_TWO_SIDED`), `anisotropy` (aniso x 8 bits, y 8, rotation 16 as a fraction of a turn); unpacks with alpha 1 |
+| `LightQuery` | 32 | `position: vec3<f32>`, `width: f32` (footprint), `normal: u32` (packed), `random: u32` (two 16-bit uniforms: where on a light), `pick: u32` (uniform: the choices), `space: u32` (bits 0..16 the ray encoding, bit 31 `LIGHT_QUERY_ANY_SIDE`) |
+| `LightSample` | 32 | `radiance: vec3<f32>` (incident radiance over its probability within its sampler), `distance: f32` (`LIGHT_SAMPLE_FAR` for a directional light), `dir: u32` (packed, toward the light), `pdf: f32` (solid angle within its sampler, 0 delta), `weight: f32` (sum of offers' weights, 0 no sample), `light: u32` (sampler id 28..32, the sampler's light id below) |
+
+**Snippets** (each a `ShaderSnippet`; a shader opts in with the marker and
+lists the snippet):
+
+| Marker | Const | What |
+|---|---|---|
+| `//!use frame_surface` | `gbuffer::SURFACE_SNIPPET` | `SurfaceData`, `SURFACE_FLAG_*` (1 subsurface, 2 anisotropic, 4 low specular, 8 two-sided), `surface_data`, `surface_with_transmission`, `surface_transmission`, `GBufferSurfaceTexels`, `gbuffer_surface_texels`, `gbuffer_surface_at` |
+| `//!use gbuffer_output` | `gbuffer::OUTPUT_SNIPPET` | adds `gbuffer_output(surface, tag, motion)` and `gbuffer_depth_output(.., depth)` (with `frame_surface`) |
+| `//!use frame_ray_stream` | `rays::stream::SNIPPET` | the rays, hits, packings; `scene_ray_cone(width, spread, mask)` (every space), `scene_cone_in_space(cone, space)`, `scene_ray_space(ray)`, `SCENE_SPACE_ANY`, `scene_space_of_slot`, `scene_ray_sees_space(ray, slot)`; needs nothing else |
+| `//!use frame_ray_surface` | `rays::stream::SURFACE_SNIPPET` | `SceneSurface`, `scene_surface_pack(surface, face)`, `scene_surface_unpack(row)`, `scene_surface_face(row)` (with `frame_ray_stream` and `frame_surface`) |
+| `//!use frame_light_samples` | `rays::light_samples::SNIPPET` | the rows, `light_query_point`, `light_query_uniform(q, k)`, `light_query_position_uniforms`, `light_query_space`, `light_query_sees_space`, `light_query_faces`, `light_sample_of`, `light_sample_offer(row, offer, q, sampler)`, `light_sample_found`, `light_sample_dir`, `light_sample_distance`, `light_sample_radiance`, `light_sample_pdf` (with `frame_ray_stream`) |
+
+**Rust**: `SceneRay::new(origin, t_max, dir, cone)`, `SceneRay::cone(width,
+spread, mask)` (every space), `.in_space(space)`, `.space()`,
+`.sees_space(slot)`, `SPACE_ANY`, `space_of_slot(slot)`, `MASK_ALL` (0x0f);
+`SceneSurface` accessors (`base_color`, `roughness`, `ao`, `flags`,
+`specular_f0`, `transmission`) and `surface_flags`; `Stream::with_detail`,
+`SurfaceDetail::{Diffuse, Full}` (default `Full`). Light samples:
+`LightBatch::new(name, capacity)` (resources `<name>_light_header`,
+`_light_queries`, `_light_samples`; the header is a `StreamHeader`),
+`LightBatchBuffers` (`new`, `clear`, `publish`), `LightSampler { name,
+supported, sample }`, `RegisterLightSampler::light_sampler` (a feature's
+prepare hook, as `RegisterRayTracer`), `offer` (a host without features),
+`sampled(env)`, `sampler_names(env)`, `sample(build, &batch)`, `SamplerId`
+(1-based, registration order, `MAX_SAMPLERS` 15), `LightSample::{offer,
+contribution, pdf, sampler}` (the WGSL's CPU mirror, for tests).
+
+#### Kinds as built
+
+- **G-buffer drawers** (meshes, foliage, the voxel publish, virtual
+  geometry's shade) write through `gbuffer_output` /
+  `gbuffer_depth_output` / `gbuffer_surface_texels`; the deferred lighting's
+  `fs_main` decodes with `gbuffer_surface_at`. Its `fs_reflection` (a second
+  entry kept under the portable 16-texture limit) still reads only the
+  normal, ORM and emissive targets for the specular composite, by the same
+  table; HLFS reads the channels its lighting needs. The materials plugin's
+  `MATERIAL_SNIPPETS` lead with the frame's surface snippet, and every
+  material program opts in with `//!use frame_surface`.
+- **Meshes** (`helio-mesh-api`): `RayInstance` keeps 64 bytes (`emissive`
+  lost its unused fourth float for `instance: u32`); its `flags` carry the
+  space slot at `RAY_INSTANCE_SPACE_SHIFT` (8, 8 bits), `in_space` /
+  `space()`; `RAY_INSTANCE_TRANSFORMS` (`RayTransform { rows: [[f32; 4];
+  3] }`, by TLAS instance); `RAY_SPACE_GROUPS` (256 `u32`: group bits 0..2,
+  `RAY_SPACE_SHARED` 4, `RAY_SPACE_PRESENT` 8; absent: the world's alone),
+  `ray_instance_mask(group, movable)`, `ray_space_groups(spaces)`; WGSL
+  `ray_instance_space`, `RayTransform`, `ray_transform_point` / `_vector` /
+  `_normal` (inverse transpose), `ray_space_cull(classes, space, entry)`.
+  The engine world's projection (`meshes_component::ray_scene`) reads each
+  owner's space, follows `SpaceSlot`'s journal, lays the groups and masks
+  out with the rows, and writes the transforms of the instances that moved;
+  the standalone projection (`helio_mesh_host::ray_tracing`) traces the
+  world's space only and publishes the transforms. The tracer
+  (`helio-pass-mesh-rays`): `mesh_rays_nearest` and `mesh_rays_occlusion`
+  cull by the space groups, `mesh_rays_surface` writes the meshes' hits'
+  surfaces from the transform table (`MeshRayTracer::surfaces()`, a
+  `MeshRaySurfaces <stream>` pass). It still writes the row's flat colour
+  and the material's constants: below `Diffuse` (no texture at the
+  footprint) until the materials' evaluator runs at hits.
+- **Voxel terrain**: `VoxelVolume::space` / `in_space`, `ChunkWorld::set_space`,
+  the ray parameters' `volume.w` bits 8..16 (`RAY_VOLUME_SPACE_SHIFT`);
+  `stream_sees` tests `scene_ray_sees_space`; `ray_surface` packs the
+  publish's surface (dielectric F0 0.03, not metallic, a leaf's share of
+  its colour let through). It answers `Diffuse` (the publish's shading at the
+  footprint) for either level until the voxel agent's `Full` kernel.
+- **GI**: the probe stream asks `SurfaceDetail::Diffuse`; probe and shadow
+  rays carry the camera's space (`GiTrace.info.y`); `GILight` unpacks hits
+  with `scene_surface_unpack` and lights the far side by
+  `surface_transmission` (the hit's share times its colour, as before).
+  `local_lights` (`gi_local_lights.wgsl`, `gi_gather_lights.wgsl`) still read
+  the lights' rows: they go when the lights' sampler lands (below).
+
+#### What the next three agents build against this
+
+1. **Materials at mesh hits** (materials and meshes plugins): replace
+   `mesh_rays_surface` with the binned material passes: bin the stream's
+   meshes hits by program (`material_class`, or the graph hash for
+   `MATERIAL_FLAG_HAS_CUSTOM_SHADER`, the drawers' `RadiantShaderKey`),
+   compose each template or graph into a hit program over the row, the mesh
+   pools (UV0, tangents) and `RAY_INSTANCE_TRANSFORMS`, sample textures at
+   the ray cone's footprint (`scene_ray_footprint`), and write
+   `scene_surface_pack(radiant_eval_surface(..), face)`. `Diffuse` streams
+   may take the table-driven default kernel (base colour texture at the
+   footprint, emission, normal); `Full` streams run every program. The
+   `RayInstance` colour fields (`base_color`, `emissive`, the texture means)
+   go with the flat kernel. Open for them: the foliage template writes
+   `subsurface_color = albedo` (the raster lights a leaf's back with its full
+   colour) where hits carry `albedo * material_transmission` (GI's far side):
+   the share belongs in the template, which changes the raster image.
+2. **The voxel terrain's surfaces** (voxel plugin): a `Full` kernel of
+   `ray_surface` that shades a hit as the publish does (scene materials,
+   textured normals, the shore's swash, the cell's occlusion), keeping the
+   current one as `Diffuse`, chosen by `stream.detail`; and the carried r1
+   items (the surface pass and walk cost, the sun pages under canopies).
+3. **The lights' sampler and the reference path tracer** (lights plugin and
+   a new consumer): register a `LightSampler` from the lights' feature
+   (`RegisterLightSampler::light_sampler`) whose pass reads
+   `helio_light_api::SCENE_LIGHTS` and, for each query, picks a point, spot
+   or directional light that `light_query_sees_space` and
+   `light_query_faces` allow (uniformly or by power), evaluates its
+   radiance as the deferred lighting's `light_incidence` does (range
+   falloff, spot cone, IES and light functions, the atmosphere's
+   transmittance for a directional light), and merges
+   `light_sample_of(radiance / choice, dir, distance, 0.0, id, light)` with
+   `light_sample_offer`. Then delete GI's `local_lights.rs`,
+   `gi_local_lights.wgsl` and `gi_gather_lights.wgsl` and move GILight onto a
+   `LightBatch` (its sun stays the atmosphere's until the sampler takes
+   directional lights through the sky frame). The reference path tracer
+   consumes streams and batches as described above.
+
+#### Measured
+
+On an RTX 3060, the build before this change (r1 merged) against this one,
+interleaved, two or three runs each; GPU medians in milliseconds.
+
+| | r1 | r2 |
+|---|---|---|
+| Terrain's streams in isolation (`stream_rays_cost`, 174,080 GI-shaped rays): nearest walk | 1.279-1.292 | 1.284-1.295 |
+| surfaces (20-byte rows, then 32) | 0.091-0.092 | 0.094-0.095 |
+| entry | 0.126-0.127 | 0.127 |
+| occlusion | 0.249-0.250 | 0.250-0.252 |
+| `indoor_cathedral_gi` (180 frames to the capture): GI | 0.107-0.118 | 0.114-0.115 |
+| MeshRays gi_probe | 0.110-0.117 | 0.113-0.114 |
+| MeshRaySurfaces gi_probe (new) | | 0.071-0.072 |
+| GILight / MeshRays gi_shadow / GIIntegrate | 0.357-0.411 / 0.044-0.050 / 0.226-0.248 | 0.377-0.393 / 0.044-0.050 / 0.243-0.245 |
+| `voxel_craft` (one pose, the last six 240-frame windows' medians): GI's passes in all | 2.904-2.908 | 2.926-2.937 |
+| of which VoxelRaySurfaces gi_probe / MeshRaySurfaces gi_probe | 0.234-0.235 / none | 0.241-0.242 / 0.022-0.023 |
+
+What it costs: the meshes' surface pass of its own (0.022 ms on
+voxel_craft's few mesh hits, 0.071 in the cathedral's all-mesh scene),
+which the trace's latency used to hide; and 3-4% on the terrain's surface
+pass for the 32-byte surface rows. The ray row costs nothing (it stayed 32
+bytes). The surface pass is the one the materials agent replaces with the
+binned material passes, which need it.
+
+Images (RGB 0-1, mean |difference|): `indoor_cathedral_gi` frame 240, three
+runs each: r1-r1 0.00005-0.00023 (0.00067 in an earlier pair), r2-r2
+0.00004-0.00108, r1-r2 0.00008-0.00108 (the means of three against each
+other 0.00040), luminance within -0.33% to +0.10%. `voxel_craft` one pose,
+8-frame burst means, no clouds: r1-r1 0.00156, r2-r2 0.00159, r1-r2
+0.00096-0.00165, luminance within 0.05%. Both inside run-to-run noise: this
+step changes encodings, not shading.
+
+#### Open
+
+- **Carried from r1** (section 3), each to its owner in this phase: the
+  terrain's surface pass and walk cost and the sun pages' leak under
+  canopies (the voxel agent), the voxel_craft r0-r1 image difference judged
+  against the reference path tracer, and an acceptance suite on a ray-query
+  device (the reference's agent).
+- **Pre-existing reds met here, not this change's**: the deferred lighting's
+  `each_entry_point_fits_the_portable_texture_limit` (its documented count
+  15 against its layouts' 14) and the transparent drawer's
+  `production_pipelines_accept_coverage_and_legacy_templates` (its "legacy"
+  string replacement targets a `TransparentOutput` of two fields; the shader
+  returns three). Neither code path is touched here.
+- **The raster and the hits disagree on a leaf's back**, unchanged by this
+  step (images held): the foliage template's `subsurface_color` is the full
+  albedo, a hit's is `albedo * material_transmission`. The materials agent
+  settles it in the template (it changes the raster image).
+- **Not verified here**: a scene with authored spaces traced through the
+  engine (no example or level has a rigid frame or portal pocket with
+  traced meshes; the engine projection's groups and `SpaceSlot` journal are
+  covered by compilation and the tracer's own GPU test, not by frames);
+  Earth and Moon holds (voxel_flight), whose terrain code changed only in
+  its rows' packing; the engine's render acceptance suite.
