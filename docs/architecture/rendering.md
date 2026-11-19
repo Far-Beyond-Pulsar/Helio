@@ -157,12 +157,13 @@ and then sees no other kind.
   under `rays.<stream>`: the per-signal ray count the rules above ask for.
 - **Runs from one origin** (`Stream::with_run`, `Stream::run`, 1 = none):
   the consumer states that its rays come in runs of N consecutive rows
-  from row 0 sharing their origin and caster mask (a probe's rays, a hit's
-  shadow rays toward several lights, a pixel's samples). A tracer whose
-  cost has a part that depends on the origin alone pays it once a run; one
-  without (a TLAS query) ignores it. Wavefront tracers recover this
-  coherence by sorting rays; here the consumer that made the rays that way
-  says so.
+  from row 0 sharing their origin and caster mask (r2's camera rays first,
+  a hit's shadow rays toward several lights, a pixel's samples). A tracer
+  whose cost has a part that depends on the origin alone pays it once a
+  run; one without (a TLAS query) ignores it. Wavefront tracers recover
+  this coherence by sorting rays; here the consumer that made the rays that
+  way says so. Runs serve only rays that really share an origin: GI's probe
+  rays do not (below).
 
 #### Tracers
 
@@ -200,12 +201,23 @@ GI (the GI plugin's `helio-pass-gi`) is a consumer of two streams and knows
 no kind:
 
 - `gi_probe` (nearest, 64 rays a probe updated this frame, up to 174,080,
-  each probe's a run from the probe itself: `Stream::with_run(64)`) and
+  each starting `gi_ray_offset` behind its probe along its own direction,
+  and GILight taking a hit within that distance as inside) and
   `gi_shadow` (occlusion: a sun ray and one local light's a probe ray's
   hit, packed from row 0, the count written on the GPU). A shadow ray
   starts as wide as the probe ray's footprint at its hit
   (`GI_RAY_SPREAD * t` from the probe) and keeps that width, so a tracer
   may answer it at that level of detail (the meshes test cut-outs at it).
+- **Why a probe's rays are not a run.** Started at the probe itself (a run
+  of 64 from one origin, which the terrain's tracer places once), a probe
+  lying on a surface met it only with the rays toward it: the others left
+  from the surface's far side, so the probe stayed live and carried light
+  through the surface (a solid cut-out card let 1 % through,
+  `vg_ray_proxies`). Started `gi_ray_offset` behind the probe along its own
+  direction, every ray of such a probe crosses the surface within that
+  distance and the probe is dropped, whichever side f32 rounding put it.
+  The rays then share no origin, so the stream is not in runs and the
+  terrain enters them ray by ray.
 - One node at `Slot::Geometry` 20, `once_per_frame`, after the G-buffer
   phase (so the terrain's tracer walks this frame's cut): **GI** (the sun,
   probes that came into the clipmap reset, the probe rays) → each kind's
@@ -257,11 +269,15 @@ Where the first build's cost goes, split by pass (a profiling build timed
 the entry and the walk apart): the probe walk's entry 0.085 ms on
 voxel_craft and 0.11-0.12 on the planets, its walk 1.53 and 1.44; the
 sun's shadow rays 0.36-0.45 (an entry 0.08 and a walk 0.28-0.37 on the
-planets). What changed here: a probe's 64 rays are a run
-(`Stream::with_run`), its origin placed once, and an origin in a solid
-cell is an inside hit with no walk (on GI's 174,080 rays in isolation,
-`stream_rays_cost`: entry 0.166 -> 0.130 ms, walk with entry 1.324 ->
-1.303). The sun's shadow rays answered from the terrain's sun occlusion
+planets). What changed here: an origin in a solid cell is an inside hit
+with no walk, and a stream in runs places each run's origin once (on GI's
+174,080 rays in isolation as runs of 64 from the probe, `stream_rays_cost`:
+entry 0.166 -> 0.130 ms, walk with entry 1.324 -> 1.303). The closing
+build's figures above were taken with GI's probe rays in runs; they are no
+longer (GI on ray streams, above), so GI pays the terrain's entry ray by ray
+again, about 0.04 ms of that isolated entry, not re-measured in the frame.
+Runs stay for streams whose rays share an origin, r2's camera rays first.
+The sun's shadow rays answered from the terrain's sun occlusion
 pages at their footprint cost 0.07-0.09 instead of 0.41 but brightened
 voxel_craft's shade by 3-8 % and are not built (Tracers, above).
 
@@ -297,7 +313,8 @@ poses, no clouds; voxel_flight ground holds):
 
 The r0-r1 image difference on voxel_craft is not explained. Proven here:
 the stream changes of this round (runs, inside origins, probe rays from
-the probe itself) do not move the image (a build with them and without
+the probe itself; GI's probes have since gone back to rays from behind the
+probe, not in runs) do not move the image (a build with them and without
 the page answers against the build before them: 0.0006-0.0013, inside
 r1-r1 noise); answering the sun's visibility from the sun occlusion pages
 (the candidate: r0 read them) moves voxel_craft further from r0, brighter
