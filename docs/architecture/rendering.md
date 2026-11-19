@@ -1154,3 +1154,126 @@ tracer over the streams and light batches, knowing no kind:
   terrain's run entry places a run's origin with one thread and reads a
   start row a run (`rows / run` rows), nothing sized by the run's length, so
   a run of 2^19 rays costs one thread; nothing needed changing.
+- **Ray offsets**: a reference ray starts `0.002 + 4e-6 |p| + footprint /
+  100` off the surface it leaves. 0.1 mm made every bounce and shadow ray
+  from voxel_craft's terrain an inside hit (the terrain takes an origin
+  within 1/1024 of a cell of a solid face for one, and a cell is about a
+  footprint wide). That was one cause of a black terrain in the reference;
+  it is not the only one (see Open).
+
+**Verified** (RTX 3060):
+
+- The BSDF (`helio-frame-api` `tests/bsdf_gpu.rs`, 2M directions a case,
+  eight surfaces at three view angles): the evaluated integral and the
+  sampled estimate agree within five standard errors everywhere; a white
+  Lambertian surface (F0 0) reflects 1.0000, white metals 0.31 to 0.99
+  (single-scattering GGX loses energy with roughness); `bsdf_pdf`
+  integrates to 0.97..1.03; a specular weight never exceeds 1. Found, not
+  fixed: a white *dielectric* returns more than it receives at grazing
+  views, 1.015 at roughness 0.8 and n.wo 0.1 and, measured offline, up to
+  1.53 at roughness 0.1, because the diffuse lobe is weighted by
+  `1 - F(wo.h)` (the deferred lighting's coupling before this change too).
+  The fix is the specular lobe's directional albedo `E(n.wo, roughness)`
+  (Kulla and Conty 2017; Filament's energy compensation), diffuse weighted
+  by `1 - E`; it needs a table every BSDF reader binds (a polynomial fit
+  was 2-6% off at grazing smooth surfaces), which touches every lighting
+  model's bindings, so it is left to the phase that owns them (r5).
+- The sampler (`tests/sampler_gpu.rs`): over 48 point lights of ranges
+  0.6 m to 70 m, a spot, a global 900 m light, two suns and dead rows, at
+  points inside the grid, outside its finest levels and outside every
+  level, 8192 samples a point: the mean of `light_sample_radiance *
+  cos` is the brute-force sum of `light_incidence * cos` over every light
+  within five standard errors (plus 1e-4 for f32 and the row's packing);
+  every density 0; a light behind a one-sided point never chosen; a point
+  out of every light's range gets no sample; a point of one coordinate
+  space lit only by its space's lights, a point of every space by all.
+- The reference (`tests/reference_gpu.rs`, the tests' own analytic tracer
+  and sampler, 32x32): the furnace (a closed room of albedo 0.502, every
+  wall emitting 1) at depths 1, 2, 3: 1, 1.50195, 1.75391 against
+  1, 1.50196, 1.75393; at depth 12 with Russian roulette 2.0065 against
+  2.0074 (256 paths a pixel); direct light from a point light and a sun on
+  Lambertian ground, one surface a path: mean relative error 0.05%, worst
+  pixel 0.23% (512 paths a pixel); the furnace's RMS error at 16 and 64
+  paths a pixel 0.507 and 0.261, ratio 1.94 (1/sqrt(N): 2). Two faults the
+  tests found and this fixes: a WGSL `vec3` field padded the owners' row to
+  48 bytes in a 32-byte buffer (a third of the light samples were written
+  out of bounds), and a stage bound its count buffer for writing while
+  dispatching indirectly from it, which wgpu rejects (a stage now
+  dispatches over the frame's paths, its lanes returning past its count).
+- GI's suites (lib, `probes`, `mesh_gi_graph`, `vg_ray_proxies`) pass on the
+  lights' sampler; the sampler's, the deferred lighting's (the texture
+  count test included: 14) and HLFS's unit tests pass; Helio's layer gate,
+  fmt, the frame-api tests; `one_owner`; `api_statics`.
+
+**indoor_cathedral_gi** (960x540 internal, its capture at frame 240; r2's
+contract build `C:/t/int/indoor_cathedral_gi_r2.exe` interleaved with this
+one, two runs each; GPU medians in ms over frames 60 to 240):
+
+| | before | after |
+|---|---|---|
+| GI, GILight, GIIntegrate | 0.110, 0.32-0.40, 0.23-0.24 | 0.096-0.099, 0.29-0.30, 0.22-0.23 |
+| LightSampleGrid, LightSamples, GIShadow (new) | | 0.055-0.057, 0.074-0.078, 0.057-0.058 |
+| GI's passes in all | 0.66-0.75 | 0.80-0.82 |
+| DeferredLight | 0.50-0.51 | 0.58-0.60 |
+
+The cathedral pays 0.1 ms for GI on the contract (the grid, the batch and
+a pass of its own for the shadow rays, against GILight's loop over its 256
+gathered lights) and 0.08 ms in the deferred lighting for the frame's
+BSDF (Smith's exact masking, two square roots a light, against the
+Schlick-k approximation). Images (frame 240, RGB 0-1, mean |difference|):
+before-before 0.0005, after-after 0.0009, before-after 0.0007-0.0010,
+luminance +0.07% to +0.3%: inside run-to-run noise (the chandeliers
+flicker by wall time).
+
+The reference against the real-time image (the scene held still,
+`HELIO_STILL`; linear, at the lighting's output before fog, transparency and
+the tone map; 2340 paths a pixel, six bounces): real-time luminance 0.815
+of the reference's, mean |error| 0.0055 (p99 0.063), mean relative error
+18%. The real-time image is darker by a fifth: the reference's
+interreflections between the stone walls (albedo near 0.5) carry more light
+than the probes' irradiance gives the deferred lighting. The indirect
+diffuse alone (the deferred lighting's view 23 against the reference's 63,
+final images at the same fixed exposure): luminance 0.957, mean |error|
+0.0035. At 2340 paths the reference still shows fireflies (paths that find
+a candle through a bounce); its p99 errors are theirs.
+
+A reference frame (518,400 paths, six stages, the cathedral's meshes
+traced through the TLAS): about 7.5 ms on the RTX 3060, by stage: camera
+rays 0.43; each depth's trace, surfaces, shade, samples, shadow rays,
+shadow trace and resolve 1.5 ms at depths 0 to 2 falling to 0.4 ms at depth
+5 as Russian roulette and misses end paths; the sums 0.18; the display
+0.06. Out of its views it records nothing.
+
+**voxel_craft** (one pose, its burst at 1500 frames; r1's merged exe and
+r0's baseline against this build): not answered. The reference renders
+voxel_craft's terrain and trees as silhouettes, near black under the fog
+(`C:/t/r2d/compare/craft/r1_vs_reference_side_by_side.png`), while its
+meshes are lit, so its numbers (r0 and r1 luminance 0.71 and 0.70 of the
+reference's, indirect 0.82 and 0.81) measure that fault, not r0 or r1.
+What was measured: GI's irradiance (view 23) on the contract against r1's,
+luminance 0.998 (GI on the sampler does not change voxel_craft's indirect
+light); the final image against r1's, mean |difference| 0.026, luminance
++10.7% (the frame's BSDF: Smith's exact masking and the F90 rule brighten
+the outdoor deferred lighting). Every comparison here is to be rerun at
+integration with `scripts/r2/rerun_reference.sh` (`PART=cathedral` or
+`PART=craft`).
+
+**Open**:
+
+- voxel_craft's terrain in the reference: hits are found (the silhouettes)
+  and the voxel `ray_surface` fills a surface for any stream of its tracer
+  and volume, yet the terrain returns almost no light. Not yet separated:
+  surfaces never written for the reference's streams, every NEE ray from
+  the terrain occluded, or inside hits. The grass (foliage) is not traced at
+  all. Until this is fixed the r0-against-r1 question has no answer.
+- The dielectric BSDF's energy at grazing views (above).
+- `HELIO_STILL=2` (rows written once) culls the cathedral's objects: Hi-Z
+  history faults when nothing writes a row; the comparisons use
+  `HELIO_STILL=1` (rows rewritten unchanged).
+- Emissive surfaces are not light samples: paths find them only by
+  bouncing, the fireflies at 2340 paths.
+- HLFS still evaluates its lights itself rather than through
+  `light_incidence`.
+- The reference restarts on SceneDB content and the camera; state outside
+  SceneDB (a voxel edit, a GI setting) does not restart it.
+- Its passes stay in the graph, idle, when no view shows it.
