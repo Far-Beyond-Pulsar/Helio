@@ -95,6 +95,8 @@ helio-pass-perf-overlay = { layer = "feature", group = "debug" }
 helio-pass-buffer-view = { layer = "feature", group = "debug" }
 # The editor's selection outline over the mask every kind draws into.
 helio-pass-selection-outline = { layer = "feature", group = "debug" }
+# The reference path tracer over the frame's ray streams and light samples.
+helio-pass-reference = { layer = "feature", group = "reference" }
 
 # renderer
 helio = { layer = "renderer" }

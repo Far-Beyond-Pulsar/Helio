@@ -187,7 +187,12 @@ fn totals(values: &[f32], config: u32, view: u32) -> ([f64; 2], [f64; 2], f64, f
         let mean = sum / n;
         [mean, ((squares / n - mean * mean).max(0.0) / n).sqrt()]
     };
-    (stat(sums[0], sums[1]), stat(sums[2], sums[3]), sums[4] / n, most)
+    (
+        stat(sums[0], sums[1]),
+        stat(sums[2], sums[3]),
+        sums[4] / n,
+        most,
+    )
 }
 
 #[test]
@@ -213,7 +218,10 @@ fn the_bsdf_conserves_energy_and_its_sampler_matches_it() {
                 uniform[0],
                 sampled[0]
             );
-            assert!(pdf <= 1.0 + 5.0 * uniform[1].max(1e-3), "{label}: pdf mass {pdf}");
+            assert!(
+                pdf <= 1.0 + 5.0 * uniform[1].max(1e-3),
+                "{label}: pdf mass {pdf}"
+            );
             // A white Lambertian surface reflects all it receives, a white
             // metal (configs 2 to 5) no more.
             if config == 1 {
