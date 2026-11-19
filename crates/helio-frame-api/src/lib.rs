@@ -19,7 +19,8 @@
 //! - [`view`]: the views a frame renders (its camera and the captures
 //!   features ask for) as a drawer sees them when it builds.
 //! - [`rays`]: the frame's TLAS and the buffers that follow it, published by
-//!   whatever builds it.
+//!   whatever builds it; and [`rays::stream`], the ray streams every kind's
+//!   tracer answers, so a consumer traces the whole scene knowing no kind.
 //! - [`static_names`]: the read lists of a pass whose reads are what a
 //!   publisher named (media, the sun's transmittance).
 //! - [`host_input`]: resources a host supplies every frame, declared by the
@@ -43,13 +44,14 @@ pub use host::{host_input, host_kind, HOST_INPUTS};
 
 /// The scene buffers the frame defines, by key: any feature may read them,
 /// whoever produces them (the renderer's entity generations and camera, a
-/// lighting input's probe rows). A host's catalog
+/// lighting input's probe rows, the host's selection rows). A host's catalog
 /// links a feature's read of one of these to the frame rather than to a
 /// kind's contract.
 pub const FRAME_BUFFERS: &[&str] = &[
     helio_core::ENTITY_GENERATIONS_KEY.as_str(),
     helio_core::CAMERA_BUFFER_KEY.as_str(),
     lighting::ENVIRONMENT_PROBES,
+    selection::OBJECT_SELECTED.name(),
 ];
 pub use phase::{
     phase_settings, Attachment, AttachmentFormat, FrameNode, Phase, PhaseList, PhaseViews, Slot,
@@ -69,4 +71,51 @@ pub fn static_names(names: &[&'static str]) -> &'static [&'static str] {
     let list: &'static [&'static str] = Box::leak(names.to_vec().into_boxed_slice());
     lists.push(list);
     list
+}
+
+/// `name` as a `'static` string, one per distinct name: a resource a node
+/// names when it is built (a ray stream's buffers) is a `'static` name in
+/// its passes' read and write lists.
+pub fn static_name(name: &str) -> &'static str {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
+        std::sync::OnceLock::new();
+    let mut names = NAMES.get_or_init(Default::default).lock().unwrap();
+    if let Some(known) = names.get(name) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(name.to_owned().into_boxed_str());
+    names.insert(leaked);
+    leaked
+}
+
+/// What the contracts' build-time tests run in.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::Arc;
+
+    use helio_feature_api::{BuildEnv, FrameDesc};
+
+    /// Runs `test` with a build environment over wgpu's no-op device (the
+    /// contracts tested build nothing on the GPU).
+    pub fn with_env(test: impl FnOnce(&mut BuildEnv<'_>)) {
+        let (device, queue) = wgpu::Device::noop(&Default::default());
+        let (device, queue) = (Arc::new(device), Arc::new(queue));
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256,
+            usage: wgpu::BufferUsages::UNIFORM,
+            mapped_at_creation: false,
+        });
+        let stats = helio_core::FrameStats::new(&device);
+        let frame = FrameDesc {
+            width: 64,
+            height: 64,
+            internal_width: 64,
+            internal_height: 64,
+            surface_format: wgpu::TextureFormat::Rgba8Unorm,
+            xr: false,
+        };
+        let mut env = BuildEnv::new(&device, &queue, frame, &buffer, &buffer, &stats, true);
+        test(&mut env);
+    }
 }

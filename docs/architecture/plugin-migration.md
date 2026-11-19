@@ -101,7 +101,7 @@ repository (the table's second column), a submodule at
 | `pulsar.meshes` | [Plugin_Meshes](https://github.com/Far-Beyond-Pulsar/Plugin_Meshes) | StaticMesh, StaticMeshDraw, SkeletalMesh, LOD, VirtualGeometry | object batch, culling (occlusion, indirect dispatch), mesh drawers (GBuffer, ShadowCasters, Forward, Transparent), skinning, LOD selection, VG (all `helio-pass-vg*`, `helio-vg-*`), ray proxies + TLAS publication, the mesh part of the scene join | crates done (batch 4): `plugins/vendor/meshes/` (`api` = helio-mesh-api, `feature/*`, `vg/*`, `asset-compat`, `host` = helio-mesh-host, root = meshes_plugin (every registration, p19), `component` = meshes_component, `editor` = meshes_editor, `examples` = meshes-examples, `snapshot`, `web-demos`, `android-demos`); the Helio repo has no mesh crate. The SceneDB components, mesh assets and import, scene join, authored LOD selection, VG host, picking and thumbnails are the plugin's since Phase C step 3 part B, through generic registrations (see "As built, Phase C step 3 part B") |
 | `pulsar.lights` | [Plugin_Lights](https://github.com/Far-Beyond-Pulsar/Plugin_Lights) | Light, ReflectionCapture | light list, light cull, shadow views + atlas (shadow matrix/dirty/atlas; casters come from drawers), the lighting model (deferred light, forward light function), IES, light icons (as billboards) | done (batch 5): `plugins/vendor/lights/` (`api` = helio-light-api, `feature/{cull,shadows,deferred,hlfs,billboard}`, `host` = helio-light-host, root = lights_plugin (every registration, p19), `component` = lights_component with `LightComponent`/`ReflectionCaptureComponent`, `editor` = lights_editor, `examples` = lights-examples); the Helio repo has no light crate |
 | `pulsar.sky` | [Plugin_Sky](https://github.com/Far-Beyond-Pulsar/Plugin_Sky) | Atmosphere | atmosphere tables, clouds, sky composite; publishes `sky`, `sun_visibility`, `sun_transmittance` | done (batch 3): `plugins/vendor/sky/` (root = `sky_plugin`, `sky_component`, `feature` = helio-pass-sky, `sky_editor`, `sky-examples`); no api crate: what others read of it is the frame's |
-| `pulsar.gi` | [Plugin_GI](https://github.com/Far-Beyond-Pulsar/Plugin_GI) | (none; settings) | probe clipmap, tracers interface; publishes `indirect_diffuse` | done (batch 3): `plugins/vendor/gi/` (root = `gi_plugin`: the feature's registration and settings, `api` = helio-gi-api, `feature` = helio-pass-gi, `gi-examples`; no component or editor crate) |
+| `pulsar.gi` | [Plugin_GI](https://github.com/Far-Beyond-Pulsar/Plugin_GI) | (none; settings) | probe clipmap, a consumer of the frame's ray streams (r1); publishes `indirect_diffuse` and offers its `indirect_occlusion` distance | done (batch 3): `plugins/vendor/gi/` (root = `gi_plugin`: the feature's registration and settings, `api` = helio-gi-api, `feature` = helio-pass-gi, `gi-examples`; no component or editor crate) |
 | `pulsar.fog` | [Plugin_Fog](https://github.com/Far-Beyond-Pulsar/Plugin_Fog) | GlobalFog, LocalFogVolume | volumetric fog and its composite | done (batch 2): `plugins/vendor/fog/` (root = `fog_plugin`, `fog_component`, `feature` = helio-pass-volumetric-fog, `fog_editor`, `fog-examples`); publishes the frame's participating media |
 | `pulsar.post` | [Plugin_Post](https://github.com/Far-Beyond-Pulsar/Plugin_Post) | PostProcessVolume, CameraPostProcess | volume blend, publishes post settings | done (batch 2): `plugins/vendor/post/` (root = `post_plugin`, `post_component`, `feature` = helio-pass-post-volumes, `post_editor`, `post-examples`); blends over the host's `POST_BASELINE` |
 | `pulsar.lens` | [Plugin_Lens](https://github.com/Far-Beyond-Pulsar/Plugin_Lens) | CameraLens | lens, flare (reads `light_list` via lights api) | done (batch 1): `plugins/vendor/lens/` (root = `lens_plugin`, `lens_component`, `feature/{lens,flare,optics}`, `lens-examples`; no editor crate); the view overscan through `ViewOverscanRegistration` |
@@ -705,7 +705,9 @@ As built, batch 3 (2026-11-03, branch `rewrite/p9-gi-sky` in both repos):
 GI and the sky are Pulsar plugins; the Helio repo has none of their crates
 (helio-pass-gi, helio-gi-api, helio-pass-sky, helio-sky-api).
 - **Layout** as batches 1 and 2: `plugins/vendor/gi/` with `api` (helio-gi-api:
-  the probe clipmap's contract, which the voxel terrain traces), `component`
+  the probe clipmap's contract, which the voxel terrain traced until r1;
+  since then the terrain answers GI's rays as a tracer of the frame's ray
+  streams and depends on no GI crate), `component`
   (`gi_component`: GI has no SceneDB component, so it holds the feature's and
   the settings group's registrations), `feature` (helio-pass-gi), `editor`
   (`gi_plugin`) and `examples` (`gi-examples`: `indoor_cathedral_gi`);
@@ -722,7 +724,7 @@ GI and the sky are Pulsar plugins; the Helio repo has none of their crates
   the way batch 2's media are (`publish` / `current`): the sky's atmosphere
   node publishes its `cloud_shadow_map` / `cloud_shadow_frame`, and fog's
   froxels and GI's probe update and mesh rays bind whatever was published, or
-  the stand-in (fully lit). Why not `SUN_VISIBILITY` /
+  the stand-in (fully lit) (since r1 GI's light pass, `GILight`, binds it). Why not `SUN_VISIBILITY` /
   `DIRECTIONAL_VISIBILITY`: those are per pixel of the G-buffer, while a
   medium's froxels and the probes' ray hits are points off the surface and
   off the screen; the clouds fold the map into `SUN_VISIBILITY` for surfaces,
@@ -775,7 +777,9 @@ GI and the sky are Pulsar plugins; the Helio repo has none of their crates
   passes and, where mesh rays run, GI's three); Helio's preset snapshot loses
   exactly the moved passes (324 lines: Atmosphere, CloudTrace and
   AtmosphereComposite in 15 graphs, GI, GIMeshRays and GIResolve in 12) and
-  gains nothing. voxel_craft (p8 exe vs p9, alternating, 8-frame bursts at 4
+  gains nothing. (GIMeshRays is gone since r1, `rendering.md`: GI's update is
+  GI, GILight and GIIntegrate, with each kind's tracer passes between
+  them.) voxel_craft (p8 exe vs p9, alternating, 8-frame bursts at 4
   poses): the render-graph dump is identical (29 passes), mean |Δ| p8-p9
   0.07-0.49 against p8-p8 0.05-0.36 and p9-p9 0.12-0.43, run times 29/29/26/24 s.
   The GI cathedral (Helio p8 `indoor_cathedral` vs `indoor_cathedral_gi`):
@@ -1480,7 +1484,7 @@ rewrite plugins:
 
 | Plugin (repo) | Owns | Overlap | Decision |
 |---|---|---|---|
-| `skm_editor` (Plugin_SKM) | `skeletal_assets` (every skeletal format: `.skeleton`, `.animseq`, `.skmesh`, `.blendspace`, `.montage`, `.animgraph`, IK rigs and retargets, pose DBs; the animation runtime; CPU skinning) and the animation editor | `helio_component`'s `SkeletalMeshComponent` decodes `skeletal_assets::skmesh` and calls its skinning; the editor preview has its own `SkinVertex` and skinning WGSL; `material_ids.rs` reads and writes material documents | Owner of **animation** (skeletons, clips, graphs, the pose runtime: `pulsar.animation`), not of skinned drawing: the animation plugin writes joint palettes, `pulsar.meshes` owns the skinned vertex rows and skinning in its drawers and the palette/skin keys (moved to `helio-mesh-api` here). Its preview should draw through the engine renderer (as the asset viewer does), and its material ids go through the materials' component api once material assets leave `helio_component`. |
+| `skm_editor` (Plugin_SKM) | `skeletal_assets` (every skeletal format: `.skeleton`, `.animseq`, `.skmesh`, `.blendspace`, `.montage`, `.animgraph`, IK rigs and retargets, pose DBs; the animation runtime; CPU skinning) and the animation editor | `helio_component`'s `SkeletalMeshComponent` decodes `skeletal_assets::skmesh` and calls its skinning; the editor preview has its own `SkinVertex` and skinning WGSL; `material_ids.rs` reads and writes material documents | Owner of **animation** (skeletons, clips, graphs, the pose runtime: `pulsar.animation`), not of skinned drawing: the animation plugin writes joint palettes, `pulsar.meshes` owns the skinned vertex rows, the skinning (one compute pass into its skin cache, which its drawers and its ray-traced scene read: r1, `rendering.md`) and the palette/skin keys (moved to `helio-mesh-api` here). Its preview should draw through the engine renderer (as the asset viewer does), and its material ids go through the materials' component api once material assets leave `helio_component`. |
 | `shader_editor` (Plugin_Shaders) | the `.material` graph asset (`shader_graph_save.json`), the graph editor, its own PSGC compile and texture lowering, a Lambert "PBR" preview | a second graph compiler beside `helio_component::material_graph`; the preview is not the engine's BRDF; the import companion overlaps `meshes/asset-compat`'s material converter; the graph file name is a literal in seven crates | **Merge into `pulsar.materials`**: the graph UI becomes the materials plugin's editor, its compile path is deleted for the one compiler (which moves into `materials_component` with the material assets, Phase C step 3), the preview draws Radiant templates through the engine renderer. |
 | `matter_editor` (Plugin_Matter) | `.pif` texture painting (layers, history, brushes, tile compositor) | none in code: nothing reads `.pif`, painted textures do not reach the material texture table | **Separate, with a contract**: it produces images; the texture-asset pipeline (`texture_assets`, cooked textures) imports them, as any image. |
 | `asset_viewer` (in tree) | viewers for `.fbx`, `.mesh`, `.png`; per-slot default materials of a mesh | its own mesh pipeline and graph-material program; the `Globals` copy above | Its mesh viewer and slot materials become `pulsar.meshes`' editor (drawing through the engine renderer); the image viewer stays generic. |

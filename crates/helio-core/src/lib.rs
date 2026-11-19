@@ -124,7 +124,8 @@ pub use view::{
 
 // Re-export managers
 pub use crate::acceleration::{
-    AccelerationError, BlasGeometry, BlasManager, BlasSegment, TlasInstanceInput, TlasManager,
+    AccelerationError, BlasCounters, BlasGeometry, BlasManager, BlasMemory, BlasPolicy,
+    BlasSegment, BlasWork, TlasCounters, TlasInstanceInput, TlasManager, TlasPolicy,
 };
 // Re-export core types
 pub use context::{PassContext, PrepareContext};

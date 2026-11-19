@@ -31,7 +31,6 @@ const BANNED_RESOURCE_LITERALS: &[&str] = &[
     "billboards",
     "vg",
     "corona_emitters",
-    "depth_texture",
     "hiz_sampler",
 ];
 

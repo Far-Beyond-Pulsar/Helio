@@ -5,6 +5,7 @@
 //! | Contract | Form | Published today by | Stand-in |
 //! |---|---|---|---|
 //! | [`INDIRECT_DIFFUSE`] | buffer, 2 words a pixel | GI probes' resolve, then a bake's lightmaps | sky/ambient only |
+//! | [`indirect_occlusion`] | metres, offered at build | GI probes (twice their spacing) | none: a kind keeps its own reach |
 //! | [`INDIRECT_SPECULAR_LAYERS`] | rgba16f textures, straight alpha, any resolution | SSR (half res), planar reflections | no layer |
 //! | [`ENVIRONMENT_PROBES`] + [`ENVIRONMENT_CUBES`] | probe rows + cube array | reflection captures, bake | sky cube only |
 //! | [`SUN_VISIBILITY`] / [`DIRECTIONAL_VISIBILITY`] | rgba16f, full res | clouds / terrain | fully visible |
@@ -249,6 +250,76 @@ pub fn lighting_settings(env: &BuildEnv<'_>) -> LightingSettings {
 /// over the GI probes, on the surfaces it baked) and publishes its own only
 /// where none was.
 pub const INDIRECT_DIFFUSE: &str = "indirect_diffuse";
+
+/// The smallest distance (metres) at which the graph's [`INDIRECT_DIFFUSE`]
+/// resolves occlusion: an occluder nearer a surface than this is lost in how
+/// the indirect diffuse samples the scene (world-space probes blur what lies
+/// within about two of their spacings), one farther away is in it.
+///
+/// A kind that lights its own surfaces adds the occlusion nearer than this
+/// itself (its own short rays, or a screen-space term) and leaves the rest to
+/// the indirect diffuse, so no occluder darkens a surface twice and none is
+/// missed between the two. With no indirect diffuse in the graph there is no
+/// distance, and such a kind keeps the reach of its own.
+///
+/// The publishers are the features that publish [`INDIRECT_DIFFUSE`]. Their
+/// node may build after a consumer's (the indirect diffuse runs at
+/// [`crate::Slot::LightingInputs`], a surface's drawer in the G-buffer phase
+/// before it), so a publisher does not publish at its build: it offers
+/// ([`OfferIndirectOcclusion`](crate::lighting::indirect_occlusion::OfferIndirectOcclusion))
+/// an [`IndirectOcclusionOffer`](crate::lighting::indirect_occlusion::IndirectOcclusionOffer),
+/// evaluated when a consumer asks
+/// ([`distance`](crate::lighting::indirect_occlusion::distance)), which
+/// answers `None` where it will not build in this graph. With several publishers the smallest distance holds: the
+/// finest indirect diffuse decides where the kind's own term may stop. Today
+/// the world-space probes offer about twice their spacing (metres); a traced
+/// per-pixel indirect diffuse offers a few centimetres, and a kind's own
+/// term then shrinks to its contact shadows.
+pub mod indirect_occlusion {
+    use std::sync::Arc;
+
+    use helio_feature_api::{BuildEnv, FeatureRegistrar};
+
+    /// What a publisher offers: the distance (metres) at which its indirect
+    /// diffuse resolves occlusion in the graph being built, or `None` where
+    /// it builds none there.
+    pub type IndirectOcclusionOffer = Arc<dyn Fn(&mut BuildEnv<'_>) -> Option<f32> + Send + Sync>;
+
+    #[derive(Default)]
+    struct Offers(Vec<IndirectOcclusionOffer>);
+
+    /// What a feature that publishes the indirect diffuse offers its
+    /// distance through.
+    pub trait OfferIndirectOcclusion {
+        /// Offers `offer` to every graph built with this feature.
+        fn indirect_occlusion(&mut self, offer: IndirectOcclusionOffer);
+    }
+
+    impl OfferIndirectOcclusion for FeatureRegistrar<'_> {
+        fn indirect_occlusion(&mut self, offer: IndirectOcclusionOffer) {
+            self.prepare(Arc::new(move |env| self::offer(env, offer.clone())));
+        }
+    }
+
+    /// Offers `offer` to the graph being built
+    /// ([`OfferIndirectOcclusion`] does it for a feature; a test or a host
+    /// without features calls it directly).
+    pub fn offer(env: &mut BuildEnv<'_>, offer: IndirectOcclusionOffer) {
+        env.shared(Offers::default).0.push(offer);
+    }
+
+    /// The smallest distance (metres) at which the graph's indirect diffuse
+    /// resolves occlusion (the module docs), or `None` when
+    /// nothing in this graph publishes an indirect diffuse.
+    pub fn distance(env: &mut BuildEnv<'_>) -> Option<f32> {
+        let offers = env.shared(Offers::default).0.clone();
+        offers
+            .iter()
+            .filter_map(|offer| offer(env))
+            .filter(|d| d.is_finite() && *d >= 0.0)
+            .reduce(f32::min)
+    }
+}
 
 /// Screen-space indirect specular layers, composited over the environment
 /// probes in index order: each is an `Rgba16Float` texture at whatever
@@ -521,5 +592,58 @@ impl Default for AmbientLight {
             color: [0.05, 0.05, 0.08],
             intensity: 1.0,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::indirect_occlusion::{distance, offer, IndirectOcclusionOffer};
+    use crate::test_env::with_env;
+
+    fn fixed(metres: Option<f32>) -> IndirectOcclusionOffer {
+        Arc::new(move |_| metres)
+    }
+
+    #[test]
+    fn no_publisher_is_no_distance() {
+        with_env(|env| assert_eq!(distance(env), None));
+    }
+
+    #[test]
+    fn one_publisher_gives_its_distance() {
+        with_env(|env| {
+            offer(env, fixed(Some(2.0)));
+            assert_eq!(distance(env), Some(2.0));
+        });
+    }
+
+    #[test]
+    fn the_finest_of_two_publishers_holds() {
+        with_env(|env| {
+            offer(env, fixed(Some(2.0)));
+            offer(env, fixed(Some(0.05)));
+            assert_eq!(distance(env), Some(0.05));
+        });
+    }
+
+    #[test]
+    fn a_publisher_that_will_not_build_offers_nothing() {
+        with_env(|env| {
+            offer(env, fixed(None));
+            assert_eq!(distance(env), None);
+            // An offer sees the graph being built (its settings), when the
+            // consumer asks.
+            #[derive(Clone, Copy)]
+            struct Builds(bool);
+            offer(
+                env,
+                Arc::new(|env| env.setting::<Builds>().filter(|b| b.0).map(|_| 4.0)),
+            );
+            assert_eq!(distance(env), None);
+            env.insert_setting(Builds(true));
+            assert_eq!(distance(env), Some(4.0));
+        });
     }
 }

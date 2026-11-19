@@ -82,11 +82,13 @@ helio-controls = { path = "crates/helio-controls" }
 microfont = "3.7.8"
 
 # wgpu 30.0.1: the upstream v30.0.1 tag plus Helio's patches, on
-# Far-Beyond-Pulsar/wgpu branch helio/v30.0.1 (texture tracker start states,
-# which put HiZ mips in the wrong Vulkan layout; handles compared by instance
-# and id). Every crate of the wgpu workspace is patched together so naga and
-# wgpu-types stay one version. Pulsar-Native's root manifest carries the same
-# section.
+# Far-Beyond-Pulsar/wgpu branch helio/v30.0.1: texture tracker start states
+# (which put HiZ mips in the wrong Vulkan layout), handles compared by
+# instance and id, acceleration-structure refit (PreferUpdate,
+# request_rebuild), compaction safe against present, and AS sizes for memory
+# accounting. Every crate of the wgpu workspace is patched together so naga
+# and wgpu-types stay one version. Pulsar-Native's root manifest carries the
+# same section.
 [patch.crates-io]
 naga = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1" }
 wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", branch = "helio/v30.0.1" }

@@ -11,11 +11,18 @@
 //! thin-sheet transmission. The rows a kind keys by instance for its own
 //! readers (the meshes' instance rows and proxy pool) are its api's.
 //!
+//! The TLAS holds triangles only. What traces every kind of geometry (a
+//! voxel terrain is no BLAS) is a ray stream ([`stream`]): the kinds'
+//! tracers answer a consumer's batch of rays, the meshes' by querying this
+//! TLAS.
+//!
 //! How others do it: Unreal's `FRayTracingScene` and Bevy Solari's
 //! `RaytracingSceneBindings` are built from the scene's primitives inside the
 //! renderer, which knows every primitive type. Here the renderer knows none:
 //! the builder is the kind's, the TLAS is the frame's, so a second kind of
 //! traced content joins the same TLAS without a renderer setter.
+
+pub mod stream;
 
 /// The frame's TLAS and the buffers that follow it, for one frame.
 pub const SCENE_RAYS: helio_core::PayloadContract<SceneRays> =

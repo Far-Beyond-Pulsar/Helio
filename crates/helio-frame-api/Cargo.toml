@@ -15,3 +15,5 @@ wgpu = { workspace = true }
 [dev-dependencies]
 # The contracts' WGSL layouts, measured (`tests/layouts.rs`).
 naga = { version = "30.0.0", features = ["wgsl-in"] }
+# The contracts' build-time tests run on wgpu's no-op device.
+wgpu = { workspace = true, features = ["noop"] }
