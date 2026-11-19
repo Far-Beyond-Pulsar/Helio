@@ -19,7 +19,7 @@
 //   `SURFACE_FLAG_ANISOTROPIC` alphas `roughness_aniso_x/_y` along a tangent
 //   turned by `aniso_rotation`), Smith's height-correlated masking-shadowing
 //   G2 = 1 / (1 + L(wo) + L(wi)) (Heitz 2014), Schlick's Fresnel from
-//   `specular_f0`. Sampled from the distribution of visible normals (Heitz
+//   `specular_f0` (its grazing reflectance 0 under 2%: `bsdf_fresnel`). Sampled from the distribution of visible normals (Heitz
 //   2018; spherical caps, Dupuy and Benyoub 2023), density
 //   G1(wo) D(h) / (4 n.wo).
 // - **Diffuse**: Lambert, `albedo (1 - metallic) (1 - F(wo.h)) / pi`;
@@ -117,9 +117,13 @@ fn bsdf_pow5(x: f32) -> f32 {
 }
 
 // Schlick's Fresnel at `cos_theta` from reflectance `f0` at normal
-// incidence.
+// incidence, toward a grazing reflectance of 1 for any real material and of
+// nothing for a reflectance under 2% (no real material has one: it means
+// "no specular", as Unreal's `F_Schlick` reads it), so a surface of F0 0 is
+// purely diffuse.
 fn bsdf_fresnel(cos_theta: f32, f0: vec3<f32>) -> vec3<f32> {
-    return f0 + (1.0 - f0) * bsdf_pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
+    let f90 = clamp(50.0 * max(f0.r, max(f0.g, f0.b)), 0.0, 1.0);
+    return f0 + (f90 - f0) * bsdf_pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
 // GGX's distribution of normals at local half vector `h`.
@@ -218,16 +222,21 @@ fn bsdf_pdf(s: SurfaceData, wo: vec3<f32>, wi: vec3<f32>) -> f32 {
     let cos_o = max(dot(n, wo), 1e-4);
     let cos_i = dot(n, wi);
     let lobes = bsdf_lobe_weights(s, cos_o);
-    if cos_i <= 0.0 {
-        return lobes.z * -cos_i / BSDF_PI;
-    }
+    // The specular lobe's visible normals reflect `wo` below the horizon
+    // too (those samples carry no light): its density is counted wherever
+    // the half vector is a microfacet's, so a direction the light through
+    // a thin surface shares is weighed by both lobes' densities.
     let frame = bsdf_frame(s, n);
     let lo = normalize(vec3<f32>(bsdf_to_local(frame, wo).xy, cos_o));
     let h = normalize(lo + bsdf_to_local(frame, wi));
-    let alpha = bsdf_alphas(s);
-    let g1 = 1.0 / (1.0 + bsdf_smith_lambda(lo, alpha));
-    let specular = g1 * bsdf_ggx_d(h, alpha) / (4.0 * cos_o);
-    return lobes.x * cos_i / BSDF_PI + lobes.y * specular;
+    var specular = 0.0;
+    if h.z > 0.0 {
+        let alpha = bsdf_alphas(s);
+        let g1 = 1.0 / (1.0 + bsdf_smith_lambda(lo, alpha));
+        specular = g1 * bsdf_ggx_d(h, alpha) / (4.0 * cos_o);
+    }
+    let diffuse = select(lobes.z * -cos_i, lobes.x * cos_i, cos_i > 0.0) / BSDF_PI;
+    return diffuse + lobes.y * specular;
 }
 
 fn bsdf_sample(s: SurfaceData, wo: vec3<f32>, u: vec3<f32>) -> BsdfSample {
