@@ -593,3 +593,62 @@ and its skinning WGSL) draws through a renderer of its own with its own
 away when the preview draws through an engine-owned Helio runtime (Pulsar's
 `render_runtimes`, which plugins get handles to and never build Helio
 themselves); until then it is a known copy, not the engine's skinning.
+
+## 4. r2: the surface at a hit, and the reference
+
+### The problem
+
+r1 gave every consumer the same hits. What a consumer gets at a hit is still
+thin: the meshes' tracer writes the instance's row, one colour and a vertex
+normal; no texture is read past a cut-out's alpha, no material graph runs.
+Reflections (r4) and a radiance cache (r3) need the surface a pixel has. And
+nothing in the engine says what the right image is: r1's voxel_craft frames
+differ from the build before it by a fraction of a percent, and neither is
+ground truth.
+
+### How others do it
+
+- **Unreal**: a hit runs the material's hit shader (ray-tracing pipelines),
+  cheaper variants by ray type (`r.RayTracing` material LOD and the
+  "simplified material" modes; Lumen picks between its surface cache and
+  full hit lighting for reflections by roughness). Its path tracer is the
+  in-editor reference every real-time path is compared with.
+- **RTXPT and the 2026 NVIDIA guidance**: material LOD by ray class
+  (primary, specular bounce, diffuse bounce, shadow), texture detail from ray
+  cones, shader execution reordering to bring hits of one material together.
+- **Wavefront renderers**: hits are sorted by material and each material's
+  kernel runs over its hits.
+
+### The design frame
+
+Filled in, with what was decided and measured, as the phase lands.
+
+- **A stream states the detail it needs.** A nearest stream asks for a
+  surface at one of a few levels (a diffuse consumer: base colour, emission
+  and a normal at the ray's footprint; a specular consumer or the reference:
+  the material in full). A tracer may answer a lower level with a cheaper
+  kernel; it never answers less than asked.
+- **A hit's surface is what a G-buffer texel is.** `SceneSurface` holds what
+  the frame's G-buffer holds for a pixel (`gbuffer.rs`), packed as a row, so
+  one lighting evaluation serves a pixel and a hit. What the G-buffer cannot
+  say for a hit (the lighting model a material class asks for) it does not
+  say for a hit either, until the G-buffer does.
+- **Materials run at hits through the materials' evaluator**, the one the
+  drawers use, with texture detail from the ray's cone. A table-driven
+  material is one kernel; material programs are kernels of their own, run
+  over the hits binned to them (the stream is the shader table as data).
+- **A ray carries its coordinate space** (the authored space identity `main`
+  gave cameras and objects), and a tracer answers with the geometry of that
+  space. Crossing an aperture into another space is the portals' to add on
+  this contract.
+- **Direct light at a point is a contract**: a kind of light answers a batch
+  of points with a sample (direction, distance, radiance over probability).
+  GI's own reading of the lights' rows goes; r5 replaces how a sample is
+  chosen, behind the same contract.
+- **The reference path tracer** is a consumer of streams and of that
+  contract, with no cache and no denoiser: camera rays in a run from the
+  eye, bounces with next-event estimation, accumulated over frames. A
+  technique is judged by its error against the reference on fixed poses.
+- **Carried from r1** (section 3, GI on ray streams): the terrain's surface
+  pass and walk cost, the sun-occlusion pages' leak under canopies, the
+  voxel_craft image difference, an acceptance suite on a ray-query device.
