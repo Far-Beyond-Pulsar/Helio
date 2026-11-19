@@ -1014,3 +1014,138 @@ step changes encodings, not shading.
   covered by compilation and the tracer's own GPU test, not by frames);
   Earth and Moon holds (voxel_flight), whose terrain code changed only in
   its rows' packing; the engine's render acceptance suite.
+
+#### Direct light samples and the reference
+
+**The lights' sampler** (the lights plugin, `helio-pass-light-sampler`,
+registered with `RegisterLightSampler::light_sampler` from the lights'
+feature set). How others choose a light at a point: Unreal's path tracer
+keeps a world-space light grid of per-cell light lists and picks a light in
+the cell by its estimated contribution; RTXDI resamples candidates from a
+world-space grid (ReGIR) or a power-proportional alias table; PBRT-v4 and
+Cycles walk a light BVH with a bounded-importance traversal (Conty and
+Kulla 2018). The screen-tile lists the lights already build (the deferred
+lighting's binning, HLFS's grids) cover what the camera sees and nothing
+else: a bounce, a probe or a reflection's hit is off the screen as often as
+on it, so the sampler builds its own world-space structure, once a frame,
+before the first batch a graph samples:
+
+- **The grid**: six nested levels of 32^3 cubic cells about the eye, level
+  `l`'s cells `2^l` m across (32 m to 1 km wide). A local light lives in the
+  finest level whose cells are at least its range wide and whose box holds
+  its sphere (at most 27 cells, so the entries are bounded by 27 a light
+  row and never overflow); directional lights and local lights no level
+  holds are the globals. Three dispatches: count, allocate (an atomic
+  offset a cell), fill. 1.5 MiB of cells plus 108 bytes a light row.
+- **The choice**: a point weighs the globals and the lights of the cell
+  holding it at each level (each light once), by `light_arrival` (the
+  falloff and cone) times the cosine to its normal, a light its space does
+  not see weighing 0, and keeps one by weighted reservoir sampling. The
+  kept light is then evaluated in full by `light_incidence` (its IES
+  profile and light function, a sun's air), and a sun by the media's
+  transmittance (`sun_transmittance`, the clouds'), and offered as
+  `radiance / (weight / total)`. The bound used for the choice is at least
+  the full evaluation (profiles, light functions, air and media only take
+  light away), so the estimate is unbiased; every light here is a delta
+  (point, spot, directional), so the density is 0. The choice is one
+  kernel (`light_sample`), which r5's resampled choice replaces behind the
+  same rows.
+- **One owner of a light's evaluation**: `light_arrival` (in `light_list`)
+  and `light_incidence` (`//!use light_incidence`) moved out of the
+  deferred lighting; the deferred lighting, the forward function
+  (`light_forward`, which had its own copy of the falloff) and the sampler
+  call them. The IES profiles and their stand-in moved to the lights' api
+  (`IesProfiles`, `ies_stand_in`). Spaces match as the deferred lighting
+  matches them: a light of slot `s` reaches a query whose space is
+  `SCENE_SPACE_ANY` or `s + 1` (`light_query_sees_space`).
+- **What scales with what**: the build is linear in the light list's rows
+  and the grid's cells, once a frame however many batches ask; a point
+  costs the lights that can reach it (the globals and one cell a level),
+  not every light. What the grid does not bound: many lights whose ranges
+  exceed a kilometre, or lights far from the eye, which are globals every
+  point weighs.
+
+**GI on the contract.** GI's light pass writes a light query a hit into its
+batch (`light_batch()`, `gi_probe`), the samplers answer, and a shadow pass
+(`GIShadow`) turns the samples into the shadow stream; `local_lights.rs`,
+`gi_local_lights.wgsl`, `gi_gather_lights.wgsl`, `gi_sun` and GI's reading of
+`scene_lights` and `directional_lights` are gone: GI depends on no light
+kind. The sun is one more answer of the sampler. Why: GI traced a sun
+shadow ray at every hit and a second toward one local light; one sample
+chosen by contribution traces the sun where it dominates and a lamp where it
+does, one shadow ray a hit (`gi_shadow` holds `MAX_RAYS` rows, half its
+size), and the sun is lit exactly as the deferred lighting lights it (its
+air at the hit, not at the eye).
+
+**The BSDF as a contract.** How a surface returns light belongs with the
+surface (`helio_frame_api::gbuffer::BSDF_SNIPPET`, `//!use frame_bsdf`,
+beside `SurfaceData`): a `SurfaceData`'s fields mean something only under one
+reflectance model, and every reader of it (the lighting models over the
+G-buffer, the ray streams' consumers, the reference, the materials'
+shading-cost probe) lights it with that model. A lighting model owns how
+light arrives (its lights, shadows, indirect inputs), not how the surface
+returns it, so two models over one G-buffer cannot disagree about a surface
+and the reference judges the real-time image with the same reflectance.
+`bsdf_eval(s, wo, wi)` (the BSDF times the cosine), `bsdf_pdf`,
+`bsdf_sample(s, wo, u)`, and the split sum an environment is weighted by
+(`bsdf_environment_split_sum`, `bsdf_fresnel_roughness`). The model: GGX
+with alpha = roughness^2 (anisotropic alphas along the turned tangent),
+Smith's height-correlated G2 (the deferred lighting's Schlick-k remapping of
+roughness was a raster-only approximation), Schlick's Fresnel with a
+grazing reflectance of 0 under 2% F0 (Unreal's `F_Schlick`: F0 0 is purely
+diffuse), sampled by its visible normals (Dupuy and Benyoub 2023); Lambert
+weighted by `(1 - metallic)(1 - F(wo.h))`, wrapped for subsurface surfaces;
+a thin two-sided surface's back passing `subsurface_color / pi`. The lobes
+are drawn in proportion to an estimate of what each reflects and every
+density is the mixture's. The materials' `pbr_eval.wgsl` (its terms, which
+the deferred lighting composed, and the shading-cost probe's own
+Cook-Torrance copy) is deleted.
+
+**The reference path tracer** (`helio-pass-reference`, a Helio pass crate in
+the feature layer: it needs only frame contracts, so it lives below every
+plugin and every host building Helio's presets has it). A wavefront path
+tracer over the streams and light batches, knowing no kind:
+
+- **A frame** traces a path for each pixel of a moving window of the image
+  (`ReferenceSettings::paths_per_frame`, 2^19 by default), as unrolled
+  stages (`max_depth`, 6 by default): camera rays from the eye as one run of
+  the depth-0 stream (`Stream::with_run(capacity)`); at each depth the
+  tracers' nearest hits and `Full` surfaces, `ReferenceShade` (emission, or
+  the sky on a miss; a light query a hit; the BSDF's sample, Russian
+  roulette from depth 3 by the throughput, survivors compacted into the
+  next depth's stream), the samplers, `ReferenceShadow` (the sample times
+  `bsdf_eval`, weighted against `bsdf_pdf` by the power heuristic, a delta
+  light's weight 1; a shadow ray), the tracers' occlusion, and
+  `ReferenceResolve`. Two nearest streams, one batch and one shadow stream
+  serve every depth (the stages alternate them). `ReferenceAccumulate` sums
+  each pixel's paths in 32-bit floats (a path that came back not finite is
+  counted as no light); no cache, no denoiser, no clamp.
+- **The sky** on a miss is the atmosphere's sky table back to radiance
+  (GI's probe rays take it the same way); the sun's disc is not in it, the
+  sun being a delta light the sampler samples, so it is counted once.
+  Emissive surfaces are emission at hits (no sampler offers them), weight 1.
+- **Ray cones**: a camera ray starts with no width and a pixel's spread; a
+  bounce starts as wide as the footprint that found the hit and spreads by
+  its lobe, twice the GGX alpha for a specular sample and a 90-degree cone
+  for a diffuse one (Akenine-Moller et al., RTG II, 2021).
+- **Restart**: the sum restarts when the camera (its unjittered
+  clip-to-frame transform and eye), the frame's origin, the image size or
+  the scene's buffers (`SceneBufferProjection::content_signature`) change.
+  There is no frame-level history-invalidation seam in Helio; this is what
+  the frame offers, and it does not see a kind's state outside SceneDB (a
+  voxel edit, a TLAS payload by itself).
+- **How it shows**: debug views 62 (`REFERENCE_VIEW`, the image) and 63
+  (`REFERENCE_DIFFUSE_VIEW`, the light that reached the camera's hit by a
+  first bounce off a diffuse lobe), registered like every pass's debug
+  views; the mean covers the scene colour at `Slot::Lighting` 900 and goes
+  through the rest of the chain. Outside them every pass records nothing and
+  holds no buffer (the passes stay in the graph: Helio has no rebuild on a
+  debug view's change). `ReferenceDisplay::image` gives a host or test the
+  sums (`vec4` a pixel, rgb and count) and, once asked for
+  (`request_snapshot`), the real-time scene colour at the same pixels.
+- **Settings**: `ReferenceSettings` (resolution scale, paths a frame,
+  bounces), described for hosts as `helio_pass_reference::REFERENCE`.
+- **Runs**: the camera stream is the first real stream in runs. The
+  terrain's run entry places a run's origin with one thread and reads a
+  start row a run (`rows / run` rows), nothing sized by the run's length, so
+  a run of 2^19 rays costs one thread; nothing needed changing.
