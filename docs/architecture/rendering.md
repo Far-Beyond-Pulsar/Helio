@@ -1041,7 +1041,10 @@ the sun's occlusion rays at their footprint.
   the ground and a glowing, translucent brick ball, traced as a ray from
   the eye with the pixel's footprint, decodes to the surface the publish
   wrote there in every field within the encodings' precision: 0 of 4,649
-  differ, worst normal cosine 0.9999999. Two of the publish's inputs a hit
+  differ, worst normal cosine 0.9999999; with a block of leaves added, 0 of
+  4,746, its 97 leaf texels and 801 two-sided ones letting through their
+  transmission share of their colour (`material_transmission` times the
+  albedo, the materials' rule), never their whole colour. Two of the publish's inputs a hit
   did not have moved into the surface: a natural step lights with its own
   stored slope before the one a neighbouring shading sample lends (34 of
   the 4,649 normals were up to 4 degrees off; `face_rule`'s comment said
@@ -1132,13 +1135,14 @@ its VoxelChunks less r2's, the rest of that pass being the same work):
 
 | | r0 | r1 closing | r2 |
 |---|---|---|---|
-| Earth | rays in the draw 1.09-1.21, GI 0.28-0.30: 1.37-1.51 | 2.46 | GI 0.06, VoxelRays gi_probe 1.58, surfaces 0.17, GILight 0.25, VoxelRays gi_shadow 0.21, GIIntegrate 0.13: 2.40 |
-| Moon | rays in the draw 0.95, GI 0.26: 1.21 | 2.54 | GI 0.06, VoxelRays gi_probe 1.57, surfaces 0.13, GILight 0.22, VoxelRays gi_shadow 0.23, GIIntegrate 0.13: 2.34 |
+| Earth (r0 three runs, r2 three) | rays in the draw 1.06-1.10, GI 0.28-0.29: 1.35-1.39 | 2.46 | GI 0.06-0.07, VoxelRays gi_probe 1.56-1.58, surfaces 0.17, GILight 0.25-0.26, VoxelRays gi_shadow 0.21-0.22, GIIntegrate 0.13: 2.38-2.43 |
+| Moon (r0 three runs, r2 three) | rays in the draw 0.84-0.96, GI 0.26: 1.10-1.22 | 2.54 | GI 0.06-0.07, VoxelRays gi_probe 1.57-1.63, surfaces 0.13-0.14, GILight 0.22-0.23, VoxelRays gi_shadow 0.23-0.24, GIIntegrate 0.13: 2.34-2.41 |
 
 On voxel_craft the terrain's GI is 0.15-0.2 ms under r1's, all of it the
-sun's rays (0.41 -> 0.21); on the planets 0.06-0.2 under r1, and still
-about 1 ms over r0, the probe walk (1.57-1.58 against r0's in-draw kernel's
-0.95-1.21 with its shading) being the remainder (open, below).
+sun's rays (0.41 -> 0.21); on the planets 0.03-0.2 under r1, and still
+about 1.0-1.2 ms over r0, the probe walk (1.56-1.63 against r0's in-draw
+kernel's 0.84-1.10 with its shading) being the remainder (open, below).
+The holds' images were not compared.
 
 Images (voxel_craft, four poses, 8-frame burst means, no clouds, RGB 0-1
 mean |difference|): r1-r1 0.0003-0.0012; r1-r2 0.0004-0.0007 and
@@ -1170,12 +1174,19 @@ Open:
   the appearance table's colours at hits until the ray kernels take the
   scene variant and its groups 2 and 3.
 - A volume of another space still dispatches over a stream (above).
-- **Startup**: the terrain's draw pipelines took 41-74 s to come up in this
-  build's test and voxel_craft runs (every run: no driver cache hit), the
-  r2 contract build's 52 s once and 9 s after (`publish_shows_hits_only_in_front_of_meshes`
-  wall time, same machine; the NVIDIA shader cache at its 1.1 GB size with
-  three sessions compiling). Not bisected: which of this change's draw
-  pipelines misses the cache, or whether it is the cache's size.
+- **Startup** (closed, not this change's): the time to a settled test view
+  (`publish_shows_hits_only_in_front_of_meshes`, wall time, holding the
+  build slot and the GPU lock) is the NVIDIA driver's shader cache, keyed by
+  the executable: the contract build's test exe at its old path 4.5 s then
+  2.7 s; the same file copied to a new path 72.6, 63.7 and 31.0 s over three
+  runs; this build's 58.0, 33.7 and 45.9 s. The warm runs' slow pipelines
+  include generation kernels this change does not touch
+  (`feature_block_candidates_main` 17.5 s, `chunk_columns_main` 4.7 s), and
+  the draw module grew 6 % (`chunk_draw.wgsl` 239,327 to 253,795 bytes, 38
+  to 39 entry points, the composed module 327,840 bytes; one module a form,
+  as before). The cache (1.1 GB, at its limit with several sessions
+  compiling) keeps a new executable's pipelines only partly from run to
+  run.
 - Fog reads the pages with a texel's bias from points in the air
   (`sun_occlusion_point`, the lights plugin's): under a canopy it takes
   sun within a texel of leaves; a point in the air could read with none.
