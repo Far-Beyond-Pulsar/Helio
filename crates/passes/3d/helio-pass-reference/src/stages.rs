@@ -160,6 +160,12 @@ impl RenderPass for ReferenceAccumulate {
         let (Some(b), true) = (state.buffers.as_ref(), state.paths > 0) else {
             return Ok(());
         };
+        // A frame a tracer answered short of (geometry it could not trace
+        // yet) would sum misses where that geometry is: not summed.
+        if !shared.answers.iter().all(|a| a.complete()) {
+            log::debug!("reference: a frame answered short is not summed");
+            return Ok(());
+        }
         let group = shared.group(ctx.device, b, 0, shared.sky(ctx.registry));
         let mut cmds = ctx.graphics_cmds();
         let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {

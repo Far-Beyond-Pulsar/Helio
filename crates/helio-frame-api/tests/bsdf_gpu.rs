@@ -3,14 +3,13 @@
 //!
 //! - **White furnace**: under a uniform environment of radiance 1, a
 //!   surface of albedo 1 reflects `integral of bsdf_eval` toward the eye:
-//!   exactly 1 for a white Lambertian surface (F0 0), at most 1 for a white
-//!   metal at every roughness (microfacet multiple scattering is not
-//!   modelled, so rough metals return less). A white *dielectric* (F0 0.04)
-//!   is printed, not bounded: its diffuse lobe is weighted by
-//!   `1 - F(wo.h)`, the deferred lighting's coupling, which returns more
-//!   than 1 at grazing views (1.015 at roughness 0.8 and n.wo 0.1, more on
-//!   smoother surfaces); rendering.md section 4 states it and its fix (the
-//!   specular lobe's directional albedo, tabulated).
+//!   exactly 1 for a white Lambertian surface (F0 0), at most 1 for white
+//!   dielectrics (F0 2% and 4%, the roughnesses where the old coupling
+//!   `1 - F(wo.h)` gained most), a white wrapped-diffuse (subsurface)
+//!   surface and white metals, at every view down to n.wo 0.05
+//!   (microfacet multiple scattering is not modelled, so rough surfaces
+//!   return less). The function under test is the one the deferred lighting
+//!   calls (`frame_bsdf`'s `bsdf_eval`).
 //! - **The sampler matches the evaluation**: the mean of `bsdf_sample`'s
 //!   weights is that same integral (the estimator a path tracer uses agrees
 //!   with the evaluation a light uses), and `bsdf_pdf` integrates to at most
@@ -27,12 +26,12 @@ use helio_frame_api::gbuffer::{BSDF_SNIPPET, SURFACE_SNIPPET};
 const THREADS: u32 = 64 * 64;
 const SAMPLES: u32 = 512;
 /// Configurations (`config` in the kernel) and view angles.
-const CONFIGS: u32 = 8;
-const VIEWS: u32 = 3;
+const CONFIGS: u32 = 12;
+const VIEWS: u32 = 4;
 /// Per thread, configuration and view: sum and sum of squares of the
 /// uniform estimate (luminance), of the sampled weight, the pdf's uniform
-/// estimate, the largest weight.
-const STATS: usize = 6;
+/// estimate, the largest weight, the pdf estimate's squares.
+const STATS: usize = 7;
 
 const KERNEL: &str = r#"//!use frame_surface
 //!use frame_bsdf
@@ -50,7 +49,9 @@ fn luminance(c: vec3<f32>) -> f32 {
 
 // The configurations: a white rough dielectric, a white Lambertian
 // surface (F0 0), white metal at three roughnesses, a white anisotropic
-// metal, a glossy dielectric, a thin two-sided leaf.
+// metal, a glossy dielectric, a thin two-sided leaf, white dielectrics
+// where the old coupling gained most (F0 4% and 2% at roughness 0.3, 2% at
+// 0.45), a white subsurface surface.
 fn surface(config: u32) -> SurfaceData {
     let n = vec3<f32>(0.0, 0.0, 1.0);
     switch config {
@@ -72,22 +73,39 @@ fn surface(config: u32) -> SurfaceData {
             return s;
         }
         case 6u: { return surface_data(vec3<f32>(0.6, 0.3, 0.1), n, 0.45, 0.0, vec3<f32>(0.0)); }
-        default: {
+        case 7u: {
             return surface_with_transmission(surface_data(vec3<f32>(0.5, 0.7, 0.3), n, 0.7, 0.0, vec3<f32>(0.0)), vec3<f32>(0.3, 0.45, 0.2));
+        }
+        case 8u: { return surface_data(vec3<f32>(1.0), n, 0.3, 0.0, vec3<f32>(0.0)); }
+        case 9u: {
+            var s = surface_data(vec3<f32>(1.0), n, 0.3, 0.0, vec3<f32>(0.0));
+            s.specular_f0 = vec3<f32>(0.02);
+            return s;
+        }
+        case 10u: {
+            var s = surface_data(vec3<f32>(1.0), n, 0.45, 0.0, vec3<f32>(0.0));
+            s.specular_f0 = vec3<f32>(0.02);
+            return s;
+        }
+        default: {
+            var s = surface_data(vec3<f32>(1.0), n, 0.5, 0.0, vec3<f32>(0.0));
+            s.flags = SURFACE_FLAG_SUBSURFACE;
+            s.subsurface_color = vec3<f32>(1.0);
+            return s;
         }
     }
 }
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-    for (var config = 0u; config < 8u; config++) {
+    for (var config = 0u; config < 12u; config++) {
         let s = surface(config);
-        for (var view = 0u; view < 3u; view++) {
-            let c = array<f32, 3>(1.0, 0.5, 0.1)[view];
+        for (var view = 0u; view < 4u; view++) {
+            let c = array<f32, 4>(1.0, 0.5, 0.2, 0.05)[view];
             let wo = vec3<f32>(sqrt(1.0 - c * c), 0.0, c);
-            var stats = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            var stats = array<f32, 7>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             for (var k = 0u; k < 512u; k++) {
-                let r = ((id.x * 512u + k) * 8u + config) * 4u + view;
+                let r = ((id.x * 512u + k) * 16u + config) * 4u + view;
                 // A uniform direction over the sphere.
                 let z = h(r * 8u) * 2.0 - 1.0;
                 let phi = h(r * 8u + 1u) * 6.2831853;
@@ -99,11 +117,13 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let w = luminance(sample.weight);
                 stats[2] += w;
                 stats[3] += w * w;
-                stats[4] += bsdf_pdf(s, wo, wi) * 12.566371;
+                let density = bsdf_pdf(s, wo, wi) * 12.566371;
+                stats[4] += density;
+                stats[6] += density * density;
                 stats[5] = max(stats[5], max(sample.weight.r, max(sample.weight.g, sample.weight.b)));
             }
-            let at = ((id.x * 8u + config) * 3u + view) * 6u;
-            for (var j = 0u; j < 6u; j++) { out[at + j] = stats[j]; }
+            let at = ((id.x * 12u + config) * 4u + view) * 7u;
+            for (var j = 0u; j < 7u; j++) { out[at + j] = stats[j]; }
         }
     }
 }
@@ -170,9 +190,9 @@ fn run(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<f32> {
 }
 
 /// A configuration and view's totals: (mean, standard error) of the uniform
-/// estimate and of the sampled weight, the pdf's integral, the largest
-/// weight.
-fn totals(values: &[f32], config: u32, view: u32) -> ([f64; 2], [f64; 2], f64, f64) {
+/// estimate and of the sampled weight, (mean, standard error) of the pdf's
+/// integral, the largest weight.
+fn totals(values: &[f32], config: u32, view: u32) -> ([f64; 2], [f64; 2], [f64; 2], f64) {
     let mut sums = [0.0f64; STATS];
     let mut most = 0.0f64;
     for thread in 0..THREADS {
@@ -181,6 +201,7 @@ fn totals(values: &[f32], config: u32, view: u32) -> ([f64; 2], [f64; 2], f64, f
             *sum += f64::from(values[at + k]);
         }
         most = most.max(f64::from(values[at + 5]));
+        sums[6] += f64::from(values[at + 6]);
     }
     let n = f64::from(THREADS * SAMPLES);
     let stat = |sum: f64, squares: f64| {
@@ -190,7 +211,7 @@ fn totals(values: &[f32], config: u32, view: u32) -> ([f64; 2], [f64; 2], f64, f
     (
         stat(sums[0], sums[1]),
         stat(sums[2], sums[3]),
-        sums[4] / n,
+        stat(sums[4], sums[6]),
         most,
     )
 }
@@ -207,8 +228,8 @@ fn the_bsdf_conserves_energy_and_its_sampler_matches_it() {
             let (uniform, sampled, pdf, most) = totals(&values, config, view);
             let label = format!("config {config}, view {view}");
             println!(
-                "{label}: integral {:.4} (+-{:.4}), sampled {:.4} (+-{:.4}), pdf mass {pdf:.4}, largest weight {most:.3}",
-                uniform[0], uniform[1], sampled[0], sampled[1]
+                "{label}: integral {:.4} (+-{:.4}), sampled {:.4} (+-{:.4}), pdf mass {:.4} (+-{:.4}), largest weight {most:.3}",
+                uniform[0], uniform[1], sampled[0], sampled[1], pdf[0], pdf[1]
             );
             // The two estimates of the same integral agree.
             let tolerance = 5.0 * (uniform[1] * uniform[1] + sampled[1] * sampled[1]).sqrt() + 1e-4;
@@ -219,15 +240,17 @@ fn the_bsdf_conserves_energy_and_its_sampler_matches_it() {
                 sampled[0]
             );
             assert!(
-                pdf <= 1.0 + 5.0 * uniform[1].max(1e-3),
-                "{label}: pdf mass {pdf}"
+                pdf[0] <= 1.0 + 5.0 * pdf[1] + 1e-3,
+                "{label}: pdf mass {} (+-{})",
+                pdf[0],
+                pdf[1]
             );
-            // A white Lambertian surface reflects all it receives, a white
-            // metal (configs 2 to 5) no more.
+            // A white Lambertian surface reflects all it receives; white
+            // dielectrics, metals and a wrapped diffuse surface no more.
             if config == 1 {
                 assert!((sampled[0] - 1.0).abs() <= 1e-3, "{label}: {}", sampled[0]);
             }
-            if (1..=5).contains(&config) {
+            if config <= 5 || config >= 8 {
                 assert!(
                     sampled[0] <= 1.0 + 5.0 * sampled[1] + 1e-4,
                     "{label}: a white surface reflects {} of a uniform environment",

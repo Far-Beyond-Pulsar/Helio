@@ -35,7 +35,16 @@
 //! The sum restarts when the camera (`camera_generation`), the frame's
 //! origin, the image or what
 //! the scene's buffers hold changes (`SceneBufferProjection::content_signature`).
-//! Outside its views every pass records nothing and holds no buffer.
+//! A frame a tracer answered short of (`stream::Answers`: a kind's
+//! geometry it could not trace yet, a terrain's kernels still compiling) is
+//! traced but not summed.
+//!
+//! **Only while shown.** The node's passes, and the passes it brings in
+//! through its contracts (each kind's tracer passes for its streams, the
+//! samplers' passes for its batches), are under one member gate
+//! (`RenderGraph::set_member_gate`): open while one of its views is shown,
+//! closed otherwise, when none of them is scheduled and its buffers are
+//! freed (`on_leave`).
 //!
 //! **Why here.** A Helio pass crate (the feature layer): it needs only frame
 //! contracts (streams, light samples, the surface and its BSDF, the sky, the
@@ -331,6 +340,9 @@ struct Kernels {
 struct Shared {
     settings: ReferenceSettings,
     streams: Streams,
+    /// The streams' answers this frame (`stream::answers`): a frame any
+    /// tracer answered short of is not summed.
+    answers: Vec<Arc<stream::Answers>>,
     kernels: Kernels,
     state: Mutex<State>,
     cache: helio_core::gpu_cache::GpuCache,
@@ -535,9 +547,16 @@ fn build(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
     let streams = Streams::new(&settings);
     let device = build.env.device.clone();
     let stats = build.env.stats.clone();
+    let answers = streams
+        .nearest
+        .iter()
+        .chain(&streams.shadows)
+        .map(|s| stream::answers(build.env, s))
+        .collect();
     let shared = Arc::new(Shared {
         kernels: Kernels::new(&device, &settings, &stats),
         streams: streams.clone(),
+        answers,
         settings,
         state: Mutex::new(State {
             buffers: None,
@@ -560,6 +579,31 @@ fn build(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
             bytemuck::cast_slice(&[k.0 as u32, 0, 0, 0]),
         );
     }
+    // Every pass from here on, the tracers' and samplers' included, is
+    // scheduled only while a view shows the reference (module docs).
+    let gate: helio_core::MemberGate = {
+        let shared = shared.clone();
+        Arc::new(move || shared.state.lock().unwrap().active())
+    };
+    let outer = build.graph.member_gate();
+    let gate = match outer.clone() {
+        Some(outer) => Arc::new(move || outer() && gate()) as helio_core::MemberGate,
+        None => gate,
+    };
+    build.graph.set_member_gate(Some(gate));
+    let built = build_stages(build, &shared, &streams, &device);
+    build.graph.set_member_gate(outer);
+    built
+}
+
+/// The reference's passes, under its gate.
+fn build_stages(
+    build: &mut NodeBuild<'_, '_>,
+    shared: &Arc<Shared>,
+    streams: &Streams,
+    device: &wgpu::Device,
+) -> Result<(), String> {
+    let settings = shared.settings;
     build.graph.add_pass(Box::new(ReferenceBegin {
         shared: shared.clone(),
     }));
@@ -589,8 +633,8 @@ fn build(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
     }));
     let color = helio_frame_api::color::current(build.env);
     build.graph.add_pass(Box::new(ReferenceDisplay::new(
-        &device,
-        shared,
+        device,
+        shared.clone(),
         color,
         build.env.scene_format(),
     )));
@@ -664,6 +708,13 @@ impl RenderPass for ReferenceBegin {
         self.shared.state.lock().unwrap().mode = mode;
     }
 
+    fn on_leave(&mut self, _device: &wgpu::Device) {
+        let mut state = self.shared.state.lock().unwrap();
+        state.buffers = None;
+        state.key = None;
+        state.paths = 0;
+    }
+
     fn debug_views(&self) -> &'static [helio_core::DebugViewDescriptor] {
         static VIEWS: &[helio_core::DebugViewDescriptor] = &[
             helio_core::DebugViewDescriptor {
@@ -682,6 +733,9 @@ impl RenderPass for ReferenceBegin {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let shared = &self.shared;
+        for answers in &shared.answers {
+            answers.begin();
+        }
         let mut state = shared.state.lock().unwrap();
         state.paths = 0;
         if !state.active() {

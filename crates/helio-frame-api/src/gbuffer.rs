@@ -104,10 +104,13 @@ pub const SURFACE_SNIPPET: helio_core::shader::ShaderSnippet =
 /// Marker opting a shader into [`BSDF_SNIPPET`].
 pub const BSDF_MARKER: &str = "//!use frame_bsdf";
 /// How a surface reflects light (`shaders/surface_bsdf.wgsl`, with
-/// [`SURFACE_SNIPPET`]): `bsdf_eval(s, wo, wi)` (the BSDF times the cosine),
-/// `bsdf_pdf` and `bsdf_sample` (GGX sampled by its visible normals, cosine
-/// diffuse, the light a thin two-sided surface lets through), and the split
-/// sum an environment's radiance is weighted by
+/// [`SURFACE_SNIPPET`]): `bsdf_eval(s, wo, wi)` (the BSDF times the cosine:
+/// the engine's GGX and Lambert lighting model as the deferred lighting
+/// evaluated it before, with three energy fixes), `bsdf_pdf` and
+/// `bsdf_sample` (GGX's visible normals, cosine diffuse, the light a thin
+/// two-sided surface lets through; weights `eval / pdf`, so unbiased for that
+/// model), `bsdf_facing` (a two-sided surface turned toward the side a hit
+/// sees), and the split sum an environment's radiance is weighted by
 /// (`bsdf_environment_split_sum`, `bsdf_fresnel_roughness`).
 ///
 /// It belongs with [`SURFACE_SNIPPET`]: a `SurfaceData`'s fields (roughness,

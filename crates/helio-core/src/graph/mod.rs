@@ -19,7 +19,7 @@ pub use executor::{
     FrameDebugData, GraphTimelineData, GraphTimelinePass, PassDeclaration, RenderGraph,
 };
 pub(crate) use membership::SceneRows;
-pub use membership::{RenderSize, SceneContent};
+pub use membership::{MemberGate, RenderSize, SceneContent};
 pub(crate) use pipeline_cache::driver_cache_for_device;
 pub use pipeline_cache::{BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey};
 pub use resource::{

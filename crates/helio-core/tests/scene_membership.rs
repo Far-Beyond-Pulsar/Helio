@@ -1,7 +1,8 @@
 //! The graph follows the scene: a pass whose content is SceneDB rows joins
 //! the schedule when a row is live and leaves when none is, keeping every
 //! other graph texture as it was; a resize keeps every pass and gives each
-//! both resolutions.
+//! both resolutions; passes added under a member gate are scheduled only
+//! while it is open.
 
 use bytemuck::Zeroable;
 use helio_core::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
@@ -9,7 +10,7 @@ use helio_core::{
     BufferHandle, BufferKey, GpuCameraUniforms, PassContext, PrepareContext, RenderGraph,
     RenderPass, RenderSize, Result as HelioResult, SceneBufferProjection, SceneContent, SceneInput,
 };
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 const ROWS: &str = "test_rows";
@@ -389,4 +390,70 @@ fn resize_keeps_passes_and_gives_both_resolutions() {
         "internal textures follow the internal size, output ones the output"
     );
     assert_eq!(graph.render_size(), resized);
+}
+
+/// A pass that is always a member by itself, named for the test.
+struct Named(&'static str, Arc<Counters>);
+
+impl RenderPass for Named {
+    fn name(&self) -> &'static str {
+        self.0
+    }
+    fn on_leave(&mut self, _device: &wgpu::Device) {
+        self.1.left.fetch_add(1, Ordering::Relaxed);
+    }
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        self.1.prepared.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+    fn execute(&mut self, _ctx: &mut PassContext) -> HelioResult<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn passes_under_a_gate_run_only_while_it_is_open() {
+    let Some(gpu) = gpu() else {
+        eprintln!("GPU_VALIDATION_SKIPPED_NO_ADAPTER: member gates");
+        return;
+    };
+    let mut scene = RowScene::new(Arc::clone(&gpu.device), Arc::clone(&gpu.queue));
+    let open = Arc::new(AtomicBool::new(false));
+    let gated = Arc::new(Counters::default());
+    let mut graph = RenderGraph::new(&gpu.device, &gpu.queue);
+    graph.add_pass(Box::new(Named("Before", Arc::default())));
+    let gate: helio_core::MemberGate = {
+        let open = Arc::clone(&open);
+        Arc::new(move || open.load(Ordering::Relaxed))
+    };
+    assert!(graph.set_member_gate(Some(gate)).is_none());
+    graph.add_pass(Box::new(Named("Gated A", Arc::clone(&gated))));
+    graph.add_pass(Box::new(Named("Gated B", Arc::clone(&gated))));
+    assert!(graph.set_member_gate(None).is_some());
+    graph.add_pass(Box::new(Named("After", Arc::default())));
+    graph.lock(16, 16);
+
+    // Closed at lock and while it stays closed: neither gated pass is
+    // scheduled or prepared, and the others keep their order.
+    assert_eq!(graph.member_names(), ["Before", "After"]);
+    run(&mut graph, &mut scene, [16, 16], 2);
+    assert_eq!(gated.prepared.load(Ordering::Relaxed), 0);
+
+    // Open: both join, in build order.
+    open.store(true, Ordering::Relaxed);
+    run(&mut graph, &mut scene, [16, 16], 2);
+    assert_eq!(
+        graph.member_names(),
+        ["Before", "Gated A", "Gated B", "After"]
+    );
+    assert!(gated.prepared.load(Ordering::Relaxed) >= 2);
+
+    // Closed again: both leave (told once each) and are not prepared.
+    open.store(false, Ordering::Relaxed);
+    run(&mut graph, &mut scene, [16, 16], 1);
+    assert_eq!(graph.member_names(), ["Before", "After"]);
+    assert_eq!(gated.left.load(Ordering::Relaxed), 2);
+    let prepared = gated.prepared.load(Ordering::Relaxed);
+    run(&mut graph, &mut scene, [16, 16], 2);
+    assert_eq!(gated.prepared.load(Ordering::Relaxed), prepared);
 }

@@ -138,9 +138,9 @@ pub use frame_storage::RenderFrameStorage;
 pub use graph::{
     check_routing, BindingOverrideBuilder, DebugPassInfo, DebugResourceInfo, DeclaredKind,
     DeclaredResource, FinishSegment, FrameDebugData, GraphTimelineData, GraphTimelinePass,
-    PassDeclaration, PassIdentity, PipelineFormatCache, PipelineFormatKey, RenderGraph, RenderSize,
-    RoutingIssue, RoutingKind, RoutingRead, RoutingSeverity, RoutingUnit, SceneContent, SwapPlan,
-    SwapPolicy,
+    MemberGate, PassDeclaration, PassIdentity, PipelineFormatCache, PipelineFormatKey, RenderGraph,
+    RenderSize, RoutingIssue, RoutingKind, RoutingRead, RoutingSeverity, RoutingUnit, SceneContent,
+    SwapPlan, SwapPolicy,
 };
 pub use instance::wgpu_instance_descriptor;
 
