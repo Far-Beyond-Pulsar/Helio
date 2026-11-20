@@ -1976,4 +1976,215 @@ pass, real time against the reference (direct and indirect), the binned
 material passes' fixed cost a program, the planets' probe walk, the order
 the terrain's kernels compile in, and the list of its item 6.
 
+### The problem
+
+Read on r2's tree.
+
+- **Indirect diffuse is a lattice of probes read at a pixel.** `GIResolve`
+  interpolates eight probes 0.5 m apart (finest level) into
+  `INDIRECT_DIFFUSE` with no temporal or spatial filter. Nothing nearer a
+  surface than about two spacings is in it (it offers 1 m as
+  `indirect_occlusion`), so indirect light has no contact detail, leaks
+  through walls thinner than a spacing, and the reference finds it 16% dark
+  on voxel_craft and the cathedral's indirect diffuse at 0.81.
+- **A hit is lit where it is read.** GI lights each probe hit itself (a
+  light query and a shadow ray a hit, 174,080 a frame) and reads the probes
+  back for the bounces after. A second reader of lit hits (the pixels'
+  rays here, r4's reflections) would repeat that work for the same surfaces.
+- **No one owns a pixel's history.** TSR, the light field and the terrain's
+  shadows each keep a previous depth and normal, each reproject and each
+  decide disocclusion with its own test; the f64 composition of
+  clip-to-previous-clip exists only inside TSR. The frame publishes motion
+  vectors and nothing else of the previous frame.
+- **Three private denoisers** (TSR's accumulation, the light field's
+  temporal and spatial stages, the terrain's shadow stages), none of which
+  another signal can use.
+- **Meshes have no short-range occlusion.** The deferred lighting reads an
+  `"ssao"` texture nothing writes; the terrain adds its own short sky rays.
+
+### How others do it
+
+- **Lumen** (UE5; Wright, SIGGRAPH 2021/2022). Lit surfaces live in a
+  surface cache of cards a mesh, final gather through screen probes (an
+  octahedral probe each 16 pixels, importance-sampled from last frame's
+  lighting, filtered in probe space, interpolated a pixel), a world radiance
+  cache of probes for distant light, and a full-resolution screen-space
+  bent normal for contact detail. The surface cache is cheap to read and is
+  a parametrisation a mesh: it has no answer for terrain that is not a
+  mesh, for foliage, or for anything its cards do not cover.
+- **AMD GI-1.0** (Boissé et al. 2023). Screen probes (8x8 texels a tile)
+  lit from a world-space hash grid of radiance at hit points, the probes
+  spawned and reused through reservoirs. The hash grid needs only a hit's
+  position, so it serves any geometry.
+- **NVIDIA's path-tracing guidance** (SHaRC, ReSTIR GI, NRD). A ray a
+  pixel, paths ended in a spatial hash of radiance keyed by position at a
+  level set by distance to the camera (40 bytes an entry, 2^22 entries, an
+  update pass over a few percent of the pixels), samples reused across
+  pixels and frames by reservoirs (Ouyang et al. 2021), and one denoiser
+  library for every signal taking motion vectors, normal, roughness, depth,
+  hit distance and an optional history confidence from the producer
+  (ReBLUR, ReLAX, SIGMA; a directional mode for signals traced below full
+  resolution).
+- **Kajiya** (Stachowiak 2022). An irradiance cache of entries allocated
+  where rays hit, each tracing its own rays a frame, with ReSTIR GI at half
+  resolution reading it.
+- **DDGI** (Majercik et al. 2019), what r1 kept: probes on a lattice. Its
+  cost does not depend on the screen and it lights points in the air; it
+  cannot resolve what is finer than its spacing.
+
+What they agree on: lit surfaces are cached in world space once and read by
+every ray; the final gather reuses samples in screen space; history is
+judged once, by geometry and by whether the light changed. Where they
+differ is the cache's parametrisation, and only the hash of hit points
+needs nothing from the kind that was hit.
+
+### The design
+
+Four things, each with one owner. Hits are still read only through ray
+streams, light only through light samples: nothing here names a kind.
+
+#### The frame owns a pixel's history
+
+`helio_frame_api::history`, published by the spine for a view whenever a
+reader asks:
+
+- **The previous guides**: last frame's view depth, normal and roughness at
+  the internal resolution (the G-buffer's targets are transient; the spine
+  keeps this copy).
+- **The reprojection**: the f64 composition from this frame's clip space to
+  the previous one's, rebased across an origin change (what TSR computes
+  for itself today), as a uniform a view.
+- **Where a pixel was**: for each pixel, its previous position (from the
+  velocity where the surface moves by itself, from depth and the
+  reprojection elsewhere) and whether the previous frame held the same
+  surface there (depth along the previous view within the pixel's slope,
+  the normals agreeing). One pass a frame; every temporal pass reads it.
+
+TSR takes the reprojection from here in this phase. The light field's and
+the terrain's shadow stages keep their own histories until r5 replaces the
+signals they filter (moving a filter under a signal about to be replaced is
+the work twice); r5 moves them.
+
+#### One denoiser contract
+
+`helio_frame_api::denoise`. A producer describes a **signal**: its kind
+(irradiance as first-order harmonics of luminance with two chroma terms;
+radiance; a visibility), the resolution it was traced at against the
+internal one, its hit distance, and optionally a **confidence** in [0, 1]
+that its history still describes the light (the producer knows: a
+reservoir's revalidated sample, a cache entry that changed). It gets back
+the filtered signal at the internal resolution. `denoise::filter(build,
+&signal)` adds the registered denoiser's passes after the producer's, as
+`stream::trace` adds the tracers'. With none registered the signal passes
+through, so a producer needs no denoiser to build.
+
+The implementation is `helio-pass-denoise`, a pass crate that needs only
+frame contracts: reprojection through the frame's history, accumulation
+whose length follows geometric validity times the producer's confidence, a
+wide reconstruction where history is short, and a variance-guided spatial
+stage stopped by depth, normal and hit distance (near occluders keep
+contact detail). A vendor's reconstruction (r7) registers as another
+denoiser under the same contract.
+
+Its first signal is the pixels' indirect diffuse; r4 brings reflections and
+r5 the shadows.
+
+#### The radiance cache: where a surface is lit for indirect light
+
+A world-space hash of **irradiance arriving at a surface cell**, direct and
+indirect apart, read by every ray that needs a lit hit. A reader multiplies
+by its own hit's albedo (so the cache holds no texture detail and a cell
+may be coarse), and one that lights its hit itself (a mirror reflection in
+r4) takes the indirect part alone.
+
+- **Key**: the hit's cell in the world (an integer cell, not a frame-space
+  one), the cell's level, the dominant side of the normal, the ray's
+  coordinate space. Cell sizes are powers of two in metres, so the frame's
+  origin (a multiple of 1024 m) is a whole number of cells at every level
+  and an origin change moves no entry; cells are counted in 64 bits, so a
+  planet's far side is a cell like any other.
+- **Level**: from the footprint of the ray that reads it (its cone's width
+  at the hit) and the distance to the eye, whichever is coarser. A wide
+  probe ray reads a coarse cell; a pixel's ray near the eye a fine one. A
+  cell with no value answers from the next coarser level that has one.
+- **Life**: a read marks its cell used. A cell first used takes a point and
+  normal from the hit that asked. Each frame the cache spends a ray budget
+  on the cells in use, new ones first and then the longest unlit: it traces
+  rays from the cell's point through a stream, lights their hits with one
+  light sample and one shadow ray each, adds the sky on a miss and the
+  cache's own irradiance at the hit for the bounces after, and folds the
+  result into the cell with a weight that shortens when its estimate
+  moves. A cell unused for a while is evicted.
+- **Who reads**: the probes' rays (GI's light and shadow passes for probe
+  hits go: a probe hit is `albedo * cache + emissive`), the pixels' rays
+  below, r4's reflections. Light at a surface for indirect purposes is
+  computed in one place.
+
+The contract (keys, the entry's rows, `//!use frame_radiance_cache` with
+the read and the mark) is the frame's; the cache that publishes it is the
+GI plugin's. Absent, a read finds nothing and the reader falls back (the
+probes to their own previous state).
+
+Against the alternatives: a surface cache needs a parametrisation a kind
+(none for voxels at 10 cm or for foliage); probes cannot hold a wall's two
+sides apart; a neural cache needs inference this API has no fast path for.
+A hash of hit points serves every tracer, costs memory with the surfaces
+rays reach and not with the world, and its error is bounded by a cell that
+shrinks towards the eye.
+
+#### Indirect diffuse at a pixel
+
+On a budget grid: one ray to each block of pixels (a setting: 16, 4 or 1
+pixels a ray, the traced pixel rotating in its block), from the G-buffer's
+surface, its hit lit from the cache. Samples are kept in a reservoir a
+traced pixel and reused across frames (through the frame's history) and
+across neighbours (ReSTIR GI), with a share of the kept samples retraced
+each frame: a retraced sample that changed lowers the confidence the
+denoiser is given, and that is how a light switched on does not ghost.
+The reservoirs resolve to irradiance as first-order harmonics, so a pixel
+between traced ones takes its light by its own normal; the denoiser filters
+that, and the result is `INDIRECT_DIFFUSE` in its present encoding.
+
+Occlusion nearer than a block's footprint is not in a ray a block: a
+full-resolution screen-space horizon term over that distance and no farther
+(the distance the gather offers as `indirect_occlusion`) restores it, in
+the publisher of `INDIRECT_DIFFUSE` and nowhere else. The deferred
+lighting's unwritten `"ssao"` input goes.
+
+The probes stay: they light points in the air (media, particles), answer a
+cell the cache does not hold yet, and are the cheaper setting (no pixels'
+rays; the resolve as today, its probes lit from the cache). All three
+(probes, cache, pixels) read streams, so each works wherever any tracer
+answers, with or without the ray query.
+
+Against screen probes (Lumen, GI-1.0): the same ray budget kept as a
+hemisphere a tile filters well and stops there; reservoirs a traced pixel
+are the same idea at one ray a pixel, converge to the reference as the
+budget rises, and are the machinery r5's direct light reuses. The cost is
+the correlation resampling leaves, which is the denoiser's to remove and
+the reference's to measure.
+
+#### What scales with what
+
+| | scales with | not with |
+|---|---|---|
+| History pass | internal pixels | scene |
+| Denoiser | internal pixels a signal | scene, rays |
+| Cache memory | cells rays reached lately (capacity a setting) | world size, objects |
+| Cache update | its ray budget (a setting) | cells, screen |
+| Pixels' gather | pixels over the block size | scene, lights |
+| Probes | probes updated a frame | screen |
+
+Every budget is a setting, none a constant fitted to one GPU: a faster one
+takes a ray a pixel and a larger cache.
+
+#### Steps
+
+1. The sky a miss returns and direct light against the reference (carried).
+2. The frame's history and the denoiser.
+3. The radiance cache, the probes lit from it.
+4. The pixels' gather and the near occlusion (needs 2 and 3).
+5. The binned material passes' cost a program, the terrain's kernel order
+   and its probe walk (carried; cost, not image).
+
 ### As built
