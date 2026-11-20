@@ -1964,3 +1964,16 @@ comparisons are the examples').
    restarting on state outside SceneDB; deforming static meshes in the
    engine TLAS (Pulsar-Native#1744); two TLAS projections
    (Pulsar-Native#1739).
+
+## 5. r3: one denoiser, a radiance cache, indirect diffuse a pixel
+
+Branch `render/r3-radiance-cache`.
+
+### Carried in
+
+From r2's "Integration", in order: the sky a miss returns against the sky
+pass, real time against the reference (direct and indirect), the binned
+material passes' fixed cost a program, the planets' probe walk, the order
+the terrain's kernels compile in, and the list of its item 6.
+
+### As built
