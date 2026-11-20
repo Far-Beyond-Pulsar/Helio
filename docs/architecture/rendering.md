@@ -1925,8 +1925,8 @@ terrain could already answer.
   acceptance (4,801 depth texels against the classic render) and its dense
   suite (coverage 0 against 4,835).
 
-**Frames.** Mean absolute difference of 8-bit images over 1; "same" is two
-runs of one build.
+**Frames.** Mean absolute difference of the images, on a scale of 0 to 1;
+"same build" is two runs of one build.
 
 | | same build | r2 against the baseline | luminance |
 |---|---|---|---|
