@@ -927,7 +927,11 @@ contribution, pdf, sampler}` (the WGSL's CPU mirror, for tests).
   `local_lights` (`gi_local_lights.wgsl`, `gi_gather_lights.wgsl`) still read
   the lights' rows: they go when the lights' sampler lands (below).
 
-#### What the next three agents build against this
+#### The three steps built against this
+
+The briefs as written at the contract step; what each built, measured and
+left open is in its own subsection below (materials at mesh hits, the
+terrain's surfaces, direct light samples and the reference).
 
 1. **Materials at mesh hits** (materials and meshes plugins): replace
    `mesh_rays_surface` with the binned material passes: bin the stream's
@@ -1005,22 +1009,22 @@ step changes encodings, not shading.
   canopies (the voxel agent), the voxel_craft r0-r1 image difference judged
   against the reference path tracer, and an acceptance suite on a ray-query
   device (the reference's agent).
-- **Pre-existing reds met here, not this change's**: the deferred lighting's
-  `each_entry_point_fits_the_portable_texture_limit` (its documented count
-  15 against its layouts' 14) and the transparent drawer's
-  `production_pipelines_accept_coverage_and_legacy_templates` (its "legacy"
-  string replacement targets a `TransparentOutput` of two fields; the shader
-  returns three). Neither code path is touched here.
+- **A pre-existing red met here, not this change's**: the transparent
+  drawer's `production_pipelines_accept_coverage_and_legacy_templates` (its
+  "legacy" string replacement targets a `TransparentOutput` of two fields;
+  the shader returns three). The code path is not touched here. The
+  deferred lighting's `each_entry_point_fits_the_portable_texture_limit`,
+  red at this step, passes since the lights' step (its count is 14).
 - **The raster and the hits disagree on a leaf's back**, unchanged by this
   step (images held): the foliage template's `subsurface_color` is the full
   albedo, a hit's is `albedo * material_transmission`. The materials agent
   settles it in the template (it changes the raster image).
-- **Not verified here**: a scene with authored spaces traced through the
+- **Not verified**: a scene with authored spaces traced through the
   engine (no example or level has a rigid frame or portal pocket with
   traced meshes; the engine projection's groups and `SpaceSlot` journal are
-  covered by compilation and the tracer's own GPU test, not by frames);
-  Earth and Moon holds (voxel_flight), whose terrain code changed only in
-  its rows' packing; the engine's render acceptance suite.
+  covered by compilation and the tracer's own GPU test, not by frames).
+  The Earth and Moon holds and the engine's render acceptance suite, not
+  run at this step, are in "Integration" below.
 
 #### Materials at mesh hits
 
@@ -1124,11 +1128,10 @@ reflects the same albedo returns up to twice the light that reaches it. The
 foliage template now describes its leaf with `material_transmitted`, the
 description a hit already carried; the raster and a hit agree. No shipped
 scene draws a mesh with the foliage class: voxel_craft's leaves are the voxel
-publish's (which still writes the full albedo in the raster, `chunk_draw.wgsl`
-`surface_with_transmission(surface, albedo)`, and the share at hits: the
-voxel plugin's to change to `material_transmitted`), its grass the foliage
-plugin's procedural blades (no transmission). voxel_craft's raster image is
-unchanged by this step.
+publish's, which describes them the same way (`chunk_draw.wgsl`,
+`surface_with_transmission(surface, material_transmitted(row, albedo))`, in
+the raster and at hits), its grass the foliage plugin's procedural blades
+(no transmission).
 
 **Measured** (RTX 3060, the GPU shared with two other agents' runs).
 
@@ -1245,10 +1248,6 @@ standalone host because the engine registers no test feature in its graph.
   bins; the fix is bins that overlap (a wgpu fork change or one pipeline
   over the programs present), a decision beyond this step. A frame pays it
   only for programs its rays hit; the table-only frame is one dispatch.
-- **The voxel publish's leaf transmission** (`chunk_draw.wgsl`,
-  `surface_with_transmission(surface, albedo)` in the raster) is the voxel
-  plugin's to move to `material_transmitted`; its hits already carry the
-  share.
 - **Deforming static meshes in the engine TLAS** (Pulsar-Native#1744's last
   item) are not part of this step.
 
@@ -1874,3 +1873,94 @@ Every comparison here is to be rerun at integration with
   in the reference on subsurface surfaces.
 - The reference restarts on SceneDB content and the camera; state outside
   SceneDB (a voxel edit, a GI setting) does not restart it.
+
+#### Integration
+
+The steps merged (Helio 299854c5 and the plugins' `render/r2-hit-surfaces`),
+with Pulsar-Native `main` 54ae9db58 merged in, on an RTX 3060.
+
+**Faults found here and fixed**, all of one kind: r2's ray kernels take
+longer to compile than r1's, and three places counted frames or assumed the
+terrain could already answer.
+
+- *A ground batch was marked answered when no probe ran.* The chunk pass
+  answered the foliage's `GroundLink` batch whenever it called
+  `probe_ground`, which returns without dispatching while the world cannot
+  draw (pipelines compiling, no primary volume). The placement then read
+  hits nothing wrote and kept no blade. `probe_ground` now says whether it
+  answered, and the pass answers the batch only then; the placement asks an
+  unanswered batch again.
+- *The pass stopped asking for frames while its ray kernels compiled.*
+  `ChunkPass::needs_frame` went false once the residency settled, though
+  `settled()` also requires the rays' link complete. A host drawing on
+  demand (the editor) would go idle with the streams unanswered. The pass
+  asks for frames until `ray_pipelines_ready`.
+- *Tests waited a number of frames.* `foliage_on_voxels` ran 600 frames and
+  then counted blades; it now waits for `ChunkPass::settled()` under a
+  wall-clock guard. A test waits on a readiness signal, never a count.
+- The shader validation test's snippet list lacked the frame's surface,
+  BSDF, ray stream, ray surface, light sample and heatmap snippets, so the
+  reference's shader did not resolve there.
+
+**Gates.**
+
+- Helio: `cargo test --workspace --no-fail-fast`, 108 suites, none failing;
+  the layer gate, 0 violations; fmt.
+- The engine's installed suites, each exe on its own under the GPU lock:
+  `render_acceptance` 40 of 40 (a process a test), `ray_tier_acceptance` 3
+  of 3, `default_pipelines`, `plugin_pass_lists`, `runtime_render_parity`,
+  `voxel_render_parity`, `skinned_frames`, `level_editor`, `lifecycle`,
+  `memory_over_ticks`, `gameplay_defaults` and the rest of the list pass;
+  `one_owner` passes.
+- The plugins' own: GI (lib 10, `mesh_gi_graph` 2, `probes` 15,
+  `vg_ray_proxies` 3), meshes (rays lib 4, `mesh_rays_gpu` 15, component
+  50, `skin_cache` 2, `wgsl_rows` 6), materials 13, lights (`sampler_gpu`
+  3, deferred lib 3, globals 21, layouts 18), voxel in release (lib 35,
+  `chunks` 55, `clouds` 6, `presets` 1, `volumes` 8, `voxel_pass_graph` 13,
+  `wgsl` 2, `wide_products` 1, `foliage_on_voxels` 1).
+- Red as on `main`, with the same messages and numbers as `main`'s logs:
+  `catalog` and `traits` (trait definitions the blueprint and trait editor
+  plugins do not declare), `contracts`
+  (`descriptors_require_what_their_crates_link`), the virtual-geometry
+  acceptance (4,801 depth texels against the classic render) and its dense
+  suite (coverage 0 against 4,835).
+
+**Frames.** Mean absolute difference of 8-bit images over 1; "same" is two
+runs of one build.
+
+| | same build | r2 against the baseline | luminance |
+|---|---|---|---|
+| voxel_craft, 4 poses, 8-frame bursts, no clouds (against r1) | 0.0001-0.0015 | 0.0005-0.0016 (p99 at most 0.016) | -0.03% to -0.15% |
+| Earth ground hold, 1600x900 (against r0) | 0.0002-0.0005 | 0.0010-0.0011 | 0.3575 against 0.3577 |
+| Moon ground hold, 1600x900 (against r0) | 0.0002-0.0009 | 0.0014-0.0017 (p99 0.0235) | 0.5226 against 0.5220 |
+
+The planets differ from r0 as r1 did (section 3's table); r2 changes the
+encodings of a hit and the pages' read, not the image.
+
+**The editor** started on a fresh copy of the `voxel_planet` example
+project and ran 240 s with no validation error or panic; its graph schedules
+the voxel and mesh tracers for GI's probe and shadow streams, the terrain's
+and the meshes' surface passes and `GIShadow`.
+
+**Not verified**: a scene with authored spaces traced through the engine
+(above); the reference against real time through the editor (the
+comparisons are the examples').
+
+**Carried into r3**, in order:
+
+1. The sky a miss returns (the atmosphere's sky table) at 1.8 times the sky
+   pass's radiance.
+2. Real time against the reference: direct light 6% above and indirect 16%
+   below on voxel_craft, the cathedral at 0.74.
+3. The binned material passes' fixed 0.03 to 0.06 ms a program with hits:
+   a fork change (dispatches that write disjoint ranges of one buffer
+   without a barrier and an indirect validation between them), or one
+   kernel switching on the program.
+4. The planets' probe walk, 1.0 to 1.2 ms above the kernel r1 replaced.
+5. The terrain's kernels compiled in the order the streams need them
+   (trace and `Diffuse` before `Full`).
+6. Grass traced; emissive surfaces as light samples (r5 owns the lights'
+   side); HLFS on `light_incidence` and the frame's BSDF; the reference
+   restarting on state outside SceneDB; deforming static meshes in the
+   engine TLAS (Pulsar-Native#1744); two TLAS projections
+   (Pulsar-Native#1739).
