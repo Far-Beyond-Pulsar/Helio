@@ -238,15 +238,16 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
                     path.pdf = b.pdf;
                     // The ray's cone (Akenine-Moller et al., "Improved
                     // Shader and Texture Level of Detail Using Ray Cones",
-                    // RTG II, 2021): it leaves the hit as a point (the
-                    // reference samples a point of the pixel, not its
-                    // footprint) and spreads by the lobe it was drawn from:
+                    // RTG II, 2021): it starts as wide as the footprint that
+                    // found the hit (the contract's: a ray leaves a hit as
+                    // wide as that footprint) and spreads by the lobe it was
+                    // drawn from:
                     // twice a GGX lobe's alpha (the tangent of its width)
                     // for a specular sample, a diffuse lobe's 90-degree cone
                     // for the others.
                     let alpha = bsdf_alphas(s);
                     let lobe = select(2.0, 2.0 * sqrt(alpha.x * alpha.y), b.lobe == BSDF_LOBE_SPECULAR);
-                    let cone = scene_cone_in_space(scene_ray_cone(0.0, scene_ray_spread(ray) + lobe, RAY_MASK_ALL), scene_ray_space(ray));
+                    let cone = scene_cone_in_space(scene_ray_cone(footprint, scene_ray_spread(ray) + lobe, RAY_MASK_ALL), scene_ray_space(ray));
                     next = SceneRay(at + face * (sign(side_i) * ray_offset(at, footprint)), REFERENCE_REACH, b.wi, cone);
                     want_next = true;
                 }
@@ -332,12 +333,9 @@ fn reference_shadow(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local
                 let off = ray_offset(at, footprint);
                 let distance = light_sample_distance(sample);
                 let reach = select(max(distance - 2.0 * off, 1e-4), REFERENCE_REACH, distance >= LIGHT_SAMPLE_FAR);
-                // A point's visibility of the light: no width, no spread.
-                // (As wide as the camera's footprint at the hit, shadow
-                // rays leaving voxel_craft's meadow were all stopped: the
-                // terrain came out black; with zero width, or without the
-                // meadow's foliage, they are not. rendering.md section 4.)
-                let cone = scene_cone_in_space(scene_ray_cone(0.0, 0.0, RAY_MASK_ALL), scene_ray_space(ray));
+                // As wide as the footprint that found the hit, with no
+                // spread: it stands for that patch of surface.
+                let cone = scene_cone_in_space(scene_ray_cone(footprint, 0.0, RAY_MASK_ALL), scene_ray_space(ray));
                 shadow = SceneRay(at + face * (sign(side_i) * off), reach, dir, cone);
                 light = vec4<u32>(bitcast<vec3<u32>>(c), o.path);
                 want = true;

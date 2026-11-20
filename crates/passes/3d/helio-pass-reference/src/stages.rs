@@ -348,6 +348,61 @@ impl ReferenceDisplay {
         state.snapshot_requested = true;
         state.snapshot_taken = false;
     }
+
+    /// Whether the reference traces and sums while none of its views is
+    /// shown: a host measuring the real-time image (any debug view of it,
+    /// [`Self::request_snapshot`]) against the reference. Its passes are
+    /// members while it does.
+    pub fn keep_tracing(&self, measuring: bool) {
+        self.shared.state.lock().unwrap().measuring = measuring;
+    }
+}
+
+impl ReferenceImage {
+    /// Writes the sums and the snapshot to `<prefix>_reference.f32`,
+    /// `<prefix>_diffuse.f32` and `<prefix>_realtime.f32` (when taken): each
+    /// `width`, `height` (u32 little-endian) then RGBA f32 a pixel (a sum and
+    /// its count of paths; the snapshot's colour), what
+    /// `scripts/r2/reference_compare.py` reads. Waits for the GPU: a host's
+    /// measurement, not a frame's work. Returns the files written.
+    pub fn write(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        prefix: &str,
+    ) -> std::io::Result<Vec<String>> {
+        let mut buffers = vec![("reference", &self.image), ("diffuse", &self.diffuse)];
+        buffers.extend(self.snapshot.as_ref().map(|s| ("realtime", s)));
+        let mut written = Vec::new();
+        for (name, buffer) in buffers {
+            let staging = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Reference dump"),
+                size: buffer.size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, buffer.size());
+            queue.submit([encoder.finish()]);
+            staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, |r| r.expect("reference dump maps"));
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .map_err(std::io::Error::other)?;
+            let pixels = (self.size[0] * self.size[1]) as usize * 16;
+            let mut bytes = Vec::with_capacity(8 + pixels);
+            bytes.extend_from_slice(&self.size[0].to_le_bytes());
+            bytes.extend_from_slice(&self.size[1].to_le_bytes());
+            bytes.extend_from_slice(
+                &staging.slice(..).get_mapped_range().expect("mapped")[..pixels],
+            );
+            let path = format!("{prefix}_{name}.f32");
+            std::fs::write(&path, bytes)?;
+            written.push(path);
+        }
+        Ok(written)
+    }
 }
 
 impl RenderPass for ReferenceDisplay {
@@ -403,6 +458,10 @@ impl RenderPass for ReferenceDisplay {
             pass.set_pipeline(&self.snapshot);
             pass.dispatch_workgroups((b.size[0] * b.size[1]).div_ceil(64), 1, 1);
             state.snapshot_taken = true;
+        }
+        // Measured, not shown: the scene colour stays the real-time image.
+        if !state.shown() {
+            return Ok(());
         }
         drop(state);
         let group = cache.bind_group(

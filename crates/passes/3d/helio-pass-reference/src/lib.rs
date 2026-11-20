@@ -309,10 +309,18 @@ struct State {
     /// A host's request for a snapshot of the real-time scene colour.
     snapshot_requested: bool,
     snapshot_taken: bool,
+    /// A host measuring against it ([`ReferenceDisplay::keep_tracing`]):
+    /// traced and summed while no view shows it.
+    measuring: bool,
 }
 
 impl State {
     fn active(&self) -> bool {
+        self.shown() || self.measuring
+    }
+
+    /// Whether one of its views covers the scene colour.
+    fn shown(&self) -> bool {
         self.mode == REFERENCE_VIEW || self.mode == REFERENCE_DIFFUSE_VIEW
     }
 }
@@ -568,6 +576,7 @@ fn build(build: &mut NodeBuild<'_, '_>) -> Result<(), String> {
             mode: helio_frame_api::lighting::lighting_settings(build.env).debug_mode,
             snapshot_requested: false,
             snapshot_taken: false,
+            measuring: false,
         }),
         cache: helio_core::gpu_cache::GpuCache::new(),
     });
