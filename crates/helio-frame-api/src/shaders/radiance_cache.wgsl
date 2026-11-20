@@ -1,0 +1,337 @@
+// The radiance cache (`helio_frame_api::rays::radiance_cache`,
+// `//!use frame_radiance_cache`, with `//!use frame_ray_stream` for its
+// packings): irradiance arriving at surface cells of the world, direct and
+// indirect apart, kept by its publisher (the GI plugin's cache) and read by
+// every ray that needs a lit hit.
+//
+// A shader that opts in binds, under these names:
+//   radiance_cache_frame:   var<uniform> RadianceCacheFrame
+//   radiance_cache_slots:   var<storage, read_write> array<RadianceCacheSlot>
+//   radiance_cache_entries: var<storage, read_write> array<RadianceCacheEntry>
+// the publisher's buffers (`RADIANCE_CACHE_FRAME`, `_SLOTS`, `_ENTRIES`), or
+// the stand-in (`radiance_cache::stand_in`), whose frame holds no slots: a
+// read then finds nothing and a mark does nothing.
+//
+// A reader with a hit calls `radiance_cache_read(p, n, footprint, space,
+// reach)` (what the cache holds there, or nothing) and `radiance_cache_mark(p,
+// n, footprint, space)` (the cell is in use; a cell first used takes its point
+// and normal from the hit), with the hit's frame-space point, the unit normal
+// of the side the ray arrived on (the face turned toward the ray), the ray's
+// footprint at the hit (`scene_ray_footprint`), its coordinate space
+// (`scene_ray_space`) and how many levels coarser than the hit's own cell may
+// answer while it has no value (a coarser cell spans more of the scene, and
+// across a thin occluder its light is both sides'; RADIANCE_CACHE_LEVELS:
+// any). A Lambertian hit of albedo `a` then leaves
+// `a * (direct + indirect) / PI`; one that lights itself with light samples
+// (a mirror's hit) takes `indirect` alone.
+
+// Levels of cells: level `l` is `2^(l + RADIANCE_CACHE_FINEST)` metres wide,
+// 1/64 m to 1024 m. The coarsest is the frame origin's step (a multiple of
+// 1024 m), so the origin is a whole number of cells at every level.
+const RADIANCE_CACHE_LEVELS: u32 = 17u;
+const RADIANCE_CACHE_FINEST: i32 = -6;
+// Slots a key may sit in: the bucket its hash names.
+const RADIANCE_CACHE_BUCKET: u32 = 16u;
+// No slot.
+const RADIANCE_CACHE_NONE: u32 = 0xffffffffu;
+// A mark also marks the cell this many levels coarser, so a fine cell's
+// read has a coarser one to answer from while it has no value of its own.
+const RADIANCE_CACHE_ANCESTOR: u32 = 3u;
+// One mark in this many of a cell already in use moves its point to the
+// marking hit (a uniform pick among the hits that read it, over time).
+const RADIANCE_CACHE_RESEAT: u32 = 8u;
+
+// The frame's cache. `origin_xy`, `origin_z`: the frame's origin in whole
+// 1024 m (64-bit two's complement a component: x lo, x hi, y lo, y hi; z lo,
+// z hi), then the slots (0: no cache) and the frame's number. `offset`: the
+// origin's rest below 1024 m (0 for an engine frame, whose origin is a
+// multiple of 1024 m), and in w the eye angle (a cell is at least that
+// angle wide seen from the eye). `eye`: the eye in the frame's space.
+struct RadianceCacheFrame {
+    origin_xy: vec4<u32>,
+    origin_z: vec4<u32>,
+    offset: vec4<f32>,
+    eye: vec4<f32>,
+}
+
+// A slot of the hash: `state` the key's checksum (0: empty), `used` the
+// frame a reader last marked it.
+struct RadianceCacheSlot {
+    state: atomic<u32>,
+    used: atomic<u32>,
+}
+
+// A cell: `tag` its level (bits 0..5), the dominant side of its normal
+// (5..8: axis * 2 + negative) and the coordinate space (8..17,
+// `SceneRay::space`'s encoding); the world cell, 64 bits an axis.
+struct RadianceCacheKey {
+    tag: u32,
+    x_lo: u32,
+    x_hi: u32,
+    y_lo: u32,
+    y_hi: u32,
+    z_lo: u32,
+    z_hi: u32,
+}
+
+// A slot's cell, 64 bytes: its key; the point its light is gathered at, as a
+// 15-bit unorm an axis in the cell (`point` its top 10 bits an axis, 10:10:10;
+// `history` bits 16..31 its low 5, 5:5:5) and that side's normal
+// (`scene_pack_unit`); `history` bits 0..16: the updates folded into the
+// direct part (0..8) and the indirect part (8..16), 0 for a cell without a
+// value yet; the irradiance arriving there from the lights (`direct`) and
+// from everything else (`indirect`: surfaces and the sky), W / m^2.
+struct RadianceCacheEntry {
+    key: RadianceCacheKey,
+    point: u32,
+    normal: u32,
+    history: u32,
+    direct: array<f32, 3>,
+    indirect: array<f32, 3>,
+}
+
+// What a read found: the irradiance at the cell, the level it came from and
+// the cell's history (its updates folded: direct, indirect; how long its
+// value has held still).
+struct RadianceCacheIrradiance {
+    direct: vec3<f32>,
+    indirect: vec3<f32>,
+    level: u32,
+    found: bool,
+    history: vec2<u32>,
+}
+
+// Whether the frame has a cache.
+fn radiance_cache_present() -> bool {
+    return radiance_cache_frame.origin_z.z != 0u;
+}
+
+// The width of level `level`'s cells (metres) and its inverse.
+fn radiance_cache_size(level: u32) -> f32 {
+    return exp2(f32(i32(level) + RADIANCE_CACHE_FINEST));
+}
+
+fn radiance_cache_inv_size(level: u32) -> f32 {
+    return exp2(-f32(i32(level) + RADIANCE_CACHE_FINEST));
+}
+
+// The level a read of frame point `p` with footprint `footprint` (metres)
+// keys: the cell at least as wide as the footprint and as the eye angle at
+// its distance, whichever is coarser, the nearest power of two.
+fn radiance_cache_level(p: vec3<f32>, footprint: f32) -> u32 {
+    let d = length(p - radiance_cache_frame.eye.xyz);
+    let size = max(footprint, radiance_cache_frame.offset.w * d);
+    let l = round(log2(max(size, 1e-30))) - f32(RADIANCE_CACHE_FINEST);
+    return u32(clamp(l, 0.0, f32(RADIANCE_CACHE_LEVELS - 1u)));
+}
+
+// The dominant side of unit `n`: axis * 2, plus 1 toward the negative.
+fn radiance_cache_side(n: vec3<f32>) -> u32 {
+    let a = abs(n);
+    if a.x >= a.y && a.x >= a.z { return select(0u, 1u, n.x < 0.0); }
+    if a.y >= a.z { return select(2u, 3u, n.y < 0.0); }
+    return select(4u, 5u, n.z < 0.0);
+}
+
+// A 64-bit `lo`, `hi` shifted left by `s` (0..16).
+fn radiance_cache_shl(lo: u32, hi: u32, s: u32) -> vec2<u32> {
+    if s == 0u { return vec2<u32>(lo, hi); }
+    return vec2<u32>(lo << s, (hi << s) | (lo >> (32u - s)));
+}
+
+// A 64-bit `a` plus 32-bit signed `b`.
+fn radiance_cache_add(a: vec2<u32>, b: i32) -> vec2<u32> {
+    let lo = a.x + bitcast<u32>(b);
+    let carry = select(0u, 1u, lo < a.x);
+    return vec2<u32>(lo, a.y + select(0u, 0xffffffffu, b < 0) + carry);
+}
+
+// The frame origin's cell at `level`: whole 1024 m times the cells in
+// 1024 m.
+fn radiance_cache_origin_cell(level: u32) -> array<vec2<u32>, 3> {
+    let s = RADIANCE_CACHE_LEVELS - 1u - level;
+    let o = radiance_cache_frame.origin_xy;
+    let z = radiance_cache_frame.origin_z;
+    return array<vec2<u32>, 3>(radiance_cache_shl(o.x, o.y, s), radiance_cache_shl(o.z, o.w, s), radiance_cache_shl(z.x, z.y, s));
+}
+
+// Frame point `p` in level `level`'s cells (frame-local).
+fn radiance_cache_cells(p: vec3<f32>, level: u32) -> vec3<f32> {
+    return (p + radiance_cache_frame.offset.xyz) * radiance_cache_inv_size(level);
+}
+
+// The key of the cell holding frame point `p` at `level`, on the side of
+// unit `n`, in coordinate space `space`.
+fn radiance_cache_key(p: vec3<f32>, n: vec3<f32>, level: u32, space: u32) -> RadianceCacheKey {
+    let c = vec3<i32>(floor(radiance_cache_cells(p, level)));
+    let o = radiance_cache_origin_cell(level);
+    let x = radiance_cache_add(o[0], c.x);
+    let y = radiance_cache_add(o[1], c.y);
+    let z = radiance_cache_add(o[2], c.z);
+    let tag = level | (radiance_cache_side(n) << 5u) | ((space & 0x1ffu) << 8u);
+    return RadianceCacheKey(tag, x.x, x.y, y.x, y.y, z.x, z.y);
+}
+
+fn radiance_cache_mix(x0: u32) -> u32 {
+    var x = x0;
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+fn radiance_cache_hash(k: RadianceCacheKey, seed: u32) -> u32 {
+    var h = radiance_cache_mix(seed ^ k.tag);
+    h = radiance_cache_mix(h ^ k.x_lo);
+    h = radiance_cache_mix(h ^ k.x_hi);
+    h = radiance_cache_mix(h ^ k.y_lo);
+    h = radiance_cache_mix(h ^ k.y_hi);
+    h = radiance_cache_mix(h ^ k.z_lo);
+    return radiance_cache_mix(h ^ k.z_hi);
+}
+
+// The first slot of `k`'s bucket.
+fn radiance_cache_bucket(k: RadianceCacheKey) -> u32 {
+    let buckets = radiance_cache_frame.origin_z.z / RADIANCE_CACHE_BUCKET;
+    return (radiance_cache_hash(k, 0x9e3779b9u) & (buckets - 1u)) * RADIANCE_CACHE_BUCKET;
+}
+
+// `k`'s checksum, a slot's state (never 0).
+fn radiance_cache_checksum(k: RadianceCacheKey) -> u32 {
+    return max(radiance_cache_hash(k, 0x85ebca6bu), 1u);
+}
+
+fn radiance_cache_same(a: RadianceCacheKey, b: RadianceCacheKey) -> bool {
+    return a.tag == b.tag && a.x_lo == b.x_lo && a.x_hi == b.x_hi && a.y_lo == b.y_lo
+        && a.y_hi == b.y_hi && a.z_lo == b.z_lo && a.z_hi == b.z_hi;
+}
+
+// The slot holding cell `k`, or RADIANCE_CACHE_NONE.
+fn radiance_cache_find(k: RadianceCacheKey) -> u32 {
+    let base = radiance_cache_bucket(k);
+    let check = radiance_cache_checksum(k);
+    for (var i = 0u; i < RADIANCE_CACHE_BUCKET; i++) {
+        let s = base + i;
+        if atomicLoad(&radiance_cache_slots[s].state) == check && radiance_cache_same(radiance_cache_entries[s].key, k) {
+            return s;
+        }
+    }
+    return RADIANCE_CACHE_NONE;
+}
+
+// Whether entry `e` holds a value.
+fn radiance_cache_has_value(e: RadianceCacheEntry) -> bool {
+    return (e.history & 0xffffu) != 0u;
+}
+
+// The irradiance the cache holds at frame point `p` on the side of unit `n`
+// (the face turned toward the ray), for a ray of footprint `footprint` there
+// in coordinate space `space`: its cell's, or the next coarser cell's that
+// has a value, at most `reach` levels coarser; `found` false when none has.
+fn radiance_cache_read(p: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32, reach: u32) -> RadianceCacheIrradiance {
+    if !radiance_cache_present() { return RadianceCacheIrradiance(vec3<f32>(0.0), vec3<f32>(0.0), 0u, false, vec2<u32>(0u)); }
+    let first = radiance_cache_level(p, footprint);
+    let last = min(first + min(reach, RADIANCE_CACHE_LEVELS), RADIANCE_CACHE_LEVELS - 1u);
+    for (var level = first; level <= last; level++) {
+        let s = radiance_cache_find(radiance_cache_key(p, n, level, space));
+        if s == RADIANCE_CACHE_NONE { continue; }
+        let e = radiance_cache_entries[s];
+        if !radiance_cache_has_value(e) { continue; }
+        return RadianceCacheIrradiance(
+            vec3<f32>(e.direct[0], e.direct[1], e.direct[2]),
+            vec3<f32>(e.indirect[0], e.indirect[1], e.indirect[2]),
+            level,
+            true,
+            vec2<u32>(e.history & 0xffu, (e.history >> 8u) & 0xffu),
+        );
+    }
+    return RadianceCacheIrradiance(vec3<f32>(0.0), vec3<f32>(0.0), 0u, false, vec2<u32>(0u));
+}
+
+// Frame point `p`'s place in its cell at `level`, 15 bits an axis: the
+// entry's `point` (the top 10 bits, 10:10:10) and the bits of its `history`
+// from 16 (the low 5, 5:5:5).
+fn radiance_cache_pack_point(p: vec3<f32>, level: u32) -> vec2<u32> {
+    let q = radiance_cache_cells(p, level);
+    let u = vec3<u32>(clamp((q - floor(q)) * 32768.0, vec3<f32>(0.0), vec3<f32>(32767.0)));
+    let high = u >> vec3<u32>(5u);
+    let low = u & vec3<u32>(31u);
+    return vec2<u32>(high.x | (high.y << 10u) | (high.z << 20u), (low.x | (low.y << 5u) | (low.z << 10u)) << 16u);
+}
+
+// Entry `e`'s point, in the frame's space (within 1/32768 of its cell an
+// axis of where the hit was).
+fn radiance_cache_entry_point(e: RadianceCacheEntry) -> vec3<f32> {
+    let level = e.key.tag & 31u;
+    let o = radiance_cache_origin_cell(level);
+    let c = vec3<f32>(vec3<i32>(bitcast<i32>(e.key.x_lo - o[0].x), bitcast<i32>(e.key.y_lo - o[1].x), bitcast<i32>(e.key.z_lo - o[2].x)));
+    let high = vec3<u32>(e.point & 1023u, (e.point >> 10u) & 1023u, (e.point >> 20u) & 1023u);
+    let fine = e.history >> 16u;
+    let low = vec3<u32>(fine & 31u, (fine >> 5u) & 31u, (fine >> 10u) & 31u);
+    let f = (vec3<f32>((high << vec3<u32>(5u)) | low) + 0.5) / 32768.0;
+    return (c + f) * radiance_cache_size(level) - radiance_cache_frame.offset.xyz;
+}
+
+// Marks the cell of frame point `p` at `level` on the side of `n` in
+// `space` as used this frame, claiming an empty slot of its bucket for it
+// (its point and normal this hit's) when no slot holds it. A full bucket
+// keeps it out (a read then answers from a coarser cell).
+fn radiance_cache_mark_level(p: vec3<f32>, n: vec3<f32>, level: u32, space: u32) {
+    let key = radiance_cache_key(p, n, level, space);
+    let base = radiance_cache_bucket(key);
+    let check = radiance_cache_checksum(key);
+    let frame = radiance_cache_frame.origin_z.w;
+    var i = 0u;
+    var retry = 0u;
+    loop {
+        if i >= RADIANCE_CACHE_BUCKET { return; }
+        let s = base + i;
+        var state = atomicLoad(&radiance_cache_slots[s].state);
+        if state == 0u {
+            let claim = atomicCompareExchangeWeak(&radiance_cache_slots[s].state, 0u, check);
+            if claim.exchanged {
+                let at = radiance_cache_pack_point(p, level);
+                radiance_cache_entries[s] = RadianceCacheEntry(key, at.x, scene_pack_unit(n), at.y, array<f32, 3>(0.0, 0.0, 0.0), array<f32, 3>(0.0, 0.0, 0.0));
+                atomicStore(&radiance_cache_slots[s].used, frame);
+                return;
+            }
+            // A weak exchange may fail with the slot still empty: once more.
+            if claim.old_value == 0u && retry == 0u {
+                retry = 1u;
+                continue;
+            }
+            state = claim.old_value;
+        }
+        retry = 0u;
+        if state == check {
+            if atomicLoad(&radiance_cache_slots[s].used) != frame {
+                atomicStore(&radiance_cache_slots[s].used, frame);
+            }
+            let pick = radiance_cache_mix(bitcast<u32>(p.x) ^ (bitcast<u32>(p.y) * 0x9e3779b9u) ^ (bitcast<u32>(p.z) * 0x85ebca6bu) ^ frame);
+            if pick % RADIANCE_CACHE_RESEAT == 0u && radiance_cache_same(radiance_cache_entries[s].key, key) {
+                // The history's low half is the publisher's to write (its
+                // fold runs in a pass of its own); a mark rewrites the high.
+                let at = radiance_cache_pack_point(p, level);
+                radiance_cache_entries[s].point = at.x;
+                radiance_cache_entries[s].history = (radiance_cache_entries[s].history & 0xffffu) | at.y;
+                radiance_cache_entries[s].normal = scene_pack_unit(n);
+            }
+            return;
+        }
+        i++;
+    }
+}
+
+// Marks the cell a read of frame point `p` (side of unit `n`, footprint
+// `footprint`, coordinate space `space`) keys as used this frame, and the
+// cell RADIANCE_CACHE_ANCESTOR levels coarser.
+fn radiance_cache_mark(p: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32) {
+    if !radiance_cache_present() { return; }
+    let level = radiance_cache_level(p, footprint);
+    radiance_cache_mark_level(p, n, level, space);
+    if level + RADIANCE_CACHE_ANCESTOR < RADIANCE_CACHE_LEVELS {
+        radiance_cache_mark_level(p, n, level + RADIANCE_CACHE_ANCESTOR, space);
+    }
+}
