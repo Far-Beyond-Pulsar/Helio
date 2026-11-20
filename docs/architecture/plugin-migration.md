@@ -1255,7 +1255,10 @@ outside its test host. Phase B is done.
   `material_sheet_transmittance`) and `//!use material_surface` (texture
   metadata, `SurfaceData`, `material_at`, `material_texture_data`,
   `sample_texture`, `default_pbr_surface`, `material_cut_out`), over the
-  existing `pbr_eval` and `specular_aa`.
+  existing `pbr_eval` and `specular_aa`. (Since r2, `SurfaceData` and the
+  `SURFACE_FLAG_*` are the frame's, `helio_frame_api::gbuffer::SURFACE_SNIPPET`:
+  the surface a G-buffer texel and a ray's hit both encode;
+  `rendering.md` section 4.)
   - **Templates are surface functions; programs are the drawers'**. A
     template is only its `radiant_eval_surface` (or
     `radiant_eval_transparent`) and helpers over `MaterialInput`;
@@ -1419,7 +1422,7 @@ names were compared with every owner's key consts. The check that keeps it
 | Scene-join rows (owner links, pool handles, transforms, frame-origin rebasing) | frame: `helio_scene_join::join_source` (`scene_join_common.wgsl`, `Handle` added), `origin_pair` | the authored LOD's `Owner`/`Transform`/`Handle`, its hand-rolled `object_relative` and private Rust `origin_pair`; `Owner`/`Handle` in the LOD apply and the VG instance derivation; `Handle` in the meshes' joins |
 | Shadow views (`LightMatrix`), cascade selection, projection | lights: `//!use shadow_atlas`, new `//!use shadow_lookup` | the meshes' casters' `ShadowFace` x2 and shadow-dirty's `GpuShadowMatrix`; the prelude's `helio_csm_select`/`helio_shadow_project` (a lights concept in the frame) move to `shadow_lookup` for fog and the flare |
 | Foliage ground rows | foliage api: `GROUND_SNIPPET` (`GroundQuery`, `GroundHit`, `GroundArgs`, `GROUND_NONE`, `ground_miss`) | placement's and the voxel ground's copies |
-| Surface flags | materials: `pbr_eval` (`SURFACE_FLAG_TWO_SIDED`) | voxel's copy |
+| Surface flags | materials: `pbr_eval` (`SURFACE_FLAG_TWO_SIDED`); since r2 the frame's `gbuffer::SURFACE_SNIPPET` with `SurfaceData` | voxel's copy |
 | Material rows key | materials: `MATERIALS` | the object batch's `MATERIALS_KEY` literal and `"materials"` in eight mesh/portal passes |
 | Mesh pools, skin buffers, VG instances, static objects | meshes api: `MESH_VERTICES`, `MESH_INDICES`, `SKELETAL_SKIN_VERTICES`, `SKELETAL_BONE_PALETTE` (moved from `helio_component`), `VG_INSTANCES`, `STATIC_OBJECTS` | literals in five mesh drawers, portals, the mesh host, VG BVH, the engine's authored LOD and VG instance derivation |
 | Material stand-in | materials: `MaterialStandIn` | GI's mesh tracer's own no-table fallback (batch 6 leftover, cleared: the tracer takes a queue) |

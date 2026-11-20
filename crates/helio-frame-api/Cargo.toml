@@ -17,3 +17,5 @@ wgpu = { workspace = true }
 naga = { version = "30.0.0", features = ["wgsl-in"] }
 # The contracts' build-time tests run on wgpu's no-op device.
 wgpu = { workspace = true, features = ["noop"] }
+# The surface encodings' round trip runs on a real device (`tests/surface_gpu.rs`).
+pollster = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "helio-pass-reference"
+version = "0.1.0"
+edition = "2021"
+description = "Helio pass: the reference path tracer over the frame's ray streams and light samples, knowing no kind"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+helio-feature-api = { path = "../../../helio-feature-api" }
+helio-frame-api = { path = "../../../helio-frame-api" }
+helio-settings = { path = "../../../helio-settings" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+glam = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }

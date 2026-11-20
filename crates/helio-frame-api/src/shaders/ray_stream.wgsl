@@ -15,20 +15,32 @@ struct RayStreamHeader {
     count: u32,
 }
 
-// A ray: its origin and the most distance it travels (0 or less: no ray in
-// this row), its unit direction, and `cone`. A tracer traces from the origin
-// itself, from distance 0: the consumer starts a ray off the surface it
-// leaves.
+// A ray, 32 bytes: its origin and the most distance it travels (0 or less:
+// no ray in this row), its unit direction, and `cone`: the ray's cone, the
+// casters it sees and the coordinate space it travels in. A tracer traces
+// from the origin itself, from distance 0: the consumer starts a ray off the
+// surface it leaves.
 //
-// `cone` is the ray's cone (Akenine-Moller et al., "Texture Level of Detail
-// Strategies for Real-Time Ray Tracing", Ray Tracing Gems): its footprint is
-// `width` across at the origin and grows by `spread` a metre, so a tracer
-// reads textures and tests cut-outs at the detail the ray can resolve
-// (`scene_ray_footprint`). Bits 0..16: the spread, a half float. Bits
-// 16..24: the caster mask the ray sees (`RAY_MASK_*`). Bits 24..32: the
-// width, 0 for none, else `2^((bits - 160) / 8)` metres (a micrometre to
-// kilometres in steps of 9%). A camera or probe ray has no width; a ray
-// that leaves a hit starts as wide as the ray that found the hit was there.
+// The cone (Akenine-Moller et al., "Texture Level of Detail Strategies for
+// Real-Time Ray Tracing", Ray Tracing Gems): its footprint is `width`
+// across at the origin and grows by `spread` a metre, so a tracer reads
+// textures and tests cut-outs at the detail the ray can resolve
+// (`scene_ray_footprint`). A camera or probe ray has no width; a ray that
+// leaves a hit starts as wide as the ray that found the hit was there.
+//
+// The space is the authored coordinate space, encoded as a camera's
+// (`Camera.view_info.w`): the space's slot plus one, or `SCENE_SPACE_ANY`
+// (0) for a ray that sees every space, as an unrestricted camera does. A
+// tracer answers only with geometry of that space (`scene_ray_sees_space`).
+// A ray serving a view takes the view's (`cameras[0].view_info.w`); a ray
+// leaving a hit keeps its parent's, or the hit's content space where a remap
+// put the hit in another (`helio_frame_api::lighting::VIEW_REMAP_SPACES`).
+//
+// `cone`'s bits: 0..11 the spread (a half float's top 11 bits: its 5
+// exponent bits and 6 of its mantissa, 0.8% at worst), 11..15 the caster
+// mask the ray sees (`RAY_MASK_*`), 15..24 the space, 24..32 the width (0
+// for none, else `2^((bits - 160) / 8)` metres: a micrometre to kilometres
+// in steps of 9%).
 struct SceneRay {
     origin: vec3<f32>,
     t_max: f32,
@@ -36,18 +48,50 @@ struct SceneRay {
     cone: u32,
 }
 
-// Casters that never move, casters that may, and every caster.
+// `SceneRay::space` of a ray that sees every coordinate space.
+const SCENE_SPACE_ANY: u32 = 0u;
+
+// `SceneRay::space` of a ray in authored space slot `slot` (0: the world).
+fn scene_space_of_slot(slot: u32) -> u32 {
+    return slot + 1u;
+}
+
+// The coordinate space `ray` travels in (`SCENE_SPACE_ANY`, or a slot plus
+// one).
+fn scene_ray_space(ray: SceneRay) -> u32 {
+    return (ray.cone >> 15u) & 0x1ffu;
+}
+
+// `cone` (`scene_ray_cone`) for a ray in coordinate space `space`.
+fn scene_cone_in_space(cone: u32, space: u32) -> u32 {
+    return (cone & ~(0x1ffu << 15u)) | ((space & 0x1ffu) << 15u);
+}
+
+// Whether `ray` sees geometry authored in space slot `slot`
+// (`helio_camera_sees_space` for rays).
+fn scene_ray_sees_space(ray: SceneRay, slot: u32) -> bool {
+    let space = scene_ray_space(ray);
+    return space == SCENE_SPACE_ANY || space == slot + 1u;
+}
+
+// Casters that never move, casters that may, and every caster (the mask
+// holds four bits).
 const RAY_MASK_STATIC: u32 = 1u;
 const RAY_MASK_MOVABLE: u32 = 2u;
-const RAY_MASK_ALL: u32 = 0xffu;
+const RAY_MASK_ALL: u32 = 0xfu;
 
+// The cone of a footprint `width` across at the origin, growing by
+// `spread` a metre, seeing the casters of `mask`, in every coordinate space
+// (`scene_cone_in_space` puts it in one).
 fn scene_ray_cone(width: f32, spread: f32, mask: u32) -> u32 {
     let w = select(0u, u32(clamp(round(log2(max(width, 1e-30)) * 8.0 + 160.0), 1.0, 255.0)), width > 0.0);
-    return (pack2x16float(vec2<f32>(spread, 0.0)) & 0xffffu) | ((mask & 0xffu) << 16u) | (w << 24u);
+    let half = pack2x16float(vec2<f32>(max(spread, 0.0), 0.0)) & 0x7fffu;
+    let s = min((half + 8u) >> 4u, 0x7bfu);
+    return s | ((mask & 0xfu) << 11u) | (w << 24u);
 }
 
 fn scene_ray_spread(ray: SceneRay) -> f32 {
-    return unpack2x16float(ray.cone & 0xffffu).x;
+    return unpack2x16float((ray.cone & 0x7ffu) << 4u).x;
 }
 
 fn scene_ray_width(ray: SceneRay) -> f32 {
@@ -61,7 +105,7 @@ fn scene_ray_footprint(ray: SceneRay, t: f32) -> f32 {
 }
 
 fn scene_ray_mask(ray: SceneRay) -> u32 {
-    return (ray.cone >> 16u) & 0xffu;
+    return (ray.cone >> 11u) & 0xfu;
 }
 
 // A hit, one a ray. Of a nearest-hit stream: the distance to the nearest
@@ -122,45 +166,8 @@ fn scene_occlusion(through: vec3<f32>) -> SceneHit {
     return SceneHit(select(0.0, 1.0, blocked), 0u, stopped.x | (stopped.y << 10u) | (stopped.z << 20u), 0u);
 }
 
-// The surface at a nearest hit, written by the tracer that found it: the
-// shading normal and the face's (both on the side the ray met, packed by
-// `scene_pack_unit`), base colour (RGB8) and metalness (alpha), `params`
-// (roughness in bits 0..8, the share of light the surface lets through from
-// its far side, tinted by its base colour, in bits 8..16: leaves), and the
-// radiance it emits (`scene_pack_radiance`).
-struct SceneSurface {
-    normal: u32,
-    face: u32,
-    base_color: u32,
-    params: u32,
-    emissive: u32,
-}
-
-fn scene_surface(normal: vec3<f32>, face: vec3<f32>, base_color: vec3<f32>, metallic: f32, roughness: f32, transmission: f32, emissive: vec3<f32>) -> SceneSurface {
-    return SceneSurface(
-        scene_pack_unit(normal),
-        scene_pack_unit(face),
-        pack4x8unorm(vec4<f32>(base_color, metallic)),
-        pack4x8unorm(vec4<f32>(roughness, transmission, 0.0, 0.0)),
-        scene_pack_radiance(emissive),
-    );
-}
-
-fn scene_surface_base_color(surface: SceneSurface) -> vec3<f32> {
-    return unpack4x8unorm(surface.base_color).rgb;
-}
-
-fn scene_surface_metallic(surface: SceneSurface) -> f32 {
-    return unpack4x8unorm(surface.base_color).a;
-}
-
-fn scene_surface_roughness(surface: SceneSurface) -> f32 {
-    return unpack4x8unorm(surface.params).x;
-}
-
-fn scene_surface_transmission(surface: SceneSurface) -> f32 {
-    return unpack4x8unorm(surface.params).y;
-}
+// The surface at a nearest hit is a `SceneSurface` row
+// (`//!use frame_ray_surface`, with `//!use frame_surface`).
 
 // A unit vector in 32 bits (octahedral, 16 bits an axis).
 fn scene_pack_unit(n: vec3<f32>) -> u32 {

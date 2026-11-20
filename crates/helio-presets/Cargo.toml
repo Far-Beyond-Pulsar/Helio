@@ -28,6 +28,7 @@ helio-pass-selection-outline = { path = "../passes/3d/helio-pass-selection-outli
 helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflection" }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
+helio-pass-reference = { path = "../passes/3d/helio-pass-reference" }
 helio-pass-tsr = { workspace = true }
 
 [dev-dependencies]

@@ -65,14 +65,24 @@ impl<T: Send + Sync + 'static> Compiling<T> {
             wake: Condvar::new(),
         });
         let device = device.clone();
+        let asked = std::time::Instant::now();
         let job = {
             let label = label.clone();
             let outcome = Arc::clone(&outcome);
             move || {
+                let started = std::time::Instant::now();
                 let built = build_checked(&device, build);
                 if let Err(reason) = &built {
                     log::error!(target: "helio::compile", "{label}: {reason}");
                 }
+                // How long a bundle waited for a worker and took to build:
+                // what keeps its content from the frame.
+                log::info!(
+                    target: "helio::compile",
+                    "{label}: waited {:.1} s, built in {:.1} s",
+                    (started - asked).as_secs_f64(),
+                    started.elapsed().as_secs_f64()
+                );
                 IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
                 outcome.set(built);
             }

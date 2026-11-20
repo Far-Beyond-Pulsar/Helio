@@ -31,13 +31,19 @@ use std::path::{Path, PathBuf};
 
 const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_hiz::HIZ_SNIPPET,
+    helio_frame_api::diagnostics::HEATMAP_SNIPPET,
     helio_frame_api::gbuffer::OUTPUT_SNIPPET,
+    helio_frame_api::gbuffer::SURFACE_SNIPPET,
+    helio_frame_api::gbuffer::BSDF_SNIPPET,
     helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET,
     helio_frame_api::lighting::sky::SKY_SNIPPET,
     helio_frame_api::lighting::sky::SKY_TABLE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
     helio_frame_api::media::SNIPPET,
     helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
+    helio_frame_api::rays::stream::SNIPPET,
+    helio_frame_api::rays::stream::SURFACE_SNIPPET,
+    helio_frame_api::rays::light_samples::SNIPPET,
 ];
 
 /// Helio's own prelude marker, which `resolve_with` always provides.

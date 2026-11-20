@@ -15,6 +15,17 @@
 //! is live. One reader per buffer key serves every pass that asks.
 
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Whether the passes added under it are members (see
+/// [`RenderGraph::set_member_gate`](crate::graph::RenderGraph::set_member_gate)):
+/// a consumer that runs only on request (a debug view, a test's readback)
+/// gates its own passes and the passes it brings in through contracts (each
+/// kind's tracer passes for its ray streams, the samplers' passes for its
+/// light batches), so none of them is scheduled while it is off. Asked once
+/// a frame, before [`RenderPass::is_member`](crate::RenderPass::is_member),
+/// which a closed gate skips.
+pub type MemberGate = Arc<dyn Fn() -> bool + Send + Sync>;
 
 use crate::{BufferKey, SceneBufferLiveness, SceneBufferProjection};
 

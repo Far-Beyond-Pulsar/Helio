@@ -75,9 +75,56 @@ pub const TARGETS: [(&str, ResourceFormat); 8] = [
 pub const OUTPUT_MARKER: &str = "//!use gbuffer_output";
 /// `GBufferOutput` (the fragment outputs for [`TARGETS`], in location order)
 /// and `GBufferDepthOutput` (the same with `frag_depth`): every G-buffer
-/// drawer's fragment returns one, so the layout has one owner.
+/// drawer's fragment returns one, so the layout has one owner. With
+/// [`SURFACE_SNIPPET`], `gbuffer_output(surface, tag, motion)` and
+/// `gbuffer_depth_output` fill them from a `SurfaceData`.
 pub const OUTPUT_SNIPPET: helio_core::shader::ShaderSnippet =
     helio_core::wgsl_snippet!(OUTPUT_MARKER, "shaders/gbuffer_output.wgsl");
+
+/// Marker opting a shader into [`SURFACE_SNIPPET`].
+pub const SURFACE_MARKER: &str = "//!use frame_surface";
+/// The surface at a lit point (`shaders/gbuffer_surface.wgsl`): `SurfaceData`
+/// and its `SURFACE_FLAG_*`, what a material makes of a point, a G-buffer
+/// texel holds, a ray stream's hit holds ([`crate::rays::stream::SceneSurface`])
+/// and a lighting model lights. One struct, two encodings, one encode and one
+/// decode each: `gbuffer_surface_texels` / `gbuffer_surface_at` for the
+/// G-buffer's targets (table in the file), `scene_surface_pack` /
+/// `scene_surface_unpack` for a stream's rows
+/// ([`crate::rays::stream::SURFACE_SNIPPET`]). `surface_data(albedo, normal,
+/// roughness, metallic, emissive)` is a plain surface for a kind without a
+/// material table; `surface_with_transmission` makes it a thin two-sided one.
+///
+/// The frame owns it, not the materials plugin that fills it: the G-buffer
+/// is the frame's, the lighting models and the ray streams' consumers read
+/// it without any material, and a kind with no material (a plain-coloured
+/// voxel) writes one too.
+pub const SURFACE_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(SURFACE_MARKER, "shaders/gbuffer_surface.wgsl");
+
+/// Marker opting a shader into [`BSDF_SNIPPET`].
+pub const BSDF_MARKER: &str = "//!use frame_bsdf";
+/// How a surface reflects light (`shaders/surface_bsdf.wgsl`, with
+/// [`SURFACE_SNIPPET`]): `bsdf_eval(s, wo, wi)` (the BSDF times the cosine:
+/// the engine's GGX and Lambert lighting model as the deferred lighting
+/// evaluated it before, with three energy fixes), `bsdf_pdf` and
+/// `bsdf_sample` (GGX's visible normals, cosine diffuse, the light a thin
+/// two-sided surface lets through; weights `eval / pdf`, so unbiased for that
+/// model), `bsdf_prepare` / `bsdf_eval_prepared` (the frame made once for
+/// many lights), `bsdf_facing` (a two-sided surface turned toward the side a hit
+/// sees), and the split sum an environment's radiance is weighted by
+/// (`bsdf_environment_split_sum`, `bsdf_fresnel_roughness`).
+///
+/// It belongs with [`SURFACE_SNIPPET`]: a `SurfaceData`'s fields (roughness,
+/// reflectance, anisotropy, subsurface, the share let through) mean
+/// something only under one reflectance model, and every reader of the
+/// surface (the lighting models over the G-buffer, the ray streams' hit
+/// consumers, the reference path tracer, a shading-cost probe) lights it
+/// with that model. A lighting model owns how light arrives (its lights,
+/// shadows and indirect inputs), not how the surface returns it, so two
+/// lighting models over one G-buffer cannot disagree about a surface, and
+/// the reference judges the real-time image with the same reflectance.
+pub const BSDF_SNIPPET: helio_core::shader::ShaderSnippet =
+    helio_core::wgsl_snippet!(BSDF_MARKER, "shaders/surface_bsdf.wgsl");
 
 /// [`TARGETS`]' formats, in location order.
 pub const TARGET_FORMATS: [wgpu::TextureFormat; 8] = [
