@@ -481,6 +481,10 @@ impl Fixture {
         });
 
         let mut graph = helio_core::RenderGraph::new(&device, &queue);
+        // The frame's reprojection, published as the spine does.
+        graph.add_pass(Box::new(
+            helio_pass_history::HistoryReprojectionPass::standalone(),
+        ));
         graph.add_pass(Box::new(
             TsrPass::new(
                 &device,
