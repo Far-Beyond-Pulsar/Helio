@@ -1309,7 +1309,8 @@ the sun's occlusion rays at their footprint.
   not wrong; reading them from the surface at a texel's bias was. An
   occlusion ray along the sun at least a finest texel wide, seeing every
   caster and every volume the pages hold, now walks the first two texels of
-  the finest level resident at its origin up to its footprint's in each
+  the finest level resident at its origin up to the one whose texel is half
+  its width (so the read's 2x2 filter spans the ray; section 4) in each
   volume and takes what the pages let through from a texel up the sun on:
   the band the bias hides was walked, and the receiver's own surface
   (slopes to 1.3 over the filter) stays its own. On the same receivers it
@@ -1594,18 +1595,54 @@ tracer over the streams and light batches, knowing no kind:
   sun being a delta light the sampler samples, so it is counted once.
   Emissive surfaces are emission at hits (no sampler offers them), weight 1.
 - **Ray cones**: a camera ray starts with no width and a pixel's spread; a
-  bounce leaves its hit as a point and spreads by its lobe, twice the GGX
-  alpha for a specular sample and a 90-degree cone for a diffuse one
-  (Akenine-Moller et al., RTG II, 2021); a shadow ray is a point's
-  visibility, no width and no spread. Shadow rays as wide as the camera's
-  footprint at the hit (the first version) were all stopped leaving
-  voxel_craft's meadow: the terrain came out black. Proof, by single-change
-  runs of the reference at one pose: shadows ignored, the terrain is lit;
-  shadow rays offset 0.25 m, lit; shadow rays of zero width, lit, with the
-  trees' shadows; the first version's rays with the meadow's foliage off
-  (`VOXEL_CRAFT_NO_FOLIAGE`), lit. Of the tracers only the meshes' reads a
-  ray's width (cut-outs tested at the mip of the footprint); which geometry
-  of the meadow stops a wide ray was not found.
+  ray leaving a hit is as wide as the footprint that found it (the stream
+  contract's), a bounce spreading by its lobe, twice the GGX alpha for a
+  specular sample and a 90-degree cone for a diffuse one (Akenine-Moller et
+  al., RTG II, 2021), a shadow ray with no spread.
+- **The black terrain was not the rays' width.** A first version took
+  voxel_craft's terrain going black under wide shadow rays for a tracer
+  fault and gave the reference's rays zero width. It was the reference
+  summing frames the terrain had not answered: the terrain's draw and ray
+  kernels compile off the frame (`helio_core::compile`, which now logs each
+  bundle's wait and build time: on this machine with a cold driver cache
+  the chunk draw pipelines take 64 s and the ray stream pipelines 38 s, so
+  about 3,800 frames of voxel_craft), and until they have, the terrain
+  answers no stream (`Answers::short`). The first version had no answers
+  check, so at 1,500 frames most of its sum was frames without the
+  terrain. The single-change runs that seemed to prove the width (zero
+  width, a 0.25 m offset, foliage off: lit) ran from shader sources on
+  disk after earlier runs, most likely on a warm driver cache with the
+  kernels ready within their 300 frames (the same executable run fresh for
+  300 frames shows no terrain light at all; not proven further). Proof:
+  the same pre-merge executable, unchanged (footprint-wide shadow rays,
+  foliage on), summed for 6,000 frames lights the terrain with the trees'
+  shadows; the merged build with footprint-wide rays does too; and the
+  terrain's tracer answers wide occlusion rays leaving the ground as the
+  exact walk does (`wide_occlusion_rays_leave_the_ground` in the voxel
+  plugin's `tests/chunks.rs`). The reference now skips frames a tracer
+  answered short of, and its rays are back on the contract's widths.
+- **What a width does in the tracers**: the meshes' tracer tests cut-outs
+  at the footprint's mip; the terrain's answers an occlusion ray at least a
+  sun-page texel wide from the sun's pages past a short walked band
+  (`paged_occlusion`). The test above (a forest, the sun 50 degrees up, a
+  solid 6 m roof added; ground points under open sky and under cover, each
+  judged by nine zero-width walks within half a metre; rays of 0, 1 cm,
+  10 cm and 1 m) finds no width fault: walked widths answer exactly, and
+  the pages' answers for wider rays are off at 1 of 164 open and 3 of 159
+  covered points at 1 m (a page texel is a point sample; the test allows
+  one in fifty). One improvement there: the pages were read at the level
+  whose texel is the ray's width, so the read's 2x2 filter spanned twice
+  the ray; read at half the width (`chunk_draw.wgsl`, `paged_occlusion`)
+  it spans the ray, and 10 cm rays went from 1 open point stopped and 1
+  covered let through to none (1 m unchanged). Judged by five walks (the
+  canopies' gappy cover counted as cover), metre-wide rays came back lit at
+  9 of 87 covered points: a metre-wide ray under a canopy with gaps is
+  partly lit, and a point-sampled answer reads one side or the other. GI's
+  shadow rays carry the probe ray's footprint (0.443 times the hit's
+  distance); voxel_craft's GI indirect view (23, four poses) before and
+  after the half-width reads: mean |difference| 0.0003, luminance 0.9999
+  (run-to-run noise); GI's shadow rays of zero width against the
+  footprint's: 0.0005, luminance +0.45%. GI's light did not change.
 - **Ray offsets**: a reference ray starts `0.002 + 4e-6 |p| + footprint /
   100` off the surface it leaves, along the hit's face (the terrain takes an
   origin within 1/1024 of a cell of a solid face for an inside hit).
@@ -1683,6 +1720,15 @@ tracer over the streams and light batches, knowing no kind:
 - Member gates (`helio-core` `tests/scene_membership.rs`): gated passes are
   neither scheduled nor prepared while closed, join in build order when
   open, and leave (told once) when it closes again.
+- Wide occlusion rays (the voxel plugin's `tests/chunks.rs`
+  `wide_occlusion_rays_leave_the_ground`): above; and
+  `sun_pages_under_a_canopy` with the half-width reads: 58 of 2,573
+  footprint answers differ from the walk (59 before), lit 0.600 against
+  0.607.
+- On the merged tree: the frame-api suites (BSDF, layouts, surface), the
+  reference's (unit and GPU), member gates, the deferred lighting's, HLFS's,
+  the sampler's (unit and GPU) and GI's (lib, `probes`, `mesh_gi_graph`,
+  `vg_ray_proxies`) pass.
 - GI's suites (lib, `probes`, `mesh_gi_graph`, `vg_ray_proxies`) pass on the
   lights' sampler; the sampler's, the deferred lighting's (the texture
   count test included: 14), HLFS's and the materials' unit tests pass;
@@ -1712,17 +1758,21 @@ own because the samples arrive from another pass). The grid is rebuilt
 only when lights change, and leaves the schedule with its last user; the
 other two are the price of a shared sampler, a dispatch each.
 
-The reference against the real-time image (the scene held still,
-`HELIO_STILL`; linear, at the lighting's output before fog, transparency and
-the tone map; 1440 paths a pixel, six bounces): real-time luminance 0.761
-of the reference's, mean |error| 0.0061 (p99 0.069), mean relative error
-20%. The real-time image is darker by a quarter: the reference's
-interreflections between the stone walls (albedo near 0.5) carry more light
-than the probes' irradiance gives the deferred lighting. The indirect
-diffuse alone (the deferred lighting's view 23 against the reference's 63,
-final images at the same fixed exposure): luminance 0.863, mean |error|
-0.0035. The reference still shows fireflies (paths that find a candle
-through a bounce); its p99 errors are theirs.
+The reference against the real-time image (the merged tree; the scene held
+still, `HELIO_STILL`; linear, at the lighting's output before fog,
+transparency and the tone map; 3,940 paths a pixel, six bounces): real-time
+luminance 0.737 of the reference's, mean |error| 0.0066 (p99 0.045), mean
+relative error 24%. The real-time image is darker by a quarter: the
+reference's interreflections between the stone walls (albedo near 0.5)
+carry more light than the probes' irradiance gives the deferred lighting.
+The images through the post (both raw: a debug view's scene colour goes
+through without exposure or tone curve, so the real-time image is captured
+in debug mode 250, which no pass draws): the whole frame 0.746 of the
+reference's, mean |error| 0.0062; the indirect diffuse alone (the deferred
+lighting's view 23 against the reference's 63) 0.805, mean |error| 0.0039.
+(An earlier "final images 1.21" compared the tone-mapped real-time image
+with the raw reference.) The reference still shows fireflies (paths that
+find a candle through a bounce); its p99 errors are theirs.
 
 A reference frame (518,400 paths, six stages, the cathedral's meshes
 traced through the TLAS): about 7.5 ms on the RTX 3060, by stage: camera
@@ -1731,41 +1781,84 @@ shadow trace and resolve about 1.5 ms at depths 0 to 2 falling to 0.4 ms at
 depth 5 as Russian roulette and misses end paths; the sums 0.18; the
 display 0.06.
 
-**voxel_craft** (the tour's first pose; the reference summed over 1500
-frames, against bursts of eight frames of r1's merged build and r0's baseline;
-`scripts/r2/rerun_reference.sh PART=craft`). The meadow's grass is
-procedural foliage, which no tracer traces: it covers 26% of the image by
-more than 0.05 (40% by more than 0.02), where the reference shows bare turf.
-So the comparison runs every build with the grass off (`NO_FOLIAGE=1`):
+**voxel_craft** (the merged tree; the tour's first pose, the grass off as
+no tracer traces it (`NO_FOLIAGE=1`: with it the meadow covers 26% of the
+image by more than 0.05, where the reference shows bare turf); r0's
+baseline, r1's merged build and this one, real-time bursts of eight frames
+after 5,000; the reference summed over 7,300 paths a pixel;
+`scripts/r2/rerun_reference.sh PART=craft NO_FOLIAGE=1`, results in
+`C:/t/r2d/final/craft`).
 
-| against the reference | final image mean \|err\| | p99 | luminance | indirect (23 vs 63) mean \|err\| | luminance |
-|---|---|---|---|---|---|
-| r0 | 0.0284 | 0.117 | 1.493 | 0.0069 | 1.314 |
-| r1 | 0.0281 | 0.116 | 1.488 | 0.0069 | 1.306 |
+Two faults in the comparisons before this one, both corrected: the
+reference summed frames the terrain had not answered (above), and the
+real-time "final" images were tone-mapped while the reference's view went
+through the post as a debug view, which shows the scene colour raw (no
+exposure, no tone curve: `helio-pass-postprocess`'s `DEBUG_VIEW`), so the
+earlier "real-time a third brighter" was the tone curve. The real-time
+image is now captured raw too (debug mode 250, which no pass draws), and
+this build's real-time scene colour is snapshotted linear with the
+reference (`HELIO_REFERENCE_DUMP`, `ReferenceDisplay::keep_tracing`).
 
-(With the grass: r0 0.0396 / 1.550, r1 0.0395 / 1.547; indirect 0.0103 /
-1.93 and 0.0102 / 1.91.) r1 is nearer than r0 on every number, by 1% of
-the error: r0 and r1 light this pose almost alike, and both are far from
-the reference, which is darker by a third. That gap is not yet the
-lighting's: the terrain's hit surfaces are not its G-buffer's. At the same
-pose the reference's first-hit albedo (from the terrain's `ray_surface`)
-against the G-buffer's albedo view: ground 0.37 0.40 0.21 against 0.28
-0.40 0.18, canopy 0.55 0.41 0.29 against 0.34 0.41 0.27 (the leaves come
-out orange). Until the terrain's `Full` surfaces match its publish, the
-reference judges a different material, so r0 against r1 is answered only as
-"alike, r1 marginally nearer". Every comparison here is to be rerun at
-integration with `scripts/r2/rerun_reference.sh`.
+The hit surfaces first: the reference's first-hit albedo (from the
+tracers' `Full` surfaces) against the G-buffer's albedo view (4), linear,
+over the pixels that hit something: 0.1497 0.2097 0.0967 against 0.1495
+0.2096 0.0967 (ground 0.0907 0.1515 0.0562 against 0.0905 0.1511 0.0562,
+canopy 0.2624 0.3209 0.1788 against 0.2619 0.3203 0.1789): equal.
+
+| against the reference (raw images, through the same post) | whole frame: hits mean \|err\| | luminance | sky mean \|err\| | luminance | indirect (23 vs 63) on hits mean \|err\| | luminance |
+|---|---|---|---|---|---|---|
+| r0 | 0.00705 | 1.003 | 0.0263 | 0.777 | 0.00310 | 1.054 |
+| r1 | 0.00691 | 1.009 | 0.0263 | 0.778 | 0.00303 | 1.083 |
+| r2 (this build) | 0.00693 | 1.007 | 0.0263 | 0.777 | 0.00302 | 1.078 |
+
+(Whole images: r0 0.01015 mean |err|, p99 0.072, luminance 0.930; r1
+0.01004, 0.072, 0.934; r2 0.01006, 0.072, 0.933.) r0 against r1: r1 has
+the lower error everywhere, r0 the luminance nearer 1 on hits and in the
+indirect diffuse, each by about 1% of the error, inside what one pose and
+eight frames resolve (r2 against r1 on the same runs: 0.0019 mean). They
+are alike at this pose; neither is nearer truth by a margin this
+measurement can stand on.
+
+Where this build's gap lies (linear, the lighting's output before fog and
+the tone map; real-time luminance 0.894 of the reference's over the whole
+image), by the reference's own parts (`reference_parts.py`) against the
+real-time image's views:
+
+| linear mean luminance | reference | real-time |
+|---|---|---|
+| sky pixels (16% of the image) | 0.0775 | 0.0423 (0.546) |
+| hits (84%): all light | 0.0439 | 0.0445 (1.013) |
+| hits: direct (the lights at the first hit; view 22) | 0.0355 | 0.0377 (1.06) |
+| hits: indirect (sky 0.0026 + first bounce 0.0049 + later 0.0009; view 23) | 0.0084 | 0.0071 (0.84) |
+| canopy hits: direct / indirect | 0.0175 / 0.0129 | 0.0192 / 0.0106 |
+| ground hits: direct / indirect | 0.0445 / 0.0058 | 0.0459 / 0.0053 |
+
+So r2's real-time image is not brighter than the reference: over what the
+camera hits it is within 1.3%, with direct light 6% above the reference's
+and indirect light 16% below it (the first bounce off the canopy carries
+most of what GI's probes miss); the whole-image gap is the sky the camera
+sees, which the reference takes from the atmosphere's low-order sky table
+(`sky_table_eval`, the irradiance harmonics back to radiance, as GI's probe
+rays do) at 1.8 times the atmosphere's rendered sky. That is where r3
+starts: the reference's (and GI's) sky radiance against the sky pass's, then
+the real-time direct light's 6% (shadow softness and the sun's
+transmittance), then the indirect light's missing first bounce.
+Every comparison here is to be rerun at integration with
+`scripts/r2/rerun_reference.sh`.
 
 **Open**:
 
-- The terrain's hit surfaces (voxel `ray_surface`, the hit-surface
-  contract's `Full` detail) differ from its G-buffer publish in albedo
-  (above): its owners'.
+- The reference's sky on a miss is the atmosphere's low-order sky table
+  (as GI's probe rays take it): 1.8 times the sky pass's radiance where
+  voxel_craft's camera sees the sky. The first item of r3.
 - Grass is not traced: the reference and GI see bare turf under it.
-- Which geometry of voxel_craft's meadow stops shadow rays as wide as a
-  footprint (above). GI's shadow rays carry the probe ray's footprint as
-  their width too; whether GI's sun on the terrain is stopped the same way
-  was not measured (GI's irradiance matches r1's, which had the same rays).
+- The terrain answers no ray stream until its draw and ray kernels have
+  compiled: 64 s and 38 s on this machine with a cold driver cache (about
+  3,800 frames of voxel_craft), during which GI holds its probes and the
+  reference sums nothing. A host keeps its pipeline cache
+  (`PULSAR_PIPELINE_CACHE`); compiling the ray kernels a stream's detail
+  needs first (the trace and the `Diffuse` surfaces before `Full`'s) would
+  let GI start sooner. The terrain's owners'.
 - `HELIO_STILL=2` (rows written once) culls the cathedral's objects: Hi-Z
   history faults when nothing writes a row; the comparisons use
   `HELIO_STILL=1` (rows rewritten unchanged).
