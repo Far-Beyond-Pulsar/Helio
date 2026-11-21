@@ -26,8 +26,8 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use helio_feature_api::NodeBuild;
 use helio_frame_api::history::{
-    self, rebase_previous_view, HistoryPublisher, HistoryReprojection, PIXELS, PREVIOUS_DEPTH,
-    PREVIOUS_NORMAL, REPROJECTION,
+    self, rebase_previous_view, HistoryPublisher, HistoryReprojection, DEPTH, NORMAL, PIXELS,
+    PREVIOUS_DEPTH, PREVIOUS_NORMAL, REPROJECTION,
 };
 
 /// Views a graph keeps history for at once (mono, two eyes and a few
@@ -435,7 +435,7 @@ impl RenderPass for HistoryPixelsPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &[PIXELS, PREVIOUS_DEPTH, PREVIOUS_NORMAL]
+        &[PIXELS, DEPTH, NORMAL, PREVIOUS_DEPTH, PREVIOUS_NORMAL]
     }
 
     fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
@@ -547,6 +547,8 @@ impl RenderPass for HistoryPixelsPass {
         };
         // This frame wrote `latest`; the other slot is the previous frame's.
         let previous = guides.latest ^ 1;
+        frame.write_texture_binding(DEPTH, &guides.depth[guides.latest], "HistoryPixels");
+        frame.write_texture_binding(NORMAL, &guides.normal[guides.latest], "HistoryPixels");
         frame.write_texture_binding(PREVIOUS_DEPTH, &guides.depth[previous], "HistoryPixels");
         frame.write_texture_binding(PREVIOUS_NORMAL, &guides.normal[previous], "HistoryPixels");
         frame.write_texture_binding(PIXELS, &guides.pixels, "HistoryPixels");

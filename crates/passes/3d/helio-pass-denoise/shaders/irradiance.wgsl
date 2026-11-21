@@ -2,37 +2,54 @@
 //!use frame_history
 //!use frame_denoise_irradiance
 // The denoiser's stages for an irradiance signal (lib.rs documents them and
-// where each constant comes from), one thread a pixel at the internal
-// resolution:
+// where each constant comes from). Light is spread where the information is,
+// per traced sample; only what needs a pixel's own geometry runs per pixel:
 //
-// 0. `guides`: each pixel's raw depth and normal (octahedral) into one
-//    texel, so every later tap reads its geometry with one load.
-// 1. `temporal`: this frame's samples at the pixel (the traced pixels of the
-//    nearest 2x2 blocks, a tent of the block over their distance times the
-//    geometry weight) folded into the pixel's history, read where the frame's
-//    history says the pixel was (the bilinear taps that held the same
-//    surface). The history's length falls by the producer's confidence and
-//    the share of the footprint that held the surface, and is capped.
-// 2. `fix`: where history is short, the neighbours' accumulated values,
-//    weighted by their history length and the geometry, over a radius that
-//    shrinks as history grows. Its result is the history the next frame reads.
-// 3. `spatial`, four times at steps of 1, 2, 4 and 8 blocks: an a-trous
-//    filter of the linear B-spline's 3x3 (the same reach as three of the
-//    cubic B-spline's 5x5, at 36 taps instead of 75) stopped by the
-//    luminance's standard error (variance guided), by geometry (distance
-//    against the irradiance's own scale, the hit distance; normal; plane). A
-//    pixel whose estimate is already within the half floats' rounding is not
-//    filtered.
+// 1. `temporal` (a pixel): this frame's samples at the pixel (the traced
+//    pixels of the nearest 2x2 blocks, a tent of the block over their
+//    distance times the geometry weight) folded into the pixel's history,
+//    read where the frame's history says the pixel was (the bilinear taps
+//    that held the same surface). The history's length falls by the
+//    producer's confidence and the share of the footprint that held the
+//    surface, and is capped.
+// 2. `records` (a block, for blocks of 4 and 16): the block's record, the
+//    temporal result at its representative pixel (its centre). A signal
+//    traced at every pixel has its pixels as records.
+// 3. `spatial`, twice (a block): an a-trous filter of the linear B-spline's
+//    3x3 over the records, at steps of s and 2s blocks, s set by the record's
+//    history length (4 / sqrt(length): wide where history is short, one
+//    block once it holds 16 frames), stopped by the luminance's standard
+//    error (variance guided) and by geometry (distance against the
+//    irradiance's own scale, the hit distance; normal; plane). A record
+//    already within the half floats' rounding is left as it is.
+// 4. `reconstruct` (a pixel): the filtered records of the pixel's nearest
+//    2x2 blocks (tent times geometry, at the pixel's own normal), combined
+//    with the pixel's own temporal result by inverse variance, the records'
+//    variance taken with the bias their difference from the pixel shows. Its
+//    result is the signal's output and the history the next frame reads:
+//    the spatial stage is recurrent (its work accumulates over frames, as
+//    ReBLUR's post-blur history does), while the luminance's moments stay
+//    the raw samples' (the variance never sees the filter).
 //
 // Values are the linear irradiance a + b . n (`denoise_irradiance_linear`),
-// its chroma as ratios to luminance, 1 / hit distance; history also a length
-// and the first two moments of the luminance at the pixel's normal (f32:
-// the variance is their difference, which half floats cannot resolve).
+// its chroma as ratios to luminance, 1 / hit distance; a pixel's state also
+// a history length and the first two moments of the luminance at the
+// pixel's normal (f32: the variance is their difference, which half floats
+// cannot resolve). Layouts (the history's two first are the outputs):
+//   A Rgba16Float (a, Co / Y, Cg / Y, standard error; -1: no light yet)
+//   B Rgba16Float (b, 1 / hit distance)
+//   M Rgba32Float (length, mean, mean square)    pixels only; the temporal
+//                                                result's is the next
+//                                                frame's history's
+//   N R32Float (length)                           records only
 
 struct DenoiseParams {
     // The view's inverse projection (view space from clip; no frame-space
     // translation, so positions keep their precision far from the origin).
     inv_proj: mat4x4<f32>,
+    // The projection's P[2][2], P[2][3], P[3][2], P[3][3]: raw depth from
+    // view depth.
+    proj_zw: vec4<f32>,
     size: vec2<u32>,
     traced: vec2<u32>,
     side: u32,
@@ -40,14 +57,14 @@ struct DenoiseParams {
     // Bit 0: the signal has a confidence; bit 1: the frame's history is bound.
     flags: u32,
     max_history: f32,
-    fix_history: f32,
     // A pixel's width a metre of view depth.
     pixel_scale: f32,
-    _pad: vec2<u32>,
+    _pad: vec3<u32>,
 }
 
-@group(0) @binding(0) var depth_tex: texture_depth_2d;
-@group(0) @binding(1) var normal_tex: texture_2d<f32>;
+// The frame's guides at a pixel (`helio_frame_api::history::DEPTH`, `NORMAL`).
+@group(0) @binding(0) var guide_depth: texture_2d<f32>;
+@group(0) @binding(1) var guide_normal: texture_2d<f32>;
 @group(0) @binding(2) var history_pixels: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> params: DenoiseParams;
 
@@ -59,25 +76,31 @@ struct DenoiseParams {
 @group(1) @binding(4) var hist_m_in: texture_2d<f32>;
 @group(1) @binding(5) var temp_a_out: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(6) var temp_b_out: texture_storage_2d<rgba16float, write>;
-@group(1) @binding(7) var temp_m_out: texture_storage_2d<rg32float, write>;
-// fix
-@group(1) @binding(8) var temp_a_in: texture_2d<f32>;
-@group(1) @binding(9) var temp_b_in: texture_2d<f32>;
-@group(1) @binding(10) var temp_m_in: texture_2d<f32>;
-@group(1) @binding(11) var hist_a_out: texture_storage_2d<rgba16float, write>;
-@group(1) @binding(12) var hist_b_out: texture_storage_2d<rgba16float, write>;
-@group(1) @binding(13) var hist_m_out: texture_storage_2d<rg32float, write>;
-// spatial
+@group(1) @binding(7) var temp_m_out: texture_storage_2d<rgba32float, write>;
+// records
+@group(1) @binding(8) var rec_temp_a: texture_2d<f32>;
+@group(1) @binding(9) var rec_temp_b: texture_2d<f32>;
+@group(1) @binding(10) var rec_temp_m: texture_2d<f32>;
+@group(1) @binding(11) var rec_a_out: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(12) var rec_b_out: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(13) var rec_n_out: texture_storage_2d<r32float, write>;
+// spatial (the length is the x of `in_n`: a record's N or a pixel's M)
 @group(1) @binding(14) var in_a: texture_2d<f32>;
 @group(1) @binding(15) var in_b: texture_2d<f32>;
-@group(1) @binding(16) var in_m: texture_2d<f32>;
+@group(1) @binding(16) var in_n: texture_2d<f32>;
 @group(1) @binding(17) var out_a: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(18) var out_b: texture_storage_2d<rgba16float, write>;
-// x: the step in pixels, y: the iteration (0 reads history).
-@group(1) @binding(19) var<uniform> iteration: vec4<u32>;
-// guides: written, then read by every other stage.
-@group(1) @binding(20) var guides_out: texture_storage_2d<rgba32float, write>;
-@group(1) @binding(21) var guides_in: texture_2d<f32>;
+@group(1) @binding(19) var out_n: texture_storage_2d<r32float, write>;
+// x: the iteration.
+@group(1) @binding(20) var<uniform> iteration: vec4<u32>;
+// reconstruct
+@group(1) @binding(21) var own_a: texture_2d<f32>;
+@group(1) @binding(22) var own_b: texture_2d<f32>;
+@group(1) @binding(23) var own_m: texture_2d<f32>;
+@group(1) @binding(24) var rec_a: texture_2d<f32>;
+@group(1) @binding(25) var rec_b: texture_2d<f32>;
+@group(1) @binding(26) var hist_a_out: texture_storage_2d<rgba16float, write>;
+@group(1) @binding(27) var hist_b_out: texture_storage_2d<rgba16float, write>;
 
 // The normal stop: a sample's irradiance holds the hemisphere about the
 // normal it was traced at; seen from a normal tilted by t, a share
@@ -100,6 +123,15 @@ const LUMA_SIGMAS: f32 = 3.0;
 // ...and a difference within the half floats' rounding (2^-10 of the value)
 // is no difference.
 const LUMA_FLOOR: f32 = 0.0009765625;
+// The spatial stage's step: a record's estimate rests on `length` frames;
+// the filter's footprint of (2 step + 1)^2 records adds about step^2 of
+// them, so a step of 4 / sqrt(length) keeps about 16 frames' worth behind
+// every estimate (one block from 16 frames on, four at one).
+const SPATIAL_FRAMES: f32 = 16.0;
+// History shorter than this many frames has no variance of its own yet:
+// the moments of fewer than four samples are dominated by their own noise
+// (SVGF's threshold).
+const FIX_HISTORY: f32 = 4.0;
 // Chroma ratios of real colours: Co / Y and Cg / Y stay within +-2 (pure
 // red: Co / Y = 2).
 const CHROMA_LIMIT: f32 = 2.0;
@@ -114,49 +146,31 @@ struct Guide {
     sky: bool,
 }
 
-// A unit vector's octahedral encoding.
-fn oct_encode(n: vec3<f32>) -> vec2<f32> {
-    let p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
-    let folded = (1.0 - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
-    return select(p, folded, n.z < 0.0);
-}
-
-fn oct_decode(e: vec2<f32>) -> vec3<f32> {
-    var n = vec3<f32>(e, 1.0 - abs(e.x) - abs(e.y));
-    let t = saturate(-n.z);
-    n = vec3<f32>(n.xy + select(vec2<f32>(t), vec2<f32>(-t), n.xy >= vec2<f32>(0.0)), n.z);
-    return normalize(n);
-}
-
-@compute @workgroup_size(8, 8)
-fn guides(@builtin(global_invocation_id) id: vec3<u32>) {
-    if any(id.xy >= params.size) {
-        return;
-    }
-    let p = vec2<i32>(id.xy);
-    let d = textureLoad(depth_tex, p, 0);
-    var e = vec2<f32>(0.0);
-    if !helio_is_sky(d) {
-        e = oct_encode(helio_gbuffer_normal(textureLoad(normal_tex, p, 0).xyz));
-    }
-    textureStore(guides_out, p, vec4<f32>(d, e, 0.0));
-}
-
 fn guide(p: vec2<i32>) -> Guide {
     let size = vec2<i32>(params.size);
     let q = clamp(p, vec2<i32>(0), size - 1);
-    let t = textureLoad(guides_in, q, 0);
+    let vd = textureLoad(guide_depth, q, 0).r;
     var g: Guide;
-    g.sky = helio_is_sky(t.x);
+    g.sky = vd <= 0.0;
     if g.sky {
         return g;
     }
+    // The raw depth of view depth vd (`helio_view_depth` inverted), then
+    // the view-space point through the inverse projection.
+    let z = params.proj_zw;
+    let d = (z.z - vd * z.x) / (z.w - vd * z.y);
     let uv = (vec2<f32>(q) + 0.5) / vec2<f32>(size);
-    let v = params.inv_proj * vec4<f32>(helio_uv_to_ndc(uv), t.x, 1.0);
+    let v = params.inv_proj * vec4<f32>(helio_uv_to_ndc(uv), d, 1.0);
     g.x = v.xyz / v.w;
-    g.depth = -g.x.z;
-    g.n = oct_decode(t.yz);
+    g.depth = vd;
+    g.n = normalize(textureLoad(guide_normal, q, 0).xyz);
     return g;
+}
+
+// The representative pixel of block `b` (its centre, inside the image).
+fn representative(b: vec2<i32>) -> vec2<i32> {
+    let side = i32(params.side);
+    return min(b * side + side / 2, vec2<i32>(params.size) - 1);
 }
 
 fn footprint(g: Guide) -> f32 {
@@ -183,22 +197,6 @@ fn inverse_hit(hit: f32) -> f32 {
     return select(0.0, 1.0 / max(hit, 1e-6), finite && hit < NO_HIT);
 }
 
-// History: a = (a, Co / Y, Cg / Y, 1 / hit), b = (b, length), m = second
-// the luminance's first two moments (at the pixel's normal).
-struct State {
-    a: vec4<f32>,
-    b: vec4<f32>,
-    m: vec2<f32>,
-}
-
-fn state_scaled(s: State, w: f32) -> State {
-    return State(s.a * w, s.b * w, s.m * w);
-}
-
-fn state_add(x: State, y: State) -> State {
-    return State(x.a + y.a, x.b + y.b, x.m + y.m);
-}
-
 fn finite4(v: vec4<f32>) -> vec4<f32> {
     let exponent = bitcast<vec4<u32>>(v) & vec4<u32>(0x7f800000u);
     return select(v, vec4<f32>(0.0), exponent == vec4<u32>(0x7f800000u));
@@ -211,16 +209,14 @@ fn pcg(v: u32) -> u32 {
     return (w >> 22u) ^ w;
 }
 
-// `v` as a half float, rounded up with the probability of its distance
-// from the half below: the stored value's mean is `v` whatever rounding the
+// `v` as a half float, rounded up with probability `u` of its distance from
+// the half below: the stored value's mean is `v` whatever rounding the
 // hardware's conversion uses (it receives a value a half holds exactly).
-// History is stored and read back every frame and blended by 1 / length: a
-// conversion that truncates (several GPUs' storage writes) loses half a
-// step a frame, which the running mean amplifies by its length (1% at 32
-// frames).
-fn half_unbiased(v: f32, seed: u32) -> f32 {
+// What the next frame reads back is blended by 1 / length: a conversion that
+// truncates (several GPUs' storage writes) loses half a step a frame, which
+// the running mean amplifies by its length (1% at 32 frames).
+fn half_unbiased(v: f32, u: f32) -> f32 {
     let a = min(abs(v), 65504.0);
-    let u = f32(pcg(seed) >> 8u) * (1.0 / 16777216.0);
     var lo: f32;
     var hi: f32;
     if a < 6.103515625e-5 {
@@ -236,21 +232,48 @@ fn half_unbiased(v: f32, seed: u32) -> f32 {
     return select(r, -r, v < 0.0);
 }
 
+// A texel's four channels rounded so, from one hash: a byte of it a channel
+// (a rounding probability resolved to 1/256 of a step: a bias under 2^-19
+// of the value).
 fn half4(v: vec4<f32>, p: vec2<i32>, stream: u32) -> vec4<f32> {
-    let seed = pcg((u32(p.y) * params.size.x + u32(p.x)) ^ pcg(params.frame * 8u + stream));
-    return vec4<f32>(half_unbiased(v.x, seed), half_unbiased(v.y, seed + 1u),
-        half_unbiased(v.z, seed + 2u), half_unbiased(v.w, seed + 3u));
+    let h = pcg((u32(p.y) * params.size.x + u32(p.x)) ^ pcg(params.frame * 4u + stream));
+    let u = (vec4<f32>(vec4<u32>(h, h >> 8u, h >> 16u, h >> 24u) & vec4<u32>(255u)) + 0.5) / 256.0;
+    return vec4<f32>(half_unbiased(v.x, u.x), half_unbiased(v.y, u.y), half_unbiased(v.z, u.z),
+        half_unbiased(v.w, u.w));
+}
+
+// A pixel's state while it is blended: (a, Co / Y, Cg / Y, 1 / hit), (b),
+// (mean, mean square), length.
+struct State {
+    a: vec4<f32>,
+    b: vec3<f32>,
+    m: vec2<f32>,
+}
+
+fn state_scaled(s: State, w: f32) -> State {
+    return State(s.a * w, s.b * w, s.m * w);
+}
+
+fn state_add(x: State, y: State) -> State {
+    return State(x.a + y.a, x.b + y.b, x.m + y.m);
 }
 
 fn load_history(t: vec2<i32>) -> State {
-    return State(finite4(textureLoad(hist_a_in, t, 0)), finite4(textureLoad(hist_b_in, t, 0)),
-        textureLoad(hist_m_in, t, 0).xy);
+    let a = finite4(textureLoad(hist_a_in, t, 0));
+    let b = finite4(textureLoad(hist_b_in, t, 0));
+    return State(vec4<f32>(a.xyz, b.w), b.xyz, textureLoad(hist_m_in, t, 0).yz);
 }
 
-fn store_temp(p: vec2<i32>, s: State) {
-    textureStore(temp_a_out, p, half4(s.a, p, 0u));
-    textureStore(temp_b_out, p, half4(s.b, p, 1u));
-    textureStore(temp_m_out, p, vec4<f32>(s.m, 0.0, 0.0));
+// The standard error of a mean of `length` samples of moments `m`; -1 for
+// no light.
+fn standard_error(m: vec2<f32>, length: f32) -> f32 {
+    return select(-1.0, sqrt(max(m.y - m.x * m.x, 0.0) / max(length, 1.0)), length > 0.0);
+}
+
+fn store_temp(p: vec2<i32>, s: State, length: f32) {
+    textureStore(temp_a_out, p, half4(vec4<f32>(s.a.xyz, standard_error(s.m, length)), p, 0u));
+    textureStore(temp_b_out, p, half4(vec4<f32>(s.b, s.a.w), p, 1u));
+    textureStore(temp_m_out, p, vec4<f32>(length, s.m, 0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -262,7 +285,7 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>) {
     var empty: State;
     let g = guide(p);
     if g.sky {
-        store_temp(p, empty);
+        store_temp(p, empty, 0.0);
         return;
     }
     // This frame's samples at the pixel.
@@ -301,7 +324,7 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         // Chroma as ratios to the sample's own luminance: exact for each
         // sample of one colour whatever normal it was traced at.
         let chroma = clamp(s0.yz / max(s0.x, 1e-12), vec2<f32>(-CHROMA_LIMIT), vec2<f32>(CHROMA_LIMIT));
-        fresh = state_add(fresh, State(vec4<f32>(l.x, chroma, inv) * w, vec4<f32>(l.yzw, 0.0) * w, vec2<f32>(y, y * y) * w));
+        fresh = state_add(fresh, State(vec4<f32>(l.x, chroma, inv) * w, l.yzw * w, vec2<f32>(y, y * y) * w));
         confidence += w * select(1.0, saturate(s1.w), (params.flags & 1u) != 0u);
         weight += w;
     }
@@ -313,14 +336,17 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         let taps = history_taps(hp);
         let footprint = history_taps_weight(taps);
         if footprint > 1e-3 {
+            var held = 0.0;
             for (var i = 0u; i < 4u; i++) {
                 let w = taps.weights[i];
                 if w > 0.0 {
-                    history = state_add(history, state_scaled(load_history(history_tap(taps, i)), w / footprint));
+                    let t = history_tap(taps, i);
+                    history = state_add(history, state_scaled(load_history(t), w / footprint));
+                    held += textureLoad(hist_m_in, t, 0).x * w / footprint;
                 }
             }
             // A footprint the surface held in part is a weaker history.
-            length = history.b.w * footprint;
+            length = held * footprint;
         }
     }
     if weight > 0.0 {
@@ -329,103 +355,23 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let total = min(length + weight, params.max_history);
     if total <= 0.0 {
-        store_temp(p, empty);
+        store_temp(p, empty, 0.0);
         return;
     }
     let alpha = select(0.0, weight / total, weight > 0.0);
-    var out = State(mix(history.a, fresh.a, alpha), mix(history.b, fresh.b, alpha), mix(history.m, fresh.m, alpha));
-    out.b.w = total;
-    store_temp(p, out);
-}
-
-fn load_temp(t: vec2<i32>) -> State {
-    let q = clamp(t, vec2<i32>(0), vec2<i32>(params.size) - 1);
-    return State(textureLoad(temp_a_in, q, 0), textureLoad(temp_b_in, q, 0), textureLoad(temp_m_in, q, 0).xy);
+    store_temp(p, State(mix(history.a, fresh.a, alpha), mix(history.b, fresh.b, alpha), mix(history.m, fresh.m, alpha)), total);
 }
 
 @compute @workgroup_size(8, 8)
-fn fix(@builtin(global_invocation_id) id: vec3<u32>) {
-    let p = vec2<i32>(id.xy);
-    if any(id.xy >= params.size) {
+fn records(@builtin(global_invocation_id) id: vec3<u32>) {
+    if any(id.xy >= params.traced) {
         return;
     }
-    var own = load_temp(p);
-    let length = own.b.w;
-    let g = guide(p);
-    if !g.sky && length < params.fix_history {
-        // A 5x5 of taps spanning +-2 strides: two blocks each way where the
-        // pixel has no history, one block once it holds half of it.
-        let stride = max(1, i32(ceil(f32(params.side) * (1.0 - 0.5 * length / params.fix_history))));
-        var sum = state_scaled(own, length);
-        var total = length;
-        for (var j = 0; j < 25; j++) {
-            let o = vec2<i32>(j % 5 - 2, j / 5 - 2);
-            if all(o == vec2<i32>(0)) {
-                continue;
-            }
-            let q = p + o * stride;
-            if any(q < vec2<i32>(0)) || any(q >= vec2<i32>(params.size)) {
-                continue;
-            }
-            let s = load_temp(q);
-            if s.b.w <= 0.0 {
-                continue;
-            }
-            let gq = guide(q);
-            if gq.sky {
-                continue;
-            }
-            let w = s.b.w * geometry_weight(g, gq, record_radius(gq, s.a.w));
-            sum = state_add(sum, state_scaled(s, w));
-            total += w;
-        }
-        if total > 0.0 {
-            own = state_scaled(sum, 1.0 / total);
-            // Its length is its own: the neighbours' samples are not this
-            // pixel's, and the next frames' replace them as fast as before.
-            own.b.w = length;
-        }
-    }
-    textureStore(hist_a_out, p, half4(own.a, p, 2u));
-    textureStore(hist_b_out, p, half4(own.b, p, 3u));
-    textureStore(hist_m_out, p, vec4<f32>(own.m, 0.0, 0.0));
-}
-
-// A pixel as the spatial stage filters it: the linear irradiance, chroma
-// ratios, the standard error of its luminance at `n`, 1 / hit distance.
-// `valid` false where it holds no light yet.
-struct Filtered {
-    a: f32,
-    b: vec3<f32>,
-    chroma: vec2<f32>,
-    error: f32,
-    inverse_hit: f32,
-    valid: bool,
-}
-
-fn load_filtered(t: vec2<i32>, n: vec3<f32>) -> Filtered {
-    let q = clamp(t, vec2<i32>(0), vec2<i32>(params.size) - 1);
-    let a = textureLoad(in_a, q, 0);
-    let b = textureLoad(in_b, q, 0);
-    var f: Filtered;
-    f.a = a.x;
-    f.b = b.xyz;
-    f.chroma = a.yz;
-    if iteration.y == 0u {
-        // History: its moments to an error.
-        let length = b.w;
-        f.valid = length > 0.0;
-        let y = max(a.x + dot(b.xyz, n), 0.0);
-        let m = textureLoad(in_m, q, 0).xy;
-        let variance = max(m.y - m.x * m.x, 0.0);
-        f.error = sqrt(variance / max(length, 1.0));
-        f.inverse_hit = a.w;
-    } else {
-        f.valid = a.w >= 0.0;
-        f.error = a.w;
-        f.inverse_hit = b.w;
-    }
-    return f;
+    let b = vec2<i32>(id.xy);
+    let r = representative(b);
+    textureStore(rec_a_out, b, textureLoad(rec_temp_a, r, 0));
+    textureStore(rec_b_out, b, textureLoad(rec_temp_b, r, 0));
+    textureStore(rec_n_out, b, vec4<f32>(textureLoad(rec_temp_m, r, 0).x, 0.0, 0.0, 0.0));
 }
 
 // The linear B-spline's weight at tap `k` from the centre: 1/2, 1/4.
@@ -435,54 +381,57 @@ fn b1(k: i32) -> f32 {
 
 @compute @workgroup_size(8, 8)
 fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
-    let p = vec2<i32>(id.xy);
-    if any(id.xy >= params.size) {
+    if any(id.xy >= params.traced) {
         return;
     }
-    let g = guide(p);
+    let b = vec2<i32>(id.xy);
+    let g = guide(representative(b));
+    let ca = textureLoad(in_a, b, 0);
+    let cb = textureLoad(in_b, b, 0);
+    let length = textureLoad(in_n, b, 0).x;
+    textureStore(out_n, b, vec4<f32>(length, 0.0, 0.0, 0.0));
     if g.sky {
-        textureStore(out_a, p, vec4<f32>(0.0, 0.0, 0.0, -1.0));
-        textureStore(out_b, p, vec4<f32>(0.0));
+        textureStore(out_a, b, vec4<f32>(0.0, 0.0, 0.0, -1.0));
+        textureStore(out_b, b, vec4<f32>(0.0));
         return;
     }
-    let centre = load_filtered(p, g.n);
-    let y_centre = centre.a + dot(centre.b, g.n);
+    let valid = ca.w >= 0.0;
+    let y_centre = ca.x + dot(cb.xyz, g.n);
     // Converged: within the half floats' rounding, filtering adds nothing.
-    if centre.valid && LUMA_SIGMAS * centre.error <= LUMA_FLOOR * abs(y_centre) {
-        let stream = 4u + 2u * iteration.y;
-        textureStore(out_a, p, half4(vec4<f32>(centre.a, centre.chroma, centre.error), p, stream));
-        textureStore(out_b, p, half4(vec4<f32>(centre.b, centre.inverse_hit), p, stream + 1u));
+    if valid && LUMA_SIGMAS * ca.w <= LUMA_FLOOR * abs(y_centre) {
+        textureStore(out_a, b, ca);
+        textureStore(out_b, b, cb);
         return;
     }
-    let radius = record_radius(g, centre.inverse_hit);
-    let step = i32(iteration.x);
-    var sum_a = 0.0;
-    var sum_b = vec3<f32>(0.0);
-    var sum_chroma = vec2<f32>(0.0);
-    var sum_inverse_hit = 0.0;
+    let radius = record_radius(g, cb.w);
+    let s = clamp(round(sqrt(SPATIAL_FRAMES / max(length, 1.0))), 1.0, 4.0);
+    let step = i32(s) << iteration.x;
+    var sum_a = vec4<f32>(0.0);
+    var sum_b = vec4<f32>(0.0);
     var sum_variance = 0.0;
     var total = 0.0;
     for (var j = 0; j < 9; j++) {
         let o = vec2<i32>(j % 3 - 1, j / 3 - 1);
-        let q = p + o * step;
-        if any(q < vec2<i32>(0)) || any(q >= vec2<i32>(params.size)) {
+        let q = b + o * step;
+        if any(q < vec2<i32>(0)) || any(q >= vec2<i32>(params.traced)) {
             continue;
         }
-        let gq = guide(q);
-        if gq.sky {
+        let fa = textureLoad(in_a, q, 0);
+        if fa.w < 0.0 {
             continue;
         }
-        let f = load_filtered(q, gq.n);
-        if !f.valid {
-            continue;
-        }
+        let fb = textureLoad(in_b, q, 0);
         var w = b1(abs(o.x)) * b1(abs(o.y));
         if any(o != vec2<i32>(0)) {
+            let gq = guide(representative(q));
+            if gq.sky {
+                continue;
+            }
             // The neighbour's record held at its own radius and ours.
-            w *= geometry_weight(g, gq, min(radius, record_radius(gq, f.inverse_hit)));
-            if centre.valid {
-                let y = f.a + dot(f.b, g.n);
-                let spread = LUMA_SIGMAS * sqrt(centre.error * centre.error + f.error * f.error)
+            w *= geometry_weight(g, gq, min(radius, record_radius(gq, fb.w)));
+            if valid {
+                let y = fa.x + dot(fb.xyz, g.n);
+                let spread = LUMA_SIGMAS * sqrt(ca.w * ca.w + fa.w * fa.w)
                     + LUMA_FLOOR * max(abs(y), abs(y_centre)) + 1e-12;
                 w *= exp(-abs(y - y_centre) / spread);
             }
@@ -490,20 +439,112 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         if w <= 0.0 {
             continue;
         }
-        sum_a += w * f.a;
-        sum_b += w * f.b;
-        sum_chroma += w * f.chroma;
-        sum_inverse_hit += w * f.inverse_hit;
-        sum_variance += w * w * f.error * f.error;
+        sum_a += w * vec4<f32>(fa.xyz, 0.0);
+        sum_b += w * fb;
+        sum_variance += w * w * fa.w * fa.w;
         total += w;
     }
     if total <= 0.0 {
-        textureStore(out_a, p, vec4<f32>(0.0, 0.0, 0.0, -1.0));
-        textureStore(out_b, p, vec4<f32>(0.0));
+        textureStore(out_a, b, vec4<f32>(0.0, 0.0, 0.0, -1.0));
+        textureStore(out_b, b, vec4<f32>(0.0));
         return;
     }
     let inv = 1.0 / total;
-    let stream = 4u + 2u * iteration.y;
-    textureStore(out_a, p, half4(vec4<f32>(sum_a * inv, sum_chroma * inv, sqrt(sum_variance) * inv), p, stream));
-    textureStore(out_b, p, half4(vec4<f32>(sum_b * inv, sum_inverse_hit * inv), p, stream + 1u));
+    // Rounded without bias: the records reach the history (`reconstruct`).
+    let stream = 4u + 2u * iteration.x;
+    textureStore(out_a, b, half4(vec4<f32>(sum_a.xyz * inv, sqrt(sum_variance) * inv), b, stream));
+    textureStore(out_b, b, half4(sum_b * inv, b, stream + 1u));
+}
+
+@compute @workgroup_size(8, 8)
+fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
+    let p = vec2<i32>(id.xy);
+    if any(id.xy >= params.size) {
+        return;
+    }
+    // The moments are the temporal result's: its M is the next frame's
+    // history M (the two swap, nothing is copied).
+    let m = textureLoad(own_m, p, 0);
+    let g = guide(p);
+    if g.sky {
+        textureStore(hist_a_out, p, vec4<f32>(0.0, 0.0, 0.0, -1.0));
+        textureStore(hist_b_out, p, vec4<f32>(0.0));
+        return;
+    }
+    let oa = textureLoad(own_a, p, 0);
+    let ob = textureLoad(own_b, p, 0);
+    // The filtered records of the nearest 2x2 blocks (a wider 4x4 where
+    // none of them holds this surface: a feature narrower than a block).
+    let side = f32(params.side);
+    let first = vec2<i32>(floor((vec2<f32>(p) + 0.5) / side - 0.5));
+    var sa = vec4<f32>(0.0);
+    var sb = vec4<f32>(0.0);
+    var error = 0.0;
+    var total = 0.0;
+    for (var ring = 0; ring < 2 && total <= 0.0; ring++) {
+        let span = 2 + 2 * ring;
+        for (var j = 0; j < span * span; j++) {
+            let o = vec2<i32>(j % span, j / span) - ring;
+            if ring == 1 && all(o >= vec2<i32>(0)) && all(o <= vec2<i32>(1)) {
+                continue;
+            }
+            let q = first + o;
+            if any(q < vec2<i32>(0)) || any(q >= vec2<i32>(params.traced)) {
+                continue;
+            }
+            // A tent of the block where it reaches (the 2x2), the geometry
+            // alone past it.
+            let r = representative(q);
+            let tent = saturate(1.0 - abs(vec2<f32>(p - r)) / side);
+            var w = select(tent.x * tent.y, 1.0, ring == 1);
+            if w <= 0.0 {
+                continue;
+            }
+            let ra = textureLoad(rec_a, q, 0);
+            if ra.w < 0.0 {
+                continue;
+            }
+            let rb = textureLoad(rec_b, q, 0);
+            let gq = guide(r);
+            if gq.sky {
+                continue;
+            }
+            w *= geometry_weight(g, gq, record_radius(gq, rb.w));
+            if w <= 0.0 {
+                continue;
+            }
+            sa += w * vec4<f32>(ra.xyz, 0.0);
+            sb += w * rb;
+            error += w * ra.w;
+            total += w;
+        }
+    }
+    var a = oa;
+    var b = ob;
+    if total > 0.0 {
+        sa /= total;
+        sb /= total;
+        let e_s = error / total;
+        if oa.w < 0.0 {
+            a = vec4<f32>(sa.xyz, e_s);
+            b = sb;
+        } else {
+            // Inverse variance; the records' variance holds the bias their
+            // difference from the pixel shows beyond both noises (the
+            // pixel's own detail the records cannot hold).
+            let d = (sa.x + dot(sb.xyz, g.n)) - (oa.x + dot(ob.xyz, g.n));
+            let e_p2 = oa.w * oa.w;
+            let bias2 = max(d * d - e_p2 - e_s * e_s, 0.0);
+            let w_s = 1.0 / (e_s * e_s + bias2 + 1e-20);
+            let w_p = 1.0 / (e_p2 + 1e-20);
+            // Below FIX_HISTORY frames the moments do not yet measure the
+            // pixel's variance (SVGF estimates it spatially there): its own
+            // estimate counts by its length.
+            let t = max(w_s / (w_s + w_p), 1.0 - m.x / FIX_HISTORY);
+            a = vec4<f32>(mix(oa.xyz, sa.xyz, t), sqrt(1.0 / (w_s + w_p)));
+            b = mix(ob, sb, t);
+        }
+    }
+    textureStore(hist_a_out, p, half4(a, p, 2u));
+    textureStore(hist_b_out, p, half4(b, p, 3u));
 }

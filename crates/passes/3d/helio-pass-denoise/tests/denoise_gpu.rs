@@ -185,9 +185,10 @@ fn pass(f: &Fixture) -> &DenoisePass {
 /// The history's length at each pixel.
 fn lengths(f: &Fixture) -> Vec<f32> {
     let (history, _) = pass(f).textures().expect("a frame ran");
-    support::read(f.gpu, &history[1])
+    // M: (length, mean, mean square).
+    support::read(f.gpu, &history[2])
         .iter()
-        .map(|t| t[3])
+        .map(|t| t[0])
         .collect()
 }
 
@@ -263,7 +264,7 @@ fn a_noisy_signal_converges_to_its_field_within_the_bound() {
         b: DVec3::new(0.0, 0.0, 0.25),
     };
     let sigma = 0.5;
-    for block in [TraceBlock::One, TraceBlock::Sixteen] {
+    for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
         let signal = Signal::irradiance("test_irradiance", block);
         let mut f = fixture(gpu, signal);
         let p = Producer::new(gpu, signal, sigma);
@@ -305,7 +306,7 @@ fn a_noisy_signal_converges_to_its_field_within_the_bound() {
 #[test]
 fn a_disocclusion_and_a_camera_move_do_not_ghost() {
     let Some(gpu) = support::gpu() else { return };
-    for block in [TraceBlock::One, TraceBlock::Sixteen] {
+    for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
         let signal = Signal::irradiance("test_ghost", block);
         let mut f = fixture(gpu, signal);
         let p = Producer::new(gpu, signal, 0.0);
@@ -358,8 +359,14 @@ fn a_disocclusion_and_a_camera_move_do_not_ghost() {
 #[test]
 fn confidence_zero_restarts_a_pixel() {
     let Some(gpu) = support::gpu() else { return };
-    for with_confidence in [true, false] {
-        let mut signal = Signal::irradiance("test_confidence", TraceBlock::One);
+    let cases = [
+        (TraceBlock::One, true),
+        (TraceBlock::Four, true),
+        (TraceBlock::Sixteen, true),
+        (TraceBlock::One, false),
+    ];
+    for (block, with_confidence) in cases {
+        let mut signal = Signal::irradiance("test_confidence", block);
         if with_confidence {
             signal = signal.with_confidence();
         }
@@ -386,12 +393,19 @@ fn confidence_zero_restarts_a_pixel() {
             .map(|y| (y / 2.0 - 1.0).abs())
             .fold(0.0, f64::max);
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        println!("confidence {with_confidence}: mean {mean:.4} after the change");
+        println!("{block:?} confidence {with_confidence}: mean {mean:.4} after the change");
         if with_confidence {
-            assert!(worst < 0.01, "{worst}");
-            // The history restarted: one frame's weight.
+            assert!(worst < 0.01, "{block:?}: {worst}");
+            // The history restarted: one frame's weight (traced at every
+            // pixel, 1; else the tents of the four nearest blocks' traced
+            // pixels, each at most 1), where a kept history would hold 32.
             for (l, hit) in lengths(&f).iter().zip(hits(&f)) {
-                assert!(!hit || (*l - 1.0).abs() < 1e-3, "length {l}");
+                let one = if block == TraceBlock::One {
+                    (*l - 1.0).abs() < 1e-3
+                } else {
+                    *l <= 4.0 + 1e-3
+                };
+                assert!(!hit || one, "{block:?}: length {l}");
             }
         } else {
             let lagged = 1.0 + 1.0 / f64::from(MAX_HISTORY);
@@ -414,7 +428,7 @@ fn quarter_and_sixteenth_signals_resolve_to_internal_resolution() {
         gradient: DVec3::ZERO,
         b: DVec3::new(0.3, 0.2, 0.4),
     };
-    for block in [TraceBlock::Four, TraceBlock::Sixteen] {
+    for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
         let signal = Signal::irradiance("test_resolve", block);
         let mut f = fixture(gpu, signal);
         let p = Producer::new(gpu, signal, 0.0);
@@ -464,46 +478,48 @@ fn a_frame_origin_change_mid_run_changes_nothing() {
         DVec2::new(20.0, 20.0),
     )]);
     let view = View::looking(far, DVec3::new(0.0, 0.0, -1.0));
-    let signal = Signal::irradiance("test_origin", TraceBlock::Sixteen);
-    let mut outputs = Vec::new();
-    for jump in [false, true] {
-        let mut f = fixture(gpu, signal);
-        let p = Producer::new(gpu, signal, 0.5);
-        let origin = DVec3::new(6_370_816.0, 0.0, 0.0);
-        let field = |_: &support::Hit| Field {
-            gradient: field.gradient,
-            // The field in the world, not the frame.
-            a: field.a - field.gradient.dot(far),
-            ..field
-        };
-        for i in 0..40 {
-            let moved = jump && i >= 20;
-            let origin = origin
-                + if moved {
-                    DVec3::new(1024.0, 0.0, -2048.0)
-                } else {
-                    DVec3::ZERO
-                };
-            frame(&mut f, &p, &scene, &view, origin, |h| field(h), 1.0);
+    for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
+        let signal = Signal::irradiance("test_origin", block);
+        let mut outputs = Vec::new();
+        for jump in [false, true] {
+            let mut f = fixture(gpu, signal);
+            let p = Producer::new(gpu, signal, 0.5);
+            let origin = DVec3::new(6_370_816.0, 0.0, 0.0);
+            let field = |_: &support::Hit| Field {
+                gradient: field.gradient,
+                // The field in the world, not the frame.
+                a: field.a - field.gradient.dot(far),
+                ..field
+            };
+            for i in 0..40 {
+                let moved = jump && i >= 20;
+                let origin = origin
+                    + if moved {
+                        DVec3::new(1024.0, 0.0, -2048.0)
+                    } else {
+                        DVec3::ZERO
+                    };
+                frame(&mut f, &p, &scene, &view, origin, |h| field(h), 1.0);
+            }
+            outputs.push(denoised(&f));
         }
-        outputs.push(denoised(&f));
-    }
-    let (mut worst, mut sum, mut n): (f64, f64, f64) = (0.0, 0.0, 0.0);
-    for (a, b) in outputs[0].iter().zip(&outputs[1]) {
-        if let (Some(a), Some(b)) = (a, b) {
-            let d = (b - a) / a.max(1e-3);
-            worst = worst.max(d.abs());
-            sum += d;
-            n += 1.0;
+        let (mut worst, mut sum, mut n): (f64, f64, f64) = (0.0, 0.0, 0.0);
+        for (a, b) in outputs[0].iter().zip(&outputs[1]) {
+            if let (Some(a), Some(b)) = (a, b) {
+                let d = (b - a) / a.max(1e-3);
+                worst = worst.max(d.abs());
+                sum += d;
+                n += 1.0;
+            }
         }
+        let step = 2f64.powi(-11);
+        println!(
+            "{block:?} origin change: worst relative difference {worst:.6}, mean {:+.6}",
+            sum / n
+        );
+        assert!(worst <= 5.0 * step, "{worst}");
+        assert!((sum / n).abs() <= step, "{}", sum / n);
     }
-    let step = 2f64.powi(-11);
-    println!(
-        "origin change: worst relative difference {worst:.6}, mean {:+.6}",
-        sum / n
-    );
-    assert!(worst <= 5.0 * step, "{worst}");
-    assert!((sum / n).abs() <= step, "{}", sum / n);
 }
 
 /// The stages' GPU cost at 1920x1080 internal, pipelined (two frames in

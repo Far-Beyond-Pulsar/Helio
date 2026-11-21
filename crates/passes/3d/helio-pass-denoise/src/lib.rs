@@ -4,54 +4,62 @@
 //! any kind and lives below every plugin.
 //!
 //! **Stages** (`shaders/irradiance.wgsl`), for a signal traced at one pixel
-//! of each block of `side x side` internal pixels:
+//! of each block of `side x side` internal pixels. Light is spread where the
+//! information is, once a traced sample; only what needs a pixel's own
+//! geometry runs once a pixel:
 //!
-//! 1. **Temporal accumulation through the frame's history.** A pixel's new
-//!    sample is the traced pixels of its four nearest blocks, each weighted
-//!    by a tent of one block over its distance (a partition of unity in
-//!    expectation: one sample a block's area) times the geometry weight
-//!    below; their sum is how much this frame says about the pixel. Its
-//!    history is read where the frame's history says it was, from the
+//! 1. **Temporal accumulation through the frame's history** (a pixel). A
+//!    pixel's new sample is the traced pixels of its four nearest blocks,
+//!    each weighted by a tent of one block over its distance (a partition of
+//!    unity in expectation: one sample a block's area) times the geometry
+//!    weight below; their sum is how much this frame says about the pixel.
+//!    Its history is read where the frame's history says it was, from the
 //!    bilinear taps that held the same surface, renormalised. The history's
 //!    length is multiplied by the producer's confidence and by the share of
-//!    the footprint that held the surface, then grows by this frame's
-//!    weight up to [`DenoiseSettings::max_history`]; the running mean
-//!    blends by weight over length.
-//! 2. **A wide reconstruction where history is short** (below
-//!    [`FIX_HISTORY`] frames): the neighbours' accumulated values on a 5x5
-//!    of taps two blocks each way (one once half the length is there),
-//!    weighted by their own history length (inverse variance) and the
-//!    geometry. Its result is the history the next frame reads, with the
-//!    pixel's own length, so new samples replace it as fast as before.
-//! 3. **A variance-guided spatial stage**: an a-trous filter of the linear
-//!    B-spline's 3x3, four iterations at steps of one, two, four and eight
-//!    blocks (the reach of three of the cubic B-spline's 5x5 at half the
-//!    taps; a step of one block makes every tap an independent sample), a
-//!    pixel already within the half floats' rounding left as it is, each tap
-//!    weighted by the
-//!    luminance stop (the difference of two estimates against the standard
-//!    error of their difference, from the history's two moments over its
-//!    length; variance propagated through the iterations) and the geometry
-//!    weight.
+//!    the footprint that held the surface, then grows by this frame's weight
+//!    up to [`DenoiseSettings::max_history`]; the running mean blends by
+//!    weight over length.
+//! 2. **Records** (a block; blocks of 4 and 16): the temporal result at the
+//!    block's representative pixel (its centre). Traced at every pixel, the
+//!    pixels are the records.
+//! 3. **Spatial** (a block), twice: an a-trous filter of the linear
+//!    B-spline's 3x3 over the records, at steps of s and 2s blocks, `s =
+//!    sqrt(16 / length)` within 1 to 4 (the footprint adds about s^2 records,
+//!    so every estimate rests on about 16 frames' worth: wide where history
+//!    is short, which is the history fix, one block from 16 frames on), each
+//!    tap weighted by the luminance stop (the difference of two estimates
+//!    against the standard error of their difference, from the pixel's two
+//!    moments over its length) and the geometry weight. A record within the
+//!    half floats' rounding is left as it is.
+//! 4. **Reconstruction** (a pixel): the filtered records of the pixel's
+//!    nearest 2x2 blocks (a tent of the block times the geometry weight; a
+//!    4x4 where none holds the pixel's surface), at the pixel's own normal,
+//!    combined with the pixel's own temporal result by inverse variance,
+//!    the records' variance holding the bias their difference from the pixel
+//!    shows beyond both noises (so a still view keeps the per-pixel detail
+//!    the rotating samples give it), the pixel's own counting by its length
+//!    below [`FIX_HISTORY`] frames (its moments do not measure its variance
+//!    yet). The result is the output and the next frame's history: the
+//!    spatial stage is recurrent, as ReBLUR's post-blur history is, while the
+//!    moments stay the raw samples' (the variance never sees the filter).
 //!
-//! **Geometry weight** (one function in all three): irradiance caching's
+//! **Geometry weight** (one function in every stage): irradiance caching's
 //! error bound (Ward, Rubinstein and Clear 1988; Tabellion and Lamorlette
 //! 2004): a record holds over its harmonic mean hit distance (the producer's
 //! hit distance, accumulated as its inverse), so near occluders keep contact
 //! detail and open ground filters wide; never narrower than its pixel's
 //! diagonal. Times a normal stop (the share of the hemisphere a tilted
 //! normal sees that the sample never did) and a plane stop (a step leaves
-//! the plane by its whole separation). The constants' derivations are in the
-//! shader.
+//! the plane by its whole separation). Positions and normals are the frame's
+//! guides (`helio_frame_api::history::DEPTH`, `NORMAL`), one copy a view.
 //!
-//! **Cost** (internal pixels `P`, a view): temporal 4 sample and 4 history
-//! taps, fix 25 taps on the pixels below [`FIX_HISTORY`] only (the rest copy),
-//! spatial 4 x 9 taps; every tap's geometry one load of the guides (raw depth
-//! and octahedral normal, written once). Memory: history 24 bytes a pixel
-//! (the luminance's two moments in f32: their difference is the variance,
-//! which half floats cannot resolve), the temporal result (also the spatial
-//! stage's ping-pong) 24, the output 16, the guides 16: 80 bytes a pixel a
-//! signal and view (166 MB at 1920x1080). Nothing scales with the scene.
+//! **Cost** (internal pixels `P`, blocks `P / side^2`): temporal 4 sample and
+//! 4 history taps a pixel, reconstruction 4 record taps a pixel, records and
+//! 2 x 9 spatial taps a block. Memory: a pixel's history 16 bytes (its A
+//! and B, the outputs), its moments 2 x 16 (length and two f32 moments,
+//! swapped with the temporal result's, never copied), the temporal result
+//! 16: 64 bytes a pixel; records 20 bytes a block in two or three sets.
+//! Nothing scales with the scene.
 
 use std::sync::{Arc, Mutex};
 
@@ -62,12 +70,10 @@ use helio_frame_api::denoise::{self, Denoiser, RegisterDenoiser, Signal, SignalK
 use helio_frame_api::history::{self, Need};
 use helio_settings::{number, Group, Resolved};
 
-/// Where history is shorter than this many frames the wide reconstruction
-/// runs. The spatial stage's first iteration gathers the 25 taps of one
-/// block step; once a pixel's own history holds as many samples as the
-/// fix's 5x5 would add over its usable share (a quarter, after the geometry
-/// rejects what is not its surface: about 6), the fix adds nothing the
-/// spatial stage does not. Four keeps it below that.
+/// Below this many frames of history a pixel's moments do not measure its
+/// variance yet (the moments of fewer than four samples are dominated by
+/// their own noise: SVGF's threshold), so its own estimate counts by its
+/// length against the records'. Also the least history a setting may ask.
 pub const FIX_HISTORY: f32 = 4.0;
 
 /// The denoiser's settings (a renderer config's `features`).
@@ -154,9 +160,16 @@ fn settings(env: &BuildEnv<'_>) -> DenoiseSettings {
 }
 
 fn filter(build: &mut NodeBuild<'_, '_>, signal: &Signal) -> Result<(), String> {
-    // Absent a publisher, every frame starts afresh (no history).
-    let history = history::request(build, Need::Pixels)?;
-    let pass = DenoisePass::new(build.env.device, *signal, settings(build.env), history);
+    // The guides, history and where each pixel was are the frame's.
+    if !history::request(build, Need::Pixels)? {
+        return Err("the denoiser reads the frame's history, which no publisher offers".into());
+    }
+    let pass = DenoisePass::new(
+        build.env.device,
+        build.env.queue,
+        *signal,
+        settings(build.env),
+    );
     build.graph.add_pass(Box::new(pass));
     Ok(())
 }
@@ -170,43 +183,53 @@ pub const SNIPPETS: [helio_core::shader::ShaderSnippet; 2] =
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
     inv_proj: [f32; 16],
+    proj_zw: [f32; 4],
     size: [u32; 2],
     traced: [u32; 2],
     side: u32,
     frame: u32,
     flags: u32,
     max_history: f32,
-    fix_history: f32,
     pixel_scale: f32,
-    _pad: [u32; 2],
+    _pad: [u32; 7],
 }
 
 const PARAMS_BYTES: u64 = std::mem::size_of::<Params>() as u64;
 
-/// Steps of the spatial stage, in blocks.
-const SPATIAL_STEPS: [u32; 4] = [1, 2, 4, 8];
+/// Iterations of the spatial stage (steps of s and 2s blocks).
+const SPATIAL_ITERATIONS: usize = 2;
 
-/// One view's textures (all at the internal size).
+const HALF: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+const MOMENTS: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+const LENGTH: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+
+/// One view's textures.
 struct Targets {
     size: [u32; 2],
-    /// History: (a, Co, Cg, 1 / hit), (b, length), the luminance's moments.
-    history: [wgpu::TextureView; 3],
-    /// The temporal result, read by the fix; the spatial stage's ping-pong.
-    temp: [wgpu::TextureView; 3],
-    /// The signal's output (`Signal::outputs`).
-    out: [wgpu::TextureView; 2],
-    /// Each pixel's raw depth and octahedral normal, for the stages' taps.
-    guides: wgpu::TextureView,
+    /// A pixel's state (internal size): A (a, Co / Y, Cg / Y, standard
+    /// error), B (b, 1 / hit); the history's are the signal's outputs.
+    history: [wgpu::TextureView; 2],
+    /// The temporal result, the same layout.
+    temp: [wgpu::TextureView; 2],
+    /// M (length, mean, mean square), two: the temporal stage reads the
+    /// history's and writes the other, which is the next frame's history's.
+    moments: [wgpu::TextureView; 2],
+    /// The moments the last frame wrote.
+    moments_latest: usize,
+    /// Records (traced size): A, B and length. The blocks' records first
+    /// (none for a signal traced at every pixel: its pixels are its
+    /// records), then the spatial stage's ping-pong.
+    records: Vec<[wgpu::TextureView; 3]>,
     /// History was written for this view's previous frame.
     primed: bool,
-    /// The textures behind the views, in their order (tests read them back).
+    /// The textures behind the history's views (tests read them back).
     textures: Vec<wgpu::Texture>,
 }
 
 impl Targets {
-    fn new(device: &wgpu::Device, size: [u32; 2]) -> Self {
+    fn new(device: &wgpu::Device, size: [u32; 2], traced: [u32; 2], side: u32) -> Self {
         let made = std::cell::RefCell::new(Vec::new());
-        let texture = |label: &str, format: wgpu::TextureFormat| {
+        let texture = |label: &str, size: [u32; 2], format: wgpu::TextureFormat| {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
@@ -228,30 +251,39 @@ impl Targets {
             made.borrow_mut().push(texture);
             view
         };
-        let half = wgpu::TextureFormat::Rgba16Float;
-        let moment = wgpu::TextureFormat::Rg32Float;
-        let mut targets = Self {
+        let history = [
+            texture("Denoise history A", size, HALF),
+            texture("Denoise history B", size, HALF),
+        ];
+        let moments = [
+            texture("Denoise moments A", size, MOMENTS),
+            texture("Denoise moments B", size, MOMENTS),
+        ];
+        let temp = [
+            texture("Denoise temporal A", size, HALF),
+            texture("Denoise temporal B", size, HALF),
+        ];
+        let sets = if side == 1 { 2 } else { 3 };
+        let records = (0..sets)
+            .map(|_| {
+                [
+                    texture("Denoise records A", traced, HALF),
+                    texture("Denoise records B", traced, HALF),
+                    texture("Denoise records length", traced, LENGTH),
+                ]
+            })
+            .collect();
+        let textures = made.into_inner();
+        Self {
             size,
-            history: [
-                texture("Denoise history A", half),
-                texture("Denoise history B", half),
-                texture("Denoise history moments", moment),
-            ],
-            temp: [
-                texture("Denoise temporal A", half),
-                texture("Denoise temporal B", half),
-                texture("Denoise temporal moments", moment),
-            ],
-            out: [
-                texture("Denoise output A", half),
-                texture("Denoise output B", half),
-            ],
-            guides: texture("Denoise guides", wgpu::TextureFormat::Rgba32Float),
+            history,
+            temp,
+            moments,
+            moments_latest: 0,
+            records,
             primed: false,
-            textures: Vec::new(),
-        };
-        targets.textures = made.into_inner();
-        targets
+            textures,
+        }
     }
 }
 
@@ -266,29 +298,26 @@ const MAX_VIEWS: usize = 8;
 
 struct Kernels {
     shared_layout: wgpu::BindGroupLayout,
-    guides_layout: wgpu::BindGroupLayout,
-    guides: wgpu::ComputePipeline,
     temporal_layout: wgpu::BindGroupLayout,
-    fix_layout: wgpu::BindGroupLayout,
+    records_layout: wgpu::BindGroupLayout,
     spatial_layout: wgpu::BindGroupLayout,
+    reconstruct_layout: wgpu::BindGroupLayout,
     temporal: wgpu::ComputePipeline,
-    fix: wgpu::ComputePipeline,
+    records: wgpu::ComputePipeline,
     spatial: wgpu::ComputePipeline,
+    reconstruct: wgpu::ComputePipeline,
     params: wgpu::Buffer,
-    /// A uniform each spatial iteration (step, iteration).
+    /// A uniform each spatial iteration (its index), written once.
     iterations: Vec<wgpu::Buffer>,
-    /// Bound where the frame publishes no history.
-    no_history: wgpu::TextureView,
 }
 
 impl Kernels {
-    fn new(device: &wgpu::Device) -> Self {
-        let float = wgpu::TextureSampleType::Float { filterable: false };
-        let texture = |binding, sample_type| wgpu::BindGroupLayoutEntry {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+        let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Texture {
-                sample_type,
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
                 view_dimension: wgpu::TextureViewDimension::D2,
                 multisampled: false,
             },
@@ -314,8 +343,6 @@ impl Kernels {
             },
             count: None,
         };
-        let half = wgpu::TextureFormat::Rgba16Float;
-        let moment = wgpu::TextureFormat::Rg32Float;
         let layout = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
@@ -324,53 +351,54 @@ impl Kernels {
         };
         let shared_layout = layout(
             "Denoise shared",
-            &[
-                texture(0, wgpu::TextureSampleType::Depth),
-                texture(1, float),
-                texture(2, float),
-                uniform(3),
-            ],
-        );
-        let guides_layout = layout(
-            "Denoise guides",
-            &[storage(20, wgpu::TextureFormat::Rgba32Float)],
+            &[texture(0), texture(1), texture(2), uniform(3)],
         );
         let temporal_layout = layout(
             "Denoise temporal",
             &[
-                texture(21, float),
-                texture(0, float),
-                texture(1, float),
-                texture(2, float),
-                texture(3, float),
-                texture(4, float),
-                storage(5, half),
-                storage(6, half),
-                storage(7, moment),
+                texture(0),
+                texture(1),
+                texture(2),
+                texture(3),
+                texture(4),
+                storage(5, HALF),
+                storage(6, HALF),
+                storage(7, MOMENTS),
             ],
         );
-        let fix_layout = layout(
-            "Denoise fix",
+        let records_layout = layout(
+            "Denoise records",
             &[
-                texture(21, float),
-                texture(8, float),
-                texture(9, float),
-                texture(10, float),
-                storage(11, half),
-                storage(12, half),
-                storage(13, moment),
+                texture(8),
+                texture(9),
+                texture(10),
+                storage(11, HALF),
+                storage(12, HALF),
+                storage(13, LENGTH),
             ],
         );
         let spatial_layout = layout(
             "Denoise spatial",
             &[
-                texture(21, float),
-                texture(14, float),
-                texture(15, float),
-                texture(16, float),
-                storage(17, half),
-                storage(18, half),
-                uniform(19),
+                texture(14),
+                texture(15),
+                texture(16),
+                storage(17, HALF),
+                storage(18, HALF),
+                storage(19, LENGTH),
+                uniform(20),
+            ],
+        );
+        let reconstruct_layout = layout(
+            "Denoise reconstruct",
+            &[
+                texture(21),
+                texture(22),
+                texture(23),
+                texture(24),
+                texture(25),
+                storage(26, HALF),
+                storage(27, HALF),
             ],
         );
         let module = helio_core::shader::module_with(
@@ -406,56 +434,43 @@ impl Kernels {
                 mapped_at_creation: false,
             })
         };
-        let iterations: Vec<_> = SPATIAL_STEPS
-            .iter()
-            .map(|_| buffer("Denoise iteration", 16))
-            .collect();
-        let no_history = device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("Denoise no history"),
-                size: wgpu::Extent3d {
-                    width: 1,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: history::PIXELS_FORMAT.to_wgpu(),
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
+        let iterations: Vec<_> = (0..SPATIAL_ITERATIONS)
+            .map(|i| {
+                let b = buffer("Denoise iteration", 16);
+                helio_core::upload::write_buffer(
+                    queue,
+                    &b,
+                    0,
+                    bytemuck::cast_slice(&[i as u32, 0, 0, 0]),
+                );
+                b
             })
-            .create_view(&Default::default());
+            .collect();
         Self {
-            guides: pipeline("guides", &guides_layout),
-            guides_layout,
             temporal: pipeline("temporal", &temporal_layout),
-            fix: pipeline("fix", &fix_layout),
+            records: pipeline("records", &records_layout),
             spatial: pipeline("spatial", &spatial_layout),
+            reconstruct: pipeline("reconstruct", &reconstruct_layout),
             shared_layout,
             temporal_layout,
-            fix_layout,
+            records_layout,
             spatial_layout,
+            reconstruct_layout,
             params: buffer("Denoise params", PARAMS_BYTES),
             iterations,
-            no_history,
         }
     }
 }
 
 /// The denoiser's passes for one signal (module docs): one pass, its stages
 /// dispatches of their own, each under a GPU scope (`Denoise: temporal`,
-/// `Denoise: fix`, `Denoise: spatial`).
+/// `Denoise: records`, `Denoise: spatial`, `Denoise: reconstruct`).
 pub struct DenoisePass {
     signal: Signal,
     settings: DenoiseSettings,
-    /// The frame publishes a history.
-    history: bool,
     kernels: Kernels,
     views: Mutex<Vec<View>>,
     active: Option<usize>,
-    /// The step of each spatial iteration was uploaded for this block size.
-    uploaded_steps: bool,
     cache: helio_core::gpu_cache::GpuCache,
     /// This frame filtered the signal (its inputs were there).
     ran: bool,
@@ -466,22 +481,18 @@ pub struct DenoisePass {
 impl DenoisePass {
     fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         signal: Signal,
         settings: DenoiseSettings,
-        history: bool,
     ) -> Self {
         let mut reads = signal.inputs.to_vec();
-        if history {
-            reads.push(history::PIXELS);
-        }
+        reads.extend([history::PIXELS, history::DEPTH, history::NORMAL]);
         Self {
             signal,
             settings,
-            history,
-            kernels: Kernels::new(device),
+            kernels: Kernels::new(device, queue),
             views: Mutex::new(Vec::new()),
             active: None,
-            uploaded_steps: false,
             cache: helio_core::gpu_cache::GpuCache::new(),
             ran: false,
             reads: helio_frame_api::static_names(&reads),
@@ -494,16 +505,21 @@ impl DenoisePass {
         &self.signal
     }
 
-    /// The active view's history `[(a, Co, Cg, 1 / hit), (b, length),
-    /// moment]` and output `[out0, out1]` textures (for tests and tools that
-    /// read them back).
+    /// The active view's history `[A, B, M]` (A and B are the outputs; M the
+    /// length and the luminance's moments) and output `[out0, out1]`
+    /// textures (for tests and tools that read them back).
     pub fn textures(&self) -> Option<([wgpu::Texture; 3], [wgpu::Texture; 2])> {
         let views = self.views.lock().unwrap();
         let targets = views.get(self.active?)?.targets.as_ref()?;
+        // Made in order: history A, B, moments A, B, temporal A, B, ...
         let t = &targets.textures;
         Some((
-            [t[0].clone(), t[1].clone(), t[2].clone()],
-            [t[6].clone(), t[7].clone()],
+            [
+                t[0].clone(),
+                t[1].clone(),
+                t[2 + targets.moments_latest].clone(),
+            ],
+            [t[0].clone(), t[1].clone()],
         ))
     }
 }
@@ -535,11 +551,6 @@ impl RenderPass for DenoisePass {
         self.writes
     }
 
-    fn declare_resources(&self, builder: &mut helio_core::graph::ResourceBuilder) {
-        builder.read(helio_frame_api::gbuffer::GROUP);
-        builder.read(helio_frame_api::gbuffer::DEPTH);
-    }
-
     fn on_resize(&mut self, _device: &wgpu::Device, _size: helio_core::graph::RenderSize) {
         for view in self.views.get_mut().unwrap() {
             view.targets = None;
@@ -550,6 +561,8 @@ impl RenderPass for DenoisePass {
         let camera = ctx.camera_data;
         let id = camera.jitter_frame[3].to_bits();
         let size = [ctx.width.max(1), ctx.height.max(1)];
+        let side = self.signal.block.side();
+        let traced = self.signal.traced_size(size);
         let views = self.views.get_mut().unwrap();
         let index = match views.iter().position(|v| v.id == id) {
             Some(i) => i,
@@ -568,71 +581,49 @@ impl RenderPass for DenoisePass {
         };
         views[index].used = ctx.frame_num;
         if views[index].targets.as_ref().is_none_or(|t| t.size != size) {
-            views[index].targets = Some(Targets::new(ctx.device, size));
+            views[index].targets = Some(Targets::new(ctx.device, size, traced, side));
         }
         self.active = Some(index);
         let proj = glam::DMat4::from_cols_array(&camera.proj.map(f64::from));
         let inv_proj = proj.inverse().to_cols_array().map(|v| v as f32);
-        let side = self.signal.block.side();
-        let traced = self.signal.traced_size(size);
+        let p = camera.proj;
         // A pixel's width a metre of view depth (the projection's vertical
         // scale: 2 / (P[1][1] h)).
-        let pixel_scale = 2.0 / (camera.proj[5].abs().max(1e-12) * size[1] as f32);
+        let pixel_scale = 2.0 / (p[5].abs().max(1e-12) * size[1] as f32);
         let primed = views[index].targets.as_ref().unwrap().primed;
         let params = Params {
             inv_proj,
+            // P[2][2], P[2][3], P[3][2], P[3][3] (column-major).
+            proj_zw: [p[10], p[11], p[14], p[15]],
             size,
             traced,
             side,
             frame: ctx.frame_num as u32,
-            flags: u32::from(self.signal.confidence) | (u32::from(self.history && primed) << 1),
+            flags: u32::from(self.signal.confidence) | (u32::from(primed) << 1),
             max_history: self.settings.max_history,
-            fix_history: FIX_HISTORY,
             pixel_scale,
-            _pad: [0; 2],
+            _pad: [0; 7],
         };
         ctx.write_buffer(&self.kernels.params, 0, bytemuck::bytes_of(&params));
-        if !self.uploaded_steps {
-            for (i, (buffer, step)) in self
-                .kernels
-                .iterations
-                .iter()
-                .zip(SPATIAL_STEPS)
-                .enumerate()
-            {
-                ctx.write_buffer(
-                    buffer,
-                    0,
-                    bytemuck::cast_slice(&[step * side, i as u32, 0, 0]),
-                );
-            }
-            self.uploaded_steps = true;
-        }
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         self.ran = false;
         let key = |name| helio_core::ResourceKey::new(name);
-        let (Some(signal0), Some(signal1)) = (
-            ctx.registry.texture_view(key(self.signal.inputs[0])),
-            ctx.registry.texture_view(key(self.signal.inputs[1])),
+        let view = |name| ctx.registry.texture_view(key(name));
+        let (Some(signal0), Some(signal1), Some(pixels), Some(depth), Some(normal)) = (
+            view(self.signal.inputs[0]),
+            view(self.signal.inputs[1]),
+            view(history::PIXELS),
+            view(history::DEPTH),
+            view(history::NORMAL),
         ) else {
-            // The producer wrote nothing this frame: history is kept.
+            // The producer or the history wrote nothing this frame: history
+            // is kept.
             return Ok(());
-        };
-        let Some(gbuffer) = ctx.registry.view_group::<4>(helio_core::ResourceKey::new(
-            helio_frame_api::gbuffer::GROUP,
-        )) else {
-            return Ok(());
-        };
-        let pixels = if self.history {
-            ctx.registry.texture_view(key(history::PIXELS))
-        } else {
-            None
         };
         let k = &self.kernels;
-        let pixels = pixels.unwrap_or(&k.no_history);
         let mut views = self.views.lock().unwrap();
         let Some(targets) = self
             .active
@@ -656,21 +647,19 @@ impl RenderPass for DenoisePass {
         let shared = group(
             &k.shared_layout,
             &[
-                texture_entry(0, ctx.depth),
-                texture_entry(1, gbuffer.views[1]),
+                texture_entry(0, depth),
+                texture_entry(1, normal),
                 texture_entry(2, pixels),
                 buffer_entry(3, &k.params),
             ],
         );
-        let [ha, hb, hm] = &targets.history;
-        let [ta, tb, tm] = &targets.temp;
-        let [oa, ob] = &targets.out;
-        let g = &targets.guides;
-        let guides = group(&k.guides_layout, &[texture_entry(20, g)]);
+        let [ha, hb] = &targets.history;
+        let [ta, tb] = &targets.temp;
+        let latest = targets.moments_latest;
+        let (hm, tm) = (&targets.moments[latest], &targets.moments[latest ^ 1]);
         let temporal = group(
             &k.temporal_layout,
             &[
-                texture_entry(21, g),
                 texture_entry(0, signal0),
                 texture_entry(1, signal1),
                 texture_entry(2, ha),
@@ -681,47 +670,74 @@ impl RenderPass for DenoisePass {
                 texture_entry(7, tm),
             ],
         );
-        let fix = group(
-            &k.fix_layout,
-            &[
-                texture_entry(21, g),
-                texture_entry(8, ta),
-                texture_entry(9, tb),
-                texture_entry(10, tm),
-                texture_entry(11, ha),
-                texture_entry(12, hb),
-                texture_entry(13, hm),
-            ],
-        );
-        // history -> temp -> out -> temp -> out.
+        // The records: the blocks' (a pass of their own), or the pixels'
+        // temporal result itself.
+        let (records, ping, pong) = if targets.records.len() == 3 {
+            let [ra, rb, rn] = &targets.records[0];
+            let g = group(
+                &k.records_layout,
+                &[
+                    texture_entry(8, ta),
+                    texture_entry(9, tb),
+                    texture_entry(10, tm),
+                    texture_entry(11, ra),
+                    texture_entry(12, rb),
+                    texture_entry(13, rn),
+                ],
+            );
+            (Some(g), 1, 2)
+        } else {
+            (None, 0, 1)
+        };
+        let first: [&wgpu::TextureView; 3] = if records.is_some() {
+            let [a, b, n] = &targets.records[0];
+            [a, b, n]
+        } else {
+            [ta, tb, tm]
+        };
         let iteration =
-            |i: usize, input: [&wgpu::TextureView; 2], output: [&wgpu::TextureView; 2]| {
+            |i: usize, input: [&wgpu::TextureView; 3], output: &[wgpu::TextureView; 3]| {
                 group(
                     &k.spatial_layout,
                     &[
-                        texture_entry(21, g),
                         texture_entry(14, input[0]),
                         texture_entry(15, input[1]),
-                        texture_entry(16, hm),
-                        texture_entry(17, output[0]),
-                        texture_entry(18, output[1]),
-                        buffer_entry(19, &k.iterations[i]),
+                        texture_entry(16, input[2]),
+                        texture_entry(17, &output[0]),
+                        texture_entry(18, &output[1]),
+                        texture_entry(19, &output[2]),
+                        buffer_entry(20, &k.iterations[i]),
                     ],
                 )
             };
+        let [pa, pb, pn] = &targets.records[ping];
         let spatial = [
-            iteration(0, [ha, hb], [ta, tb]),
-            iteration(1, [ta, tb], [oa, ob]),
-            iteration(2, [oa, ob], [ta, tb]),
-            iteration(3, [ta, tb], [oa, ob]),
+            iteration(0, first, &targets.records[ping]),
+            iteration(1, [pa, pb, pn], &targets.records[pong]),
         ];
-        let groups = [targets.size[0].div_ceil(8), targets.size[1].div_ceil(8)];
+        let [fa, fb, _] = &targets.records[pong];
+        let reconstruct = group(
+            &k.reconstruct_layout,
+            &[
+                texture_entry(21, ta),
+                texture_entry(22, tb),
+                texture_entry(23, tm),
+                texture_entry(24, fa),
+                texture_entry(25, fb),
+                texture_entry(26, ha),
+                texture_entry(27, hb),
+            ],
+        );
+        let pixel_groups = [targets.size[0].div_ceil(8), targets.size[1].div_ceil(8)];
+        let traced = self.signal.traced_size(targets.size);
+        let traced_groups = [traced[0].div_ceil(8), traced[1].div_ceil(8)];
         let mut cmds = ctx.graphics_cmds();
         let stage = |cmds: &mut helio_core::CommandRecorder<'_>,
                      ctx: &mut PassContext,
                      scope: &'static str,
                      pipeline: &wgpu::ComputePipeline,
-                     stage: &[&wgpu::BindGroup]| {
+                     stage: &[&wgpu::BindGroup],
+                     groups: [u32; 2]| {
             ctx.begin_gpu_scope(cmds, scope);
             {
                 let mut pass = cmds.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -737,23 +753,42 @@ impl RenderPass for DenoisePass {
             }
             ctx.end_gpu_scope(cmds, scope);
         };
-        stage(&mut cmds, ctx, "Denoise: guides", &k.guides, &[&guides]);
         stage(
             &mut cmds,
             ctx,
             "Denoise: temporal",
             &k.temporal,
             &[&temporal],
+            pixel_groups,
         );
-        stage(&mut cmds, ctx, "Denoise: fix", &k.fix, &[&fix]);
+        if let Some(records) = &records {
+            stage(
+                &mut cmds,
+                ctx,
+                "Denoise: records",
+                &k.records,
+                &[records],
+                traced_groups,
+            );
+        }
         stage(
             &mut cmds,
             ctx,
             "Denoise: spatial",
             &k.spatial,
-            &[&spatial[0], &spatial[1], &spatial[2], &spatial[3]],
+            &[&spatial[0], &spatial[1]],
+            traced_groups,
+        );
+        stage(
+            &mut cmds,
+            ctx,
+            "Denoise: reconstruct",
+            &k.reconstruct,
+            &[&reconstruct],
+            pixel_groups,
         );
         targets.primed = true;
+        targets.moments_latest = latest ^ 1;
         drop(views);
         self.ran = true;
         Ok(())
@@ -771,7 +806,8 @@ impl RenderPass for DenoisePass {
         else {
             return;
         };
-        for (name, view) in self.signal.outputs.iter().zip(&targets.out) {
+        // The history's A and B are the signal's outputs.
+        for (name, view) in self.signal.outputs.iter().zip(&targets.history) {
             frame.write_texture_binding(*name, view, "Denoise");
         }
     }

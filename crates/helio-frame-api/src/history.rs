@@ -13,9 +13,12 @@
 //!   change. CPU work only.
 //! - [`request`]`(build, Need::Pixels)`: that, and one compute pass a frame
 //!   publishing [`PIXELS`] ("where a pixel was": its previous position and
-//!   which of the bilinear taps there held the same surface) and the
-//!   previous guides, [`PREVIOUS_DEPTH`] and [`PREVIOUS_NORMAL`] (last
-//!   frame's view depth, normal and roughness).
+//!   which of the bilinear taps there held the same surface), this frame's
+//!   guides, [`DEPTH`] and [`NORMAL`] (view depth, normal and roughness:
+//!   one copy a view, which every temporal pass and denoised signal reads
+//!   instead of keeping its own), and the previous guides,
+//!   [`PREVIOUS_DEPTH`] and [`PREVIOUS_NORMAL`] (last frame's; the two
+//!   swap, nothing is copied).
 //!
 //! The first reader of a graph adds the publisher's passes where it asks
 //! (after the G-buffer, before itself); later readers find them there. A
@@ -51,6 +54,14 @@ pub const SNIPPET: ShaderSnippet = helio_core::wgsl_snippet!(MARKER, "shaders/hi
 
 /// The view's reprojection: a uniform buffer holding one [`HistoryReprojection`].
 pub const REPROJECTION: &str = "history_reprojection";
+/// This frame's view depth (`R32Float`, positive, 0 for sky or nothing):
+/// the guides every temporal pass and the denoiser read at a pixel, written
+/// once a frame by the publisher. Next frame they are [`PREVIOUS_DEPTH`]
+/// (the textures swap; nothing is copied).
+pub const DEPTH: &str = "history_depth";
+/// This frame's shading normal (xyz, frame space) and roughness (w)
+/// (`Rgba16Float`); next frame's [`PREVIOUS_NORMAL`].
+pub const NORMAL: &str = "history_normal";
 /// Last frame's view depth (`R32Float`, positive, 0 for sky or nothing).
 pub const PREVIOUS_DEPTH: &str = "history_previous_depth";
 /// Last frame's shading normal (xyz, frame space) and roughness (w)
@@ -200,8 +211,9 @@ pub enum Need {
     /// [`REPROJECTION`] alone (a reader with its own history at another
     /// resolution, as TSR's at the output's).
     Reprojection,
-    /// [`REPROJECTION`], [`PIXELS`], [`PREVIOUS_DEPTH`] and
-    /// [`PREVIOUS_NORMAL`].
+    /// [`REPROJECTION`], [`PIXELS`], this frame's guides ([`DEPTH`],
+    /// [`NORMAL`]) and last frame's ([`PREVIOUS_DEPTH`],
+    /// [`PREVIOUS_NORMAL`]).
     Pixels,
 }
 
