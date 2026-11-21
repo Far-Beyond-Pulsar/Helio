@@ -2430,4 +2430,7 @@ build against itself: 0.0002. The change is the sky light: GI's probe rays now t
 the drawn sky rather than the 1.8x table, and the irradiance table the
 deferred lighting reads is integrated from the radiance table (the reference's
 indirect sky on hits fell by the same 8%). voxel_flight's Earth ground hold
-(25 s, clouds off): r2 against this build @@EARTH@@.
+(25 s, clouds off): r2 against this build 0.0021 mean |difference|,
+luminance -0.19% (one run each; the same-build repeat waited behind
+another session's GPU work and was not run, so the Earth hold's run-to-run
+noise is not measured here).
