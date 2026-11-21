@@ -2188,3 +2188,138 @@ takes a ray a pixel and a larger cache.
    and its probe walk (carried; cost, not image).
 
 ### As built
+
+#### The binned passes' cost, the probe walk, the kernels' order
+
+Step 5, carried from r2 ("Integration", items 3 to 5). Each cost was
+measured again on this tree first (Pulsar `render/r3-cost` before its
+changes is r2 as merged: the r2 executables are its baselines).
+
+**The binned material passes' fixed cost a program** (the meshes plugin,
+`helio_pass_mesh_rays::surfaces`; the wgpu fork).
+
+- *Where the time went.* An Nsight GPU trace of `mesh_rays_gpu`'s
+  `hit_surface_cost` (174,080 hits on 81 textured quads, clocks locked to
+  base, 1.32 GHz) with each bin's dispatch in a debug range: with 64
+  programs a bin holds 2,000 to 4,000 hits and runs 41 us at 1 % of the
+  SMs' throughput, about one warp active a TPC: a small dispatch takes one
+  kernel latency, whatever its hits. Bins in a row cannot overlap: each
+  writes the stream's surfaces (read-write storage), so wgpu puts a
+  barrier between every two, and each indirect dispatch is preceded by
+  wgpu's indirect-call validation (a dispatch of its own and two more
+  barriers: 12 us measured on the table-only pass, 0.090 ms with it and
+  0.078 without). 64 bins: 2.69 ms; 8 bins (20,000 hits each): 0.53 ms. One
+  pipeline for all 64 bins costs the same as 64 pipelines: the programs are
+  not the cost, the serialisation is.
+- *How others do it.* Wavefront renderers and UE5's Nanite compute
+  materials dispatch a bin a material back to back with no barrier between
+  them (D3D12 and Vulkan let an application omit the UAV barrier between
+  independent dispatches: `BeginUAVOverlap` in Unreal's RHI, `SkipBarrier`
+  UAVs in RDG). The other way, one kernel switching on the program
+  (Falcor), puts every present program's code and the widest program's
+  registers in one module, recompiled whenever the set of programs
+  changes: compile time grows with the programs, which a scene of hundreds
+  of material graphs cannot afford.
+- *What changed.* The wgpu fork gains overlapping spans in compute passes
+  (`ComputePass::begin_overlap` / `end_overlap`, branch `render/r3-cost`,
+  "HELIO PATCH"): within a span a resource that stays in a writable
+  storage state gets no barrier between dispatches (the caller states they
+  do not read what each other writes), and the span's indirect arguments
+  are validated together when it begins, each into a slot of its own (one
+  barrier for the span instead of three dispatches' worth each). Transitions
+  into and out of the writable state keep their barriers, so the first
+  dispatch after the span sees its writes; arguments are still validated
+  (a span past 255 indirect dispatches validates the rest one by one).
+  Helio's `ComputeCmds::begin_overlap` / `end_overlap` expose it; the
+  meshes' bins are the first span (a hit is in one bin: disjoint rows).
+- *Measured* (same trace, clocks locked): 64 bins 2.69 -> 0.34 ms, 8 bins
+  0.53 -> 0.24 ms; the bins now share one latency. Without locked clocks
+  (the bench's own timestamps, the whole run of binning and shading,
+  three interleaved runs each): 8 programs 0.321 -> 0.221 ms (`Diffuse`),
+  0.375 -> 0.312 (`Full`); 64 programs 3.97-4.00 -> 3.77-3.93: on this
+  latency-bound load the driver drops clocks (210 to 500 MHz read between
+  runs), which the locked trace removes. The fixed cost a program with hits
+  is now part of one shared latency instead of 0.03-0.06 ms each.
+
+**The planets' probe walk** (the voxel plugin's tracer). Measured, its
+cause found, and not changed: what remains belongs to the work the rays
+do, not to a stream overhead this step can remove.
+
+- *Where the time goes* (Nsight, voxel_flight Earth ground hold, clocks
+  locked; this tree with the entry and the walk in debug ranges, against
+  r0's in-draw kernel): the entry 0.18-0.20 ms (12 M warp instructions, all
+  32 lanes busy), the walk 1.75-2.46 ms (155-231 M warp instructions, 3.8
+  to 4.3 of 32 lanes busy); r0's `gi_trace` (its entry, walk, shading and
+  sun lookup in one kernel) 1.50-1.70 ms, 125 M warp instructions at 5.4
+  lanes.
+- *The walk is not slower than r0's.* On identical rays in isolation
+  (`stream_rays_cost`) the stream walk with its entry costs 1.33 ms, the
+  entry alone 0.19, against the old kernel's 1.12 with its shading (r1);
+  the walk code is r0's line for line; `ray_nearest` compiles to 72
+  registers and 3,840 bytes of spill a workgroup, r0's kernel (rebuilt in
+  today's module) to 80 and 6,400.
+- *What the frame adds.* (a) The entry, a pass of its own placing each
+  ray (r0 placed each probe once, on the CPU, in f64: a consumer's
+  shortcut no stream has). (b) Rays r0 never walked: r0 dropped a probe
+  ray whose start lay in air with no drawn frame near it (a miss: sky where
+  ground may lie); the stream walks it in the placing chunk's frame. A
+  build dropping those rays as r0 did walked 1.66-1.96 ms against
+  1.75-2.46 in the same hold. (c) Lanes: GI's 64 rays a probe in all
+  directions keep 4 of 32 lanes busy, as they did in r0.
+- *Tried and measured slower* (isolation, 174,080 GI-shaped rays): the
+  rays sorted by direction (8x8 octahedral cells, then probe): 1.33 ->
+  1.48 ms (origins scattered across a wave cost more than directions
+  gathered save); the walk in rounds with compaction (a ray out of its
+  round's boxes keeps its exact state and goes on in the next round's
+  list; bit-identical to the CPU casts): 1.33 -> 1.77 with 12, 12, 24 and
+  48 boxes, 1.50 with one round of 96 (the structure alone). Neither
+  shipped.
+- The remainder is r3's to spend differently: probe rays read the radiance
+  cache (step 3) and the probes become the cheap setting beside the pixels'
+  gather (step 4); a probe stream with fewer rays where the cache answers
+  is where the walk's cost falls, not in the walk.
+
+**The terrain's kernels compiled in the order the streams need them**
+(the voxel plugin's `chunks::rays`).
+
+- Before: one compile job a form built all six ray kernels in a row
+  (`RayPipelines`), the `Full` surfaces among them, whether a stream asked
+  for `Full` or not; GI waited for all of them.
+- Now each kernel is a job of its own (`RayKernel`, `helio_core::compile`)
+  and only the kernels a scheduled stream needs compile
+  (`RayKernels::of(class, detail, run)`, gathered on the graph's
+  `RayLink` as each stream's pass is built): the trace kernels and the
+  `Diffuse` surfaces first, together, then `Full`'s, the longest, once
+  those finished. A stream is answered when its own kernels are ready for
+  every volume (`RayLink::complete(kernels)`; before, the trace pass marks
+  it short and traces nothing, so a hit never lacks its surface);
+  `ChunkPass::settled` and `needs_frame` wait for every kernel the streams
+  need.
+- Measured (voxel_flight Earth hold, the r2 executable against this
+  build, each from a fresh executable path; the NVIDIA driver kept none of
+  the module's pipelines between runs, so both pairs were cold): the
+  draw's pipelines ready at 100-106 s (r2) and 101-121 s (this build), the
+  generation and draw bundles unchanged; GI's streams answerable 11.0-11.4
+  s after them on r2 (the one bundle, built in 11.4-11.5 s), 3-4 s after
+  them now (the four kernels GI needs built in 1.4-4.5 s each,
+  concurrently). The graph also holds the reference path tracer's streams
+  (camera rays in runs, `Full`): their run entry joins the first order and
+  the `Full` surfaces finish 4-5 s after GI's kernels, after them as
+  intended.
+
+**Verified.** Nothing here changes an image: voxel_craft, four poses,
+8-frame bursts, no clouds, r2 and this build alternated: r2-r2
+0.0001-0.0012, new-new 0.0004-0.0012, r2-new 0.0007-0.0017 (p99 at most
+0.017), luminance within +0.06 %; Earth and Moon ground holds (1600x900):
+r2-r2 0.0004/0.0005, new-new 0.0009/0.0007, r2-new 0.0003-0.0009 /
+0.0004-0.0006, luminance equal to four digits; graph p50 Earth 12.66-12.69
+against 12.51-12.66 ms, Moon 10.76-10.80 against 10.79-10.83, VoxelRays
+gi_probe 1.54-1.55 against 1.54-1.58. Suites (release, each executable on
+its own): voxel lib 35, `chunks` 55 (stream tests bit-identical to the
+CPU casts), `volumes` 8, `voxel_pass_graph` 13, `wgsl` 2,
+`foliage_on_voxels` 1; meshes rays lib 4, `mesh_rays_gpu` 15; GI lib 10,
+`probes` 15, `mesh_gi_graph` 2, `vg_ray_proxies` 3; the engine's
+`ray_tier_acceptance` 3 (three programs in three bins through the engine
+path); `helio-core` `wgsl_validation`; the layer gate (0 violations);
+`one_owner`. Not verified: the wgpu fork's own test suite, the overlap on
+DX12 and Metal (this machine runs Vulkan), the editor.
