@@ -10,6 +10,10 @@
 //!   texel and a ray's hit both encode.
 //! - [`depth`]: the frame's depth resources (full-resolution depth, Hi-Z).
 //! - [`color`]: the scene colour chain post features read and advance.
+//! - [`history`]: a pixel's history (the reprojection, where a pixel was,
+//!   the previous guides), published by the spine for a view's readers.
+//! - [`denoise`]: the denoiser contract every noisy signal is filtered
+//!   through, whichever denoiser the frame has.
 //! - [`media`]: the participating medium integrated along view rays, for
 //!   what composites at its own depth.
 //! - [`lighting`]: the inputs a lighting model reads, as generic contracts
@@ -34,9 +38,11 @@
 //! Depends on `helio-core` and `helio-feature-api` only.
 
 pub mod color;
+pub mod denoise;
 pub mod depth;
 pub mod diagnostics;
 pub mod gbuffer;
+pub mod history;
 mod host;
 pub mod lighting;
 pub mod media;

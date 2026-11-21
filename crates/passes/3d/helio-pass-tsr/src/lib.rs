@@ -157,6 +157,8 @@ pub const TSR_COLOR: &str = "tsr_color";
 
 // ── GPU uniform ───────────────────────────────────────────────────────────────
 
+/// `TsrUniform` (tsr_main.wgsl). The reprojection is the frame's
+/// (`helio_frame_api::history::REPROJECTION`, bound beside it).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TsrUniform {
@@ -165,69 +167,10 @@ struct TsrUniform {
     flags: u32,              // bit 0: reset, bit 1: transparency coverage, bit 2: motion vectors
     previous_jitter_uv: [f32; 2],
     _pad: [f32; 2],
-    reprojection: Reprojection,
 }
 
-/// How the resolve carries a point of this frame's clip space to last
-/// frame's (`TsrUniform` in tsr_main.wgsl): clip to previous clip, composed
-/// in f64 from this frame's view-projection, last frame's and last frame's
-/// view (UE's ClipToPrevClip). Through world space in f32 instead, a near
-/// point moves by rounding of the camera's position (hundreds of metres off
-/// the frame origin), frame to frame, and history accumulating over dozens
-/// of frames smears by it.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
-struct Reprojection {
-    clip_to_previous_clip: [f32; 16],
-    clip_to_world_w: [f32; 4],
-    eye_to_previous_clip: [f32; 4],
-    clip_to_previous_view_z: [f32; 4],
-}
-
-impl Reprojection {
-    /// From this frame's view-projection (`view_proj`) and eye, last frame's
-    /// view-projection and view, in this frame's coordinates (all
-    /// column-major).
-    fn new(
-        view_proj: [f32; 16],
-        eye: [f32; 3],
-        previous_view_proj: [f32; 16],
-        previous_view: [f32; 16],
-    ) -> Self {
-        let matrix = |m: [f32; 16]| glam::DMat4::from_cols_array(&m.map(f64::from));
-        let clip_to_world = matrix(view_proj).inverse();
-        let previous_view_proj = matrix(previous_view_proj);
-        let clip_to_previous_clip = previous_view_proj * clip_to_world;
-        let clip_to_previous_view = matrix(previous_view) * clip_to_world;
-        let eye = glam::DVec4::new(f64::from(eye[0]), f64::from(eye[1]), f64::from(eye[2]), 1.0);
-        let f32s = |v: glam::DVec4| v.to_array().map(|x| x as f32);
-        Self {
-            clip_to_previous_clip: clip_to_previous_clip.to_cols_array().map(|x| x as f32),
-            clip_to_world_w: f32s(clip_to_world.row(3)),
-            eye_to_previous_clip: f32s(previous_view_proj * eye),
-            clip_to_previous_view_z: f32s(clip_to_previous_view.row(2)),
-        }
-    }
-}
-
-// Express previous view-space depth in the current floating origin. Current
-// local points are old local points minus origin_shift, so compose V * T(shift).
-// Matrices use column-major GPU layout; only the translation column changes.
-// Compose in f64, matching the renderer's previous-projection rebasing.
-fn rebase_previous_view(previous: [f32; 16], origin_shift: [f64; 3]) -> [f32; 16] {
-    assert!(
-        origin_shift.iter().all(|v| v.is_finite()),
-        "camera origin shift must be finite"
-    );
-    let mut rebased = previous;
-    for row in 0..4 {
-        rebased[12 + row] = (f64::from(previous[row]) * origin_shift[0]
-            + f64::from(previous[4 + row]) * origin_shift[1]
-            + f64::from(previous[8 + row]) * origin_shift[2]
-            + f64::from(previous[12 + row])) as f32;
-    }
-    rebased
-}
+/// The snippets `tsr_main.wgsl` is built with.
+pub const SNIPPETS: [helio_core::shader::ShaderSnippet; 1] = [helio_frame_api::history::SNIPPET];
 
 // ── History ───────────────────────────────────────────────────────────────────
 
@@ -322,13 +265,15 @@ fn output_texture(
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 /// What the resolve and reconstruction bind groups were made for: colour,
-/// depth, coverage, stochastic mask and motion vectors.
+/// depth, coverage, stochastic mask, motion vectors and the frame's
+/// reprojection.
 type ResolveKey = (
     wgpu::TextureView,
     wgpu::TextureView,
     wgpu::TextureView,
     wgpu::TextureView,
     wgpu::TextureView,
+    wgpu::Buffer,
 );
 
 /// The reconstruction's buffer for `texels` input texels.
@@ -413,8 +358,6 @@ pub struct TsrPass {
     /// `true` until the first frame (or after `reset_history()`).
     first_frame: bool,
     previous_jitter_uv: [f32; 2],
-    previous_view: [f32; 16],
-    previous_world_origin: Option<[f64; 3]>,
     previous_view_id: Option<u32>,
     /// Fraction of history confidence dropped per frame (`0` = none, `1` = all).
     reactivity: f32,
@@ -474,10 +417,11 @@ impl TsrPass {
         format: wgpu::TextureFormat,
         quality: TsrQuality,
     ) -> Self {
-        let tsr_shader = helio_core::shader::module(
+        let tsr_shader = helio_core::shader::module_with(
             device,
             "TSR Shader",
             helio_core::include_wgsl!("../shaders/tsr_main.wgsl"),
+            &SNIPPETS,
         );
         let blit_shader = helio_core::shader::module(device, "TSR Blit Shader", BLIT_WGSL);
 
@@ -568,6 +512,7 @@ impl TsrPass {
                 storage_entry(17),      // out_depth_coarse
                 storage_entry(18),      // out_state
                 storage_entry(19),      // out_noise
+                uniform_entry(21),      // history (the frame's reprojection)
             ],
         });
         let reconstruct_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -743,8 +688,6 @@ impl TsrPass {
             output_height,
             first_frame: true,
             previous_jitter_uv: [0.0; 2],
-            previous_view: [0.0; 16],
-            previous_world_origin: None,
             previous_view_id: None,
             reactivity: 0.0,
             quality,
@@ -980,6 +923,7 @@ fn make_resolve_bg(
     sampler: &wgpu::Sampler,
     camera: &wgpu::Buffer,
     uniform: &wgpu::Buffer,
+    reprojection: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     let view = wgpu::BindingResource::TextureView;
     device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1053,6 +997,10 @@ fn make_resolve_bg(
             wgpu::BindGroupEntry {
                 binding: 19,
                 resource: view(&next.noise_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 21,
+                resource: reprojection.as_entire_binding(),
             },
         ],
     })
@@ -1219,6 +1167,7 @@ impl RenderPass for TsrPass {
         if self.motion_vectors {
             builder.read(helio_frame_api::gbuffer::VELOCITY);
         }
+        builder.read(helio_frame_api::history::REPROJECTION);
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, size: helio_core::RenderSize) {
@@ -1296,7 +1245,6 @@ impl RenderPass for TsrPass {
             ndc[0] * ctx.width as f32 * 0.5,
             ndc[1] * ctx.height as f32 * 0.5,
         ];
-        let world_origin = ctx.world_origin.to_array();
         let view_id = ndc[3].to_bits();
         let view_changed = self
             .previous_view_id
@@ -1314,48 +1262,18 @@ impl RenderPass for TsrPass {
             ))
             .is_some();
         self.first_frame = false;
-        let previous_view = if reset != 0 {
-            ctx.camera_data.view
-        } else {
-            match self.previous_world_origin {
-                Some(previous) => rebase_previous_view(
-                    self.previous_view,
-                    [
-                        world_origin[0] - previous[0],
-                        world_origin[1] - previous[1],
-                        world_origin[2] - previous[2],
-                    ],
-                ),
-                None => self.previous_view,
-            }
-        };
-
         let u = TsrUniform {
             jitter_offset: jitter,
             reactivity: self.reactivity,
             flags: reset | (u32::from(coverage) << 1),
             previous_jitter_uv: self.previous_jitter_uv,
             _pad: [0.0; 2],
-            reprojection: Reprojection::new(
-                ctx.camera_data.view_proj,
-                [
-                    ctx.camera_data.position_near[0],
-                    ctx.camera_data.position_near[1],
-                    ctx.camera_data.position_near[2],
-                ],
-                ctx.camera_data.prev_view_proj,
-                previous_view,
-            ),
         };
 
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
         self.flags = u.flags;
         self.previous_jitter_uv = [ndc[0] * 0.5, -ndc[1] * 0.5];
-        // Retain the raw matrix and its origin, not this frame's rebased
-        // history matrix, so successive shifts are never applied twice.
-        self.previous_view = ctx.camera_data.view;
-        self.previous_world_origin = Some(world_origin);
         self.previous_view_id = Some(view_id);
         Ok(())
     }
@@ -1403,6 +1321,15 @@ impl RenderPass for TsrPass {
             .flatten();
         let motion_bound = motion.is_some();
         let motion_view = motion.unwrap_or(&self.motion_fallback_view);
+        // The frame's reprojection of this view (the spine's history).
+        let reprojection = ctx
+            .registry
+            .buffer_binding(helio_frame_api::history::REPROJECTION)
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "TsrPass reads the frame's history reprojection; no pass published it".into(),
+                )
+            })?;
         // Queue writes land before this frame's commands run.
         ctx.write_buffer(
             &self.uniform_buf,
@@ -1421,6 +1348,7 @@ impl RenderPass for TsrPass {
             reactive_view.clone(),
             stochastic_view.clone(),
             motion_view.clone(),
+            reprojection.clone(),
         );
         if self.bind_group_key.as_ref() != Some(&key) {
             self.bind_groups = [1, 0].map(|read| {
@@ -1438,6 +1366,7 @@ impl RenderPass for TsrPass {
                     &self.linear_sampler,
                     ctx.camera,
                     &self.uniform_buf,
+                    reprojection,
                 ))
             });
             self.reconstruct_bind_group = Some(make_reconstruct_bg(

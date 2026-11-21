@@ -42,6 +42,7 @@ pub fn default_features() -> FeatureSet {
         .with(helio_pass_debug_overlay::DebugOverlayFeature)
         .with(helio_pass_selection_outline::SelectionOutlineFeature)
         .with(helio_pass_reference::ReferenceFeature)
+        .with(helio_pass_denoise::DenoiseFeature)
         .with(RendererNodes)
 }
 

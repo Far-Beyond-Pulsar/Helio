@@ -4,7 +4,9 @@
 //! [`SpineFeature`] registers one node per spine pass: scene prep (the
 //! background, the G-buffer's clear of last resort, the depth pyramid), the
 //! lighting model's unlit stand-in, TSR and the tone map, plus the host
-//! inputs they read. Everything else joins at the frame's slots and draw
+//! inputs they read. It publishes the frame's pixel history
+//! (`helio_frame_api::history`, `helio_pass_history`) for the graphs whose
+//! readers ask for it. Everything else joins at the frame's slots and draw
 //! phases (`helio_frame_api`): an object kind's batches, culling and drawers
 //! register from its own crates (a meshes plugin's object batch in
 //! `Slot::Prepare`, its culling around the pyramid in `Slot::Visibility`,
@@ -18,6 +20,7 @@
 //! their renderer config into it).
 
 use helio_feature_api::{pass_node, BuildEnv, Feature, FeatureRegistrar, ParamDesc};
+use helio_frame_api::history::{self, Need, RegisterHistory};
 use helio_frame_api::lighting::{model, LightingModel, RegisterLightingModel, Shading};
 use helio_frame_api::{color, host_input, FrameNode, Slot};
 use helio_pass_hiz::HiZBuildPass;
@@ -85,6 +88,7 @@ impl Feature for SpineFeature {
         for name in HOST_INPUTS {
             registrar.node(host_input(name));
         }
+        registrar.history(helio_pass_history::publisher());
         register_scene_prep(registrar);
         register_lighting(registrar);
         register_post(registrar);
@@ -164,6 +168,11 @@ fn register_post(registry: &mut FeatureRegistrar<'_>) {
             CATEGORY,
             "Temporal anti-aliasing and upscaling. The renderer's internal resolution follows the project's TSR setting.",
             |build| {
+                // TSR reprojects through the frame's history (its own
+                // history is at the output resolution).
+                if !history::request(build, Need::Reprojection)? {
+                    return Err("TSR needs the frame's history, which the spine publishes".into());
+                }
                 let (iw, ih) = build.env.internal_size();
                 let frame = build.env.frame;
                 let quality = tsr_quality(&build.text("quality"));

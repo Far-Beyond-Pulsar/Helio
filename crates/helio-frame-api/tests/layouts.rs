@@ -205,3 +205,40 @@ fn the_radiance_cache_rows_have_their_contract_sizes() {
     );
     validate(&source);
 }
+
+/// The history's reprojection uniform is the size its Rust mirror is, and
+/// the history and irradiance snippets validate with what they decode.
+#[test]
+fn the_history_and_denoise_contracts_have_their_sizes() {
+    use helio_frame_api::denoise::IRRADIANCE_SNIPPET;
+    use helio_frame_api::history::{HistoryReprojection, SNIPPET};
+    let source = helio_core::shader::resolve_with(
+        "//!use helio_prelude
+         //!use frame_history
+         //!use frame_denoise_irradiance
+         @group(0) @binding(0) var<uniform> history: HistoryReprojection;
+         @group(0) @binding(1) var pixels: texture_2d<f32>;
+         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
+         @compute @workgroup_size(8, 8)
+         fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+             let r = history_reproject(history, vec2<f32>(0.5), 0.25);
+             let p = history_pixel(textureLoad(pixels, vec2<i32>(id.xy), 0), id.xy);
+             let t = history_taps(p);
+             let at = history_tap(t, 3u);
+             var input: DenoiseIrradianceInput;
+             input = denoise_irradiance_add(input, vec3<f32>(1.0), vec3<f32>(0.0, 0.0, 1.0));
+             let l = denoise_irradiance_linear(input.signal0, input.signal1, vec3<f32>(0.0, 0.0, 1.0));
+             let e = denoise_irradiance(vec4<f32>(l.x, 0.0, 0.0, 0.0), vec4<f32>(l.yzw, 0.0), vec3<f32>(0.0, 1.0, 0.0))
+                 + denoise_irradiance_input(input.signal0, input.signal1, vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0));
+             let px = denoise_traced_pixel(id.xy / 4u, 7u, 4u, vec2<u32>(64u));
+             out[id.x] = vec4<f32>(r.xy + vec2<f32>(at) + vec2<f32>(px), history_taps_weight(t), e.x);
+         }
+",
+        &[SNIPPET, IRRADIANCE_SNIPPET],
+    );
+    validate(&source);
+    assert_eq!(
+        struct_size(&source, "HistoryReprojection"),
+        HistoryReprojection::BYTES
+    );
+}

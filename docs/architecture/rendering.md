@@ -2189,6 +2189,405 @@ takes a ray a pixel and a larger cache.
 
 ### As built
 
+#### The frame's history and the denoiser
+
+Step 2. Helio `render/r3-denoise`.
+
+**The history** (`helio_frame_api::history`, snippet `//!use frame_history`,
+`shaders/history.wgsl`; published by `helio-pass-history`, a spine-layer
+crate the spine registers through `RegisterHistory`).
+
+- **Asking.** A reader calls `history::request(build, Need)` while its graph
+  builds, before adding its own passes. The first reader of a graph adds the
+  publisher's passes at that point (after the G-buffer, which everything
+  that reads a history follows); a later one finds them. `Need::Reprojection`
+  adds `HistoryReprojection` (a 128-byte upload, no GPU work);
+  `Need::Pixels` adds `HistoryPixels` too. A graph whose nodes ask for
+  neither schedules neither: today the TSR node asks for the reprojection,
+  the denoiser for the pixels. Without a publisher (a host with no spine)
+  `request` answers `false`: TSR and the denoiser then refuse to build
+  (the denoiser reads its guides from the history). The api
+  crate holds no state: the publisher and what was added live in the build
+  environment's shared state, as the ray tracers do.
+- **Per view.** The passes key their state by the camera's view id
+  (`jitter_frame[3]`), as the renderer keys `prev_view_proj`: mono or each
+  XR eye; a capture is a graph of its own, so its own history. Eight views
+  at most (least recently rendered first out).
+- **`REPROJECTION`** (uniform, `HistoryReprojection`, 128 bytes): TSR's
+  former `Reprojection` moved here unchanged (UE's ClipToPrevClip composed
+  in f64 from `view_proj`, `prev_view_proj` and the previous view rebased
+  across an origin change by `history::rebase_previous_view`) plus `info.x`,
+  whether the view has a previous frame, and `info.y`, the frames it
+  rendered. `history_reproject(h, raster_uv, depth)` returns the previous
+  raster uv (jittered), in-front, and the previous view depth (0 sky; sky
+  reprojects as a direction). Rasters are as drawn, each frame with its own
+  jitter: a reader on another grid (TSR's unjittered output) removes the
+  previous jitter itself.
+- **`PIXELS`** (`Rgba16Float`, internal resolution): xy the surface's
+  previous position minus the pixel's centre in pixels; z a 4-bit mask of
+  the 2x2 previous texels around it that held the same surface; w the flags
+  (`MOVES`: from the G-buffer's velocity; `HAS_PREVIOUS`). `history_pixel`
+  decodes it, `history_taps` gives the bilinear footprint's weights with the
+  rejected taps zeroed (a reader renormalises by `history_taps_weight`, or
+  keeps less history where it is small). The previous position is the
+  velocity's where bit 0 of its w says the surface moves by itself, the
+  reprojection's elsewhere. A tap holds the same surface when its previous
+  view depth is the expected one within what the surface's slope moves
+  depth by over the tap's offset, and its normal faces the same side
+  (n . n' > 0: depth cannot tell the two sides of a leaf or a thin wall
+  apart; a stricter normal test rejects a normal-mapped surface's own
+  detail). The slope: the four neighbours, reprojected too (once a texel
+  into workgroup memory), give the local map from a step of one current
+  pixel to a previous-raster displacement and a previous-depth change; the
+  tap's offset solved in those steps times the larger of each axis's two
+  one-pixel changes bounds a plane's depth there (depth along a plane is
+  monotone and convex in screen position, so over part of a pixel on either
+  side it changes by at most that part of the larger side's change). The
+  neighbours are the same surface's where any are (a normal turning by more
+  than 60 degrees is a crease: the ground's depth at a wall's foot says
+  nothing of the wall's slope), and the larger side is held to twice the
+  smaller (along a plane the two differences stay within a factor of two
+  unless its horizon is within three pixels; a depth step before a parallel
+  surface is far more); one side alone counts twice (along a plane the
+  slope at the pixel exceeds the chord to a neighbour a step away by
+  1 + step / distance to the horizon). A surface that moves by itself uses its current
+  depth changes and may change its depth by 1/32 a frame (20 m/s at 10 m
+  and 60 Hz). Floor: 1 mm plus 2^-12 of the depth (an order above the f32
+  rounding of depth, positions and the reprojection). Earlier versions of
+  this test (the smaller side's slope alone, a slope per previous pixel
+  along each axis, one side at its own value) rejected valid taps on
+  grazing ground and at a wall's foot in the moving-camera test.
+- **`DEPTH`** and **`NORMAL`** (added with the denoiser's cost rework):
+  this frame's guides, the same textures the pixels pass already wrote for
+  the next frame, published under their own names, so every reader (the
+  denoiser's signals, any temporal pass) takes the view's one copy; next
+  frame the slots swap and they are the previous guides. The denoiser's own
+  packed guide copy (16 bytes a pixel a signal) went with this.
+- **`PREVIOUS_DEPTH`** (`R32Float` view depth, 0 sky) and
+  **`PREVIOUS_NORMAL`** (`Rgba16Float`: shading normal, roughness): last
+  frame's guides, ping-ponged by the pixels pass, valid only when the view's
+  previous frame wrote them (a frame the pass was gated out of, a resize or
+  a view's first frame invalidate them).
+
+TSR takes the reprojection from `REPROJECTION` (bound at 21 beside its own
+uniform, which lost the 112 bytes). Its `Reprojection`, `rebase_previous_view`
+and previous-view and origin tracking are deleted; its tests drive the
+history's reprojection pass beside TSR as the spine does. The light field
+and the terrain's shadow stages keep their histories until r5, as the
+design says.
+
+**The denoiser contract** (`helio_frame_api::denoise`, snippet
+`//!use frame_denoise_irradiance`, `shaders/denoise_irradiance.wgsl`).
+
+- A producer declares `Signal::irradiance(name, TraceBlock)` (`One`,
+  `Four`, `Sixteen`: one traced pixel each 1, 2x2 or 4x4 internal pixels),
+  optionally `.with_confidence()`; writes `<name>_signal0` and
+  `<name>_signal1` (`Rgba16Float`, `Signal::traced_size`, one texel a block)
+  every frame; then calls `denoise::filter(build, &signal)` after the passes
+  that write them, and reads what `Filtered` names: the denoiser's
+  `<name>_denoised0`/`1` at internal resolution, or with no denoiser
+  registered its own inputs (`block` says which), read with
+  `denoise_irradiance_input`.
+- The traced pixel: `traced_pixel(block, frame, side, size)` /
+  `denoise_traced_pixel`, frame the graph's frame number truncated: each
+  block visits its pixels in Bayer order, every pixel once in side^2
+  frames, the blocks of a side x side group out of phase.
+- Inputs: 0 = (luminance, Co, Cg of the irradiance estimate at the traced
+  normal, hit distance in metres; past the half float's range: none); 1 =
+  (the luminance-weighted arrival direction, confidence). A producer sums
+  its samples with `denoise_irradiance_add(input, L cos / pdf, dir)`. The
+  denoiser reads a sample as the linear irradiance `a + b . n` exact at the
+  traced normal, `b` = 3/4 of the luminance-weighted direction (over a
+  uniformly lit hemisphere the weighted mean direction is 2/3 of the normal
+  and the first-order harmonics' cosine convolution gives a gradient of
+  half the value along it), so first-order harmonics of luminance and two
+  chroma terms, and samples traced at other normals average.
+- Outputs: 0 = (a, Co/Y, Cg/Y, the luminance's standard error; -1: no light
+  yet), 1 = (b, 1/hit distance, harmonic mean). `denoise_irradiance(out0,
+  out1, n)` is the RGB irradiance at a pixel's own normal.
+- Registration: `RegisterDenoiser::denoiser(Denoiser { name, supports,
+  filter })` (a feature's prepare hook), `denoise::offer` for a host or test;
+  the first registered that supports a signal filters it. A later signal
+  kind (r4's radiance, r5's visibility) is a `SignalKind` variant with its
+  two tables and its snippet; `Signal`, `filter` and the registration stay.
+
+**A producer, as step 4's gather uses it.** In its node's build: `let
+signal = Signal::irradiance("pixel_indirect", TraceBlock::of_pixels(n))
+.with_confidence();` then its own passes (they write `signal.inputs` at
+`signal.traced_size(internal)`, `Rgba16Float`, every frame, and read the
+frame's history themselves with `history::request(build, Need::Pixels)?`
+before adding them: their reservoirs reproject through `PIXELS` with
+`//!use frame_history`, `history_pixel(texel, pixel)`, `history_taps`,
+`history_tap`, `history_taps_weight`), then `let filtered =
+denoise::filter(build, &signal)?;`, then the pass that resolves
+`filtered.textures` into `INDIRECT_DIFFUSE` (`//!use
+frame_denoise_irradiance`: `denoise_irradiance(out0, out1, normal)`, or
+`denoise_irradiance_input(in0, in1, traced_normal, normal)` with the traced
+pixel `denoise_traced_pixel(block, frame, side, size)` when
+`filtered.denoiser` is `None`). Traced texel `b` (one thread a texel of
+`traced_size`) traces internal pixel `denoise_traced_pixel(b, frame_num,
+side, internal size)`, `frame_num` the graph's frame number truncated; its
+sample is the sum of
+`denoise_irradiance_add(input, L * cos / pdf, dir)` over its samples, its
+hit distance the nearest hit's (or none), its confidence what the
+reservoir's revalidation says.
+
+**The denoiser** (`helio-pass-denoise`, feature `helio.denoise` in Helio's
+default features; feature layer, group `denoise`; frame contracts only: the
+signal and the frame's history, its guides included). One pass a signal,
+its stages dispatches under GPU scopes. The rule its cost follows: light is
+spread where the information is, once a traced sample; only what needs a
+pixel's own geometry (reprojecting its history, reconstructing by its own
+depth and normal) runs once a pixel.
+
+1. **Temporal** (`Denoise: temporal`, a pixel). A pixel's new sample is the
+   traced pixels of its four nearest blocks, each weighted by a tent one
+   block wide over its distance (a partition of unity in expectation: one
+   sample a block's area) times the geometry weight; their sum is how much
+   this frame says about the pixel. Its history is the bilinear read where
+   `PIXELS` says it was, from the taps that held the surface, renormalised.
+   The history's length times the producer's confidence times the
+   footprint's valid share, plus this frame's weight, capped at
+   `max_history`, sets the blend (weight over length).
+2. **Records** (`Denoise: records`, a block, for blocks of 4 and 16): the
+   temporal result at the block's representative pixel (its centre). Traced
+   at every pixel, the pixels are the records and this stage is skipped.
+3. **Spatial** (`Denoise: spatial`, a block), twice: an a-trous filter of
+   the linear B-spline's 3x3 over the records at steps of s and 2s blocks,
+   `s = sqrt(16 / length)` within 1 to 4: the footprint adds about s^2
+   records to a record's `length` frames, so every estimate rests on about
+   16 frames' worth (wide where history is short, which is the history fix
+   ReLAX runs as a separate pass; one block from 16 frames on). Each tap is
+   weighted by the luminance stop (the difference of two estimates, the
+   neighbour's at this record's normal, against 3 standard errors of the
+   difference, sqrt(sp^2 + sq^2), from the moments over the length; 3:
+   99.7% of noise differences; variance propagated as sum w^2 s^2 / (sum
+   w)^2) and the geometry weight. A record already within the half floats'
+   rounding is left as it is.
+4. **Reconstruction** (`Denoise: reconstruct`, a pixel): the filtered
+   records of the nearest 2x2 blocks (a tent of the block times the
+   geometry weight; the 4x4 around them where none holds the pixel's
+   surface, a feature narrower than a block), at the pixel's own normal,
+   combined with the pixel's own temporal result by inverse variance. The
+   records' variance includes the bias their difference from the pixel
+   shows beyond both noises, so a still view, whose rotating samples have
+   given each pixel its own converged value, keeps its per-pixel detail;
+   below `FIX_HISTORY` = 4 frames the pixel's own moments do not measure its
+   variance yet (SVGF's threshold) and it counts by its length. The result
+   is the output and the next frame's history: the spatial stage is
+   recurrent (its work accumulates over frames, as ReBLUR's post-blur
+   history does), while the moments stay the raw samples' (the temporal
+   result's moments are the next frame's history moments, swapped, not
+   copied), so the variance never sees the filter. The bias recurrence costs
+   is bounded the same way: the records only enter a pixel by as much as
+   their error and bias let them.
+
+The geometry weight, one function in every stage: irradiance caching's
+error bound (Ward, Rubinstein and Clear 1988; Tabellion and Lamorlette
+2004): a record holds over its harmonic mean hit distance (the error of
+using it at distance d is d / R), never below its pixel's diagonal, so
+near occluders keep contact detail and open ground filters wide; times a
+normal stop (a sample's irradiance holds the hemisphere about its traced
+normal; a normal tilted by t sees a share (1 - cos t)/2 of its
+cosine-weighted hemisphere never sampled; weight 0 at 1/8, t = 41 degrees)
+and a plane stop (two points of a surface whose normals differ by those 41
+degrees leave each other's tangent plane by tan(20.7) = 0.378 of their
+separation; a step by a whole one). Positions are view space from the
+frame's guide depth through the inverse projection (the raw depth
+recovered from the projection's z and w rows), so the frame origin's size
+never enters.
+
+What is stored and read back on the next frame (the temporal result, the
+records, the history) is rounded to half floats stochastically (up with
+the probability of the distance from the half below, so the stored mean is
+the value whatever rounding the hardware's conversion uses), one hash a
+texel, a byte of it a channel: this GPU's storage conversion truncates,
+which a running mean amplifies by its length (the first convergence run
+read 1.03% dark at 32 frames). The luminance's two moments are f32: with
+the mean taken from the half-float state, the half floats' rounding alone
+read as a 0.6% standard error on converged pixels.
+
+`DenoiseSettings::max_history` (host setting `denoise.max_history`) is 32:
+the running mean's noise falls as its square root (5.7 times; NRD's default
+is 30) and light that changes without the producer's confidence lags by it
+(half a second at 60 Hz). Memory a signal and view: 64 bytes a pixel
+(history 16, the outputs; moments 2 x 16; the temporal result 16) and 20
+bytes a record in two sets (three for blocks of 4 and 16): 216 MB at
+1920x1080 traced at every pixel, 164 MB at a quarter, 140 MB at a
+sixteenth (the first version: 166 MB at any block).
+
+**What the per-block design replaced, and what it loses.** The first version
+ran a 5x5 fix and four 3x3 a-trous iterations at steps of 1, 2, 4 and 8
+blocks at every internal pixel: at a sixteenth it filtered the same
+block-spaced lattice sixteen times a block, its cost following pixels while
+its information follows traced samples, and it kept a packed depth and
+normal copy (16 bytes a pixel a signal) beside the history's own. Against
+it the new path loses spatial reach a frame (two iterations, three blocks at
+the long-history step, against four reaching fifteen) and makes it up over
+frames through the recurrence; on the tests' noisy wall the converged RMS
+error at a sixteenth rose from 0.0119 to 0.0240 (bound 0.1016) and at a
+quarter is 0.0089; on the bumpy surface and behind the moving box (the
+tests that would show lost per-pixel detail or leaking light) nothing
+changed: worst 0.0008 and 0.0000.
+
+What it costs (RTX 3060, 1920x1080 internal, measured against the first
+version under **Verified**): 1.59-1.76 ms at a sixteenth (was 4.20-4.33),
+2.87-3.38 ms at a quarter (was 4.31-5.14; about 1.9-2.3 ms once the runs'
+lower clocks are taken out), and 2.5 ms traced at every pixel in the one
+undisturbed run (was 4.7). The spatial stage, which was three quarters of
+the first version's cost, now follows the traced samples (0.33-0.37 ms at a
+sixteenth against 3.05-3.18); what is left follows pixels: the temporal
+stage and the reconstruction, each one pixel's own taps.
+
+**Against NRD, SVGF and UE.** SVGF (Schied et al. 2017) is the same three
+stages on colour: temporal accumulation with moments, a 7x7 spatial
+variance estimate where history is short, five a-trous iterations stopped by
+luminance (sigma_l = 4 of one sample's deviation), depth and normal (power
+128); A-SVGF (Schied et al. 2018) adds temporal gradients from re-shaded
+samples to shorten history where light changes. ReLAX (NRD) is SVGF's
+stages with a history fix of the disoccluded pixels, an anti-firefly pass and
+the input's confidence (`IN_DIFF_CONFIDENCE`) scaling accumulated frames;
+ReBLUR (NRD) is a blur whose radius follows the hit distance and the
+accumulated frames, with the same confidence input; both have an SH mode
+(luminance first-order harmonics plus YCoCg chroma, resolved by the pixel's
+normal) for signals traced below full resolution. UE5's Lumen screen-probe
+gather filters in probe space and then temporally, and its denoisers
+(`ScreenSpaceDenoise`) are per signal and private. Ours: the producer's
+confidence plays A-SVGF's gradients and NRD's confidence input (the
+producer knows, from its reservoirs' revalidation, more than a gradient a
+denoiser re-traces can tell, and it costs the denoiser nothing); the
+history fix is ReBLUR's (a spatial footprint that widens as the history
+shortens) rather than ReLAX's separate pass; the spatial stage is recurrent
+as ReBLUR's is, with the variance kept on the unfiltered samples as SVGF
+keeps it; the luminance stop is SVGF's, on the standard error
+of the difference rather than one sample's deviation (so it relaxes as
+history grows); the hit distance enters as irradiance caching's record
+radius, which is ReBLUR's hit-distance radius with a bound it derives from;
+the SH representation is NRD's, made exact at each sample's traced normal so
+samples from neighbours average. History is judged once, by the frame's
+history, for every temporal pass. What it lacks against NRD: an
+anti-firefly pass and history clamping on fast lights (the producer's
+confidence is the answer here; a producer without one lags by max_history),
+and a separate specular path (r4's addition).
+
+Their costs, as published (NRD v4.18.0's README, "Performance": RTX 4080 at
+2560x1440 native, a diffuse and a specular signal together): ReBLUR 2.55 ms
+(3.40 in its SH mode), ReLAX 3.25 ms (4.80 SH), SIGMA's shadow 0.40 ms. NRD
+publishes no diffuse-only or below-full-resolution figure, and an RTX 4080 is
+about 2.5 to 3 times an RTX 3060, so the comparison is of order only:
+ReBLUR's SH mode spends 0.92 ns a pixel for two signals on a 4080, about
+2.5 ns on a 3060 by that ratio, 5.2 ms at 1920x1080 (half of it, roughly,
+one signal's); ours is under **Verified**.
+
+**Verified** (RTX 3060):
+
+- **Where a pixel was** (`helio-pass-history` `tests/pixels_gpu.rs`: an
+  analytic scene ray-cast on the CPU in f64 into the G-buffer, cameras
+  uploaded as the renderer does, 96x64): every pixel's previous position
+  against the f64 projection through the previous camera, and every 2x2
+  that lies on one quad found whole (all four taps) or, where it was hidden,
+  found empty. Worst position error: still camera (jitter moving) 0.0005
+  px, moving camera (translated and turned) 0.017 px, an object moving by
+  itself (its motion vectors) 0.0004 px with 85 uncovered pixels finding no
+  tap, a frame-origin jump of (1024, 0, -2048) m 6,371 km from the world's
+  origin 0.0023 px; bound 0.02 px (a half-float offset's step under 16 px
+  of motion plus f32 evaluation). A view's first frame has no history.
+- **The denoiser** (`helio-pass-denoise` `tests/denoise_gpu.rs`, the same
+  fixture, 160x112, the tests the producer; every test at blocks of 1, 4
+  and 16, bounds unchanged by the per-block rework): a signal with 50%
+  relative noise a sample over a lit wall (a gradient and a normal term)
+  converges to the field with a relative RMS error of 0.0056 / 0.0089 /
+  0.0240 at blocks of 1 / 4 / 16 (the first version: 0.0055 / - / 0.0119;
+  bound 0.1016: sigma / sqrt(32) plus 15%; the bound is the temporal mean's
+  alone) and a mean of +0.0000 / +0.0018 / +0.0028 (first version +0.0001 /
+  - / +0.0019; bound 0.0102); a wall behind a box that moves by itself for
+  three frames, then a camera that pans and turns for four: worst error
+  0.0000 at every block (first version 0.0005; bound 0.02); confidence 0
+  after a change: 2.0000 at every block for a field stepped from 1 to 2 and
+  a history of length 1, against 1.0312 without a confidence (1 + 1/32);
+  over a bumpy surface: worst error 0.0008 at each pixel's own normal at
+  every block, where one value a block would err by 0.165; two runs, one
+  moving the frame's origin mid-run: worst difference 0.0009, mean 0.00001
+  at every block (bound five half-float steps, 0.0024). Readiness is the
+  history's length read back under a wall-clock guard. `pixels_gpu` (5
+  tests, with the history now publishing this frame's guides) passes.
+- **TSR**: its suite (14 tests, the reprojection and origin cases driven
+  through the history's pass) passes; its image on real frames: below.
+- **Cost** at 1920x1080 internal, pipelined (two frames in flight), the
+  graph's GPU timings, medians of 200 frames after 100, a signal whose noise
+  is redrawn every frame (four half-float draws uploaded in turn); the first
+  version's test exe kept and run interleaved with the new one under the GPU
+  lock (base, new, base, new; each run all three blocks). Clocks sampled
+  through each run: idle-low (210-495 MHz core) in most samples and 1777-1935
+  MHz in 2 to 3 of them for every run alike; the runs at a quarter came out
+  at lower clocks for the new build (`HistoryPixels`, the same code in both,
+  0.75 and 0.84 ms against 0.51 and 0.57), so its stages there read about
+  1.5 times high. Medians, run 1 / run 2, ms:
+
+  | stage | first version, 1/16 | new, 1/16 | first version, 1/4 | new, 1/4 | scales with (new) |
+  |---|---|---|---|---|---|
+  | HistoryReprojection | 0.002 / 0.002 | 0.002 / 0.002 | 0.003 / 0.002 | 0.003 / 0.003 | views |
+  | HistoryPixels | 0.51 / 0.51 | 0.53 / 0.51 | 0.51 / 0.57 | 0.76 / 0.85 | internal pixels |
+  | Denoise: guides | 0.19 / 0.20 | deleted | 0.19 / 0.20 | deleted | |
+  | Denoise: temporal | 0.68 / 0.68 | 0.79 / 0.72 | 0.72 / 0.85 | 1.13 / 1.38 | internal pixels (4 sample, 4 history taps; writes the moments) |
+  | Denoise: fix | 0.28 / 0.28 | deleted | 0.30 / 0.30 | deleted | |
+  | Denoise: records | | 0.063 / 0.063 | | 0.20 / 0.20 | traced samples |
+  | Denoise: spatial | 3.18 / 3.05 | 0.37 / 0.33 | 3.10 / 3.78 | 0.72 / 0.88 | traced samples x 2 iterations x 9 taps |
+  | Denoise: reconstruct | | 0.52 / 0.47 | | 0.75 / 0.90 | internal pixels (4 record taps) |
+  | Denoise in all | 4.33 / 4.20 | 1.76 / 1.59 | 4.31 / 5.14 | 2.87 / 3.38 | |
+
+  Traced at every pixel the test uploads 16 MB of signal a frame and three
+  of the four runs were disturbed (`HistoryPixels` at 5.3-5.5 ms); the
+  undisturbed tenth percentiles: the first version 4.70 ms (temporal 0.63,
+  guides 0.19, fix 0.30, spatial 3.58), the new one 2.55 ms (temporal 0.57,
+  spatial 1.58, reconstruct 0.39). Convergence, old against new: above
+  (relative RMS 0.0055 / 0.0119 at blocks of 1 / 16 before, 0.0056 / 0.0089
+  / 0.0240 at 1 / 4 / 16 now, every bound unchanged). Nothing depends on the
+  scene.
+- **Gates**: Helio's layer gate (0 violations), `cargo test -p helio-core
+  --test wgsl_validation`, `helio-frame-api` `tests/layouts.rs` (the
+  reprojection's 128 bytes against WGSL, every new snippet function
+  validated), the crates' unit tests, clippy (no new warnings), per-package
+  fmt, Pulsar `cargo test -p one_owner` (its layout heuristic flagged
+  `HistoryReprojection`'s first fields as the portals' `GpuPortalStage`; the
+  struct leads with its `info` header instead).
+
+**TSR on the history's reprojection, real frames** (RTX 3060; r2's merged
+builds `C:/t/int2/voxel_craft_r2_merged.exe` and `voxel_flight_r2_merged.exe`
+against this branch's; a warm-up run of the new exe first; mean |difference|
+of the images, 0 to 1):
+
+| | same build | this against r2 | luminance |
+|---|---|---|---|
+| voxel_craft, 4 poses, 8-frame bursts, no clouds | r2 twice: 0.00004-0.00056; this twice: 0.0006-0.0015 (p99 0.013) | 0.0006-0.0018 (p99 0.016) | -0.06% to +0.01% |
+| Earth ground hold, 1600x900 | this twice: 0.00075 | 0.00088-0.00108 (p99 0.0078) | 0.3575-0.3576 against 0.3578 |
+
+The new build's own two voxel_craft runs differ as much from each other as
+from r2: its terrain kernels compiled cold on both runs (49.5 and 65.7 s for
+the generation and draw pipelines, shots at frames 6093 and 7060), where
+r2's binary found them in the driver's cache (shots at frame 1755), and the
+game's clock follows real frame time, so the bursts are taken at different
+times of day. The reprojection itself is TSR's former composition, moved;
+TSR's suite, which checks the uniform's values, the origin cases and the
+resolve's image, passes. A second round (r2 and this alternated again) was
+stopped while the GPU queue was held for hours by other work.
+
+**Open**:
+
+- No producer yet: the denoiser runs on real frames from step 4. The
+  reference path tracer's one-frame first-bounce estimate as a real signal
+  (against its converged image, the cathedral) was not built: it needs the
+  reference to export each path's first-bounce direction and incident
+  radiance, which is step 4's producer's own data path; step 4 builds it
+  with its producer.
+- The previous position is a half float offset: 0.5 px steps past 1024 px
+  of motion a frame (a fast turn), enough for a filter, not for TSR (which
+  keeps its own).
+- 80 bytes a pixel a signal: the guides could be shared by every signal of
+  a view (one texture a view).
+- Captures build the denoiser into their graphs like the primary view when
+  a producer is in them; nothing does today.
+
 #### The radiance cache
 
 Helio `helio_frame_api::rays::radiance_cache` (the contract, beside the ray
