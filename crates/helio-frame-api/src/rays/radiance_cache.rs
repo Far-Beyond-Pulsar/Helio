@@ -81,6 +81,19 @@ pub const BUCKET: u32 = 16;
 pub const ANCESTOR: u32 = 3;
 /// One mark in this many of a used cell moves its point to the marking hit.
 pub const RESEAT: u32 = 8;
+/// The new cells' queue holds a place for every this many slots
+/// (`RADIANCE_CACHE_QUEUE_SHARE`): it follows the hash's slots in
+/// [`SLOTS`]'s buffer, its count first.
+pub const QUEUE_SHARE: u32 = 4;
+/// The directions along a cell's surface its clear distances are kept in
+/// (`RADIANCE_CACHE_WAYS`).
+pub const WAYS: u32 = 8;
+
+/// Slot rows [`SLOTS`]'s buffer holds for a cache of `slots` slots: the
+/// hash's, the new cells' queue's count and its places.
+pub fn slot_rows(slots: u32) -> u64 {
+    u64::from(slots) + 1 + u64::from(slots / QUEUE_SHARE)
+}
 
 /// The width (m) of level `level`'s cells.
 pub fn cell_size(level: u32) -> f32 {
@@ -270,7 +283,7 @@ impl RadianceCacheKey {
     }
 }
 
-/// `RadianceCacheEntry` (see the WGSL), 64 bytes.
+/// `RadianceCacheEntry` (see the WGSL), 96 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Pod, Zeroable)]
 pub struct RadianceCacheEntry {
@@ -285,8 +298,18 @@ pub struct RadianceCacheEntry {
     pub history: u32,
     /// Irradiance from the lights (W / m^2).
     pub direct: [f32; 3],
-    /// Irradiance from everything else.
+    /// Irradiance from what the cell's rays meet as they meet it: what
+    /// surfaces emit and reflect of the lights' light, the sky.
     pub indirect: [f32; 3],
+    /// Irradiance from the light those surfaces reflect of the cache's own
+    /// (the later bounces); a read's indirect light is `indirect + bounced`.
+    pub bounced: [f32; 3],
+    /// Updates folded into `bounced` (bits 0..8).
+    pub bounced_history: u32,
+    /// How far from the cell's point, along its surface, its rays found
+    /// nothing in the way, in [`WAYS`] directions (f16 pairs, metres;
+    /// `radiance_cache_holds`: a reader past that reads a finer cell).
+    pub clear: [u32; 4],
 }
 
 impl RadianceCacheEntry {
@@ -351,12 +374,28 @@ pub fn stand_in(device: &wgpu::Device) -> StandIn {
 mod tests {
     use super::*;
 
+    /// The WGSL's copies of the contract's constants.
+    #[test]
+    fn the_snippet_s_constants_are_the_contract_s() {
+        for (name, value) in [
+            ("RADIANCE_CACHE_LEVELS", LEVELS),
+            ("RADIANCE_CACHE_BUCKET", BUCKET),
+            ("RADIANCE_CACHE_ANCESTOR", ANCESTOR),
+            ("RADIANCE_CACHE_RESEAT", RESEAT),
+            ("RADIANCE_CACHE_QUEUE_SHARE", QUEUE_SHARE),
+            ("RADIANCE_CACHE_WAYS", WAYS),
+        ] {
+            let line = format!("const {name}: u32 = {value}u;");
+            assert!(SNIPPET.source.contains(&line), "{line}");
+        }
+    }
+
     #[test]
     fn rows_have_their_contract_sizes() {
         assert_eq!(RadianceCacheFrame::BYTES, 64);
         assert_eq!(RadianceCacheSlot::BYTES, 8);
         assert_eq!(std::mem::size_of::<RadianceCacheKey>(), 28);
-        assert_eq!(RadianceCacheEntry::BYTES, 64);
+        assert_eq!(RadianceCacheEntry::BYTES, 96);
     }
 
     #[test]

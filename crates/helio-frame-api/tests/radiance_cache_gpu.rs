@@ -176,8 +176,9 @@ impl Gpu {
         let slots = u64::from(frame.slots().max(1));
         let cache = Cache {
             frame: self.buffer(RadianceCacheFrame::BYTES, wgpu::BufferUsages::UNIFORM),
+            // The hash's slots and the new cells' queue after them.
             slots: self.buffer(
-                slots * RadianceCacheSlot::BYTES,
+                radiance_cache::slot_rows(frame.slots()).max(1) * RadianceCacheSlot::BYTES,
                 wgpu::BufferUsages::STORAGE,
             ),
             entries: self.buffer(
@@ -397,7 +398,18 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
     let slots: Vec<RadianceCacheSlot> = bytemuck::cast_slice(&gpu.read(&cache.slots)).to_vec();
     let mut entries: Vec<RadianceCacheEntry> =
         bytemuck::cast_slice(&gpu.read(&cache.entries)).to_vec();
-    let occupied: Vec<usize> = (0..slots.len()).filter(|&s| slots[s].state != 0).collect();
+    let n = frame.slots() as usize;
+    let occupied: Vec<usize> = (0..n).filter(|&s| slots[s].state != 0).collect();
+    // The new cells' queue after the slots: each cell claimed once, a place
+    // each; a place whose mark claimed nothing holds none.
+    let queued = slots[n].state as usize;
+    let mut placed: Vec<usize> = slots[n + 1..n + 1 + queued]
+        .iter()
+        .filter(|q| q.state != u32::MAX)
+        .map(|q| q.state as usize)
+        .collect();
+    placed.sort_unstable();
+    assert_eq!(placed, occupied, "the queue holds the cells claimed");
     let mut want = std::collections::HashSet::new();
     for q in &floor {
         let p = [q.p[0], q.p[1], q.p[2]];
@@ -432,7 +444,8 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
     let out = gpu.run(&cache, 2, &floor, groups);
     assert!(out.chunks(12).take(floor.len()).all(|w| w[0] == 0));
     // A publisher's values: the fine cells' direct 1 + their slot, the
-    // ancestors' indirect 7; the first half of the fine cells only.
+    // ancestors' indirect 6.5 and bounced 0.5 (a read's indirect light is
+    // their sum, 7); the first half of the fine cells only.
     let fine_level = frame.level([0.0, -1.0, 0.0], 0.02);
     let mut fine: Vec<usize> = occupied
         .iter()
@@ -447,7 +460,11 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
         }
         entries[s].history = (entries[s].history & 0xffff_0000) | 0x0101;
         entries[s].direct = [1.0 + s as f32, 0.0, 0.0];
-        entries[s].indirect = [0.0, 7.0, 0.0];
+        entries[s].indirect = [0.0, 6.5, 0.0];
+        entries[s].bounced = [0.0, 0.5, 0.0];
+        // Its rays found every way open (f16 65504, the snippet's
+        // RADIANCE_CACHE_FAR, in each half).
+        entries[s].clear = [0x7bff_7bff; 4];
     }
     gpu.queue
         .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&entries));
@@ -473,6 +490,61 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
             assert_eq!(f32::from_bits(w[3]), 7.0);
         }
     }
+    // Where a cell's light holds: a point a third of a cell from a lit fine
+    // cell's point reads it while its rays found its ways open, and the
+    // ancestor once they found something a millimetre away every way (an
+    // occluder between): the cell's light is its point's side's.
+    let (i, q) = floor
+        .iter()
+        .enumerate()
+        .find(|(_, q)| {
+            let key = frame.key([q.p[0], q.p[1], q.p[2]], [0.0, 1.0, 0.0], fine_level, 1);
+            occupied
+                .iter()
+                .any(|&s| entries[s].key == key && lit.contains(&s))
+        })
+        .unwrap();
+    let size = radiance_cache::cell_size(fine_level);
+    let point = entries[occupied
+        .iter()
+        .copied()
+        .find(|&s| {
+            entries[s].key == frame.key([q.p[0], q.p[1], q.p[2]], [0.0, 1.0, 0.0], fine_level, 1)
+        })
+        .unwrap()]
+    .point_in_cell();
+    // A third of a cell along x, staying in the cell.
+    let dx = if point[0] < 0.5 {
+        size / 3.0
+    } else {
+        -size / 3.0
+    };
+    let aside = [Query {
+        p: [q.p[0] + dx, q.p[1], q.p[2], q.p[3]],
+        n: q.n,
+    }];
+    let out = gpu.run(&cache, 2, &aside, 1);
+    assert_eq!((out[0], out[1]), (1, fine_level), "query {i}: open ways");
+    let s = occupied
+        .iter()
+        .copied()
+        .find(|&s| {
+            entries[s].key == frame.key([q.p[0], q.p[1], q.p[2]], [0.0, 1.0, 0.0], fine_level, 1)
+        })
+        .unwrap();
+    // f16 0.001 (0x1419) in each half.
+    entries[s].clear = [0x1419_1419; 4];
+    gpu.queue
+        .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&entries));
+    let out = gpu.run(&cache, 2, &aside, 1);
+    assert_eq!(
+        (out[0], out[1], f32::from_bits(out[3])),
+        (1, fine_level + ANCESTOR, 7.0),
+        "query {i}: blocked ways"
+    );
+    entries[s].clear = [0x7bff_7bff; 4];
+    gpu.queue
+        .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&entries));
     // The other side, another space: other cells, nothing found.
     let flipped: Vec<Query> = floor
         .iter()
