@@ -2188,3 +2188,345 @@ takes a ray a pixel and a larger cache.
    and its probe walk (carried; cost, not image).
 
 ### As built
+
+#### The radiance cache
+
+Helio `helio_frame_api::rays::radiance_cache` (the contract, beside the ray
+streams and the light samples), the GI plugin's `cache.rs` and
+`gi_cache.wgsl` (the publisher), GI's light passes (the probes' reader and
+the cache's own lighting). Branch `render/r3-cache`.
+
+**The contract.** Keys and rows (Rust and WGSL, layout tests
+`tests/layouts.rs`; the WGSL against its Rust mirror on a GPU,
+`tests/radiance_cache_gpu.rs`):
+
+| Row | Bytes | Fields |
+|---|---|---|
+| `RadianceCacheFrame` (`radiance_cache_frame`, a uniform) | 64 | the frame's origin in whole 1024 m (64-bit two's complement an axis), the slots (0: no cache), the frame's number, the origin's rest below 1024 m (0 for an engine frame), the eye angle, the eye in the frame's space |
+| `RadianceCacheSlot` (`radiance_cache_slots`) | 8 | `state` (the key's checksum, 0 empty), `used` (the frame a reader last marked it) |
+| `RadianceCacheKey` | 28 | `tag` (level 5 bits, side 3, space 9), the world cell: x, y, z, 64 bits each |
+| `RadianceCacheEntry` (`radiance_cache_entries`, a slot each) | 64 | key, point (15 bits an axis in the cell: its top 10:10:10 here, its low 5:5:5 in `history` from bit 16), normal (`scene_pack_unit`), history (bits 0..16: updates folded, direct 8 bits, indirect 8; 0 no value), direct irradiance (3 f32, W/m^2), indirect irradiance (3 f32) |
+
+`//!use frame_radiance_cache` (with `frame_ray_stream`), for a shader that
+binds the three under those names:
+
+- `radiance_cache_read(p, n, footprint, space, reach)`: what the cache
+  holds for a hit at frame point `p`, the face's normal turned toward the
+  ray `n`, the ray's footprint there and its space: `direct`, `indirect`,
+  the `level` it came from, the cell's `history` (updates folded a part:
+  how long its value has held still, a reader's confidence), `found`
+  (false: nothing at the hit's level or up to `reach` levels coarser).
+- `radiance_cache_mark(p, n, footprint, space)`: the hit's cell in use this
+  frame, claimed with the hit's point and normal where no slot holds it,
+  and the cell `ANCESTOR` (3) levels coarser.
+- For a publisher: `radiance_cache_key`, `_find`, `_level`, `_size`,
+  `_cells`, `_entry_point`, `_side`. Rust: `RadianceCacheFrame::{new, level,
+  key, origin_cell}`, `RadianceCacheKey::{new, cell, bucket, checksum}`,
+  `cell_size`, `stand_in(device)` (a frame without slots: a read finds
+  nothing, a mark does nothing).
+
+The api crate holds no `static`, `thread_local!` or `inventory::collect!`.
+
+**The hash and its levels.**
+
+- **A cell**: level `l` is `2^(l - 6)` m wide, 17 levels from 1/64 m to
+  1024 m. The coarsest is the frame origin's step, so the origin is a whole
+  number of cells at every level: the cell of a frame point is the origin's
+  cell (whole 1024 m shifted by `16 - l` bits, 64-bit) plus
+  `floor((p + rest) / size)`, an origin change moves no cell, and a point an
+  Earth's radius or 10^12 m from the world's zero keys as one near it (its
+  high words carry). An origin off the 1024 m step (a test's, a host's own)
+  keeps world cells too, its rest carried in the frame. The finest: a sixth
+  of the 10 cm voxel, below what any reader's indirect light resolves.
+- **The level** of a read: `round(log2(max(footprint, a * d)))`, the
+  coarser of the ray's footprint at the hit and the eye angle `a` at the
+  hit's distance `d` from the eye. The eye angle is the publisher's, from
+  its capacity: cells at least `a d` wide hold at most `4 pi / a^2` cells a
+  level for surfaces all round the eye, over 17 levels half the slots: `a
+  = sqrt(4 pi 17 / (slots / 2))`, 0.040 rad at the default 2^18 slots (a
+  10 cm cell 2.5 m away, a metre 25 m away). A probe's ray (0.443 a metre
+  of footprint) reads cells about half its distance wide; a pixel's ray
+  near the eye the eye angle's.
+- **The side**: the dominant axis of the face's normal turned toward the
+  ray, and its sign. A thin wall's two sides are two keys whatever the
+  cell's size; a floor and a wall in one cell are two cells.
+- **The space**: the ray's (`SceneRay::space`), so two coordinate spaces
+  at one place are two cells, and a cell's rays travel in its space.
+- **The hash**: buckets of 16 slots (the bucket a 32-bit hash of the key
+  names, a second hash its checksum); a key sits in its bucket's first slot
+  that holds it or is empty. A read compares the checksum and then the
+  whole key, so a checksum collision costs a miss, never a wrong value. A
+  claim is a compare-exchange of the slot's state; a claim racing another
+  of the same key finds its checksum and marks; one racing a different key
+  moves on. A full bucket keeps a cell out (a read answers from a coarser
+  one): at half load, 0.4% of keys (Poisson's tail past 16 at 8 a bucket).
+- **A cell's point**: the first marking hit's, 15 bits an axis in the cell
+  (a 1024 m cell's within 3 cm, where 10 bits put it up to a metre off its
+  hit, outside a room near its corner); one mark in
+  8 of a cell in use moves it to the marking hit (a uniform pick among the
+  hits that read it, over time), so a coarse cell's light is gathered over
+  the places its readers meet it rather than at one of them. Its rays start
+  off it along its normal by f32's rounding there and by the point's own
+  precision (`sqrt(3) / 65536` of the cell).
+- **A mark's ancestor**: the cell 3 levels coarser is marked with it, so a
+  new fine cell's read answers from a cell 8 times wider while it has no
+  value of its own (1/64th as many cells of a surface), for a reader whose
+  reach allows it.
+
+**The update** (GI's node, after the probes' rays; costs below):
+
+1. `RadianceCache`: `cache_scan` over the slots (each cell's frames since
+   it was marked, from its slot, and since it was lit, from its life: the
+   publisher's 32 bytes a slot beside the contract's rows, the frame it was
+   lit plus one and the fold's change tests; the two passes over the slots
+   read a slot's 8 bytes and its life's first 4, never an entry's line), into histograms of
+   powers of two),
+   `cache_plan` (one invocation: what goes, what is lit), `cache_select`
+   over the slots (evicts, lists), `cache_rays` (4 rays a listed cell into
+   GI's stream after the probes', cosine distributed about its normal in a
+   2x2 stratified set (the frame BSDF's frame and cosine direction), from no
+   width spreading by `sqrt(2 pi / 128)`, the share of the hemisphere one
+   ray of the cell's history stands for), `cache_header` (the stream's
+   count, the statistics). A first version started the rays as wide as the
+   cell (the stream contract's convention for a ray leaving a hit): their
+   hits then keyed cells as coarse as the cell, and a floor's cell under a
+   5 cm slab took the slab's lit top into it (a 1 m cell under it read 2.5%
+   of the top's light); from no width their hits key cells at the detail the
+   cell's estimate resolves, or the eye angle's.
+   - Evicted: a cell no reader marked for 128 frames (twice the longest a
+     probe of GI's coarser levels goes between updates, 41 frames, a power
+     of two above), and past half the slots the least recently used, whole
+     histogram bins, never a cell marked this frame or the last.
+   - Lit: `rays / 4` cells at most, never-lit cells first, then by how long
+     ago they were lit.
+2. The stream's tracers, once for the probes' rays and the cache's: one
+   stream, so the per-stream fixed costs section 4 measured (a dispatch a
+   volume on the terrain, a binned material pass a program on meshes) are
+   paid once. Not in runs: a probe's rays share no origin (section 3), and a
+   stream's runs are the whole stream's.
+3. `GILight`: each cache ray's hit lit by the cache's indirect part there
+   (for the bounces after), its emission, the light through it; the sky on a
+   miss (`sky_radiance`, the one call GI's rays make); a light query at the
+   hit and one at the cell's point. The probes' rays are lit here too
+   (below). Every hit marks its cell.
+4. The light samplers, `GIShadow` (the hit's sample off its surface, the
+   cell's as irradiance there, a shadow ray each, two a cache ray at most,
+   packed), the shadow stream's tracers.
+5. `RadianceCacheFold`, a lane a listed cell: the indirect part `pi` times
+   its rays' mean radiance, the direct part its light samples' mean, each
+   the plain mean of its updates since it last restarted, 32 at most. A
+   change test restarts a part at its **next** update: a fast mean (4
+   updates) and a slow one (the history's) of each update's luminance,
+   clamped from above at the fast mean plus 3 mean absolute deviations, more
+   than 1.2 deviations apart (3 standard deviations of their difference:
+   `sqrt(1/7 + 1/63 - 2c)` of an update's, `c` the two exponential means'
+   covariance) and 5% of the slow mean, once 8 updates measured them. A
+   first version shortened the history on the samples themselves (a jump: an
+   update far off the fast mean restarted the part at it; a lag: the value
+   moved to the fast mean, ReBLUR's anti-lag, Zhdan 2021). Weights chosen by
+   the samples they weigh bias the mean: a history restarted at a bright
+   update keeps it and weighs it more. On the heavy-tailed updates of one
+   light sample among the cathedral's many lamps that put its indirect light
+   at twice the reference (simulated: x2.0 where 2% of samples are 50 times
+   the rest). The test now sees an update only through the clamp and decides
+   only about updates it has not seen: simulated within 1.2% of the plain
+   mean on Gaussian, shadowed (Bernoulli) and those heavy-tailed updates, a
+   light switched off restarting its parts within about 3 updates. On a
+   frame a tracer answered short, or no ray met anything, the cells hold, as
+   the probes do.
+
+Settings (`GiSettings`, the `gi` host group): `radiance_cache_slots` (a
+power of two, 2^12 to 2^24; 2^18 by default) and `radiance_cache_rays`
+(1024 up; 32,768 a frame by default: at the load the eviction keeps, half
+the default slots' cells, every cell lit at least once in the time the probes
+that read it take to come round, the finest levels' 21 frames: `2^17 * 4 /
+21` = 24,966 rays, the power of two above). Statistics:
+`rays.radiance_cache`, `radiance_cache.cells` (in use), `.new`, `.evicted`,
+`.lit`; GI's stream counts both kinds of ray under `rays.gi`. The debug
+view `Radiance Cache` (39, GI's resolve): the cell a pixel-wide read finds
+at each pixel, its irradiance / pi, cell edges darker, dark purple where
+none holds a value.
+
+**The probes read the cache.** A probe ray's hit is `albedo * (direct +
+indirect) / pi + emission`, plus its transmission share of the far side's
+cell (read with the face turned away), at the probe ray's footprint (0.443 a
+metre), with a reach of one level (a cell twice as wide). GI's light queries
+and shadow rays a probe hit are gone: the light batch and the shadow stream
+are the cache's alone (65,536 rows each at most against 174,080 before).
+Where the cache has no value within that reach (a cell new this frame or the
+last), the probes' own irradiance at the hit stands in, as a bounce did
+before; a probe more than 1/32 of whose reflecting hits had none holds that
+update (its irradiance off by at most that share otherwise) rather than
+learn a world lit by its own previous state. Why the reach is one level: a
+first version let probes read a new cell's ancestor (8 times wider); their
+first updates took it into their histories (alpha 1), and the ancestor of a
+floor cell by a thin wall spans both sides: the VG suite's solid cut-out
+card let 11% of the open room's light into the dark half (`far < 0.001`
+before), a black roof's shade under it 0.112 of the open ground against a
+true 0.021. Read one level up, a probe whose cells are new holds an update
+cycle instead (about 20 frames on the finest levels); at a scene's start
+GI's probes come in after their first cycle. The cache rays' hits read with
+the same reach.
+
+**Against the alternatives** (section 5, "How others do it"):
+
+- **SHaRC** (NVIDIA RTXGI 2.x): a spatial hash of radiance keyed by a
+  quantised position at a level from the distance to the camera, filled by
+  a few percent of the pixels' paths and read where paths end. Its key is
+  a packed position of bounded range (positions far apart alias), cells
+  hold radiance and are lit only by the camera's paths, so what the camera
+  does not see goes stale. Here cells are exact 64-bit world cells (an
+  origin change and an Earth's far side key alike), sides and spaces are
+  keys, and the cache lights its cells with its own budget wherever readers
+  marked them (probes off screen, reflections).
+- **AMD GI-1.0's hash grid cache**: the closest design (cells at hit
+  points, lit by rays of their own, read by screen probes); it serves one
+  world space and keys cells by position and distance from the camera.
+- **Kajiya's irradiance cache**: entries in camera-centred cascades, each
+  tracing its own rays, read by ReSTIR GI; bounded to the cascades' reach,
+  entries on a grid about the camera rather than at surfaces' sides.
+- **Lumen**: the surface cache is cards a mesh, cheap to read and exact in
+  texture space, with no answer for 10 cm voxels, foliage or anything
+  without cards; its world radiance cache is probes, which cannot hold a
+  wall's two sides apart. Here every tracer's hits are cached alike.
+- **Neural radiance caching** (Müller et al. 2021): an MLP trained on path
+  suffixes each frame; better generalisation between cells, but it needs
+  fused tensor-core inference and training wgpu has no fast path for.
+
+What it costs and scales with: memory 104 bytes a slot (64 the entry, 8 the
+slot, 32 the publisher's life), 26 MiB at 2^18 slots, with the slots (a
+setting), never the world; a frame's update two passes over the slots
+(their 8 bytes and the lives' first 4: 6 MiB read at 2^18), the rays, light
+queries and shadow rays of the budget (a setting), never the screen; a
+read one bucket of 16 slots a level it walks (one, mostly), a mark two.
+Cells in use follow the surfaces readers reach and their distance from the
+eye (at most `4 pi / a^2` a level), not the world's size: an Earth-sized
+planet costs what a room does.
+
+**Verified** (RTX 3060; every test waits on a signal under a wall-clock
+guard, never a count of frames):
+
+- The contract (`helio-frame-api`): layout tests of the four rows; on a GPU
+  (`radiance_cache_gpu`), keys, levels, buckets and checksums from the WGSL
+  equal to the Rust mirror's bit for bit over 4,096 random hits (footprints
+  a millimetre to tens of metres, every side, four spaces) at frame origins
+  at the world's zero, an Earth's radius in every axis's sign, 10^12 m (the
+  high words carrying) and off the 1024 m step, each hit inside its world
+  cell (f64); marks claim each cell once with the hit's point (back within
+  1/32768 of its cell) and normal, and its ancestor; a read finds nothing
+  before a value, the publisher's value after, the ancestor's where its own
+  cell has none, nothing on the other side or in another space, nothing in
+  the stand-in. Unit tests: an origin change moves no cell at any level (the
+  zero, an Earth's radius, 10^12 m), any origin keys world cells, the level
+  rule, sides, spaces and levels apart, buckets spread.
+- The cache (GI's `tests/radiance_cache.rs`, over the analytic tracer and
+  the lights' sampler, read and marked by a pass outside GI through the
+  contract):
+  - **A closed box with one point light** (6 x 4 x 6 m, albedo 128/255)
+    against a radiosity solution on the CPU (patches of a third of a metre,
+    Jacobi to convergence; the solver itself checked by the energy it must
+    conserve: the walls' direct flux 1.0008 of the light's `4 pi I`, their
+    absorbed flux 1.007): direct within 0.2% at four wall points (one delta
+    light, every sample exact), indirect -6.8%, -6.4%, -7.9% and -5.0%
+    (bound 10%: the estimate's noise over 128 frames, about 2%, and the
+    coarser cells its rays read and the probes' irradiance standing in where
+    a hit's cell is new). All four low: the mean over the 128 frames after
+    the cells settle (94 frames) still holds the later bounces' rise, and a
+    coarse cell's one point; the biased first fold read -0.9% to -5.6%
+    (its upward bias hid part of it). Not separated further.
+  - **A thin plate's two sides** (5 cm, read with a metre's footprint):
+    the top 2.000 (the sun's 2), the underside exactly 0.
+  - **A light switched off**: the four points under 5% of their light after
+    103 frames (24,087 cells in use, 8,192 lit a frame: a cell updated every
+    3 frames, so about 34 updates, the bounces falling one after another);
+    bound 285 frames, what a part whose history never shortened would take
+    (95 updates).
+  - **An origin change** (the eye at a 1024 m boundary, the origin moving
+    1024 m): every settled cell keeps its slot, key, history and values bit
+    for bit, and the reads at the same world points their values.
+  - **Earth scale**: a glowing furnace of albedo 1/2 converges to `2 pi`
+    within 1% in 311 frames at the world's zero, 316 at an Earth's radius in
+    x, 313 at an Earth's radius in -y and -z, each read at the same level.
+  - **Eviction and re-use** (2^13 slots, 503 probe cells): a set of 2,880
+    keys (96 spaces of 30 points) lit, then a second as large: lit 4 frames
+    after, 6,318 cells evicted meanwhile, the first set's reads find nothing,
+    and read again it comes back.
+  - **Two spaces at one place**: a wall point in each space reads its own
+    room's light, `pi` and `3 pi`.
+- GI's suites on the cache: `probes` 15 of 15 (they wait for the probes
+  they check: a probe whose hits' cells are new holds), `mesh_gi_graph` 2 of
+  2, `vg_ray_proxies` 3 of 3 (the solid cut-out card's far half 0.000000 and
+  0.000122 of the open room's 2.044, as before), lib 13 (constants against
+  their derivations, the shaders' copies, settings).
+- Gates: Helio's layer gate (0), `helio-core`'s `wgsl_validation` (the
+  snippet in its list), the frame-api suites (lib 30, layouts 5,
+  `radiance_cache_gpu` 2, `surface_gpu`, `bsdf_gpu`), clippy on
+  `helio-frame-api`, `helio-pass-gi`, `helio-gi-api` and `gi-examples` with
+  no warnings of theirs, `cargo fmt -p` on every package touched,
+  `one_owner`, `helio-pass-voxel-planet`'s tests compile.
+
+**Measured** (RTX 3060, release builds; `indoor_cathedral_gi` held still,
+against r2's reference images `scripts/r2/reference_compare.py`; the timing
+A/Bs interleaved, two runs a build, after a warm-up of the new exe's name):
+
+| | base (r2 merged) | the cache |
+|---|---|---|
+| Cathedral indirect diffuse / reference, frame 240 | 0.805 | 0.801 |
+| ... frame 1200 (settled) | 0.884 | 0.994 |
+| Cathedral whole frame / reference, frame 240 | 0.746 | 0.801 |
+| ... frame 1200 | 0.797 | 0.852 |
+| Cathedral indirect mean relative error, frame 1200 | 0.231 | 0.269 |
+| Cathedral GI passes (resolve aside) | 1.039, 1.057 ms | 1.232, 1.228 ms |
+| voxel_craft GI passes (four poses, median of 240-frame windows) | 2.92, 2.83 ms | 3.16, 3.06 ms |
+| voxel_flight Earth ground hold, GI passes | 2.89 ms | 3.42 ms |
+| voxel_flight Moon ground hold, GI passes | 2.77 ms | 3.39 ms |
+
+The cathedral's indirect light was 12% short of the reference with the
+probes' own light queries (one sample a probe hit, its shadow ray, its
+history the probe's); read from the cache it is within 1% once the cache
+settles. Per pixel it is noisier (the mean relative error 0.269 against
+0.231): a coarse cell's one light sample an update among many lamps
+shows as blotches cell by cell until its 32 updates average it, and two
+runs of the cache differ more than two of the base (0.0041 mean against
+0.00075 at frame 240: the order of claims and of the lit cells' list).
+The cache's passes: `RadianceCache` 0.16 ms, `RadianceCacheFold` 0.05 ms in
+the cathedral (64k cells, 8,192 lit a frame, 32,768 rays); GI's `GILight`
+fell 0.33 → 0.22 ms (no light queries a probe hit); the stream's tracers
+take the cache's rays beside the probes'.
+
+voxel_craft (four poses, eight-frame bursts, no clouds): the cache's frames
+0.4% to 1.7% darker than r2's (the shade under trees and overhangs), mean
+difference 0.004 to 0.008 against 0.0026 to 0.0040 between two of its own
+runs (r2's own: 0.0002); the first pose without foliage against r2's
+reference: the whole frame 0.925 of the reference (r2 0.933), indirect
+diffuse in the same post 1.31 (r2 1.29, both images over r2's reference's
+post). The cache's passes there: `RadianceCache` 0.09 ms, `RadianceCacheFold`
+0.03 ms; the stream's voxel walk takes the 32,768 cache rays beside the
+probes' (`VoxelRays gi` 1.66 → 1.96 ms), which is most of the cost.
+voxel_flight's ground holds (1600x900, 25 s, no clouds; one interleaved
+pair a planet, the p50 of the hold, against r2's merged build; an earlier
+build of the cache with the first fold measured the same, Earth 2.42 →
+2.98 ms, Moon 2.36 → 3.00 ms): the images 0.0014 (Earth) and 0.0013 (Moon)
+mean apart, 0.2% darker; `VoxelRays gi` 1.54 → 2.00 ms on the Earth.
+
+**Open** (for step 4 and after):
+
+- **Thin occluders and coarse cells.** A cell's rays start at its one
+  point; a cell straddling a thin wall (wider than the wall, both faces
+  turned one way: a floor under a slab) lights one place for the whole
+  cell. The slab-box test reads 0.67% of the lit top under it. Step 4's
+  pixel reads go finer near the eye (the eye angle), where it matters most.
+- **Cell noise near many lights.** One light sample a cell an update: with
+  the cathedral's many lamps a cell's direct part is a mean of heavy-tailed
+  samples, visible as blotches cell by cell in view 39 until 32 updates
+  average it. ReSTIR-style reuse of samples between neighbouring cells, or
+  a light cache per cell, would cut it.
+- **Start-up.** Probes whose hits' cells are new hold an update cycle;
+  a scene's first GI comes about 20 frames later than before.
+- **Cost.** The default budget (32,768 rays) adds about 0.2 ms to GI's
+  passes in the cathedral and in voxel_craft, 0.5-0.6 ms on the voxel
+  planets, where the walk of the cache's rays dominates (8-12 ns a ray).
+  A lower default, or a budget that follows the cells in use, is a
+  coordinator decision.
+- **The scan** reads every slot each frame (O(slots), 6 MiB at the
+  default); a cell list kept by the marks would make it O(cells in use).
