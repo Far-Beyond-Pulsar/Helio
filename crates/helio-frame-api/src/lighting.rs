@@ -11,7 +11,7 @@
 //! | [`SUN_VISIBILITY`] / [`DIRECTIONAL_VISIBILITY`] | rgba16f, full res | clouds / terrain | fully visible |
 //! | [`sun_transmittance`] | world-space map along the sun + frame | clouds | fully lit |
 //! | [`TRANSMISSION`] | rgba16f, internal res | water caustics | nothing added |
-//! | [`sky`] | sky frame (medium, suns) + sky table | the sky | no sky |
+//! | [`sky`] | sky frame (medium, suns), sky irradiance table, sky radiance table | the sky | no sky |
 //! | [`VIEW_REMAPS`] | `mat4` per remap chain + G-buffer tag | what draws through remaps (the portals' chains) | no remap |
 //!
 //! A lighting model binds every contract it uses, the stand-in where it is
@@ -407,26 +407,33 @@ pub const VIEW_REMAP_SPACES_BYTES: u64 = VIEW_REMAP_CHAINS * 4;
 /// The sky: what lights a surface from the air above it and what the air
 /// takes from the sun on its way, as other kinds read it: the participating
 /// medium (Rayleigh, Mie, ozone; aerial perspective, terrain and water read
-/// it), the sky's radiance (the sky-view LUT, the sky table, its irradiance)
+/// it), the sky's radiance (the sky-view LUT from the eye, the radiance
+/// table anywhere, the irradiance table and the eye's irradiance)
 /// and the suns (the lights' directional lights, packed). Published by the
 /// sky plugin, which keeps what only it draws (clouds, stars, a panorama) in
 /// a block of its own; read by lighting, GI, fog, water, terrain.
 pub mod sky {
     /// Graph key of the per-frame sky buffer (`SkyFrame` in `frame_sky.wgsl`).
     pub const SKY_FRAME: &str = "sky_frame";
-    /// Graph key of the sky-view LUT.
+    /// Graph key of the sky-view LUT: the sky's radiance seen from the eye,
+    /// by direction (`sky_view_uv`: the full circle of azimuths about the
+    /// first sun, rows concentrated at the horizon).
     pub const SKY_VIEW: &str = "sky_view";
+    /// The sky-view LUT's texels (`SKY_VIEW_SIZE` in `frame_sky.wgsl`).
+    pub const SKY_VIEW_SIZE: [u32; 2] = [256, 108];
     /// Bytes of `SkyFrame`. The buffer is usable as a uniform as well
     /// as storage: consumers already at the per-stage storage-buffer limit
     /// (the deferred lighting pass) bind it as a uniform.
     pub const SKY_FRAME_BYTES: u64 = 1872;
     /// Graph key of the sky's irradiance table (`SKY_TABLE_*` in
     /// `frame_sky.wgsl`): the sky over a surface anywhere in the air, by its
-    /// altitude and sun angle. Usable as a uniform.
+    /// altitude and sun angle, as low-order harmonics of irradiance. Usable
+    /// as a uniform. Irradiance only: a ray takes the sky along its
+    /// direction from [`SKY_RADIANCE`].
     pub const SKY_TABLE: &str = "sky_table";
-    /// Entries of the sky table: 16 altitudes by 24 sun cosines, six vec4s
-    /// each.
-    pub const SKY_TABLE_ENTRIES: u64 = 16 * 24;
+    /// Entries of the sky tables: 16 altitudes by 40 sun cosines (six vec4s
+    /// each in the irradiance table: 60 KiB, within a uniform binding).
+    pub const SKY_TABLE_ENTRIES: u64 = 16 * 40;
     pub const SKY_TABLE_BYTES: u64 = SKY_TABLE_ENTRIES * 6 * 16;
 
     /// Marker opting a shader into the frame's sky WGSL.
@@ -449,6 +456,64 @@ pub mod sky {
     /// every call, since its directional lights are indexed at run time.
     pub const SKY_TABLE_SNIPPET: helio_core::shader::ShaderSnippet =
         helio_core::wgsl_snippet!(SKY_TABLE_MARKER, "shaders/sky_table.wgsl");
+
+    /// Graph key of the sky's radiance table (`SKY_RADIANCE_*` in
+    /// `frame_sky.wgsl`, a texture view): the sky's radiance by direction
+    /// anywhere in the air, by altitude and sun angle, for a unit sun. What
+    /// a ray that meets nothing takes; from the eye it is the sky the sky
+    /// pass draws, to the table's resolution.
+    pub const SKY_RADIANCE: &str = "sky_radiance";
+    /// The radiance table's texels: an azimuth by zenith map an entry of
+    /// [`SKY_TABLE_ENTRIES`], the entries as slices.
+    pub const SKY_RADIANCE_SIZE: [u32; 3] = [32, 64, SKY_TABLE_ENTRIES as u32];
+    pub const SKY_RADIANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+    /// Marker opting a shader into [`SKY_RADIANCE_SNIPPET`].
+    pub const SKY_RADIANCE_MARKER: &str = "//!use sky_radiance";
+
+    /// The sky's radiance along a direction from anywhere
+    /// (`sky_radiance_eval`); with [`SKY_SNIPPET`], for a shader binding the
+    /// frame as `sky_frame`, the table as `sky_radiance` and
+    /// [`sky_radiance_sampler`] as `sky_radiance_sampler`.
+    pub const SKY_RADIANCE_SNIPPET: helio_core::shader::ShaderSnippet =
+        helio_core::wgsl_snippet!(SKY_RADIANCE_MARKER, "shaders/sky_radiance.wgsl");
+
+    /// The sampler `sky_radiance_eval` reads the table with: linear, clamped
+    /// (an entry's map ends at the sun's azimuth and its opposite, the
+    /// zenith and the nadir).
+    pub fn sky_radiance_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+        device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Sky radiance"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        })
+    }
+
+    /// What a reader binds as [`SKY_RADIANCE`] while nothing publishes it:
+    /// one texel (the frame then has no atmosphere, and
+    /// `sky_radiance_eval` reads nothing).
+    pub fn sky_radiance_stand_in(device: &wgpu::Device) -> wgpu::TextureView {
+        device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("No sky radiance"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D3,
+                format: SKY_RADIANCE_FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+            .create_view(&Default::default())
+    }
 }
 
 /// The sun's transmittance through the media above the scene at any point,

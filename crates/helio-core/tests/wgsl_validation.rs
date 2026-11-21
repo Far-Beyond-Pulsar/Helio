@@ -38,6 +38,7 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_frame_api::lighting::INDIRECT_SPECULAR_SNIPPET,
     helio_frame_api::lighting::sky::SKY_SNIPPET,
     helio_frame_api::lighting::sky::SKY_TABLE_SNIPPET,
+    helio_frame_api::lighting::sky::SKY_RADIANCE_SNIPPET,
     helio_frame_api::lighting::sun_transmittance::SNIPPET,
     helio_frame_api::media::SNIPPET,
     helio_frame_api::rays::RAY_TRANSMISSION_SNIPPET,
