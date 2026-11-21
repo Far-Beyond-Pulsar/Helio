@@ -2574,7 +2574,8 @@ stopped while the GPU queue was held for hours by other work.
 
 **Open**:
 
-- No producer yet: the denoiser runs on real frames from step 4. The
+- No producer yet: the denoiser runs on real frames from step 4 (built:
+  "Indirect diffuse at a pixel", below, its first producer). The
   reference path tracer's one-frame first-bounce estimate as a real signal
   (against its converged image, the cathedral) was not built: it needs the
   reference to export each path's first-bounce direction and incident
@@ -2914,7 +2915,9 @@ mean apart, 0.2% darker; `VoxelRays gi` 1.54 → 2.00 ms on the Earth.
   point; a cell straddling a thin wall (wider than the wall, both faces
   turned one way: a floor under a slab) lights one place for the whole
   cell. The slab-box test reads 0.67% of the lit top under it. Step 4's
-  pixel reads go finer near the eye (the eye angle), where it matters most.
+  pixel reads go finer near the eye (the eye angle), where it matters most. Step 4
+  measured one more case: a VG proxy wall with the pixels' gather on (below,
+  "Indirect diffuse at a pixel", Open).
 - **Cell noise near many lights.** One light sample a cell an update: with
   the cathedral's many lamps a cell's direct part is a mean of heavy-tailed
   samples, visible as blotches cell by cell in view 39 until 32 updates
@@ -2929,3 +2932,398 @@ mean apart, 0.2% darker; `VoxelRays gi` 1.54 → 2.00 ms on the Earth.
   coordinator decision.
 - **The scan** reads every slot each frame (O(slots), 6 MiB at the
   default); a cell list kept by the marks would make it O(cells in use).
+
+#### Indirect diffuse at a pixel
+
+Step 4. GI plugin `render/r3-gather` (`gather.rs`, `gi_gather.wgsl`, the
+shared hit lighting `gi_hit.wgsl`, the resolve's `gi_resolve_pixels`),
+lights `render/r3-gather` (the deferred lighting's `"ssao"` input deleted),
+voxel `render/r3-gather` (the occlusion offer's test, a no-ray-query test,
+the examples' A/B switch), Helio `render/r3-gather` (the lighting
+contract's docs, this section).
+
+**Where it lives.** GI publishes `INDIRECT_DIFFUSE`, so the gather is GI's:
+the resolve node (`helio.pass.gi_resolve`, `Slot::LightingInputs`) builds it
+before the resolve when `GiSettings::quality` asks, in the primary view only
+(captures and other views resolve the probes, as before: the reservoirs and
+the denoiser's history are a view's, and a capture would pay the gather
+again; per-view state is keyed by the camera's view id, as the denoiser's
+is, so XR eyes in one graph each keep their own). It reads frame contracts
+only: the G-buffer, a ray stream (`gi_pixels`, `SurfaceDetail::Diffuse`:
+every registered tracer answers, the terrain's walk on any device, the
+meshes' TLAS with ray queries), the radiance cache, the frame's history
+(`Need::Pixels`), the denoiser (`denoise::filter`). It names no kind. How
+a hit is lit (the cache's irradiance times the albedo, the transmission
+share of the far side's cell, the emission; the probes standing in where
+the cache has no cell; the sky on a miss) moved out of `gi_light.wgsl` into
+`gi_hit.wgsl`, one copy for the probes', the cache's and the pixels' rays.
+
+**The passes** (one ray a block of `side x side` internal pixels; `side`
+1, 2, 4 for `pixels_1`, `pixels_4`, `pixels_16`):
+
+1. `GIGather`. *Near field* (a pixel): the frame points of a workgroup's
+   8x8 pixels and 4 around them read once into workgroup memory; the
+   pixel's geometric normal from its neighbours (the nearer one-sided
+   difference an axis); along 4 screen directions and both their sides,
+   every pixel out to `side`, the highest occluder within the block's
+   footprint (`side` pixels' width at the pixel's depth) and no farther
+   closes the elevations below it, `sin^2` of its elevation of that
+   azimuth's cosine-weighted measure; `V` is the mean open share over the 8
+   azimuths, at least `(1 / 2 side)^2` (a pit a pixel wide and a block deep;
+   below that the search measures nothing). A surface whose occlusion is its
+   own (`gbuffer_own_occlusion`: the terrain's short sky rays, a meadow's)
+   takes its material occlusion as `V` (the lighting multiplies that in
+   itself, so the resolve multiplies by `V / ao`). *Rays* (a traced texel):
+   the traced pixel is the denoiser's (`denoise_traced_pixel`, the graph's
+   frame number), its ray cosine-distributed about the G-buffer normal by
+   Roberts' R2 over frames shifted by a hash of the texel (32-bit fixed
+   point: exact at any frame number), from `gi_ray_offset` off the surface,
+   as wide as the pixel there and spreading by `GI_RAY_SPREAD`
+   (`sqrt(2 pi / 32)`: a 32-frame history's share of the hemisphere, the
+   same 0.443 as a probe ray's), in the camera's coordinate space; and for
+   one texel in `RETRACE_PERIOD` (4), a second ray from its previous
+   reservoir's receiver along its kept sample, after every texel's row.
+2. The tracers (`stream::trace`).
+3. `GIGatherShade`, three dispatches over the traced texels:
+   - *validate*: a re-traced sample's light now. The same point (the hit
+     within `2 gi_ray_offset + t / 256` of where the sample was) keeps the
+     sample with its light replaced; the relative change of its luminance
+     beyond the cache's own noise (`1 / sqrt(32)`: a settled cell is the mean
+     of 32 updates of about their own size each; a restarted cell moves more,
+     which is what this detects; 0 for the sky) lowers the confidence written
+     for the denoiser (`1 - (change - noise) / (1 - noise)`) and the
+     reservoir's M by the same factor; anything else (an occluder now, the
+     sample's surface gone) drops the reservoir, confidence 0.
+   - *temporal*: this frame's hit as a reservoir (M 1, W = pi / G: the cosine
+     density in the sample's measure: area for a point, solid angle for the
+     sky) combined by generalised RIS with the reservoir of the previous
+     block the traced pixel's surface was in (the history's tap of largest
+     weight, its receiver within a block's diagonal and a pixel, the
+     denoiser's normal and plane stops), its M capped at `M_CAP` (8); each
+     sample weighted by the balance heuristic over both receivers' target
+     functions (luminance of the light times the geometry term), no
+     visibility between them (one surface within a block). Only these
+     reservoirs carry over.
+   - *spatial*: combined with up to 4 neighbours' (a disc of
+     `SPATIAL_RADIUS` = 3 texels turned each frame; the same stops), balance
+     heuristic over all their receivers (the luminance cancels: geometry
+     terms alone), no visibility ray (below). The estimate `L G W`, divided
+     by `V` at the traced pixel, is the signal (`denoise_irradiance_add`, the
+     direction toward the sample); its hit distance this frame's ray's, no
+     nearer than the block's footprint (what is nearer is the near field's);
+     its confidence the reused reservoir's validation.
+4. `Denoise` (`Signal::irradiance("gi_pixels", block).with_confidence()`).
+5. `GIResolve` (`gi_resolve_pixels`): the filtered irradiance at the pixel's
+   normal times `V` (or `V / ao`), divided by pi, weight 1, into
+   `INDIRECT_DIFFUSE` in its present encoding; the probes' where the gather
+   has no light yet (the denoiser's -1) or a remap put the pixel's content in
+   another space. Debug view 37 (`GI Near Field`) shows `V`.
+
+Short frames (a tracer answered short, `Answers`): no new sample is taken,
+the reservoirs hold; a texel left without one (and every texel on a view's
+first frames) writes the probes' irradiance at its pixel as its sample,
+confidence 1. The denoiser's contract has no "no sample": a sample of no
+light would be taken as dark, which a first version did on the frame after
+an origin change (the test's TLAS rebuilt a frame late: the whole image's
+indirect diffuse went black for a few frames). An origin change: the reservoirs' frame-space points
+move by the previous origin minus this one (whole 1024 m steps, exact in
+f32).
+
+**The near field and `indirect_occlusion`.** One ray a block resolves the
+light a block receives; occlusion whose scale is under a block's footprint
+varies between the block's pixels, which the denoiser cannot tell apart in
+motion (a still view converges each pixel's own samples over `side^2`
+frames). The horizon term does not add occlusion to the rays': the signal
+is divided by `V` where it was traced and multiplied by it where it is
+resolved, so a traced pixel's estimate is exact whatever `V` is, and `V`
+only moves it between a block's pixels (the transfer assumes the occluder
+within the footprint is darker than what lies past it: in a furnace, where
+it is not, the near-field pixels read 0.81 / 0.86 / 0.95 of the truth at
+blocks of 16 / 4 / 1 against 0.93 / 0.96 / 0.97 elsewhere). At a block of 1
+the search reaches one pixel and `V` is 1 almost everywhere (0.5% of the
+test room's pixels below 0.999, against 18.7% at 16): it fades by
+construction. Because the division also applies to a surface whose
+occlusion is its own (its material occlusion is `V`), the terrain's short
+sky rays never darken what the rays already found, whatever reach the
+terrain keeps, and GI offers `indirect_occlusion` as where its rays start,
+`OCCLUSION_START` (2 mm, `gi_ray_offset`'s constant part); the terrain
+clamps that to its own minimum of four cells.
+
+**What was deleted.** The deferred lighting's `"ssao"` input (binding 5
+and its sampler 6 in both groups, the white fallback texture, the read of a
+key nothing wrote) and its debug view 37 (now GI's near field); the
+lighting's documented sampled-texture counts fall by one each. The copies
+of the sky's radiance and of a hit's cache read that `gi_light.wgsl` held
+privately moved to `gi_hit.wgsl` (no second copy for the gather).
+
+**The constants and where they come from** (`gather.rs`'s docs; its unit
+test checks each derivation):
+
+| Constant | Value | Derivation |
+|---|---|---|
+| `M_CAP` | 8 | a kept sample stays about M + 1 frames, so the denoiser's 32-frame history rests on at least 32 / 9 = 3.6 independent samples, while resampling still chooses among 8 samples' worth |
+| `RETRACE_PERIOD` | 4 | a light switched on or off reaches every reservoir's confidence within 4 frames (67 ms at 60 Hz), for a quarter more rays |
+| `SPATIAL_RADIUS` | 3 texels | the denoiser's reach at full history (its a-trous steps of 1 and 2 blocks): reuse correlates texels no farther than the denoiser averages anyway |
+| neighbours | 4 | 4 x `M_CAP` covers the radius's 28 texels over the frames a sample stays |
+| `CACHE_NOISE` | 1 / sqrt(32) | a settled cell's mean of 32 updates of about their own size each |
+| `GI_RAY_SPREAD` | sqrt(2 pi / 32) | a 32-frame history's share of the hemisphere |
+| near floor | (1 / 2 side)^2 | a pit a pixel wide and a block deep |
+| `OCCLUSION_START` | 2 mm | `gi_ray_offset`'s constant part |
+| `NEAR_SLICES` | 4 (8 azimuths) | every pixel within the block's side along them: 8 x side taps, deterministic, no history of its own |
+
+**The visibility decision.** No validation ray for a reused sample (temporal
+or spatial). Measured: against one plain cosine ray a pixel accumulated
+(`the_reservoirs_agree_with_one_plain_ray_a_pixel`, the lit room with a
+pillar, 128 frames, a ray a pixel), the reuse's mean is 0.998 to 1.004 of
+the plain mean over the image (three runs) and within 4.1-6.4% on its worst
+8x8 tile (bound 15%, the tile's noise over 128 frames); in the cathedral the
+reuse on and off read 1.248 and 1.330 of the reference's diffuse channel at
+a quarter (run to run the same setting varies by about 0.1 there, the
+cache's noise among many lamps): no bias the reference resolves. A
+validation ray a reused sample would double the rays at a ray a pixel for
+nothing it can show; the radius is kept within the denoiser's reach so
+what leaks is never farther than what it blurs.
+
+**Against the others** (section 5, "How others do it"):
+
+- **Lumen's final gather** (UE5): an octahedral screen probe each 16x16
+  pixels (8x8 directions, importance-sampled from last frame's lighting and
+  the BRDF), filtered in probe space, interpolated to pixels, plus a
+  full-resolution short-range AO / bent normal within the probe spacing;
+  hits lit from the surface cache (cards) or the world radiance cache.
+  Published cost (Wright, "Lumen: Real-time Global Illumination in Unreal
+  Engine 5", SIGGRAPH 2022): the screen-probe gather about 2 ms at 1080p
+  on a PS5/RTX 2080-class GPU, "High" scalability. Ours keeps the same
+  ray budget a pixel at `pixels_16` (one ray a 4x4 block, as one probe
+  texel a 16x16 tile's 64 rays) but as reservoirs a traced pixel, whose
+  samples converge to the reference as the budget rises (`pixels_1` is a
+  ray a pixel) instead of a fixed hemisphere resolution, and the same
+  short-range term, as a near field the rays' estimate is transferred by
+  rather than an AO multiplied on top. Hits are lit from a hash of hit
+  points that serves every tracer (no cards: voxels and foliage alike).
+- **AMD GI-1.0** (Boissé et al. 2023): screen probes spawned and reused by
+  reservoirs, hits lit from a world hash grid; about 2.5-3 ms at 1080p on an
+  RX 7900 XTX (its paper's own timings, "GI-1.0: A Fast Scalable Two-Level
+  Radiance Caching Scheme"). The closest design: ours resamples per traced
+  pixel rather than per probe and shares its cache with the probes and
+  every other reader.
+- **ReSTIR GI** (Ouyang et al. 2021; Wyman et al., the ReSTIR course
+  2023): a ray a pixel at half resolution, temporal then spatial
+  resampling, visibility rays on spatial reuse in the unbiased variant;
+  about 8-9 ms at 1080p on an RTX 3090 including path tracing of the
+  hits. Ours lights hits from the cache (no secondary path), feeds back
+  only the temporal reservoirs (the spatial ones only resolve, which the
+  course notes give as the remedy for boiling), caps M at 8 from the
+  denoiser's history, and takes no visibility ray (measured above).
+- **Kajiya** (Stachowiak 2022): ReSTIR GI at half resolution over an
+  irradiance cache, its reservoirs validated by re-tracing in turn (one in
+  4 frames there too) and invalidated on a radiance change. The same
+  structure; its cache is camera-centred cascades, ours a hash of world
+  cells.
+- **RTXGI / SHaRC + NRD** (NVIDIA): a ray a pixel, paths ended in the hash
+  cache, the denoiser taking a confidence from the producer. Ours is that
+  at `pixels_1`, with the denoiser's contract built for it.
+
+What scales with what: the near field with internal pixels times the
+block's side (8 x side taps from workgroup memory); the rays, their
+shading and the reservoirs with internal pixels / side^2 (plus a quarter
+for the re-traced samples); the denoiser with internal pixels (its records
+with traced texels); memory 48 bytes a reservoir twice, 16 a texel and
+16 of signal, 80 a ray row (the stream, 1.25 rows a texel), 8 a pixel for
+the near field: at 1920x1080, 46 MB at a sixteenth, 135 MB at a quarter,
+489 MB at every pixel, plus the denoiser's (140-216 MB). Nothing scales with the scene, the lights or the
+world's size: an Earth costs what a room does.
+
+**Verified** (RTX 3060):
+
+- **Tests** (`plugins/vendor/gi/feature/tests/pixel_gather.rs`, the meshes'
+  tracer with ray queries, a 64x64 renderer at its internal 48x48; every
+  wait a signal under a wall-clock guard: the image settling to 0.5% over
+  16 frames, a confidence dropping):
+  - *A furnace* (a closed box of albedo 1/2 glowing with radiance 1; the
+    indirect diffuse is 2 at every pixel), mean over the pixels where the
+    near field is open, against the truth: probes 0.922 (mean relative
+    error 0.078), a sixteenth 0.930 (0.070), a quarter 0.960 (0.040), every
+    pixel 0.967 (0.033); bound 10% (the cache's closed box reads 5-8% low,
+    its own test). Where the near field closes (the box's edges) the
+    transfer reads 0.81 / 0.86 / 0.95: a furnace's occluders glow like the
+    rest, the one case the near field's assumption (an occluder darker than
+    what lies past it) does not hold.
+  - *The reservoirs against one plain ray a pixel* (above): 0.998-1.004
+    over three runs, worst tile 4.1-6.4%.
+  - *A light switched off* (the lit room's point light, settled): a
+    re-traced sample's confidence under 1/2 within 3 to 7 frames (five
+    runs); the indirect diffuse under 10% of its light after 179-193
+    frames, which is the cache's own decay (its light-off test: under 5%
+    after 103 frames at 8,192 cells lit a frame; the room's cells are
+    updated less often at 64x64), not the denoiser's history (32 frames).
+  - *The near field's reach*: 18.7% / 4.3% / 0.5% of the room's pixels
+    below 0.999 at blocks of 16 / 4 / 1, least 0.53 / 0.63 / 0.92.
+  - *Without ray queries* (`helio-pass-voxel-planet`'s
+    `the_pixels_gather_runs_over_terrain_without_ray_queries`, a device
+    without `EXPERIMENTAL_RAY_QUERY`, a flat 10 cm voxel world under a sun):
+    the gather builds with the terrain's tracer alone and its own signal is
+    lit at 8,160 of 8,160 traced texels.
+- **Against the reference path tracer** (r2's converged images,
+  `C:/t/r2d/final`; real-time frames at 1200 (cathedral, held still) and
+  after 5000 (voxel_craft's first pose, no foliage, an 8-frame mean); mean
+  luminance ratio, and the mean relative error per pixel; the cathedral's
+  also after a 5-pixel box blur of both, which takes the reference's own
+  noise out of the per-pixel error):
+
+  | | probes | a sixteenth | a quarter | every pixel |
+  |---|---|---|---|---|
+  | Cathedral whole frame: ratio / rel. error / rel. error 5 px | 0.843 / 0.175 / 0.176 | 1.015 / 0.140 / 0.089 | 1.075 / 0.173 / 0.116 | 1.065 / 0.160 / 0.100 |
+  | ... left pillar's foot (blurred): ratio / rel. error | 0.882 / 0.149 | 0.998 / 0.079 | 1.070 / 0.104 | 1.016 / 0.067 |
+  | ... right pillar's foot | 0.879 / 0.160 | 1.037 / 0.111 | 1.087 / 0.120 | 1.076 / 0.106 |
+  | ... the altar's steps | 0.819 / 0.162 | 0.986 / 0.105 | 0.950 / 0.098 | 1.005 / 0.097 |
+  | ... the near floor | 0.742 / 0.255 | 0.960 / 0.057 | 1.102 / 0.112 | 1.105 / 0.114 |
+  | Cathedral indirect (view 23 against 63): ratio / rel. error | 1.012 / 0.244 | 1.213 / 0.376 | 1.349 / 0.505 | 1.246 / 0.408 |
+  | voxel_craft whole frame: ratio / rel. error | 0.934 / 0.397 | 0.932 / 0.382 | 0.915 / 0.387 | 0.920 / 0.372 |
+  | voxel_craft indirect (23 against 63): ratio / rel. error | 1.359 / 0.862 | 1.298 / 0.639 | 1.250 / 0.499 | 1.268 / 0.590 |
+
+  On the cathedral's whole frame the gather halves the per-pixel error and
+  closes the probes' 16% deficit; at the pillars' feet, the steps and the
+  floor by the eye (contact and near-field light the probes' 0.5 m lattice
+  blurs) it cuts the error by half to four times. On voxel_craft's terrain
+  the whole frame barely moves (the terrain's own short sky rays already
+  give it contact occlusion, and its first pose is mostly sunlit) while
+  the indirect's per-pixel error falls from 0.86 to 0.50-0.64. **Open**:
+  against the reference's indirect channel (view 63) the cathedral's
+  gather reads 1.21-1.35 where the probes read 1.01, while its whole frame
+  reads 1.02-1.07 where the probes' read 0.84. Both cannot hold unless the
+  real-time direct or specular light is short by about the gather's excess;
+  the run-to-run spread of one setting is about 0.1 there (the cache's
+  noise among many lamps: two quarters read 1.27 and 1.35), and the
+  pipeline itself is unbiased (the probes' own irradiance written as the
+  gather's signal comes back through the denoiser and the resolve at 0.994
+  of it, per pixel). Settling it needs r2's reference parts on the
+  cathedral (its direct part against view 22).
+- **Cost** (RTX 3060; the graph's GPU timings, medians over 240-frame
+  windows, pipelined frames; voxel_craft at 1920x1080, four poses, two runs
+  a setting interleaved; the cathedral at 1280x720; `GILight`, the same
+  pass in every build, is the clock's reference: 0.343-0.370 ms on
+  voxel_craft in every run):
+
+  | voxel_craft 1920x1080, ms | probes | a sixteenth | a quarter | every pixel |
+  |---|---|---|---|---|
+  | whole frame (GPU) | 14.81 / 14.61 | 17.35 / 17.42 | 20.54 / 19.98 | 34.48 / 33.72 |
+  | HistoryPixels | | 0.18 | 0.18 | 0.18 |
+  | GIGather (near field, rays) | | 0.13 | 0.17 | 0.34 |
+  | the terrain's walk and surfaces | | 1.10 + 0.17 | 3.32 + 0.47 | 12.28 + 1.66 |
+  | the meshes' rays and surfaces | | 0.03 + 0.02 | 0.06 + 0.03 | 0.17 + 0.06 |
+  | GIGatherShade | | 0.35 | 1.01 | 3.29-3.76 |
+  | Denoise | | 0.92-0.95 | 0.88 | 0.99 |
+  | GIResolve | 0.27-0.29 | 0.11-0.12 | 0.11 | 0.10 |
+
+  The gather's own stages at a sixteenth (a later build with a GPU scope a
+  stage, one window): near field 0.11, rays 0.04, validate 0.07, temporal
+  0.14, spatial 0.18 ms.
+
+  | cathedral 1280x720, ms (runs a / b) | probes | a sixteenth | a quarter | every pixel |
+  |---|---|---|---|---|
+  | HistoryPixels | | 0.18 / 0.18 | 0.17 / 0.17 | 0.12 / 0.12 |
+  | GIGather | | 0.47 / 0.47 | 0.32 / 0.31 | 0.26 / 0.27 |
+  | MeshRays + MeshHitSurfaces | | 0.10 / 0.10 | 0.20 / 0.20 | 0.44 / 0.45 |
+  | GIGatherShade | | 0.27 / 0.28 | 0.79 / 0.79 | 1.97 / 1.96 |
+  | Denoise | | 0.77 / 0.77 | 0.77 / 0.76 | 0.73 / 0.74 |
+  | GIResolve | 0.35 / 0.35 | 0.09 / 0.09 | 0.08 / 0.08 | 0.06 / 0.06 |
+  | graph | 3.97 / 3.90 | 5.61 / 5.63 | 5.77 / 5.68 | 6.10 / 6.14 |
+
+  What each scales with: the terrain's walk with its rays (4.7-6.8 ns a
+  ray), the shading with traced texels (2.1-2.7 ns a texel with a cache
+  read and a mark a ray, a quarter more for the re-traced), the near field
+  with internal pixels times the block's side where the surface is not its
+  own occlusion (the cathedral's meshes: 0.47 ms at a sixteenth, 720p; the
+  terrain's own: 0.13 ms at 1080p), the denoiser and the history with
+  internal pixels. **Default: a sixteenth** (`pixels_16`): +2.6-2.8 ms on
+  voxel_craft at 1080p and +1.7 ms on the cathedral at 720p over the
+  probes' resolve, for half the whole frame's per-pixel error; a quarter
+  costs about 3 ms more on terrain for no better whole frame; every pixel is
+  the setting for faster GPUs (+20 ms here, mostly the terrain's walk).
+  Against the published numbers: Lumen's screen-probe gather about 2 ms at
+  1080p on a PS5-class GPU, GI-1.0 about 2.5-3 ms at 1080p on an RX 7900
+  XTX, ReSTIR GI about 8-9 ms on an RTX 3090 with its path tracing; ours at
+  a sixteenth, 2.9 ms of passes on an RTX 3060 (about a third of a 3090),
+  of which the denoiser is a third.
+- **Temporal** (voxel_craft, four poses, 8-frame still bursts, no clouds):
+  frame-to-frame |difference| within a burst 0.9-2.8e-4 at a sixteenth,
+  1.2-1.8e-4 at a quarter, 1.0-1.4e-4 every pixel, against 0.3-1.2e-4 for
+  the probes (an 8-bit step is 3.9e-3: under one pixel in twenty changes
+  by a step): no boiling. Two runs of a sixteenth differ by 0.0013-0.0038
+  (their burst means), less than two runs of the probes (0.0030-0.0061);
+  the probes against a sixteenth 0.0044-0.0142, luminance within +-1%.
+- **Scale**: voxel_flight's ground holds (1600x900, 25 s, no clouds, the
+  probes against a quarter, one run each): the Earth's images 0.0039 mean
+  apart (p99 0.031), luminance 0.3571 against 0.3554; the Moon's 0.0024
+  (p99 0.055), 0.5215 against 0.5216. The holds' graph p50: Earth 13.12
+  against 22.53 ms, Moon 11.30 against 19.10 ms, the terrain's walk of the
+  pixels' rays 6.51 and 5.03 ms of it (18 and 14 ns a ray, three times
+  voxel_craft's: on a planet an upward ray walks the shell to its top
+  before it misses); at a sixteenth a quarter of that. The baselines'
+  exes were not rerun against this build (the probes setting is the
+  resolve as before).
+- **Camera motion** (voxel_craft's sideways flight past glowstone,
+  `VOXEL_CRAFT_FLIGHT=120`, `tools/ghosting.py`: each moving frame against
+  the same camera held still until converged): the probes |dL| 0.0102,
+  0.31% of pixels trailing brighter and 0.43% darker by over 0.1; a
+  quarter 0.0101, 0.36% and 0.46%; a sixteenth 0.0114, 0.49% and 0.66%.
+  At a sixteenth a pixel's own samples come once in 16 frames, so in motion
+  it leans on its block's records and the reprojected reservoirs a little
+  longer: lag of about half again the probes' in the share of trailing
+  pixels, with the same mean error within 12%. A light switched on or off:
+  the confidence path (tests above): 3-7 frames to a confidence under 1/2,
+  the rest the cache's own decay.
+- **An origin change**: the reservoirs' points move by the previous origin
+  minus this one, composed in f64 (`gather.rs`'s
+  `a_rebased_point_keeps_its_world_place`: exact an Earth's radius from the
+  world's zero); the history and the denoiser are covered by their own
+  origin tests (above). A GPU test in the mesh harness was tried and
+  dropped: the harness's mesh rows are not rebased by the renderer (its
+  objects are `Mat4` rows), so across a 1024 m step the room left the view
+  and the image measured nothing of GI. It found, before that, that a
+  texel without a sample wrote a sample of no light (fixed: the probes
+  stand in). Not verified: an origin change under a real host's
+  accumulating gather (voxel_flight's holds do not cross a step).
+- **Gates**: GI's suites (`probes` 15, `radiance_cache` 8, `mesh_gi_graph`
+  2, `vg_ray_proxies` 3 with 1 ignored as before (resolving the probes it
+  tests, Open below), lib 18, `pixel_gather` 4: the furnace, the reuse,
+  the light switched off, the near field's reach); the lights' deferred lib and layouts (the documented texture
+  counts 14/10 to 13/9); `helio-pass-voxel-planet`'s
+  `the_sky_rays_reach_follows_the_indirect_diffuse` (the offer: 2 mm with
+  the gather, twice the probes' spacing with the probes alone) and the
+  no-ray-query test; Helio's layer gate (0); Pulsar's `one_owner` (no
+  exception added); clippy on `helio-pass-gi`, `helio-pass-deferred-light`
+  and `helio-frame-api` with no warnings of the change; `cargo fmt -p` on
+  every package touched. Helio's `denoise_gpu`, `pixels_gpu`, the
+  frame-api suites and `wgsl_validation` were not rerun: nothing in Helio's
+  code changed (the lighting contract's docs only).
+
+**Open**:
+
+- **The cathedral's indirect channel** against the reference (above).
+- **The VG proxy wall** (`vg_ray_proxies`'s
+  `a_vg_wall_blocks_probe_and_shadow_rays_through_its_proxy`) with the
+  gather on: the far half's probes read 8.7e-4 of light against a bound of
+  2.2e-4 (twice a classic wall's 5.8e-5 plus 1e-4), where with the probes
+  alone they read about 1e-4. The gather's reads mark cells (and their
+  ancestors three levels up) seeded on the lit side of a coarse cell that
+  straddles the thin proxy wall: the cache's thin-occluder item (above,
+  "Thin occluders and coarse cells"), which the order of the claims now
+  exposes. The suite resolves the probes it tests (`GiQuality::Probes`);
+  the case is the cache's to fix (a cell's point re-seated per side of an
+  occluder, or a reader's reach kept at its own level).
+- **The shading's cost at every pixel** (3.3-3.8 ms at 1080p): the spatial
+  stage's five domains spill (60 words of reservoirs a lane); packing a
+  reservoir to 32 bytes (the receiver as a depth along its pixel's ray) and
+  the domains to their geometry would halve it.
+- **Captures and other views** resolve the probes; a capture that needs
+  contact light (a planar reflection close to a wall) would build the
+  gather in its graph like the primary view (the state is per view id
+  already).
+- **Remapped pixels** (portals' content) take the probes' irradiance,
+  which is the world's: content in another space reads none, as before.
+- **A frame's blue noise**: the directions are R2 over frames with a hash
+  per texel (low discrepancy in time, white in space); a spatiotemporal
+  blue-noise texture as a frame contract would lower the per-frame noise
+  the denoiser sees at a sixteenth.

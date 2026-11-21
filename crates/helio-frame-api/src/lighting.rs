@@ -4,8 +4,8 @@
 //!
 //! | Contract | Form | Published today by | Stand-in |
 //! |---|---|---|---|
-//! | [`INDIRECT_DIFFUSE`] | buffer, 2 words a pixel | GI probes' resolve, then a bake's lightmaps | sky/ambient only |
-//! | [`indirect_occlusion`] | metres, offered at build | GI probes (twice their spacing) | none: a kind keeps its own reach |
+//! | [`INDIRECT_DIFFUSE`] | buffer, 2 words a pixel | GI (its pixels' gather, or its probes' resolve), then a bake's lightmaps | sky/ambient only |
+//! | [`indirect_occlusion`] | metres, offered at build | GI (its pixels' rays' start off a surface; its probes: twice their spacing) | none: a kind keeps its own reach |
 //! | [`INDIRECT_SPECULAR_LAYERS`] | rgba16f textures, straight alpha, any resolution | SSR (half res), planar reflections | no layer |
 //! | [`ENVIRONMENT_PROBES`] + [`ENVIRONMENT_CUBES`] | probe rows + cube array | reflection captures, bake | sky cube only |
 //! | [`SUN_VISIBILITY`] / [`DIRECTIONAL_VISIBILITY`] | rgba16f, full res | clouds / terrain | fully visible |
@@ -271,10 +271,14 @@ pub const INDIRECT_DIFFUSE: &str = "indirect_diffuse";
 /// evaluated when a consumer asks
 /// ([`distance`](crate::lighting::indirect_occlusion::distance)), which
 /// answers `None` where it will not build in this graph. With several publishers the smallest distance holds: the
-/// finest indirect diffuse decides where the kind's own term may stop. Today
-/// the world-space probes offer about twice their spacing (metres); a traced
-/// per-pixel indirect diffuse offers a few centimetres, and a kind's own
-/// term then shrinks to its contact shadows.
+/// finest indirect diffuse decides where the kind's own term may stop. The
+/// world-space probes offer about twice their spacing (metres); GI's
+/// per-pixel gather offers where its rays start off the surface (millimetres),
+/// and a kind's own term then shrinks to its contact shadows. A publisher that
+/// traces from the pixels divides its estimate by the material occlusion of
+/// a surface whose occlusion is its own (`gbuffer_own_occlusion`) where it
+/// traced and multiplies it back where it resolves, so that term is never
+/// counted twice whatever reach the kind keeps.
 pub mod indirect_occlusion {
     use std::sync::Arc;
 
