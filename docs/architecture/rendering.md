@@ -2188,3 +2188,246 @@ takes a ray a pixel and a larger cache.
    and its probe walk (carried; cost, not image).
 
 ### As built
+
+#### The sky a miss returns, and direct light against the reference
+
+**The sky a ray takes.** A ray that meets nothing (a reference path's
+miss, a GI probe ray's) took the sky from the atmosphere's sky table: per
+altitude and sun cosine, six L2 harmonics of the sky's irradiance / pi,
+turned back into radiance band by band (`sky_table_eval` with bands 1, 3/2,
+4). Harmonics of second order hold a cosine-weighted integral well (the
+irradiance a Lambertian surface takes: Ramamoorthi and Hanrahan's 3%) and
+the sky along a direction badly: the sky has a bright band at the horizon,
+the sun's aureole (Mie, g 0.8) and the lit ground below a sharp horizon,
+and nine coefficients smear each of them over the sphere. Measured on the
+sphere against the sky the sky pass draws (`sky_radiance_gpu`, below): the
+table's radiance integrated to the drawn sky's within 0.2% (the band-0
+coefficient is exact) and was wrong direction by direction by a mean 16% to
+85% of the sky (sun 60 degrees: 16%; sun 2 degrees: 72%; 80 km up: 51%),
+with whole bands off: 1.11 to 1.37 times the drawn sky 10 to 30 degrees up
+and 0.38 to 0.70 of it past 60 degrees, depending on the sun. The drawn sky
+itself projected on nine harmonics in any frame is as far off (0.13 to 0.82
+mean error). No exposure, factor of pi or unit was wrong: the
+representation was. The 1.8 at voxel_craft's sky pixels is that error over
+the part of the sky its camera sees (canopy gaps 20 to 60 degrees up away
+from the sun), with the r2 table's coarser sun columns.
+
+How others give a ray the sky: Unreal's Lumen and path tracer take the
+sky light's cubemap, captured from one point (the camera, or a placed
+capture) each frame or on demand; Hillaire 2020's sky-view LUT is the sky
+from the camera only; Bruneton and Neyret 2008 (and Bruneton 2017) keep a
+4D scattering table over altitude, view zenith, sun zenith and the
+view-sun angle, valid anywhere in the atmosphere, for any number of suns
+by linearity. A capture from one point is wrong for what is far from that
+point at planet scale: a probe on the night side of a planet the camera
+orbits, a hit kilometres up a mountain, the sky seen from above the air.
+The sky-view LUT is the camera's alone.
+
+**As built** (frame-api `lighting::sky`, `frame_sky.wgsl`,
+`sky_radiance.wgsl`; the sky plugin's `atmosphere_luts.wgsl`): the sky
+table is two tables over one set of entries, both published by the sky's
+atmosphere pass and rebuilt only when its rows change:
+
+- `SKY_RADIANCE` (`sky_radiance_kernel`), the radiance table: a 3D texture,
+  one slice an entry (16 altitudes, quadratic in height from 1 m to the
+  top of the air; 40 sun cosines, quadratic away from the horizon on both
+  sides, 16 of them below it down to -0.4), each slice a 32 x 64 map of the
+  sky's radiance for a unit sun in the entry's frame (x towards the sun):
+  azimuth 0 to pi from the sun (an entry holds one sun, about whose plane
+  its sky is symmetric), columns concentrated near the sun, rows at the
+  horizon as the sky-view LUT's. Each texel is the sky-view LUT's own
+  integral (`sky_along`: `sky_integrate`, 32 steps, single and multiple
+  scattering, the lit ground below the horizon through the air), the
+  function the camera's LUT now calls too, so the two cannot drift. 10.5
+  MiB (rgba16f); rebuilt in 3 to 5 ms when the medium changes (the tests'
+  wall time, all parameter tables), never a frame otherwise.
+- `SKY_TABLE`, the irradiance table: its six harmonics now integrated from
+  the radiance table's entry (256 directions of it), so a surface's sky
+  irradiance is the integral of the radiance a ray takes. Irradiance only:
+  `sky_table_eval` lost its `bands` argument and every caller passed 1
+  (the deferred lighting's ambient, the clouds' sky light).
+- `sky_radiance_eval(from_camera, d)` (`//!use sky_radiance`, bindings
+  `sky_frame`, `sky_radiance`, `sky_radiance_sampler`): the four entries
+  about the point's altitude and each sun's cosine, each read at the
+  coordinate of `d` at the point's actual radius (each row's map is laid
+  out about its own horizon, so the horizon lines up between rows), mixed
+  geometrically (the sky falls exponentially with altitude and with the
+  sun's depth below the horizon; a linear mix was 25% high at 80 km and
+  10% in twilight), summed over the frame's suns by their radiance. From
+  above the air, the sky where `d` enters it; nothing where it misses.
+  Every reader moved onto it: the reference (`sky_radiance_at`) and GI's
+  probe rays (`gi_light.wgsl`); water bound the sky table and read
+  nothing from it (binding deleted).
+- **The sky-view LUT was symmetric about the first sun**: its azimuth was
+  `|atan2|`, so with two suns (a sun and a moon) the second one's glow was
+  mirrored across the first one's vertical plane. It now covers the full
+  circle (256 x 108, columns concentrated on both sides of the first
+  sun); `sky_view_uv` and `sky_view_direction_angles` changed for every
+  reader (the composite, water, the eye's irradiance).
+
+**The contract, tested** (`plugins/vendor/sky/feature/tests/sky_radiance_gpu.rs`):
+the atmosphere pass in a render graph on the device, a probe reading, for
+16,384 directions of a Fibonacci sphere from the eye, the sky-view LUT as
+the composite samples it and `sky_radiance_eval`; Earth with the eye at 2
+m and suns at 60, 31.5, 25, 8, 2 and -3 degrees, at 300 m, 3 km, 20 km and
+80 km, two suns, Mars. Over the sphere the miss's sky integrates to the
+drawn sky's within 2%, its mean absolute error is within 2% of the sky's
+mean, and 99% of directions are within 10%:
+
+| pose | integral | mean \|err\| | p99 |
+|---|---|---|---|
+| ground, sun 60 / 31.5 / 25 | 0.999 / 0.999 / 1.000 | 0.2% | 1.3% to 2.6% |
+| ground, sun 8 / 2 | 0.997 / 1.000 | 0.5% / 0.4% | 3.2% / 5.8% |
+| ground, sun -3 (twilight) | 0.983 | 1.8% | 3.1% |
+| 300 m / 3 km / 20 km / 80 km | 0.999 / 0.996 / 0.995 / 1.000 | 0.2% to 0.5% | 1.4% to 8.6% |
+| two suns / Mars | 1.000 / 0.996 | 0.2% / 0.5% | 1.1% / 2.1% |
+
+The last percent of directions is the aureole of a sun on the horizon, the
+limb seen from high up and the zenith there (radiance near zero: above 80 km
+it is 0.3 of the drawn sky's). Two faults of the frame's sky the test found
+on the way, both fixed at their owner (`frame_sky.wgsl`): `ray_sphere` took
+the near root as the difference of two near-equal distances, so a point
+metres above an Earth-sized ground (radii in km) lost its sign and saw
+through the ground (the drawn sky was black in places 53 degrees down from
+2 m under a 2-degree sun; the table's lowest row had to sit at 10 m); it
+now takes the root nearer zero from the roots' product, and the lowest row
+is 1 m. And the table's rows put row 0 at 10 m while its lookup put row 0 at
+the ground, so an eye between the lowest rows read them at the wrong
+weights; one mapping now serves both (`sky_table_row_radius`,
+`sky_table_row`).
+
+**Direct light.** r2 measured real-time direct light (the deferred
+lighting's view 22) 6% above the reference's lights at the first hit on
+voxel_craft (grass off, clouds off). Measured here per cause, on the
+tour's first pose, mean luminance of the direct light over the pixels the
+reference's first hit is a surface (its albedo dump), every real-time view a
+linear snapshot (`HELIO_REFERENCE_DUMP`), every reference over 2,400 summed
+frames past the terrain's readiness (a fresh delta-sun reference of this
+build matches r2's to 0.00006 mean difference, luminance 1.0000):
+
+| step | real time / reference |
+|---|---|
+| r2's build and this one, as they were | 1.074 / 1.078 |
+| the reference's sun a disk (its shadow rays aim at a point of the atmosphere's sun disc, as the terrain's walks do) instead of a delta | the reference +0.6% |
+| the terrain's sun by exact walks over the disc at every pixel (steady shadows) instead of its block samples, pages and denoiser | real time -1.4% |
+| the reference's shadow rays zero-wide (exact walks) instead of the footprint (pages past a walked band) | no change (1.0001) |
+| the deferred lighting's 30% light past a subsurface surface's shadow removed | -0.3% (noise) |
+| the sun's air: real time and the sampler both take `light_incidence` (`sky_transmittance_towards`) | same function |
+| steady shadows with the natural steps' skip removed / with every skip removed | 1.056 / 1.034 against the disc reference |
+| the steps' shadows put back (`step_shadowing`, below) before the denoiser | 1.014 against the disc reference, 1.020 against the delta one (not landed) |
+| **as built: none of the above changed; real time as r2** | **1.072 (the rerun below; canopy 1.10, ground 1.07)** |
+
+**The cause** is the terrain's prefiltered steps. A voxel slope is lit as
+the smooth surface its steps stand for (natural steps by their stored
+slope's normal, smoothed surfaces by theirs, cells of a few pixels or less
+by the slope around them: `face_rule`, `face_lit`), and its sun rays skip
+the steps (`skip_along`, up to 12 cells) so the steps' shadows never show as
+stripes. Both together light every facet of the staircase with the plane's
+cosine and none of its own shade: a staircase standing for a plane of
+normal n has |n|_1 of facet area per unit of the plane, and the light the
+plane takes ((n . l) per unit) cannot light more than that, so a sunlit
+slope comes out up to 1 / (1 - shaded) too bright (a 10-degree slope under
+voxel_craft's 31-degree sun from up-slope: 1.65). The reference traces the
+steps and sees their shadows: the stripes and triangle lattices of the
+difference image at mid distance, where cells are a few pixels wide.
+
+**The fix, designed and measured, not landed.** It belongs to the owner,
+the terrain's sun visibility (the voxel plugin's `chunk_draw.wgsl`): where
+a ray skips the steps (`Face::skip`), multiply the sun by the share of the
+staircase it lights as the pixel shows it. Per cell axis i the staircase has
+|n_i| of facets facing sign(n_i); those facing away from the sun are dark;
+the plane's light falls on those facing it, which would take sum |n_i l_i|
+if none shaded another, so each keeps (n . l) / that of its area; the pixel
+shows the facets facing the eye, weighted by |n_i v_i|. It is exact for a
+staircase whose steps shade only its own facets, 1 on a level surface and on
+a slope lit from down-slope, mixed in by the skip's weight. How others do
+it: the facets' shadowing of a microsurface (the V-cavity masking-shadowing
+of Torrance and Sparrow, Heitz 2014), with the facets the voxel axes rather
+than a distribution of normals; filtering the shadows away (what is there)
+is the stripe-free look without the energy. Three placements were tried,
+and each failed a terrain gate, so the voxel plugin is unchanged:
+
+- multiplied into the walks' samples before the denoiser: 1.078 to 1.020;
+  the denoiser's history lagged a sun turned 20 degrees, 1.37% of pixels
+  off by more than half at 4 frames against the walks' own 0.92%
+  (`terrain_shadows_match_steady_shadows`);
+- in the resolve after the filters, from the hit's face alone (no ground
+  hint there): almost no effect (1.073);
+- carried in the sun word's terrain byte: the flicker gate failed (0.07%
+  of pixels against 0.055%) and the walked metric no longer matched.
+
+The patch of the resolve placement is kept outside the repositories
+(`C:/t/r3s/step_shadowing_resolve.patch`). Landing it needs the share in the
+terrain's own visibility data, so the denoiser filters a quantity whose
+history follows the sun (the share is analytic per pixel; the history lag is
+the walks', not the share's) — the voxel plugin's decision, carried to r4.
+
+**What else is left** besides the steps, by region (measured with the steps' shadows put back, 1.4% against the disc reference):
+
+- *Canopies, 1.11*: two-sided leaves lit from behind. Real time takes the
+  sun through the cell (`shadow`: the sun's pages at the cell's far side,
+  the "thin two-sided surface" the material stands for); the terrain's
+  tracer answers a ray that starts on a solid cell's face, into it, as
+  blocked by that cell (`stream_enter`, `START_FACE`), so the reference
+  (and GI's shadow rays from leaves) never pass light through a leaf. The
+  tracer's to change (a ray leaving a cell that lets light through starts
+  past it, as the real-time walk's `through` does); not changed here.
+- *Distant ground near the horizon (image rows above 250), 1.10*: there the
+  real-time shading normal (the screen's slope, `screen_ground`) gives a
+  sun cosine 0.71 of the tracer's surface (the cell's stored slope), and its
+  far-field visibility (coarse pages, the canopies' cut) is higher than the
+  reference's; the two partly cancel. Over all hits the real-time cosine is
+  0.957 of the reference's (`max(N . L, 0)` written by both, from disk).
+  The terrain's two descriptions of a hit's slope (screen-space for the
+  raster, the stored slope for rays) are its own to reconcile.
+- The steps' sky light (`sky_visibility` also skips the steps) and local
+  lights' terrain shadows (`light_skip`) take the same prefilter; their
+  share of the staircase is not put back here (indirect and lamps are not
+  this step).
+
+**The rerun** (`scripts/r2/rerun_reference.sh` steps, this build against
+r2's results in `C:/t/r2d/final/craft`; voxel_craft's first pose, grass and
+clouds off, the reference over 6,230 paths a pixel; linear, the lighting's
+output before fog and the tone map; the same pixel masks for both, the
+reference's first-hit albedo; results in `C:/t/r3s/compare/craft`):
+
+| linear mean luminance: reference \| real-time (ratio) | r2 | r3 (this build) |
+|---|---|---|
+| sky pixels (14% of the image) | 0.0810 \| 0.0415 (0.512), mean \|err\| 0.0398 | 0.0413 \| 0.0415 (1.005), mean \|err\| 0.0002 |
+| hits (86%): all light | 0.0443 \| 0.0445 (1.005) | 0.0437 \| 0.0443 (1.014) |
+| hits: direct (view 22) | 0.0350 \| 0.0376 (1.074) | 0.0350 \| 0.0375 (1.072) |
+| hits: indirect (view 23) | 0.0083 \| 0.0075 (0.898) | 0.0081 \| 0.0073 (0.899) |
+| of which the reference's sky / first bounce / later | 0.0026 / 0.0049 / 0.0008 | 0.0024 / 0.0049 / 0.0008 |
+| canopy hits: direct / indirect | 1.180 / 0.751 | 1.104 / 0.763 |
+| ground hits: direct / indirect | 1.067 / 1.022 | 1.070 / 1.008 |
+| whole image | 0.0493 \| 0.0441 (0.894) | 0.0434 \| 0.0440 (1.013) |
+
+The sky on a miss now matches: the camera's sky pixels from 0.51 to 1.005
+of the reference, the whole image from 0.894 to 1.013, and the reference's
+sky light on hits fell by 8% (its sky was the 1.8x table). The real-time
+image did not move (0.0415 sky, 0.0440 whole), as the real-time sky was
+already the sky pass's. Direct light is r2's (the steps, above, are not
+landed); on the canopy, real-time view 22 is 6% below r2's on the same pose (ground unchanged), which this session did not isolate: the voxel plugin is unchanged, and the canopy is where one pose's eight-frame burst varies most. What is left of the indirect gap is the
+canopy's: 0.76 of the reference there (ground 1.01), the first bounce off and
+through the leaves that GI's probes miss, r3's radiance cache and per-pixel
+indirect diffuse.
+
+**indoor_cathedral_gi** (the same steps as r2's above: `HELIO_STILL=1`
+real time at frame 240 against the reference at frame 2,400, 2,340 paths a
+pixel; results in `C:/t/r3s/compare/cathedral`): real-time luminance 0.737
+of the reference's, mean |error| 0.0067, p99 0.058 (r2: 0.737, 0.0066); the
+indirect diffuse alone (view 23 against the reference's 63, through the
+post) 0.817, mean |error| 0.0038 (r2: 0.805, 0.0039). The cathedral is
+indoors: no camera pixel and few probe rays see the sky, so the sky's change
+leaves it where r2 left it, and its indirect gap (the stone walls'
+interreflections the probes' irradiance misses) is r3's radiance cache's.
+
+**Frames against r2's merged build** (tone-mapped captures, RGB 0-1;
+`C:/t/r3s/frames`): voxel_craft's tour, four poses of eight-frame bursts
+after 5,000 frames (clouds off, grass on), r2 against this build: mean
+|difference| 0.0018 (0.0014 to 0.0025 an image), luminance -0.34%; this
+build against itself: 0.0002. The change is the sky light: GI's probe rays now take
+the drawn sky rather than the 1.8x table, and the irradiance table the
+deferred lighting reads is integrated from the radiance table (the reference's
+indirect sky on hits fell by the same 8%). voxel_flight's Earth ground hold
+(25 s, clouds off): r2 against this build @@EARTH@@.
