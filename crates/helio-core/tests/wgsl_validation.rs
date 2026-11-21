@@ -45,6 +45,7 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_frame_api::rays::stream::SNIPPET,
     helio_frame_api::rays::stream::SURFACE_SNIPPET,
     helio_frame_api::rays::light_samples::SNIPPET,
+    helio_frame_api::rays::radiance_cache::SNIPPET,
 ];
 
 /// Helio's own prelude marker, which `resolve_with` always provides.

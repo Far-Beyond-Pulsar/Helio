@@ -206,3 +206,49 @@ fn the_light_sample_rows_have_their_contract_sizes() {
     assert_eq!(struct_size(&source, "LightSample"), LightSample::BYTES);
     validate(&source);
 }
+
+/// The radiance cache's rows are the sizes their Rust mirrors are, and a
+/// reader's read and mark validate (a probe or a pixel with a hit).
+#[test]
+fn the_radiance_cache_rows_have_their_contract_sizes() {
+    use helio_frame_api::rays::radiance_cache::{
+        RadianceCacheEntry, RadianceCacheFrame, RadianceCacheKey, RadianceCacheSlot, SNIPPET,
+    };
+    use helio_frame_api::rays::stream::SNIPPET as STREAM;
+    let source = helio_core::shader::resolve_with(
+        "//!use frame_ray_stream
+         //!use frame_radiance_cache
+         @group(0) @binding(0) var<uniform> radiance_cache_frame: RadianceCacheFrame;
+         @group(0) @binding(1) var<storage, read_write> radiance_cache_slots: array<RadianceCacheSlot>;
+         @group(0) @binding(2) var<storage, read_write> radiance_cache_entries: array<RadianceCacheEntry>;
+         @group(0) @binding(3) var<storage, read_write> out: array<vec4<f32>>;
+         @compute @workgroup_size(64)
+         fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+             let p = vec3<f32>(f32(id.x), 1.0, 2.0);
+             let n = vec3<f32>(0.0, 1.0, 0.0);
+             let e = radiance_cache_read(p, n, 0.25, SCENE_SPACE_ANY, RADIANCE_CACHE_LEVELS);
+             radiance_cache_mark(p, n, 0.25, SCENE_SPACE_ANY);
+             let at = radiance_cache_entry_point(radiance_cache_entries[id.x]);
+             out[id.x] = vec4<f32>(e.direct + e.indirect + at, select(0.0, 1.0, e.found) + f32(e.level) * radiance_cache_size(e.level));
+         }
+",
+        &[STREAM, SNIPPET],
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheFrame"),
+        RadianceCacheFrame::BYTES
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheSlot"),
+        RadianceCacheSlot::BYTES
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheKey"),
+        std::mem::size_of::<RadianceCacheKey>() as u64
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheEntry"),
+        RadianceCacheEntry::BYTES
+    );
+    validate(&source);
+}
