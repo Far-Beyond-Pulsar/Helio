@@ -29,6 +29,53 @@ fn the_sky_frame_has_its_contract_size() {
     assert_eq!(struct_size(&source, "SkyFrame"), SKY_FRAME_BYTES);
 }
 
+/// The sky tables' WGSL dimensions are the ones their Rust constants size
+/// the buffers and textures by.
+#[test]
+fn the_sky_tables_have_their_contract_sizes() {
+    use helio_frame_api::lighting::sky::{
+        SKY_RADIANCE_SIZE, SKY_TABLE_BYTES, SKY_TABLE_ENTRIES, SKY_VIEW_SIZE,
+    };
+    let constant = |name: &str| -> u64 {
+        let line = SKY_SNIPPET
+            .source
+            .lines()
+            .find(|l| l.starts_with(&format!("const {name}: u32 = ")))
+            .unwrap_or_else(|| panic!("no `{name}`"));
+        line.split('=')
+            .nth(1)
+            .unwrap()
+            .trim()
+            .trim_end_matches(';')
+            .trim_end_matches('u')
+            .parse()
+            .unwrap()
+    };
+    let entries = constant("SKY_TABLE_R") * constant("SKY_TABLE_MU");
+    assert_eq!(entries, SKY_TABLE_ENTRIES);
+    assert_eq!(SKY_TABLE_BYTES, entries * constant("SKY_TABLE_COEFFS") * 16);
+    assert_eq!(
+        SKY_RADIANCE_SIZE.map(u64::from),
+        [
+            constant("SKY_RADIANCE_AZIMUTH"),
+            constant("SKY_RADIANCE_ZENITH"),
+            entries
+        ]
+    );
+    let view = SKY_SNIPPET
+        .source
+        .lines()
+        .find(|l| l.starts_with("const SKY_VIEW_SIZE: vec2<f32> = "))
+        .expect("no `SKY_VIEW_SIZE`");
+    assert!(
+        view.contains(&format!(
+            "vec2<f32>({}.0, {}.0)",
+            SKY_VIEW_SIZE[0], SKY_VIEW_SIZE[1]
+        )),
+        "{view} against {SKY_VIEW_SIZE:?}"
+    );
+}
+
 /// Parses and validates `source` (types, packing builtins).
 fn validate(source: &str) {
     let module = naga::front::wgsl::parse_str(source)

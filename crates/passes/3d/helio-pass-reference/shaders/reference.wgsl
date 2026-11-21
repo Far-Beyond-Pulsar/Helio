@@ -4,7 +4,7 @@
 //!use frame_bsdf
 //!use frame_light_samples
 //!use frame_sky
-//!use sky_table
+//!use sky_radiance
 // The reference path tracer (`helio_pass_reference`): a wavefront path
 // tracer over the frame's ray streams and light samples, knowing no kind.
 // A frame traces one path for each pixel of a window of the image (the
@@ -87,10 +87,11 @@ const REFERENCE_REACH: f32 = 1e9;
 @group(0) @binding(19) var<storage, read_write> image: array<vec4<f32>>;
 @group(0) @binding(20) var<storage, read_write> image_diffuse: array<vec4<f32>>;
 @group(0) @binding(21) var<uniform> sky_frame: SkyFrame;
-@group(0) @binding(22) var<uniform> sky_table: array<vec4<f32>, 2304>;
+@group(0) @binding(22) var sky_radiance: texture_3d<f32>;
 @group(0) @binding(23) var<storage, read_write> stats: array<atomic<u32>>;
 // x: this stage's depth.
 @group(0) @binding(24) var<uniform> stage: vec4<u32>;
+@group(0) @binding(25) var sky_radiance_sampler: sampler;
 
 override REFERENCE_STAT: u32 = 0u;
 
@@ -126,14 +127,14 @@ fn ray_offset(p: vec3<f32>, width: f32) -> f32 {
 }
 
 // The sky's radiance along unit `d` from frame point `p`: the
-// atmosphere's sky table there (irradiance / pi in L2 harmonics) back to
-// radiance band by band, as GI's probe rays take it; without an
+// atmosphere's radiance table there (`sky_radiance_eval`, from the eye the
+// sky the sky pass draws), as GI's probe rays take it; without an
 // atmosphere, the flat sky and ground. The sun's disc is not in it: the sun
 // is a light the samplers sample (a delta light no BSDF sample meets), so it
 // is counted once.
-fn sky_radiance(p: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+fn sky_radiance_at(p: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if sky_frame.planet.w < 0.5 { return select(frame.ground.rgb, frame.sky.rgb, d.y >= 0.0); }
-    return sky_table_eval((p - frame.eye.xyz) * 0.001, d, vec3<f32>(1.0, 1.5, 4.0));
+    return sky_radiance_eval((p - frame.eye.xyz) * 0.001, d);
 }
 
 // `c` reaching the eye along path `path` at depth `depth`.
@@ -192,7 +193,7 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
         let ray = cur_rays[r];
         let hit = cur_hits[r];
         if hit.t <= 0.0 {
-            add(&path, path.throughput * sky_radiance(ray.origin, ray.dir), depth);
+            add(&path, path.throughput * sky_radiance_at(ray.origin, ray.dir), depth);
         } else if !scene_hit_inside(hit) {
             // (The inside of something solid gives no light.)
             let row = cur_surfaces[r];
