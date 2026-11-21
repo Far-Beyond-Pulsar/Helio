@@ -306,6 +306,23 @@ impl<'a> ComputeCmds<'a> {
             .dispatch_workgroups_indirect(indirect_buffer, indirect_offset))
     }
 
+    /// Begins a span of dispatches that may run concurrently, up to
+    /// [`Self::end_overlap`] or the pass's end: no barrier between two of them
+    /// for a resource both write as storage, and their indirect arguments
+    /// validated together (the wgpu fork's `ComputePass::begin_overlap`). The
+    /// caller states that no dispatch of the span reads what another of it
+    /// writes (disjoint rows: the binned material passes' bins). This is
+    /// D3D12's and Vulkan's omitted UAV barrier (Unreal's `BeginUAVOverlap`,
+    /// RDG's `SkipBarrier`); a backend without it keeps its barriers.
+    pub fn begin_overlap(&mut self) {
+        compute!(self, |p| p.begin_overlap())
+    }
+
+    /// Ends the span [`Self::begin_overlap`] began.
+    pub fn end_overlap(&mut self) {
+        compute!(self, |p| p.end_overlap())
+    }
+
     pub fn write_timestamp(&mut self, query_set: &wgpu::QuerySet, query_index: u32) {
         compute!(self, |p| p.write_timestamp(query_set, query_index))
     }
