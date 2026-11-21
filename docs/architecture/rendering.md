@@ -2188,3 +2188,330 @@ takes a ray a pixel and a larger cache.
    and its probe walk (carried; cost, not image).
 
 ### As built
+
+#### The frame's history and the denoiser
+
+Step 2. Helio `render/r3-denoise`.
+
+**The history** (`helio_frame_api::history`, snippet `//!use frame_history`,
+`shaders/history.wgsl`; published by `helio-pass-history`, a spine-layer
+crate the spine registers through `RegisterHistory`).
+
+- **Asking.** A reader calls `history::request(build, Need)` while its graph
+  builds, before adding its own passes. The first reader of a graph adds the
+  publisher's passes at that point (after the G-buffer, which everything
+  that reads a history follows); a later one finds them. `Need::Reprojection`
+  adds `HistoryReprojection` (a 128-byte upload, no GPU work);
+  `Need::Pixels` adds `HistoryPixels` too. A graph whose nodes ask for
+  neither schedules neither: today the TSR node asks for the reprojection,
+  the denoiser for the pixels. Without a publisher (a host with no spine)
+  `request` answers `false` and the reader runs without history. The api
+  crate holds no state: the publisher and what was added live in the build
+  environment's shared state, as the ray tracers do.
+- **Per view.** The passes key their state by the camera's view id
+  (`jitter_frame[3]`), as the renderer keys `prev_view_proj`: mono or each
+  XR eye; a capture is a graph of its own, so its own history. Eight views
+  at most (least recently rendered first out).
+- **`REPROJECTION`** (uniform, `HistoryReprojection`, 128 bytes): TSR's
+  former `Reprojection` moved here unchanged (UE's ClipToPrevClip composed
+  in f64 from `view_proj`, `prev_view_proj` and the previous view rebased
+  across an origin change by `history::rebase_previous_view`) plus `info.x`,
+  whether the view has a previous frame, and `info.y`, the frames it
+  rendered. `history_reproject(h, raster_uv, depth)` returns the previous
+  raster uv (jittered), in-front, and the previous view depth (0 sky; sky
+  reprojects as a direction). Rasters are as drawn, each frame with its own
+  jitter: a reader on another grid (TSR's unjittered output) removes the
+  previous jitter itself.
+- **`PIXELS`** (`Rgba16Float`, internal resolution): xy the surface's
+  previous position minus the pixel's centre in pixels; z a 4-bit mask of
+  the 2x2 previous texels around it that held the same surface; w the flags
+  (`MOVES`: from the G-buffer's velocity; `HAS_PREVIOUS`). `history_pixel`
+  decodes it, `history_taps` gives the bilinear footprint's weights with the
+  rejected taps zeroed (a reader renormalises by `history_taps_weight`, or
+  keeps less history where it is small). The previous position is the
+  velocity's where bit 0 of its w says the surface moves by itself, the
+  reprojection's elsewhere. A tap holds the same surface when its previous
+  view depth is the expected one within what the surface's slope moves
+  depth by over the tap's offset, and its normal faces the same side
+  (n . n' > 0: depth cannot tell the two sides of a leaf or a thin wall
+  apart; a stricter normal test rejects a normal-mapped surface's own
+  detail). The slope: the four neighbours, reprojected too (once a texel
+  into workgroup memory), give the local map from a step of one current
+  pixel to a previous-raster displacement and a previous-depth change; the
+  tap's offset solved in those steps times the larger of each axis's two
+  one-pixel changes bounds a plane's depth there (depth along a plane is
+  monotone and convex in screen position, so over part of a pixel on either
+  side it changes by at most that part of the larger side's change). The
+  neighbours are the same surface's where any are (a normal turning by more
+  than 60 degrees is a crease: the ground's depth at a wall's foot says
+  nothing of the wall's slope), and the larger side is held to twice the
+  smaller (along a plane the two differences stay within a factor of two
+  unless its horizon is within three pixels; a depth step before a parallel
+  surface is far more); one side alone counts twice (along a plane the
+  slope at the pixel exceeds the chord to a neighbour a step away by
+  1 + step / distance to the horizon). A surface that moves by itself uses its current
+  depth changes and may change its depth by 1/32 a frame (20 m/s at 10 m
+  and 60 Hz). Floor: 1 mm plus 2^-12 of the depth (an order above the f32
+  rounding of depth, positions and the reprojection). Earlier versions of
+  this test (the smaller side's slope alone, a slope per previous pixel
+  along each axis, one side at its own value) rejected valid taps on
+  grazing ground and at a wall's foot in the moving-camera test.
+- **`PREVIOUS_DEPTH`** (`R32Float` view depth, 0 sky) and
+  **`PREVIOUS_NORMAL`** (`Rgba16Float`: shading normal, roughness): last
+  frame's guides, ping-ponged by the pixels pass, valid only when the view's
+  previous frame wrote them (a frame the pass was gated out of, a resize or
+  a view's first frame invalidate them).
+
+TSR takes the reprojection from `REPROJECTION` (bound at 21 beside its own
+uniform, which lost the 112 bytes). Its `Reprojection`, `rebase_previous_view`
+and previous-view and origin tracking are deleted; its tests drive the
+history's reprojection pass beside TSR as the spine does. The light field
+and the terrain's shadow stages keep their histories until r5, as the
+design says.
+
+**The denoiser contract** (`helio_frame_api::denoise`, snippet
+`//!use frame_denoise_irradiance`, `shaders/denoise_irradiance.wgsl`).
+
+- A producer declares `Signal::irradiance(name, TraceBlock)` (`One`,
+  `Four`, `Sixteen`: one traced pixel each 1, 2x2 or 4x4 internal pixels),
+  optionally `.with_confidence()`; writes `<name>_signal0` and
+  `<name>_signal1` (`Rgba16Float`, `Signal::traced_size`, one texel a block)
+  every frame; then calls `denoise::filter(build, &signal)` after the passes
+  that write them, and reads what `Filtered` names: the denoiser's
+  `<name>_denoised0`/`1` at internal resolution, or with no denoiser
+  registered its own inputs (`block` says which), read with
+  `denoise_irradiance_input`.
+- The traced pixel: `traced_pixel(block, frame, side, size)` /
+  `denoise_traced_pixel`, frame the graph's frame number truncated: each
+  block visits its pixels in Bayer order, every pixel once in side^2
+  frames, the blocks of a side x side group out of phase.
+- Inputs: 0 = (luminance, Co, Cg of the irradiance estimate at the traced
+  normal, hit distance in metres; past the half float's range: none); 1 =
+  (the luminance-weighted arrival direction, confidence). A producer sums
+  its samples with `denoise_irradiance_add(input, L cos / pdf, dir)`. The
+  denoiser reads a sample as the linear irradiance `a + b . n` exact at the
+  traced normal, `b` = 3/4 of the luminance-weighted direction (over a
+  uniformly lit hemisphere the weighted mean direction is 2/3 of the normal
+  and the first-order harmonics' cosine convolution gives a gradient of
+  half the value along it), so first-order harmonics of luminance and two
+  chroma terms, and samples traced at other normals average.
+- Outputs: 0 = (a, Co/Y, Cg/Y, the luminance's standard error; -1: no light
+  yet), 1 = (b, 1/hit distance, harmonic mean). `denoise_irradiance(out0,
+  out1, n)` is the RGB irradiance at a pixel's own normal.
+- Registration: `RegisterDenoiser::denoiser(Denoiser { name, supports,
+  filter })` (a feature's prepare hook), `denoise::offer` for a host or test;
+  the first registered that supports a signal filters it. A later signal
+  kind (r4's radiance, r5's visibility) is a `SignalKind` variant with its
+  two tables and its snippet; `Signal`, `filter` and the registration stay.
+
+**A producer, as step 4's gather uses it.** In its node's build: `let
+signal = Signal::irradiance("pixel_indirect", TraceBlock::of_pixels(n))
+.with_confidence();` then its own passes (they write `signal.inputs` at
+`signal.traced_size(internal)`, `Rgba16Float`, every frame, and read the
+frame's history themselves with `history::request(build, Need::Pixels)?`
+before adding them: their reservoirs reproject through `PIXELS` with
+`//!use frame_history`, `history_pixel(texel, pixel)`, `history_taps`,
+`history_tap`, `history_taps_weight`), then `let filtered =
+denoise::filter(build, &signal)?;`, then the pass that resolves
+`filtered.textures` into `INDIRECT_DIFFUSE` (`//!use
+frame_denoise_irradiance`: `denoise_irradiance(out0, out1, normal)`, or
+`denoise_irradiance_input(in0, in1, traced_normal, normal)` with the traced
+pixel `denoise_traced_pixel(block, frame, side, size)` when
+`filtered.denoiser` is `None`). Traced texel `b` (one thread a texel of
+`traced_size`) traces internal pixel `denoise_traced_pixel(b, frame_num,
+side, internal size)`, `frame_num` the graph's frame number truncated; its
+sample is the sum of
+`denoise_irradiance_add(input, L * cos / pdf, dir)` over its samples, its
+hit distance the nearest hit's (or none), its confidence what the
+reservoir's revalidation says.
+
+**The denoiser** (`helio-pass-denoise`, feature `helio.denoise` in Helio's
+default features; feature layer, group `denoise`; frame contracts only: the
+signal, the history's pixels, the G-buffer's depth and normals). One pass a
+signal, three stages each a dispatch under a GPU scope, one thread a pixel:
+
+1. **Temporal** (`Denoise: temporal`). A pixel's new sample is the traced
+   pixels of its four nearest blocks, each weighted by a tent one block wide
+   over its distance (a partition of unity in expectation: one sample a
+   block's area) times the geometry weight; their sum is how much this frame
+   says about the pixel. Its history is the bilinear read where `PIXELS`
+   says it was, from the taps that held the surface, renormalised. The
+   history's length times the producer's confidence times the footprint's
+   valid share, plus this frame's weight, capped at `max_history`, sets the
+   blend (weight over length). State: (a, chroma ratios, 1/hit), (b,
+   length), the first two moments of the luminance at the pixel's normal.
+2. **Wide reconstruction** (`Denoise: fix`) where the length is under
+   `FIX_HISTORY` = 4: the neighbours' state on a 5x5 of taps two blocks
+   each way (one once half that length is there), weighted by their length
+   (inverse variance) and the geometry; written as the history the next
+   frame reads, with the pixel's own length, so new samples replace it as
+   fast as before. 4: the first spatial iteration gathers 25 taps of which
+   about a quarter survive the geometry on an edge, 6; past that the fix adds
+   nothing the spatial stage does not.
+3. **Spatial** (`Denoise: spatial`): an a-trous filter of the linear
+   B-spline's 3x3, four iterations at steps of 1, 2, 4 and 8 blocks (the
+   reach of three of the cubic B-spline's 5x5, at 36 taps instead of 75; a
+   step of a block makes every tap an independent sample; the 5x5 version
+   cost 6 ms at 1920x1080), a pixel whose estimate is already within the
+   half floats' rounding left as it is, each tap weighted by the luminance stop (the
+   difference of two estimates, the neighbour's evaluated at this pixel's
+   normal, against 3 standard errors of the difference, sqrt(sp^2 + sq^2),
+   from the history's two moments over its length; 3: 99.7% of noise
+   differences; variance propagated through the iterations as sum w^2 s^2 /
+   (sum w)^2) and the geometry weight. Output is the signal's outputs.
+
+Before them a `Denoise: guides` dispatch writes each pixel's raw depth and
+octahedral normal into one `Rgba32Float` texel, so every tap reads its
+geometry with one load. State that is stored and read back every frame
+(the temporal result and the history) is rounded to half floats
+stochastically (up with the probability of the distance from the half
+below, so the stored mean is the value whatever rounding the hardware's
+conversion uses): this GPU's storage conversion truncates, which a running
+mean amplifies by its length; the first convergence run read 1.03% dark at
+32 frames, now +0.02%.
+
+The geometry weight, one function in all three: irradiance caching's error
+bound (Ward, Rubinstein and Clear 1988; Tabellion and Lamorlette 2004): a
+record holds over its harmonic mean hit distance (the error of using it at
+distance d is d / R), never below its pixel's diagonal, so near occluders
+keep contact detail and open ground filters wide; times a normal stop (a
+sample's irradiance holds the hemisphere about its traced normal; a normal
+tilted by t sees a share (1 - cos t)/2 of its cosine-weighted hemisphere
+never sampled; weight 0 at 1/8, t = 41 degrees) and a plane stop (two
+points of a surface whose normals differ by those 41 degrees leave each
+other's tangent plane by tan(20.7) = 0.378 of their separation; a step by a
+whole one). Positions are view space from the inverse projection, so the
+frame origin's size never enters.
+
+`DenoiseSettings::max_history` (host setting `denoise.max_history`) is 32:
+the running mean's noise falls as its square root (5.7 times; NRD's default
+is 30) and light that changes without the producer's confidence lags by it
+(half a second at 60 Hz). Memory: 80 bytes a pixel a signal and view
+(history 24, temporal result and spatial ping-pong 24, output 16, guides
+16; 166 MB at 1920x1080, 93 MB at TSR quality's 1440x810). The luminance's
+two moments are f32: with the mean taken from the half-float state, the
+half floats' rounding alone read as a 0.6% standard error on converged
+pixels and no pixel ever counted as converged.
+
+**Against NRD, SVGF and UE.** SVGF (Schied et al. 2017) is the same three
+stages on colour: temporal accumulation with moments, a 7x7 spatial
+variance estimate where history is short, five a-trous iterations stopped by
+luminance (sigma_l = 4 of one sample's deviation), depth and normal (power
+128); A-SVGF (Schied et al. 2018) adds temporal gradients from re-shaded
+samples to shorten history where light changes. ReLAX (NRD) is SVGF's
+stages with a history fix of the disoccluded pixels, an anti-firefly pass and
+the input's confidence (`IN_DIFF_CONFIDENCE`) scaling accumulated frames;
+ReBLUR (NRD) is a blur whose radius follows the hit distance and the
+accumulated frames, with the same confidence input; both have an SH mode
+(luminance first-order harmonics plus YCoCg chroma, resolved by the pixel's
+normal) for signals traced below full resolution. UE5's Lumen screen-probe
+gather filters in probe space and then temporally, and its denoisers
+(`ScreenSpaceDenoise`) are per signal and private. Ours: the producer's
+confidence plays A-SVGF's gradients and NRD's confidence input (the
+producer knows, from its reservoirs' revalidation, more than a gradient a
+denoiser re-traces can tell, and it costs the denoiser nothing); the
+history fix is ReLAX's; the luminance stop is SVGF's, on the standard error
+of the difference rather than one sample's deviation (so it relaxes as
+history grows); the hit distance enters as irradiance caching's record
+radius, which is ReBLUR's hit-distance radius with a bound it derives from;
+the SH representation is NRD's, made exact at each sample's traced normal so
+samples from neighbours average. History is judged once, by the frame's
+history, for every temporal pass. What it lacks against NRD: an
+anti-firefly pass and history clamping on fast lights (the producer's
+confidence is the answer here; a producer without one lags by max_history),
+and a separate specular path (r4's addition).
+
+**Verified** (RTX 3060):
+
+- **Where a pixel was** (`helio-pass-history` `tests/pixels_gpu.rs`: an
+  analytic scene ray-cast on the CPU in f64 into the G-buffer, cameras
+  uploaded as the renderer does, 96x64): every pixel's previous position
+  against the f64 projection through the previous camera, and every 2x2
+  that lies on one quad found whole (all four taps) or, where it was hidden,
+  found empty. Worst position error: still camera (jitter moving) 0.0005
+  px, moving camera (translated and turned) 0.017 px, an object moving by
+  itself (its motion vectors) 0.0004 px with 85 uncovered pixels finding no
+  tap, a frame-origin jump of (1024, 0, -2048) m 6,371 km from the world's
+  origin 0.0023 px; bound 0.02 px (a half-float offset's step under 16 px
+  of motion plus f32 evaluation). A view's first frame has no history.
+- **The denoiser** (`helio-pass-denoise` `tests/denoise_gpu.rs`, the same
+  fixture, 160x112, the tests the producer): a signal with 50% relative
+  noise a sample over a lit wall (a gradient and a normal term) converges
+  to the field with a relative RMS error of 0.0055 traced at every pixel and
+  0.0119 at one in 16 (bound 0.1016: sigma / sqrt(32) plus 15%; the bound is
+  the temporal mean's alone) and a mean of +0.0001 / +0.0019 (bound 0.0102);
+  a wall behind a box that moves by itself for three frames, then a camera
+  that pans and turns for four: worst error 0.0005 at every pixel and at a
+  sixteenth (bound 0.02); confidence 0 after a change: 2.0000 for a field
+  stepped from 1 to 2 and a history of length 1, against 1.0313 without a
+  confidence (1 + 1/32); traced at a quarter and a sixteenth over a bumpy
+  surface: worst error 0.0008 at each pixel's own normal, where one value a
+  block would err by 0.165; two runs, one moving the frame's origin
+  mid-run: worst difference 0.0016, mean 0.00001 (bound five half-float
+  steps, 0.0024). Readiness is the history's length read back under a
+  wall-clock guard.
+- **TSR**: its suite (14 tests, the reprojection and origin cases driven
+  through the history's pass) passes; its image on real frames: below.
+- **Cost** at 1920x1080 internal, pipelined (two frames in flight), the
+  graph's GPU timings, medians of 200 frames after 100, a signal traced at
+  one pixel in 16 with its noise redrawn every frame; two runs (the second
+  at lower clocks):
+
+  | stage | ms | scales with |
+  |---|---|---|
+  | HistoryReprojection | 0.002 | views |
+  | HistoryPixels | 0.51 | internal pixels |
+  | Denoise: guides | 0.19, 0.55 | internal pixels |
+  | Denoise: temporal | 0.68, 1.92 | internal pixels (4 sample and 4 history taps) |
+  | Denoise: fix | 0.26, 0.59 | internal pixels (25 taps where history is short) |
+  | Denoise: spatial | 3.14, 3.19 | internal pixels x 4 iterations x 9 taps |
+  | Denoise in all | 4.26, 6.27 | |
+
+  Traced at every pixel the test uploads 16 MB of signal a frame and its
+  timings are disturbed (p10 8.4 ms); a quarter: 5.6 and 6.6 ms. The first
+  version, a 5x5 a-trous of three iterations reading depth and normal at
+  every tap, cost 6.4 ms in its spatial stage alone. Nothing depends on the
+  scene.
+- **Gates**: Helio's layer gate (0 violations), `cargo test -p helio-core
+  --test wgsl_validation`, `helio-frame-api` `tests/layouts.rs` (the
+  reprojection's 128 bytes against WGSL, every new snippet function
+  validated), the crates' unit tests, clippy (no new warnings), per-package
+  fmt, Pulsar `cargo test -p one_owner` (its layout heuristic flagged
+  `HistoryReprojection`'s first fields as the portals' `GpuPortalStage`; the
+  struct leads with its `info` header instead).
+
+**TSR on the history's reprojection, real frames** (RTX 3060; r2's merged
+builds `C:/t/int2/voxel_craft_r2_merged.exe` and `voxel_flight_r2_merged.exe`
+against this branch's; a warm-up run of the new exe first; mean |difference|
+of the images, 0 to 1):
+
+| | same build | this against r2 | luminance |
+|---|---|---|---|
+| voxel_craft, 4 poses, 8-frame bursts, no clouds | r2 twice: 0.00004-0.00056; this twice: 0.0006-0.0015 (p99 0.013) | 0.0006-0.0018 (p99 0.016) | -0.06% to +0.01% |
+| Earth ground hold, 1600x900 | this twice: 0.00075 | 0.00088-0.00108 (p99 0.0078) | 0.3575-0.3576 against 0.3578 |
+
+The new build's own two voxel_craft runs differ as much from each other as
+from r2: its terrain kernels compiled cold on both runs (49.5 and 65.7 s for
+the generation and draw pipelines, shots at frames 6093 and 7060), where
+r2's binary found them in the driver's cache (shots at frame 1755), and the
+game's clock follows real frame time, so the bursts are taken at different
+times of day. The reprojection itself is TSR's former composition, moved;
+TSR's suite, which checks the uniform's values, the origin cases and the
+resolve's image, passes. A second round (r2 and this alternated again) was
+stopped while the GPU queue was held for hours by other work.
+
+**Open**:
+
+- No producer yet: the denoiser runs on real frames from step 4. The
+  reference path tracer's one-frame first-bounce estimate as a real signal
+  (against its converged image, the cathedral) was not built: it needs the
+  reference to export each path's first-bounce direction and incident
+  radiance, which is step 4's producer's own data path; step 4 builds it
+  with its producer.
+- The previous position is a half float offset: 0.5 px steps past 1024 px
+  of motion a frame (a fast turn), enough for a filter, not for TSR (which
+  keeps its own).
+- 80 bytes a pixel a signal: the guides could be shared by every signal of
+  a view (one texture a view).
+- Captures build the denoiser into their graphs like the primary view when
+  a producer is in them; nothing does today.
