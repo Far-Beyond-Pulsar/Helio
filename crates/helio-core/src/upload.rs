@@ -1,16 +1,14 @@
 #[cfg(debug_assertions)]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 #[cfg(debug_assertions)]
-use std::sync::{mpsc, OnceLock};
+use std::sync::mpsc;
 
-#[cfg(debug_assertions)]
-static FRAME_UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
-#[cfg(debug_assertions)]
-static REPORTER: OnceLock<mpsc::Sender<u64>> = OnceLock::new();
-
+// The byte count and the report's channel are the process's, shared with every
+// copy of Helio (`crate::runtime::Shared`), so a library's uploads are counted
+// and reported by the host's one reporter service.
 #[cfg(debug_assertions)]
 fn reporter() -> &'static mpsc::Sender<u64> {
-    REPORTER.get_or_init(|| {
+    crate::runtime::shared().upload_reporter.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<u64>();
         helio_tasks::spawn_service(
             helio_tasks::ServiceSpec::new("Helio upload reporter", "helio-upload-reporter")
@@ -43,7 +41,7 @@ fn reporter() -> &'static mpsc::Sender<u64> {
 
 pub fn record_upload_bytes(bytes: u64) {
     #[cfg(debug_assertions)]
-    FRAME_UPLOAD_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    crate::runtime::shared().upload_bytes.fetch_add(bytes, Ordering::Relaxed);
 
     #[cfg(not(debug_assertions))]
     let _ = bytes;
@@ -68,7 +66,7 @@ pub fn write_texture(
 pub fn finish_frame() {
     #[cfg(debug_assertions)]
     {
-        let frame_bytes = FRAME_UPLOAD_BYTES.swap(0, Ordering::Relaxed);
+        let frame_bytes = crate::runtime::shared().upload_bytes.swap(0, Ordering::Relaxed);
         let _ = reporter().send(frame_bytes);
     }
 }
