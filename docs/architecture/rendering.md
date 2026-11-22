@@ -1114,11 +1114,15 @@ one), so neither does a hit.
 
 **Virtual-geometry proxies** (Pulsar-Native#1744). A proxy LOD keeps its
 triangles grouped by material section (`helio_vg_stream::ProxySection`: the
-clusters' `material_slot`, the mesh's section ordinal); the engine
-projection makes each section a BLAS segment with its own row and material,
-the standalone one traces the section its object row draws. A hit on a proxy
-is shaded by its section's material with the proxy's UVs (textures and
-normal maps included).
+clusters' `material_slot`, the mesh's section ordinal); the standalone
+projection traces the section its object row draws. A hit on a proxy is
+shaded by its section's material with the proxy's UVs (textures and normal
+maps included). Only the standalone hosts trace proxies: their VG objects
+carry placeholder classic geometry. The engine projection traces a VG mesh's
+full geometry, which its `StaticMeshComponent` holds and mirrors anyway. A
+proxy there only added memory and error, and the error showed as wrong
+shadows and GI (Pulsar-Native `.agents/plans/virtual-geometry.md`, "Rays trace
+the full mesh").
 
 **The leaf's back.** What leaves the back of a thin two-sided surface lit
 from the front is what it transmits: its transmission share of its colour
