@@ -3,6 +3,9 @@ members = [
     "crates/*",
     "crates/passes/3d/*",
 ]
+# The shared library crate builds inside Pulsar-Native's workspace (its dependencies on the other
+# shared libraries resolve there, through its `[patch]` entries): it is not a member of this one.
+exclude = ["crates/helio_dylib"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -55,8 +58,8 @@ helio-core = { path = "crates/helio-core" }
 helio-scene-join = { path = "crates/helio-scene-join" }
 helio-settings = { path = "crates/helio-settings" }
 helio-tasks = { path = "crates/helio-tasks" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "cdad160514f6acc2c3cac178120d1e99b1b8f154", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "cdad160514f6acc2c3cac178120d1e99b1b8f154" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f9589128fa018570c768663ed6820c2f6874a00f", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f9589128fa018570c768663ed6820c2f6874a00f" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's

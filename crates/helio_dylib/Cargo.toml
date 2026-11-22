@@ -12,7 +12,7 @@ crate-type = ["dylib"]
 # One copy of each, from their own libraries.
 wgpui_dylib = { git = "https://github.com/Far-Beyond-Pulsar/WGPUI" }
 profiling_dylib = { git = "https://github.com/Far-Beyond-Pulsar/Pulsar-Profiling" }
-scenedb_dylib = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", branch = "shared-dylib" }
+scenedb_dylib = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f9589128fa018570c768663ed6820c2f6874a00f" }
 helio = { path = "../helio" }
 helio-core = { path = "../helio-core" }
 helio-tasks = { path = "../helio-tasks" }
