@@ -377,19 +377,6 @@ pub static RENDERER: Group = Group {
             16,
             "The most captures a frame renders, all depths together; each renders the scene              again",
         ),
-        pick(
-            "hdr_output_mode",
-            "HDR Output",
-            "Output",
-            &[
-                choice("ldr", "SDR"),
-                choice("hdr10", "HDR10"),
-                choice("scrgb", "scRGB"),
-                choice("passthrough", "Passthrough"),
-            ],
-            "ldr",
-            "Display output encoding",
-        ),
         Setting {
             key: "background_color",
             label: "Background Color",
