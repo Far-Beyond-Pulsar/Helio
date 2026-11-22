@@ -39,12 +39,12 @@ notify = "8.2.0"
 serde_json = "1"
 
 # SolidRS - 3D asset loading library
-solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-unreal = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
+solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-unreal = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 thiserror = "2.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
