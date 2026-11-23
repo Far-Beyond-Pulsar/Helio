@@ -16,6 +16,10 @@
 //!   one.
 //! - **A specular sample never gains energy**: for a pure specular surface
 //!   each weight is `F G2 / G1`, at most 1.
+//! - **The diffuse reflectance is the diffuse lobe's integral**:
+//!   `bsdf_diffuse_reflectance` (what a lighting model multiplies an
+//!   irradiance by) against the integral over the hemisphere above of
+//!   `bsdf_eval` less its specular lobe (the same surface with no albedo).
 //!
 //! The integral is estimated with uniformly distributed directions over the
 //! sphere (independent of the BSDF's own sampling). Tolerances: five
@@ -30,8 +34,9 @@ const CONFIGS: u32 = 12;
 const VIEWS: u32 = 4;
 /// Per thread, configuration and view: sum and sum of squares of the
 /// uniform estimate (luminance), of the sampled weight, the pdf's uniform
-/// estimate, the largest weight, the pdf estimate's squares.
-const STATS: usize = 7;
+/// estimate, the largest weight, the pdf estimate's squares; sum and sum of squares of the diffuse lobe's
+/// uniform estimate, and `bsdf_diffuse_reflectance` (luminance).
+const STATS: usize = 10;
 
 const KERNEL: &str = r#"//!use frame_surface
 //!use frame_bsdf
@@ -103,7 +108,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         for (var view = 0u; view < 4u; view++) {
             let c = array<f32, 4>(1.0, 0.5, 0.2, 0.05)[view];
             let wo = vec3<f32>(sqrt(1.0 - c * c), 0.0, c);
-            var stats = array<f32, 7>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            var stats = array<f32, 10>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+            // The surface's specular lobe alone: no albedo to scatter.
+            var specular_only = s;
+            specular_only.albedo = vec4<f32>(0.0, 0.0, 0.0, s.albedo.a);
+            specular_only.subsurface_color = vec3<f32>(0.0);
+            stats[9] = luminance(bsdf_diffuse_reflectance(s, c));
             for (var k = 0u; k < 512u; k++) {
                 let r = ((id.x * 512u + k) * 16u + config) * 4u + view;
                 // A uniform direction over the sphere.
@@ -113,6 +123,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 let uniform = luminance(bsdf_eval(s, wo, wi)) * 12.566371;
                 stats[0] += uniform;
                 stats[1] += uniform * uniform;
+                let diffuse = select(0.0, luminance(bsdf_eval(s, wo, wi) - bsdf_eval(specular_only, wo, wi)) * 12.566371, wi.z > 0.0);
+                stats[7] += diffuse;
+                stats[8] += diffuse * diffuse;
                 let sample = bsdf_sample(s, wo, vec3<f32>(h(r * 8u + 2u), h(r * 8u + 3u), h(r * 8u + 4u)));
                 let w = luminance(sample.weight);
                 stats[2] += w;
@@ -122,8 +135,8 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
                 stats[6] += density * density;
                 stats[5] = max(stats[5], max(sample.weight.r, max(sample.weight.g, sample.weight.b)));
             }
-            let at = ((id.x * 12u + config) * 4u + view) * 7u;
-            for (var j = 0u; j < 7u; j++) { out[at + j] = stats[j]; }
+            let at = ((id.x * 12u + config) * 4u + view) * 10u;
+            for (var j = 0u; j < 10u; j++) { out[at + j] = stats[j]; }
         }
     }
 }
@@ -191,8 +204,18 @@ fn run(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<f32> {
 
 /// A configuration and view's totals: (mean, standard error) of the uniform
 /// estimate and of the sampled weight, (mean, standard error) of the pdf's
-/// integral, the largest weight.
-fn totals(values: &[f32], config: u32, view: u32) -> ([f64; 2], [f64; 2], [f64; 2], f64) {
+/// integral, the largest weight; (mean, standard error) of the diffuse
+/// lobe's integral and `bsdf_diffuse_reflectance`.
+struct Totals {
+    uniform: [f64; 2],
+    sampled: [f64; 2],
+    pdf: [f64; 2],
+    most: f64,
+    diffuse: [f64; 2],
+    reflectance: f64,
+}
+
+fn totals(values: &[f32], config: u32, view: u32) -> Totals {
     let mut sums = [0.0f64; STATS];
     let mut most = 0.0f64;
     for thread in 0..THREADS {
@@ -201,19 +224,24 @@ fn totals(values: &[f32], config: u32, view: u32) -> ([f64; 2], [f64; 2], [f64; 
             *sum += f64::from(values[at + k]);
         }
         most = most.max(f64::from(values[at + 5]));
-        sums[6] += f64::from(values[at + 6]);
+        for (k, sum) in sums.iter_mut().enumerate().take(9).skip(6) {
+            *sum += f64::from(values[at + k]);
+        }
+        sums[9] = f64::from(values[at + 9]);
     }
     let n = f64::from(THREADS * SAMPLES);
     let stat = |sum: f64, squares: f64| {
         let mean = sum / n;
         [mean, ((squares / n - mean * mean).max(0.0) / n).sqrt()]
     };
-    (
-        stat(sums[0], sums[1]),
-        stat(sums[2], sums[3]),
-        stat(sums[4], sums[6]),
+    Totals {
+        uniform: stat(sums[0], sums[1]),
+        sampled: stat(sums[2], sums[3]),
+        pdf: stat(sums[4], sums[6]),
         most,
-    )
+        diffuse: stat(sums[7], sums[8]),
+        reflectance: sums[9],
+    }
 }
 
 #[test]
@@ -225,7 +253,14 @@ fn the_bsdf_conserves_energy_and_its_sampler_matches_it() {
     let values = run(&device, &queue);
     for config in 0..CONFIGS {
         for view in 0..VIEWS {
-            let (uniform, sampled, pdf, most) = totals(&values, config, view);
+            let Totals {
+                uniform,
+                sampled,
+                pdf,
+                most,
+                diffuse,
+                reflectance,
+            } = totals(&values, config, view);
             let label = format!("config {config}, view {view}");
             println!(
                 "{label}: integral {:.4} (+-{:.4}), sampled {:.4} (+-{:.4}), pdf mass {:.4} (+-{:.4}), largest weight {most:.3}",
@@ -257,6 +292,14 @@ fn the_bsdf_conserves_energy_and_its_sampler_matches_it() {
                     sampled[0]
                 );
             }
+            // The diffuse reflectance an irradiance is multiplied by is the
+            // diffuse lobe's integral (its fit within 0.001).
+            assert!(
+                (diffuse[0] - reflectance).abs() <= 5.0 * diffuse[1] + 2e-3,
+                "{label}: the diffuse lobe integrates to {} (+-{}), bsdf_diffuse_reflectance {reflectance}",
+                diffuse[0],
+                diffuse[1]
+            );
             // White metals: every specular sample's weight is F G2 / G1.
             if (2..=5).contains(&config) {
                 assert!(most <= 1.0 + 1e-3, "{label}: a specular weight of {most}");

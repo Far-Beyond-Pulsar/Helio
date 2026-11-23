@@ -12,5 +12,6 @@ helio-core = { workspace = true }
 helio-feature-api = { path = "../helio-feature-api" }
 wgpu = { workspace = true }
 helio-pass-hiz = { path = "../passes/3d/helio-pass-hiz" }
+helio-pass-history = { path = "../passes/3d/helio-pass-history" }
 helio-pass-tsr = { workspace = true }
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }

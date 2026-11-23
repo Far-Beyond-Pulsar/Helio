@@ -1,0 +1,20 @@
+[package]
+name = "helio-pass-denoise"
+version = "0.1.0"
+edition = "2021"
+description = "Helio's denoiser (helio_frame_api::denoise): temporal accumulation through the frame's history, a wide reconstruction where history is short, a variance-guided spatial stage"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+helio-feature-api = { path = "../../../helio-feature-api" }
+helio-frame-api = { path = "../../../helio-frame-api" }
+helio-settings = { path = "../../../helio-settings" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+glam = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
+# The frame's history, published in the tests as the spine does.
+helio-pass-history = { path = "../helio-pass-history" }

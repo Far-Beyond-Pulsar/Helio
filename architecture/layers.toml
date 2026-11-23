@@ -79,6 +79,8 @@ helio-frame-api = { layer = "feature_api" }
 
 # spine
 helio-pass-hiz = { layer = "spine" }
+# The frame's pixel history (helio_frame_api::history), which the spine publishes.
+helio-pass-history = { layer = "spine" }
 helio-pass-tsr = { layer = "spine" }
 helio-pass-postprocess = { layer = "spine" }
 # On-screen text, and the glyph atlas the status screen samples.
@@ -97,6 +99,8 @@ helio-pass-buffer-view = { layer = "feature", group = "debug" }
 helio-pass-selection-outline = { layer = "feature", group = "debug" }
 # The reference path tracer over the frame's ray streams and light samples.
 helio-pass-reference = { layer = "feature", group = "reference" }
+# The frame's denoiser (helio_frame_api::denoise) over frame contracts alone.
+helio-pass-denoise = { layer = "feature", group = "denoise" }
 
 # renderer
 helio = { layer = "renderer" }

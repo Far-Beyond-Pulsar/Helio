@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_pass_hiz::HIZ_SNIPPET,
     helio_frame_api::diagnostics::HEATMAP_SNIPPET,
+    helio_frame_api::denoise::IRRADIANCE_SNIPPET,
+    helio_frame_api::history::SNIPPET,
     helio_frame_api::gbuffer::OUTPUT_SNIPPET,
     helio_frame_api::gbuffer::SURFACE_SNIPPET,
     helio_frame_api::gbuffer::BSDF_SNIPPET,
