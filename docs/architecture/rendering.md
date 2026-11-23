@@ -3022,23 +3022,30 @@ one copy for the probes', the cache's and the pixels' rays.
      cosine density in the sample's measure) combined by generalised RIS
      with the reservoir of the previous block the traced pixel's surface was
      in (the history's tap of largest weight, its receiver within a block's
-     diagonal and a pixel, the denoiser's normal and plane stops), its M
+     diagonal and a pixel, the denoiser's normal and plane stops, and no
+     surface the depth buffer shows between the two receivers: a block
+     across an occluder's foot is the reprojection's rejection), its M
      capped at `M_CAP` (8); balance-heuristic weights over both receivers'
-     target functions (luminance times the geometry term). Only these
+     target functions (luminance times the geometry term). The previous
+     sample was traced from this surface point: no visibility ray, its
+     validity over time the re-trace's (as ReSTIR GI). Only these
      reservoirs carry over.
    - *spatial*: combined with up to 4 neighbours' (a disc of
      `SPATIAL_RADIUS` = 3 texels turned each frame; the same stops, and no
      surface the depth buffer shows nearer the eye than the straight line
      between the two receivers: a neighbour on the same plane across an
      occluder is not taken), balance heuristic over their receivers
-     (geometry terms). Where the sample chosen was taken by another receiver
-     (the previous frame's, a neighbour's) a visibility ray from this
+     (geometry terms), the integrand at the receiver's exact surface (the
+     G-buffer's position and normal: W was taken with the exact cosines).
+     Where the sample chosen is a neighbour's, a visibility ray from this
      receiver to it, into the occlusion stream `gi_pixels_visibility`.
    Reservoirs are 32 bytes: the receiver as a distance and a 16:16
    octahedral direction from the eye (the previous frame's eye moved into
-   this frame's space carries an origin change), its normal 8:8 and the
-   kept cache luminance a half; the sample as a direction and distance from
-   the receiver (below 0: the sky), its normal 8:8 and M a half; the light
+   this frame's space carries an origin change), its normal 8:8 (the
+   resampling's weights only) and the kept cache luminance a half; the
+   sample as a direction and distance from the receiver (below 0: the sky),
+   its normal 12:12 (8 bits an axis put a grazing sample's light where its
+   sampling put none) and M in 8 bits (16ths); the light
    (`scene_pack_radiance`) and W.
 6. The tracers answer the visibility stream.
 7. `GIGatherSignal`: the chosen sample's estimate `L G W` times what its
@@ -3115,18 +3122,26 @@ test checks each derivation):
 | `NEAR_SLICES` | 4 (8 azimuths) | every pixel within the block's side along them: 8 x side taps, deterministic, no history of its own |
 | `RESERVOIR_BYTES` | 32 | the layout above |
 
-**The visibility decision** (measured, `pixel_gather`'s
-`reuse_does_not_carry_light_through_an_occluder`: a room halved by a wall
-to half its height, a glowing panel on one side, the floor on both sides in
-view; the far side's floor band against one plain ray a pixel): with no
-visibility ray reuse carried the panel's light over the wall, 1.59 of the
-plain rays there; with the visibility ray alone (the first form, this
-frame's own sample in an occluded one's place) 0.74-0.90 on the far side
-and 1.02-1.08 on the near; with the depth buffer's test between receivers
-added and an occluded reuse giving none, 0.85-0.95 and 1.02-1.04 over
-four runs. The visibility rays cost what the stream's tracers make of them
-(on voxel terrain at a sixteenth 0.1-1.3 ms, below); the near side, where
-the light is, agrees with the plain rays within 4%.
+**The visibility decision** (measured, `pixel_gather`'s two occluder
+tests: a room halved by a wall to half its height, a glowing panel on one
+side, the floor on both sides in view, the camera still and swaying across
+the wall; the gather's own estimate before the denoiser, a block of 4, the
+far side's pixels within two blocks of the near side's against one plain
+ray a pixel; bound 1.15):
+
+| | camera still | camera swaying |
+|---|---|---|
+| the gather (a neighbour's sample gets a visibility ray, an occluded one none; the temporal stage rejects a receiver across the wall) | 0.92-1.05 | 0.98-1.00 |
+| no visibility ray | 1.49-1.53 | |
+| the temporal stage's rejection off | 1.00 | 1.18, 1.03 (two runs) |
+
+The near side's light agrees within 3.3% in every row. The swaying test does
+not reliably fail with the rejection off: the sway carries few blocks' history
+across the wall within the far side's band, so one run of two stayed under the
+bound; a sharper case (an occluder that moves across a lit receiver) is open. A temporal sample
+needs no visibility ray once the reprojection rejects a different surface
+point (ReSTIR GI's rule); a spatial one does. Everything after the
+denoiser moves more and is the denoiser's (below).
 
 **Against the others** (section 5, "How others do it"):
 
@@ -3158,9 +3173,14 @@ the light is, agrees with the plain rays within 4%.
   hits. Ours lights hits from the cache (no secondary path), feeds back
   only the temporal reservoirs (the spatial ones only resolve, which the
   course notes give as the remedy for boiling), caps M at 8 from the
-  denoiser's history, keeps a neighbour across an occluder the depth buffer
-  shows out of the reuse and traces a visibility ray to a reused sample,
-  discarding an occluded one (ReSTIR GI's biased form; measured above).
+  denoiser's history, keeps a neighbour or a previous receiver across an
+  occluder the depth buffer shows out of the reuse and traces a visibility
+  ray to a neighbour's sample only, discarding an occluded one (ReSTIR GI's
+  rule and its biased form; measured above). Reuse is in area measure: a
+  sample is a point with its normal, the target the light times the
+  geometry term at each receiver (both cosines and the distance), so the
+  reconnection Jacobian is in the target itself and in the balance
+  heuristic's weights over every receiver, and needs no clamp.
 - **Kajiya** (Stachowiak 2022): ReSTIR GI at half resolution over an
   irradiance cache, its reservoirs validated by re-tracing in turn (one in
   4 frames there too) and invalidated on a radiance change. The same
@@ -3237,18 +3257,61 @@ world's size: an Earth costs what a room does.
   cache, lit by many lamps, settles differently with when the pipelines
   compiled. Within that, a quarter reads the reference (0.98-1.03 over its
   forms); every pixel and a sixteenth read 0.93-0.95; the probes 0.815.
-  The final build (the visibility rays, an occluded reuse giving none, the
-  rays as wide as their block; two runs each): a quarter 1.045 / 0.119 and
-  1.176 / 0.232, every pixel 1.072 / 0.149 and 1.001 / 0.100, a sixteenth
-  0.958 / 0.092 and 0.943 / 0.094, the probes 0.877 / 0.163. The second
-  quarter's run has the left wall's light 30-40% over the reference in
-  blotches a few blocks wide (the frame captured is one frame of a
-  resampled, denoised signal: a bright sample shared by neighbours shows
-  until the denoiser's history outweighs it); the probes themselves read
-  0.815 and 0.877 in two runs. On the cathedral one captured frame does not
-  resolve better than about 7% in the mean; the settings' means over all
-  their runs at frame 3000: a quarter 1.06, every pixel 0.99, a sixteenth 0.94, the
-  probes 0.85.
+  **Means over 16 consecutive frames** (the final build: visibility rays
+  for a neighbour's sample only, the temporal stage's rejection, the
+  integrand at the receiver's exact surface; frames 3000-3015; per-frame
+  noise is the spread of each frame's ratio, a separate number):
+
+  | Setting | run a | run b | per-frame sd | frames of 16 with a 40-pixel tile 30% over its burst mean |
+  |---|---|---|---|---|
+  | probes | 0.830 / 0.183 (a first run drew no scene: discarded) | 0.838 / 0.178 | 0.0001-0.0003 | 0 |
+  | a sixteenth | 0.991 / 0.088 | 1.029 / 0.107 | 0.0005-0.0018 | 0 |
+  | a quarter | 1.173 / 0.226 | 1.064 / 0.131 | 0.0005 | 0 |
+  | every pixel | 0.978 / 0.089 | 0.922 / 0.100 | 0.0013-0.0023 | 0 |
+
+  Per frame the gather moves by under 0.3% of its mean and no frame of 64
+  (a quarter, the build before this one: 0/64 in four variants) shows a
+  block-sized bright region over its burst's mean: the excess of a quarter's
+  run is not a bright sample shared between neighbours for a few frames but
+  a state a run settles into and keeps (the left wall at 1.2-1.4 of the
+  reference in every quarter's run, the floor at 1.0 in one run and 1.35 in
+  another; not at a sixteenth or every pixel). Checked against the
+  causes named for it:
+  - *The reconnection Jacobian.* Reuse is in area measure: a sample is a
+    point with its normal, W the inverse of its density over surface area
+    (pi / G for the cosine-sampled ray), the target the light times the
+    geometry term at the receiver (both cosines over the squared
+    distance). Moving a sample to another receiver changes only the target,
+    which carries the Jacobian itself; the balance heuristic's weights are
+    the targets at every receiver (the receiver's cosine included), the
+    same functions on both sides (the luminance cancels in them). No clamp
+    is needed and none is taken.
+  - *The integrand at a reused sample.* It used the reservoir's 8-bit
+    normals: at a grazing sample W (from the exact cosines) is large, and
+    an 8-bit cosine put light where the sampling put none. Now the
+    receiver's exact surface (the G-buffer's) and the sample's normal to
+    12 bits. Measured on the occluder test: no change in its means.
+  - *The denoiser.* The gather's own estimate agrees with one plain ray a
+    pixel before the denoiser (the occluder tests: 0.97-1.01 on the lit
+    side); after it the two part by 13-21%. Over a whole image the
+    denoiser's output keeps 0.95 of the resampled signal's mean and 0.77 of
+    one plain ray a block's (`pixel_gather`'s occluder test: output over
+    input, 1 where the mean is kept): it weighs records by their variance,
+    and with the variance estimated from the samples a noisier signal's
+    bright records count less. The settings' differences on the cathedral
+    (a sixteenth's noisier signal darker than a quarter's) carry that
+    bias. It is the denoiser's (`helio-pass-denoise`), not the gather's.
+  - *Bright specks on voxel_craft* (its first pose, 16 frames, view 23):
+    443 pixels a frame of block-sized green specks that come and go
+    (3,394 pixels specked in some frame, 90 in half of them; the probes
+    none). With every
+    cache cell trusted (no light sample of the hit's own) 148 a frame and
+    1,013: two thirds are the hits' own direct light, one light sample and
+    one shadow ray a hit (the sun on a leaf a short ray met), which
+    resampling then favours. Their number falls with the hits that must
+    sample their own light: the cache rework's per-cell clear distances
+    let a short ray trust more cells (the trust rule moves behind
+    `radiance_cache_read` there).
   The remaining shortfall is shared by every row that lights hits from the
   cache, the probes most: the cache's closed box reads 4-8% low (the
   furnace below; its own test's bound), and a hit's light reflects again
@@ -3263,9 +3326,10 @@ world's size: an Earth costs what a room does.
     reads 5-8% low). Blocks with a closed pixel: 0.913 / 0.959 / 0.961.
   - *The reservoirs against one plain ray a pixel* (a lit room with a
     pillar, 128 frames a ray a pixel): 0.9996-1.0023, worst 8x8 tile 5.1%.
-  - *Reuse across an occluder* (new; above): the far side 0.85-0.95 of the
-    plain rays with reuse (1.59 with no visibility ray), the near side
-    1.02-1.04.
+  - *Reuse across an occluder*, the camera still and swaying (above): the
+    far side beside the wall 0.92-1.05 of the plain rays before the
+    denoiser (1.49-1.53 with no visibility ray; 1.18 and 1.03 in two
+    swaying runs with the temporal rejection off), the near side 0.97-1.01.
   - *A light switched off*: a confidence under 1/2 within 4-5 frames; the
     indirect diffuse under 10% of its light after 177-184 frames (the
     cache's own decay).
@@ -3322,6 +3386,15 @@ world's size: an Earth costs what a room does.
   quarter 8.8 ms; every pixel 30.7 ms, of which the terrain's walk of the
   two ray sets is 21.5 (the walk's footprint, Open).
 
+  With visibility rays for a neighbour's sample only (one run each, this
+  run's clock 2% slower: `GILight` 0.36-0.38, the probes 15.10): the whole
+  frame 19.16 / 24.26 / 45.74 ms at a sixteenth / a quarter / every pixel
+  (4.1 / 9.2 / 30.6 over the probes); the terrain's walk of the visibility
+  rays 0.60-0.62 / 2.03 / 8.00 ms (0.68-0.71 / 2.25 / 9.19-9.26 before),
+  the shading 0.39 / 1.14 / 3.49. A reused sample is a neighbour's most of
+  the time: the temporal reservoir's own samples were a tenth of the
+  visibility rays.
+
   *Packing the reservoir to 32 bytes*: the shading before it (one pass that
   also lit the hits and wrote the signal) took 1.01 ms at a quarter and
   3.29-3.76 ms at every pixel; its share now (validate, temporal, spatial)
@@ -3374,8 +3447,17 @@ world's size: an Earth costs what a room does.
 - **The visibility rays on terrain** cost as much as a second set of
   pixels' rays (their sky samples walk the shell's height): the terrain
   walk's footprint, above.
-- **The cache's level** (the furnace's 4-8%, the cathedral's 5-7% at a
-  block of 16 and 1): the cache owner's.
+- **The cache's level** (the furnace's 4-8%): the cache owner's.
+- **The denoiser keeps 0.77 of a noisy signal's mean** (one plain ray a
+  block) and 0.95 of a resampled one's, and its spatial filter carries
+  light over an occluder's foot (above): `helio-pass-denoise`'s. A quarter's
+  cathedral runs settle at 1.06-1.17 of the reference, the left wall at
+  1.2-1.4 in both, a sixteenth's and every pixel's at 0.92-1.03: not
+  resolved here.
+- **The material occlusion path** (voxel_craft's terrain, 16 frames): with
+  it switched off (own-occlusion surfaces take the horizon like any
+  other) the indirect diffuse of the terrain's half of the image reads
+  0.94 of the path's, the whole image 0.98.
 - **Captures and other views** resolve the probes. Two primary views (XR's
   eyes) each build the gather in the view's graph and keep their own
   reservoirs, near field and denoiser history by view id; not run on an XR
