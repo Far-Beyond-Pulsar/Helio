@@ -18,20 +18,24 @@
 //!   is a multiple of 1024 m, so it is a whole number of cells at every
 //!   level, a frame point's cell is the origin's plus the point's, and an
 //!   origin change moves no entry.
-//! - **The level** of a read: the cell at least as wide as the ray's
-//!   footprint at the hit and as the publisher's eye angle at the hit's
-//!   distance from the eye, whichever is coarser (a probe's wide ray reads
-//!   a coarse cell, a pixel's ray near the eye a fine one). A cell without a
-//!   value answers from the next coarser one that has one, as many levels up
-//!   as the reader allows (its `reach`: a coarser cell spans more, and
-//!   across a thin occluder holds both sides' light; a probe that keeps
-//!   what it reads in a history allows one, a pixel's ray that a denoiser
-//!   filters may allow all).
-//! - **The mark**: a reader marks the cell it read as used this frame (and
-//!   the one [`ANCESTOR`] levels coarser, so a new fine cell has something to
-//!   answer from); a cell first used takes its point and normal from the
-//!   hit that marked it. What the publisher lights, how often and what it
-//!   evicts is its own.
+//! - **The level** of a surface point: one, whoever reads it and however
+//!   wide their ray, the publisher's eye angle at its distance from the eye
+//!   (as SHaRC and GI-1.0 key their hash grids), so every reader of a place
+//!   reads and marks the same cell; a wide ray takes the cell's light as its
+//!   prefiltered value. Next to what splits a cell (an occluder between the
+//!   cell's point and the hit, found by the cell's own rays), a read goes to
+//!   finer cells, at most [`DESCENT`] levels; a cell without a value, or one
+//!   whose rays have not explored the way to the hit, answers nothing.
+//! - **The reach**: a reader says how far from its hit, along the surface,
+//!   a cell's point may stand for the hit: a ray that left a surface its
+//!   length (that surface is in the hit's way there, so light gathered
+//!   farther off is light the hit does not see: the floor beyond a contact),
+//!   a reader in the air (a probe) any distance. Past it a read goes finer,
+//!   as past an occluder.
+//! - **The mark**: a reader marks the cell it read as used this frame, and
+//!   the finer ones it went to; a cell first used takes its point and normal
+//!   from the hit that marked it. What the publisher lights, how often and
+//!   what it evicts is its own.
 //!
 //! The WGSL ([`SNIPPET`], `//!use frame_radiance_cache`) holds the rows, the
 //! read and the mark; the Rust here mirrors the key's arithmetic for tests
@@ -75,10 +79,12 @@ pub const FINEST: i32 = -6;
 /// The coarsest level's width (m): the frame origin's step.
 pub const COARSEST: f64 = 1024.0;
 const _: () = assert!(LEVELS as i32 + FINEST - 1 == 10);
-/// Slots a key may sit in.
+/// Slots a bucket holds; a key sits in its bucket or, where that was full
+/// when it was claimed, the next one (`RADIANCE_CACHE_BUCKET`).
 pub const BUCKET: u32 = 16;
-/// Levels a mark marks above the read's.
-pub const ANCESTOR: u32 = 3;
+/// Levels finer than a surface's own a read goes to where the surface's
+/// cell does not hold for it (`RADIANCE_CACHE_DESCENT`).
+pub const DESCENT: u32 = 3;
 /// The new cells' queue holds a place for every this many slots
 /// (`RADIANCE_CACHE_QUEUE_SHARE`): it follows the hash's slots in
 /// [`SLOTS`]'s buffer, its count first.
@@ -142,13 +148,13 @@ impl RadianceCacheFrame {
         self.origin_z[2]
     }
 
-    /// `radiance_cache_level`.
-    pub fn level(&self, p: [f32; 3], footprint: f32) -> u32 {
+    /// `radiance_cache_level`: the level of frame point `p`'s surface.
+    pub fn level(&self, p: [f32; 3]) -> u32 {
         let d = (0..3)
             .map(|k| (p[k] - self.eye[k]).powi(2))
             .sum::<f32>()
             .sqrt();
-        let size = footprint.max(self.offset[3] * d);
+        let size = self.offset[3] * d;
         let l = size.max(1e-30).log2().round() - FINEST as f32;
         l.clamp(0.0, (LEVELS - 1) as f32) as u32
     }
@@ -384,7 +390,7 @@ mod tests {
         for (name, value) in [
             ("RADIANCE_CACHE_LEVELS", LEVELS),
             ("RADIANCE_CACHE_BUCKET", BUCKET),
-            ("RADIANCE_CACHE_ANCESTOR", ANCESTOR),
+            ("RADIANCE_CACHE_DESCENT", DESCENT),
             ("RADIANCE_CACHE_QUEUE_SHARE", QUEUE_SHARE),
             ("RADIANCE_CACHE_WAYS", WAYS),
         ] {
@@ -466,18 +472,18 @@ mod tests {
         }
     }
 
-    /// The level: at least the footprint and the eye angle at the distance,
-    /// the nearest power of two, within the levels.
+    /// The level: the eye angle at the distance, the nearest power of two,
+    /// within the levels.
     #[test]
-    fn a_read_keys_the_coarser_of_its_footprint_and_the_eye_angle() {
+    fn a_surface_s_level_is_the_eye_angle_s() {
         let frame = RadianceCacheFrame::new([0.0; 3], [0.0; 3], 1.0 / 32.0, 1 << 16, 1);
-        // Near the eye a 1 cm footprint: 1/64 m.
-        assert_eq!(frame.level([0.1, 0.0, 0.0], 0.01), 0);
-        // 32 m away, 1 m by the angle; a 4 m footprint wins.
-        assert_eq!(frame.level([32.0, 0.0, 0.0], 0.01), 6);
-        assert_eq!(frame.level([32.0, 0.0, 0.0], 4.0), 8);
+        // Near the eye: the finest, 1/64 m.
+        assert_eq!(frame.level([0.1, 0.0, 0.0]), 0);
+        // 32 m away, 1 m by the angle; 128 m away, 4 m.
+        assert_eq!(frame.level([32.0, 0.0, 0.0]), 6);
+        assert_eq!(frame.level([0.0, -128.0, 0.0]), 8);
         // Past the coarsest: the coarsest.
-        assert_eq!(frame.level([1e7, 0.0, 0.0], 0.0), LEVELS - 1);
+        assert_eq!(frame.level([1e7, 0.0, 0.0]), LEVELS - 1);
     }
 
     #[test]
