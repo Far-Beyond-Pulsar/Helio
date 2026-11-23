@@ -2369,17 +2369,17 @@ the walks', not the share's) — the voxel plugin's decision, carried to r4.
   the "thin two-sided surface" the material stands for); the terrain's
   tracer answers a ray that starts on a solid cell's face, into it, as
   blocked by that cell (`stream_enter`, `START_FACE`), so the reference
-  (and GI's shadow rays from leaves) never pass light through a leaf. The
-  tracer's to change (a ray leaving a cell that lets light through starts
-  past it, as the real-time walk's `through` does); not changed here.
+  (and GI's shadow rays from leaves) never passed light through a leaf.
+  Since changed: a ray from such a cell starts past it ("Light through
+  leaves, for rays", below).
 - *Distant ground near the horizon (image rows above 250), 1.10*: there the
   real-time shading normal (the screen's slope, `screen_ground`) gives a
   sun cosine 0.71 of the tracer's surface (the cell's stored slope), and its
   far-field visibility (coarse pages, the canopies' cut) is higher than the
   reference's; the two partly cancel. Over all hits the real-time cosine is
   0.957 of the reference's (`max(N . L, 0)` written by both, from disk).
-  The terrain's two descriptions of a hit's slope (screen-space for the
-  raster, the stored slope for rays) are its own to reconcile.
+  The terrain's two descriptions of a hit's slope are one since ("One
+  slope", below).
 - The steps' sky light (`sky_visibility` also skips the steps) and local
   lights' terrain shadows (`light_skip`) take the same prefilter; their
   share of the staircase is not put back here (indirect and lamps are not
@@ -2569,3 +2569,111 @@ CPU casts), `volumes` 8, `voxel_pass_graph` 13, `wgsl` 2,
 path); `helio-core` `wgsl_validation`; the layer gate (0 violations);
 `one_owner`. Not verified: the wgpu fork's own test suite, the overlap on
 DX12 and Metal (this machine runs Vulkan), the editor.
+
+#### The canopy's speckles, light through leaves, one slope
+
+**The speckles.** The user's report: bright leaf cells, one or two wide,
+lit for a frame or two inside voxel_craft's shaded crowns. Measured on a
+burst of the tour (`voxel_craft` poses 9-13, 1080p, TSR on, 16 frames;
+`tools/flicker.py`'s speckle count: pixels over 40/255 brighter than the
+frames before and after, in clusters of four or more), with each suspect
+taken out by its own build:
+
+| crowns just after a look around (pose 12), speckle px a frame | |
+|---|---|
+| base, two runs | 55.3 / 56.4 (with poses 9-11 before it: 69.2) |
+| the sun's restart from the short history only where the samples around agree | 56.4 (no change) |
+| no sun on faces turned from it (the back faces' page read) | 59.1 (no change) |
+| steady shadows (every hit its own 32 walks) | 37.4 |
+| **a history begun this frame starts from the samples around** | **14.4; 12.0 / 8.9 with the rays and slope below** |
+
+With the camera still and the sun turning at play speed the crowns show
+none either way (pose 11: 1-2), nor under a tree (pose 9: 0); with no
+history they appear as soon as the view moves. Without TSR the pre-TSR
+image shows them 25-40 times more often; steady shadows there take two
+thirds off, the rest is the leaves' own aliasing under motion, which TSR
+resolves. The cause: past a disocclusion (every pixel of a turned view),
+the sun's history began from the pixel's one sample of the frame, most
+often a neighbour's lent one (a 2x2 block walks one pixel a frame; the
+others borrow it at 0.05 of their own weight); with nothing accumulated it
+counted in full, and a lit leaf's sample lent into the shade showed lit
+until the pixel's own walks came, one a cycle. Now (`temporal`) such a
+history starts from the mean of this frame's samples in the 9x9 pixels
+around (summed with the clamp's range, no extra pass), worth a cycle of
+the pixel's own samples: what NVIDIA's ReBLUR does in its history fix and
+SVGF with its spatial estimate for short histories. It costs a sum in the
+clamp's tile. `terrain_shadows_match_steady_shadows` passes unchanged
+(denoised error 0.0011; 4 frames after a 20-degree turn, 0.18% off by more
+than half against the walks' own 0.52%; jittered flicker 0.0041 against
+steady shadows' 0.0044).
+
+The gate: `flicker.py` on pose 12 at most 20 speckle pixels a frame. The
+tour's new poses (`VOXEL_CRAFT_FROM` starts there): under a tree looking up
+into its canopy, still (9) and walking with the sun turning (10); the
+crowns from the meadow facing the sun, still with the sun turning (11);
+after a look around (12: the camera swings a radian over the 30 frames
+before the burst); turning slowly (13). A moving burst steps by 1/60 s a
+frame, so builds shoot the same frames; screenshots are read back without
+waiting for the GPU (a frame that waited for its read let the asynchronous
+parts finish first), and the tour draws no reach outline.
+
+How others light a dense canopy stably: Unreal's foliage takes its sun from
+virtual shadow maps (a depth page per texel at the pixel's footprint, SMRT
+rays over them for soft shadows) plus screen-space contact shadows, and
+light through leaves from the subsurface or two-sided foliage profile (the
+sun's shadow term at the leaf, tinted); its ray-traced shadows go through
+NVIDIA's SIGMA, whose history and spatial passes treat disocclusions as
+here. Deep and opacity shadow maps prefilter hair and foliage as
+fractional occlusion. Ours keeps the walks (exact at every cell size, no
+page resolution limit near the eye) and the pages for cells under a pixel
+and a half (the prefiltered tier), and now gives a young history the same
+footing a disocclusion gets there. Cost scales with the pixels on screen,
+nothing with the scene.
+
+**Light through leaves, for rays.** A cell that lets light through
+(`lets_light_through`: its material's transmission, as `voxel_surface`
+shades it, a thin two-sided surface) is passed by a ray that starts on its
+face: the ray starts where it leaves the cell (`cell_exit`), and an
+occlusion ray's pages answer from there too. Before, `stream_enter` answered
+it as a hit from inside (`START_FACE`), so the reference and GI's shadow
+rays let no light through a leaf while the pixels' sun (`shadow`: the
+pages at the cell's far side) and local lights (`hit_walk`'s `through`)
+did. All three now take what reaches the leaf's far side, times the share
+its surface lets through.
+
+**One slope.** A hit with no stored slope (a canopy's top, an edit) of
+cells a pixel or less was lit, on screen, by the slope of the hits two
+pixels away (`screen_ground`), and by rays with the column tops two cells
+away (`slope_normal`): near the horizon the screen's gave a sun cosine 0.71
+of the rays'. `screen_ground` is deleted: both take the world's slope
+(`face_rule`, `face_lit`), which the cut keeps at about a pixel a cell.
+
+**Against the reference** (voxel_craft's first pose, grass and clouds off,
+the reference's direct part over about 6,000 paths a pixel, its first-hit
+albedo as the mask; `C:/t/r3t/ref`): real-time direct light over the
+reference's, this base 1.049 on hits (canopy 1.129, ground 1.044), with
+both changes 1.086 (canopy 1.105, ground 1.085). The reference's canopy is
+unchanged to four digits: its shadow rays start 2 mm into a leaf lit from
+behind, and below the exact levels they now pass the cell, but this
+pose's crowns are mostly far, at the exact levels, where a ray starting in
+a solid cell is not checked for a face (`on_solid_face` returns none
+there) and still ends at once: light through coarse leaves for rays is
+open (the walk's own first cell, at the exact levels, is the place). The
+ground's 4% is the slope's: with one description, distant ground lit by
+the screen's slope (darker) no longer hides that its far visibility (the
+coarse pages, the canopies' cut) is brighter than the reference's; that
+visibility is what is left, with the steps' shadowing (section above).
+
+**Holds** (voxel_flight, ground, 25 s, clouds off, against this base):
+Earth 0.0015 mean |difference|, luminance +0.06% (the same build twice:
+0.0006); the Moon 0.0015, -0.07% (twice: 0.0006). voxel_craft's other
+poses keep their shots (the gate's poses 9, 11 and 13 within run-to-run
+noise of the base).
+
+**Cost** (1080p, pose 11, pipelined frames, the last three 300-frame
+windows of each run, base and this build alternated twice): the denoiser
+0.509-0.510 ms against 0.512-0.515 (the history fix's sum); the shadow
+stage 1.065-1.068 against 1.194-1.195, of which the hits' 0.327 against
+0.379: the world's slope (`slope_normal`, the column tops) costs more than
+the screen's four loads it replaces; the frame 14.54-14.58 against
+14.67-14.68 ms (+0.8%).
