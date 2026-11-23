@@ -1,6 +1,6 @@
 [package]
 name = "helio_dylib"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 publish = false
 description = "Helio's kernel (core, tasks, the frame and feature contracts, the graph, presets) as one shared Rust dylib, on top of the SceneDB, reflection, profiling and UI libraries. A binary or plugin library that links it shares one Helio: its shader registry, pipeline caches and task host exist once per process. Built with `-C prefer-dynamic` (.cargo/config.toml)."
