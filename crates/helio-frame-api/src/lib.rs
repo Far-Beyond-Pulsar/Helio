@@ -22,8 +22,10 @@
 //! - [`rays`]: the frame's TLAS and the buffers that follow it, published by
 //!   whatever builds it; [`rays::stream`], the ray streams every kind's
 //!   tracer answers, so a consumer traces the whole scene knowing no kind;
-//!   and [`rays::light_samples`], the direct light at a batch of points every
-//!   kind of light's sampler answers.
+//!   [`rays::light_samples`], the direct light at a batch of points every
+//!   kind of light's sampler answers; and [`rays::radiance_cache`], the
+//!   irradiance arriving at surface cells, read by every ray that needs a lit
+//!   hit.
 //! - [`static_names`]: the read lists of a pass whose reads are what a
 //!   publisher named (media, the sun's transmittance).
 //! - [`host_input`]: resources a host supplies every frame, declared by the

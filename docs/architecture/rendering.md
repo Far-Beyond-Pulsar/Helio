@@ -2435,6 +2435,499 @@ luminance -0.19% (one run each; the same-build repeat waited behind
 another session's GPU work and was not run, so the Earth hold's run-to-run
 noise is not measured here).
 
+#### The radiance cache
+
+Helio `helio_frame_api::rays::radiance_cache` (the contract, beside the ray
+streams and the light samples), the GI plugin's `cache.rs` and
+`gi_cache.wgsl` (the publisher), GI's light passes (the probes' reader and
+the cache's own lighting), `integrate.rs` (the probes it holds). Branches
+`render/r3-cache`, then `render/r3-cache-open` (over step 1's sky).
+
+**The contract.** Keys and rows (Rust and WGSL; layout tests
+`tests/layouts.rs`; the WGSL against its Rust mirror on a GPU,
+`tests/radiance_cache_gpu.rs`; the snippet's constants against the Rust
+ones, a unit test):
+
+| Row | Bytes | Fields |
+|---|---|---|
+| `RadianceCacheFrame` (`radiance_cache_frame`, a uniform) | 64 | the frame's origin in whole 1024 m (64-bit two's complement an axis), the slots (0: no cache), the frame's number, the origin's rest below 1024 m (0 for an engine frame), the eye angle, the eye in the frame's space |
+| `RadianceCacheSlot` (`radiance_cache_slots`) | 8 | `state` (the key's checksum, 0 empty), `used` (the frame a reader last marked it); after the hash's slots, the new cells' queue (`slot_rows`: its count, then `slots / 4` places, a new cell's slot each) |
+| `RadianceCacheKey` | 28 | `tag` (level 5 bits, side 3, space 9), the world cell: x, y, z, 64 bits each |
+| `RadianceCacheEntry` (`radiance_cache_entries`, a slot each) | 96 | key; point (15 bits an axis in the cell: its top 10:10:10 here, its low 5:5:5 in `history` from bit 16); normal (`scene_pack_unit`); history (bits 0..16: updates folded, direct 8 bits, indirect 8; 0 no value); direct, indirect and bounced irradiance (3 f32 each, W/m^2); the bounced part's updates; the clear distances (8 f16) |
+
+`//!use frame_radiance_cache` (with `frame_ray_stream`), for a shader that
+binds the three under those names:
+
+- `radiance_cache_read(p, n, footprint, space, reach)`: what the cache
+  holds for a hit at frame point `p`, the face's normal turned toward the
+  ray `n`, the ray's footprint there and its space: `direct`, `indirect`
+  (the cell's indirect and bounced parts), the `level` it came from, the
+  cell's `history` (a reader's confidence), `found` (false: no cell at the
+  hit's level or up to `reach` levels coarser has light for `p`).
+- `radiance_cache_mark(p, n, footprint, space)`: the hit's cell in use
+  this frame, claimed with the hit's point and normal where no slot holds
+  it (a place in the new cells' queue), the cell `ANCESTOR` (3) levels
+  coarser, and the finer cells a read goes to where a cell's rays met
+  something between its point and `p`.
+- `radiance_cache_present()`, `radiance_cache_size(level)`,
+  `RadianceCacheIrradiance`: as before. For a publisher: `_key`, `_find`,
+  `_level`, `_cells`, `_entry_point`, `_side`, `_light_at`, `_holds`,
+  `_along`, `_clear`, `_tangents`. Rust: `RadianceCacheFrame::{new, level,
+  key, origin_cell}`, `RadianceCacheKey::{new, cell, bucket, checksum}`,
+  `cell_size`, `slot_rows`, `QUEUE_SHARE`, `WAYS`, `stand_in(device)`.
+
+A reader changes nothing but recompiling: the functions' signatures, their
+meaning and the binding names are the first version's; the entry grew from
+64 to 96 bytes and the slots' buffer by the queue, both the publisher's to
+size. The api crate holds no `static`, `thread_local!` or
+`inventory::collect!`.
+
+**The hash and its levels.**
+
+- **A cell**: level `l` is `2^(l - 6)` m wide, 17 levels from 1/64 m to
+  1024 m. The coarsest is the frame origin's step: the origin is a whole
+  number of cells at every level, the cell of a frame point is the
+  origin's cell (64-bit) plus `floor((p + rest) / size)`, an origin change
+  moves no cell, and a point an Earth's radius or 10^12 m out keys as one
+  near zero.
+- **The level** of a read: `round(log2(max(footprint, a * d)))`, the coarser
+  of the ray's footprint at the hit and the eye angle `a` at the hit's
+  distance `d`. `a = sqrt(4 pi 17 / (slots / 2))`, 0.040 rad at the default
+  2^18 slots (cells at least `a d` wide hold at most `4 pi / a^2` cells a
+  level round the eye, over 17 levels half the slots).
+- **The side** (the dominant axis of the face turned toward the ray, and its
+  sign) and **the space** (the ray's) are keys.
+- **The hash**: buckets of 16 slots (a 32-bit hash names the bucket, a
+  second the checksum); a read compares the checksum and then the whole
+  key. A claim reserves a place in the new cells' queue, then
+  compare-exchanges the slot's state (a reserved place whose claim another
+  mark won holds none); a full queue (`slots / 4` new cells a frame) claims
+  nothing that frame. A full bucket keeps a cell out: at half load 0.4% of
+  keys.
+- **A cell's point**: the first marking hit's, for the cell's life: its
+  clear distances (below) are that point's. The first version moved it to
+  one mark in 8, to gather a coarse cell's light over its readers' places;
+  with clear distances a moved point carries its old point's: a 1 m cell's
+  point moved toward a thin wall let the wall's far side read 7.3 of the
+  near side's 8.7 (the old distances shrunk by the move instead kept the
+  far side dark, but cut so many reads short that a furnace's cells no
+  longer settled within the tests' guard).
+- **Where a cell's light holds** (`radiance_cache_light_at`). A cell wider
+  than an occluder beside it spans both of its sides (a floor's cell across
+  a wall standing on it, a wall's across a slab against it): the same side,
+  the same key, its point on one side and its light that side's. Each cell
+  keeps, along 8 ways over its surface (45 degrees each about an
+  orthonormal frame of its normal, Duff et al. 2017), how far from its
+  point its rays found nothing in the way: a ray that goes low (below 45
+  degrees over the surface) explores its way, a hit bounding it (a wall
+  standing there), a miss leaving it open; a ray higher up says nothing of
+  the surface (a ceiling over a floor is no occluder along it). A way not
+  bounded again grows by `2^(1/8)` an update (twice in 8 updates), so a way
+  that opened is found again. For a reader at `p`: within the way's clear
+  distance the cell's light **holds**; past it, **blocked**: the read takes
+  the finest finer cell whose light holds at `p`, and the mark claims those
+  finer cells, down to the first that holds, and no finer than the eye
+  angle's cells there (the cache's resolution, which its capacity sizes:
+  the finer cells near occluders cost no more cells than the eye angle
+  allows a surface); along a way the cell's rays
+  have not explored yet, **unknown**: the light holds within a 32nd of
+  the cell of its point (thinner than any wall the cell could span),
+  otherwise the cell has none for `p` until its rays have explored that way
+  (a reader then finds nothing, or a coarser cell that holds; a mark does
+  not go finer for it). Two of a cell's four rays are low, in two opposite
+  ways that turn each frame, so every way is explored within four updates.
+  A cell's point does not move (above). A cell whose light holds everywhere its readers meet it (open
+  ground, a room's middle) is read at its footprint's level as before;
+  finer cells exist only along the occluders that split coarse ones.
+- **A mark's ancestor**: the cell 3 levels coarser is marked with it.
+
+**The update** (GI's node, after the probes' rays). The cells in use are a
+list on the GPU, two halves, one current: what the last frame kept, then
+the queue the marks filled since. Every pass of the update walks that list
+(indirect dispatches whose lengths the GPU writes), never the hash's
+slots, so a frame's work follows the cells in use and those lit, not the
+cache's size.
+
+1. `RadianceCache`: `cache_begin` (one invocation: the walk's length and
+   dispatch), `cache_scan` (a lane a cell: its frames since it was marked
+   into a histogram of powers of two, its need into another; a slot's 8
+   bytes and the publisher's 48-byte life, never an entry's line),
+   `cache_plan` (one invocation: what goes, what is lit), `cache_select` (a
+   lane a cell: evicts, keeps the rest in the other half, lists those lit;
+   workgroup-aggregated), `cache_end` (one invocation: the kept half
+   current, the queue emptied, the rays' dispatch, GI's stream count, the
+   statistics), `cache_rays` (4 rays a lit cell after the probes', cosine
+   distributed about its normal, stratified in azimuth and elevation, from
+   no width spreading by `sqrt(2 pi / 128)`).
+   - Evicted: a cell no reader marked for 128 frames (twice the longest a
+     probe of GI's coarser levels goes between updates), and past half the
+     slots the least recently used, never a cell marked this frame or the
+     last.
+   - Lit, by need, `rays / 4` cells at most (the budget is a cap): cells
+     never lit; cells a part of which restarts (its change test fired);
+     each cell's refresh, once in 21 frames (the finest probes' period), its
+     turn spread over the frames by its slot, settled or not (a change no
+     reader's frame shows is found within about a probe cycle, and a cell
+     the converging ones crowd out still takes an update); then cells still
+     converging, the least share of their histories first. A cell is settled
+     when its parts hold 7/8 of the histories their noise asks for (the
+     history is measured by the part's own deviation, uncertain by about
+     that much). A settled static scene costs the refresh alone (cells in
+     use / 21 a frame) and what the change tests' rare false alarms send
+     back.
+2. The stream's tracers, once for the probes' rays and the cache's.
+3. `GILight`: a cache ray's hit's emission (the sky on a miss: the
+   atmosphere's radiance table, `sky_radiance_eval`, step 1's one sky), a
+   light query at the hit and one at the cell's point; apart, what the hit
+   reflects of the cache's own light there (its indirect and bounced parts,
+   and the light through it from its far side); a hit the cache has no
+   light for yet gives the bounced part nothing (a stand-in would carry
+   light into the cache across what its cells keep apart, and the cache's
+   light feeds itself). Every hit marks its cell.
+4. The light samplers (the lights' sampler: one light a query, chosen in
+   proportion to its unshadowed contribution there, as the reference path
+   samples it), `GIShadow` (a shadow ray each, two a cache ray at most),
+   the shadow stream's tracers.
+5. `RadianceCacheFold`, a lane a lit cell. A ray that met an inside within
+   four of its start's offsets started in a solid (the cell's point, kept to
+   a 32768th of its cell, behind the surface next to its own at a corner):
+   neither it nor its light sample there is light arriving at the surface,
+   and the update is the mean of the other rays (a closed furnace's corner
+   cells otherwise took a ray in 128 as black). Three parts:
+   - **direct**: the light samples at the cell's point;
+   - **indirect**: `pi` times the rays' mean of what their hits send as the
+     rays meet them (emission, the light samples' light off the hit, the
+     sky);
+   - **bounced**: `pi` times the rays' mean of what their hits reflect of
+     the cache's light (the later bounces).
+   The direct and indirect parts are stationary in a static scene: each is
+   the plain mean of its updates since it last restarted, over as many as
+   bring its relative standard error to 3% (`(1.2533 * mad / mean /
+   0.03)^2`, the mean absolute deviation its change test measures), within
+   16 and 64 (twice the first version's 32: a noisier part keeps more of
+   its error, and the work a cell takes to settle, which a moving view's
+   new cells multiply, stays a few dozen updates). The bounced part follows the cells it reads,
+   which converge themselves: its history is 16 updates, so a bounce
+   settles in a few dozen updates whatever the noise of the others; its own
+   change test restarts it while those cells still move. Each part's change
+   test (a fast mean of 4 updates and the history's, of each update's
+   luminance clamped from above at the fast mean plus 3 mean absolute
+   deviations, apart by more than 1.74 deviations, 4 standard deviations
+   of their difference over the longest history, and 1% of the slow mean)
+   restarts the part at its next update, whose sample it has not seen (a
+   false alarm once in 16,000 updates, so a part fills its longest history
+   unrestarted 996 times in 1000); the bounced part restarts with the
+   indirect.
+
+**The probes read the cache** (GI's `gi_light`): a probe ray's hit is
+`albedo * (direct + indirect) / pi + emission`, plus its transmission share
+of the far side's cell, at the probe ray's footprint, with a reach of one
+level. Where the cache has no light for a probe's hit yet, a stand-in:
+its own cell's where that cell's rays have not explored the way to the
+hit (a few updates), the probes' own where they found something in the
+way or the cell is new (never a cell's light from an occluder's other
+side). A probe more than 1/32 of whose hits the
+cache has no light for yet holds that update and goes on the held list
+(`integrate.rs`); with fewer, the hits with nothing but the probes' own
+stand-in are left out of its projection (that stand-in taught a first
+update a world partly lit by the probe's empty state: the sun test's
+sideways light 18% low). The held list comes back to
+the CPU without waiting (a pooled read-back, a frame or two later), and
+GI's schedule takes those probes first, when the cache (new cells first)
+has lit their cells: at a scene's start, the probes the first three
+frames update are all updated after 9 frames, against their
+turn's 21. GI starts when the cache has its light, not a probe cycle later
+(the first version waited that cycle: 20 frames).
+
+Settings (`GiSettings`, the `gi` host group): `radiance_cache_slots` (a
+power of two, 2^12 to 2^24; 2^18 by default, about 162 bytes a slot, 40.5
+MiB) and `radiance_cache_rays` (the most rays a frame, 1024 up; 32,768 by
+default). Statistics: `rays.radiance_cache`, `radiance_cache.cells` (in
+use), `.new`, `.evicted`, `.lit`, `.settled`. The debug view `Radiance
+Cache` (39).
+
+**Against the alternatives** (section 5, "How others do it"):
+
+- **SHaRC** (NVIDIA RTXGI 2.x): a spatial hash of radiance keyed by a
+  quantised position at a level from the distance to the camera, filled by
+  a few percent of the pixels' paths, accumulated over a fixed number of
+  frames and dropped after a fixed stale time. Its key is a packed position
+  of bounded range, cells are lit only by the camera's paths (what the
+  camera does not see goes stale), and its update walks every slot each
+  frame (a fixed cost of the table's size). Here cells are exact 64-bit
+  world cells, sides and spaces are keys, the cache lights its cells with
+  its own rays by need wherever readers marked them, and a frame's work
+  follows the cells in use.
+- **AMD GI-1.0's hash grid cache**: the closest design (cells at hit
+  points, lit by rays of their own, read by screen probes, one world space,
+  a fixed update budget a frame). Neither it nor SHaRC keeps a cell from
+  carrying light across an occluder thinner than the cell: both rely on
+  the cells near the camera being small. Here a cell keeps how far its own
+  rays found its surface clear in eight ways, and a reader past that reads
+  a finer cell: the split sphere of irradiance caching (Ward 1988; the
+  records' validity radius from their rays' distances) made directional
+  along the surface and hierarchical over the hash's levels.
+- **Kajiya's irradiance cache**: entries in camera-centred cascades, each
+  tracing its own rays, read by ReSTIR GI; bounded to the cascades' reach.
+- **Lumen**: the surface cache is cards a mesh, exact in texture space,
+  with no answer for 10 cm voxels, foliage or anything without cards, and
+  updated by a fixed budget of cards a frame by priority (the closest to
+  this cache's need); its world radiance cache is probes, which cannot hold
+  a wall's two sides apart.
+- **Neural radiance caching** (Müller et al. 2021): an MLP trained on path
+  suffixes; it needs fused tensor-core inference and training wgpu has no
+  fast path for.
+- **The fold**: SHaRC and GI-1.0 accumulate a fixed number of samples (an
+  exponential mean); ReBLUR and SVGF shorten histories by the samples'
+  moments. Here a part's history follows its measured noise (a 3% standard
+  error, 16 to 64 updates), a change test only restarts at an update it
+  has not seen (unbiased; a first version doubled the cathedral's indirect
+  light by restarting at the bright update that tripped it), and the
+  later bounces, which follow other cells, keep their own short history and
+  change test so they neither lag behind the cells they read nor carry
+  their noise.
+
+What it costs and scales with: memory about 162 bytes a slot (96 the entry,
+8 the slot and 2 the queue's share, 48 the publisher's life, 8 the two
+halves of the list in use), 40.5 MiB at 2^18 slots, with the slots (a
+setting), never the world; a frame's update two walks over the cells in
+use and those queued (a slot's 8 bytes and a life's 48 each), never the
+slots; the rays, light queries and shadow rays of the cells lit (by need,
+at most the budget, a setting); a read one bucket of 16 slots a level it
+walks (one, mostly; more next to an occluder that splits a coarse cell), a
+mark two and the finer ones there. Cells in use follow the surfaces readers
+reach and their distance from the eye, and the occluders that split coarse
+cells.
+
+**Verified** (RTX 3060; every test waits on a signal under a wall-clock
+guard):
+
+- The contract (`helio-frame-api`): lib 31 (the snippet's constants against
+  Rust's), layouts 6 (the 96-byte entry), `radiance_cache_gpu` 2 (keys
+  against the Rust mirror at four origins; marks claim each cell once and
+  queue it once; a cell's light holds a third of a cell from its point
+  while its ways are open and gives way to its ancestor once something a
+  millimetre away bounds every way). `helio-core`'s `wgsl_validation`.
+- The cache (GI's `tests/radiance_cache.rs`) 9 of 9:
+  - **The closed box** against the CPU radiosity: direct within 0.2%,
+    indirect +0.8%, +1.4%, -1.6%, -3.2% once each read's cell settled
+    (2,516 frames; bound 10%). The first version's -5.6% to -0.9% (and
+    -4.1% to -6.2% on step 1's base) was lag: one history for every bounce,
+    measured at 96 frames while the later bounces still rose (a 1,920-frame
+    run of the first version climbed to 0.96-1.01 of the solution by frame
+    450). The bounced part's own short history and change test are what
+    removed it.
+  - **A wall thinner than its cells** (new): the dark side under 1% of the
+    lit side at footprints 1/8 m to 4 m, standing 0.15% (0.0122 of 8.1),
+    lying 0.0003%; the same test without the clear distances (every way
+    holds) fails, the dark side reading 1.2% at 1/8 m and the lit side's
+    whole light from 1/4 m up (4.0 of 4.0).
+  - **A light switched off**: under 5% in 118 frames (bound 4,011, the
+    longest history alone at the refresh period).
+  - **Earth scale**: a furnace converges to `2 pi` within 1% in 1,086 to
+    1,091 frames at the zero and two Earth's-radius origins (the first
+    version 311: settled cells now take a refresh a probe period).
+  - The thin plate's two sides (2, 0), an origin change (cells in use keep
+    slot, key and values), eviction and re-use at 2^13 slots, two spaces.
+- GI's `probes` 16 of 16 (with `held_probes_come_back_before_their_turn`:
+  the first three frames' probes updated after 9 frames against a 21-frame
+  turn), `mesh_gi_graph` 2 of 2, lib 13. `vg_ray_proxies` 2 of 3: the
+  classic wall lets 1.06% of the open room's light through after 60 frames
+  (bound 1%; 0.25% on the build that still moved points, 0.1% before this
+  step).
+- Gates: clippy and `cargo fmt -p` on `helio-frame-api` and `helio-pass-gi`.
+
+**Measured** (release builds; against step 1's references, and A/B against
+the merged base of step 1 and the first version, interleaved, two runs a
+build):
+
+| | merged base | this |
+|---|---|---|
+| Cathedral whole frame / reference, frame 1200 | 0.836, mean rel. error 0.182 | 0.971, 0.138 |
+| Cathedral indirect / reference, frame 1200 | 1.004, 0.258 | 1.157, 0.362 |
+| voxel_craft first pose, whole frame / reference | 1.008, 0.399 | 1.110, 0.494 |
+| Cathedral GI passes, frame 240 | 1.67, 1.70 ms | 2.02, 2.03 ms |
+| voxel_craft GI passes (four poses) | 3.46, 3.46 ms | 5.42, 5.42 ms |
+| voxel_flight Earth ground hold, GI passes | 3.51, 3.44 ms | 5.29, 4.92 ms |
+| voxel_flight Moon ground hold, GI passes | 3.37, 3.37 ms | 5.22, 5.14 ms |
+
+(The flight holds are of a build a step before this one, which still moved
+cell points.) voxel_craft's frames are 4% to 12% brighter than the base's;
+two runs of this build differ less than two of the base (0.0004 to 0.0013
+against 0.0019 to 0.0066). The cost is the hits' reads and marks
+(`GILight` 0.34 -> 1.35 ms on voxel_craft: a read near an occluder walks
+the finer levels and a mark claims them) and the cache rays' walk
+(`VoxelRays gi` 1.89 -> 2.75 ms); the cache's own passes are 0.21 ms.
+The `cost` test (analytic scene, debug build) lights about 4,000 cells a
+frame settled against the 8,192 cap (50,000 cells, 96% settled: the
+refresh is 2,400 of them, the rest new cells the probes' moving hits keep
+making); at 2^22 slots its cells are 14% more (the finer eye angle) and
+`RadianceCache` 25% dearer, not sixteen times.
+
+**Open** (as this step left them; measured again and partly closed in the
+next subsection):
+
+- **Cost.** The per-hit reads and marks near occluders and the cache rays'
+  walk on voxel terrain cost 1.8-2 ms on voxel_craft and the planets
+  (+0.35 ms in the cathedral). A settled scene still lights half the cap:
+  the probes' rotating rays keep creating fine cells near occluders. Bounding
+  the finer cells by something cheaper than the eye angle, or keeping the
+  probes' hits out of the descent, is the next step.
+- **Brightness.** The cathedral's indirect view reads 1.16 of the reference
+  (whole frame 0.97, closer than the base's 0.84); voxel_craft's frames are
+  4-12% brighter than the base's. Ruled out by measurement: the bounced
+  part's exclusion of unlit hits (with it 1.27, without 1.15), the cells'
+  stratified rays (no change), the probes' projection (1.11 to 1.15). Not
+  isolated.
+- **The standing wall's 0.15%**: the dark side's own cells hold it at every
+  footprint, with no straddling cell read; its source is not found.
+- **VG classic wall** 1.06% after 60 frames (above).
+
+#### The radiance cache's open items, measured again
+
+Branch `render/r3-cache-open`, after the subsection above. The three
+faults it left (indirect too bright, cost on voxel terrain, thin walls),
+measured first and changed only where a measurement named a cause.
+
+**The reference first.** View 63, the reference's indirect diffuse, counted
+only first bounces drawn from the diffuse lobe; it now carries the diffuse
+lobe's share of every first bounce (Helio 84f05419, from
+`render/r3-gather`), 17.7% more in the converged cathedral. The comparisons
+below are against that view at frame 3000 (the cathedral held still,
+8 frames averaged: `HELIO_CAPTURE_FRAMES`, the GI examples' capture of
+several frames) and voxel_craft's reference pose (no foliage, 8-frame
+bursts); one run a build, so a few percent is noise (two single frames of
+one build differ by up to 13%).
+
+| / reference | merged base | as left | this |
+|---|---|---|---|
+| Cathedral indirect | 0.889 | 0.897 | 0.971 |
+| Cathedral whole frame | 0.914 | 1.063 | 0.945 |
+| voxel_craft indirect | 1.182 | 1.519 | 1.520 |
+| voxel_craft whole frame | 0.995 | 1.110 | 1.110 |
+
+voxel_craft's linear parts (mean luminance; reference: sky seen 0.0062,
+direct 0.0302, the indirect parts 0.0070): direct light (view 22) 0.0382
+in the base, 0.0381 as left and here; indirect (view 23) 0.0113 in the
+base, 0.0176 as left and here. The whole frame's extra light is all
+indirect.
+
+**Fault 1, the cathedral: not the branch's.** Against the corrected view the
+branch's indirect is the base's (0.897 against 0.889); the earlier 1.157
+against 1.004 was the old view 63 at frame 1200. Ablations on the old view
+(frame 1200, one run each, the branch's cache read from disk with one
+change): as left 1.128, 1.122, 1.071; clear distances off 0.939; probes
+keeping every hit (no hold, no projection over the hits with light only)
+1.014; the cache rays' unlit hits in the bounced part 1.019; converging
+cells in one need bin 0.969. The change tests restart 2 indirect parts a
+frame of 4,479 lit (both upward); the fold on a CPU stream of heavy-tailed
+updates is within 2% of the stream's mean, slightly dark. None of these is
+a bias the corrected view shows.
+
+**Fault 1 on voxel terrain: the probes' estimator.** voxel_craft's
+indirect, the branch's cache read from disk with one change each (the
+reference pose, one run): as left 1.473; probes projecting every hit, the
+probes' own irradiance standing in for a hit the cache has no light for
+(no projection over the lit hits alone) 1.373; probes never holding 1.295;
+both 1.188, the base's 1.182. A probe held an update when more than 1/32
+of its hits had no light, and with fewer projected the others alone,
+rescaled to the sphere: both bias it toward the light the cache already
+holds wherever cells stay unlit, and on voxel_craft, where 11,000 cells a
+frame are new (below), that is every update. Not changed here: holding
+only a probe never updated and projecting every hit with `GILight`'s
+stand-in (the merged base's estimator, with the hold kept for a first
+update) fails two of `probes`' tests, whose first updates the stand-in's
+lag reaches (the sun's sideways light 0.134 against 0.159 +- 0.025; under
+the roof 0.039 against a bound of 0.032). Both estimators are biased where
+a probe's hits lack light; the cure is a cache whose working set holds
+still (below), so that a hit lacks light only while its cell is new.
+
+**Faults 1 and 2 on voxel terrain: the cache did not light its cells.** On
+voxel_craft 32,727 of the 32,768 cache rays a frame started in a solid,
+and 8,182 of the 8,192 cells lit a frame had all four rays there: they
+never took a value, stayed "never lit" (first in need every frame, so the
+budget was always full), and every read of them fell to a stand-in. Lifting
+the rays' start by a quarter of the cell or starting them as wide as the
+cell changed nothing. Two causes, both GI's:
+
+- **A cell seated on a far side.** A hit that lets light through (a voxel
+  of leaves) read and marked the cell on its far side, seated at the hit
+  with the far side's normal: behind a voxel's face that is the voxel's
+  inside. With no marks from such hits, 6 cells a frame were left with no
+  ray out. The far side is now read, never marked (`gi_light`): its cells
+  are the ones rays from that side make.
+- **A point kept for life.** A cell's point is its first marking hit's; when
+  the surface it was taken on goes (terrain streamed in finer, an edit), its
+  rays start in a solid forever. A cell all of whose rays of an update start
+  in a solid is now unseated (`RADIANCE_CACHE_UNSEATED`): no value, its life
+  cleared, not lit until the next mark seats it at its hit (the contract's
+  mark does the seating; readers change nothing). With both, every one of
+  the 8,184 cells lit a frame folds.
+
+That does not make voxel_craft cheaper or its indirect darker (1.520, as
+left; the probes' estimator above is what raises it): the cache now works there, and what it costs is its working set.
+110,130 cells in use against 2^18 slots (eviction past half the slots), so
+14,261 cells are new and 11,293 evicted a frame, 25 settle, and the budget
+is spent every frame; without the clear distances the set is the same
+(116,895 cells, 19,033 new), so the descent to finer cells is not what
+makes it. The probes' footprints key each surface at several levels (one a
+band of probe distances) and the marks add an ancestor each. The merged
+base spent the same 32,768 rays a frame, most of them, by the same two
+causes, starting in a solid and ending at once: its 3.4 ms was a cache
+that lit little.
+
+| GI passes | merged base | as left | this |
+|---|---|---|---|
+| Cathedral, frame 240 (two runs) | 1.61, 1.47 ms | 2.02, 2.03 ms | 1.67, 1.85 ms |
+| voxel_craft, four poses (two runs) | 3.33, 3.40 ms | 5.42, 5.42 ms | 5.79, 6.27 ms |
+| voxel_flight Earth ground hold | 3.51, 3.47 ms | 5.29, 4.92 ms | 5.77, 5.59 ms |
+| voxel_flight Moon ground hold (one run) | 3.36 ms | 5.22, 5.14 ms | 4.53 ms |
+
+On voxel_craft `GILight` is 0.79 ms (0.63 without the clear distances: the
+descent's cost is 0.16 ms, not the 1 ms measured while reads of unlit cells
+took the stand-in path) and the cache rays' walk 3.1 ms (real rays now).
+The clear distances measured over the cathedral's lit cells (a way each):
+93.2% open past the cell, 2.7% under a cell, 2.6% under half, 0.4% under an
+eighth, 0.2% under a 32nd, 0.8% unexplored.
+
+**Fault 3.** Both walls pass with their bounds: the classic wall lets 0.72%
+through after 60 frames (bound 1%; 1.06% as left), and the VG wall 0.62%
+(bound: twice the classic). The thin wall's dark side holds 0.145% of the
+lit side standing (0.0118 of 8.1), 0.001% lying; without the clear
+distances it reads 1.3% at 1/8 m and fails. The standing residual is the
+ways' width: a way is 45 degrees wide and its bound was the along-surface
+distance of whichever low ray met the wall, up to 8% past the wall's near
+face for a ray 22.5 degrees off its normal, so a reader just behind a
+5 cm wall within that band read the lit side's cell. Measured with the
+bound taken to the plane of the face met (where it stands off the cell's
+surface): the standing dark side 0.037% (0.0030), and the classic wall
+0.09%, the base's level. Not taken here: with it the VG wall (0.50%, the
+same as without) fails the test's bound of twice the classic, a leak of
+the VG wall's own (its proxy) that the classic wall's leak hid. A growth
+of the bound between explorations is not the source (without it: 0.0183).
+
+**Verified** (RTX 3060, debug test builds): the contract's lib 31 and
+layouts 6, `radiance_cache_gpu` 2, `wgsl_validation`; GI's lib 13,
+`radiance_cache` 9 of 9 (the closed box's indirect -2.7%, +1.0%, -3.0%,
+-1.0% of the CPU radiosity, settled after 500 frames where the step before
+took 2,516: its corner cells no longer wait on rays that start in a solid),
+`probes` 16 of 16, `mesh_gi_graph` 2 of 2, `vg_ray_proxies` 3 of 3; the
+layer gate, `one_owner`, clippy and `cargo fmt -p` on the touched packages.
+
+**Open**:
+
+- **The working set on dense terrain.** voxel_craft keeps about 110,000
+  cells at 2^18 slots, so cells are evicted before they settle; a settled
+  frame costs the whole budget. The levels a surface is keyed at (one a
+  band of probe distances, and the marks' ancestors) are what to bound.
+- **Both scenes' indirect against the corrected reference** (the table):
+  what is left once the branch's own biases are gone is the probes' and
+  the cache's shared limits (the cache's cells a level a probe distance,
+  the probes' interpolation), which the pixels' gather (step 4) replaces
+  near the eye.
+- **The VG wall's leak** (0.50%, the classic wall 0.09% with the bound to the
+  face's plane), before the plane bound can land.
+
 #### The binned passes' cost, the probe walk, the kernels' order
 
 Step 5, carried from r2 ("Integration", items 3 to 5). Each cost was

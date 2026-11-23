@@ -74,8 +74,10 @@ pub use stages::{ReferenceAccumulate, ReferenceDisplay, ReferenceImage, Referenc
 /// The debug view of the reference's image.
 pub const REFERENCE_VIEW: u32 = 62;
 /// The debug view of its indirect diffuse: the light that reached the
-/// camera's hit by a first bounce off a diffuse lobe (what a real-time
-/// indirect diffuse, the deferred lighting's own debug view 23, holds).
+/// camera's hit by a first bounce off a diffuse lobe, each first bounce
+/// weighted by the diffuse lobe's share of the BSDF in its direction (what a
+/// real-time indirect diffuse, the deferred lighting's own debug view 23,
+/// holds: irradiance times the diffuse lobe's reflectance).
 pub const REFERENCE_DIFFUSE_VIEW: u32 = 63;
 
 /// The most stages a graph unrolls.

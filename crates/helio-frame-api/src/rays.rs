@@ -16,7 +16,9 @@
 //! tracers answer a consumer's batch of rays, the meshes' by querying this
 //! TLAS. What samples every kind of light at a batch of points is
 //! [`light_samples`]: the lights' kinds' samplers answer it, and a consumer
-//! traces the samples' shadow rays as an occlusion stream.
+//! traces the samples' shadow rays as an occlusion stream. What a surface
+//! receives for indirect purposes is lit once, in the frame's
+//! [`radiance_cache`], and read there by every ray that needs a lit hit.
 //!
 //! How others do it: Unreal's `FRayTracingScene` and Bevy Solari's
 //! `RaytracingSceneBindings` are built from the scene's primitives inside the
@@ -25,6 +27,7 @@
 //! traced content joins the same TLAS without a renderer setter.
 
 pub mod light_samples;
+pub mod radiance_cache;
 pub mod stream;
 
 /// The frame's TLAS and the buffers that follow it, for one frame.
