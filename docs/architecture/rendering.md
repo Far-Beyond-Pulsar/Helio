@@ -2700,3 +2700,41 @@ stage 1.065-1.068 against 1.194-1.195, of which the hits' 0.327 against
 0.379: the world's slope (`slope_normal`, the column tops) costs more than
 the screen's four loads it replaces; the frame 14.54-14.58 against
 14.67-14.68 ms (+0.8%).
+
+#### A stream ray's width in the terrain's walk: measured, not built
+
+A stream ray carries its width and spread (`SceneRay::cone`: a footprint
+`width + spread t`), and the terrain's nearest-hit walk ignores them: a GI
+probe's ray, a radiance cache's or the gather's, decimetres to metres wide,
+walks the 10 cm cells as a pixel's does. The known answer is a cone over
+the tree's levels: Laine and Karras's sparse voxel octrees stop descending
+where a voxel covers the footprint and return that voxel's stored
+attributes (contours for its surface, a normal, a colour); VXGI samples
+mip levels of prefiltered opacity by the cone's width; Lumen traces its
+global distance field's mips, offset from the start against self-hits.
+
+The chunk tree holds above its cells: which 4-cubes and 16-cubes hold
+solid and which are full, a cell mask a 4-cube (its leaf: coverage, a
+popcount), a material pair a 16-cube, and the heightfield's slope a leaf
+where it holds natural tops. Two versions were built and measured on
+voxel_craft (1080p, pose 11, pipelined, alternated twice against the
+final build of the sections above; `C:/t/r3t/cone_walk.patch`), both
+stopping a stream ray at a node its footprint covers, at least twice the
+node from its origin, and meeting it where the ray enters it:
+
+| | GI probe rays' walk | frame | image against the final build (same build twice) |
+|---|---|---|---|
+| final build | 1.64-1.67 ms | 14.67-14.78 ms | |
+| an occupied 4- or 16-cube as solid | 1.01 ms (-38%) | 14.07-14.10 | 0.0045 mean (0.0001-0.0003); a held block -4% |
+| a 4-cube as its coverage (a hit drawn with its leaf's share) | 1.54-1.57 (-5%) | 14.68-14.77 | 0.0031 (0.0001-0.0005); -0.5% luminance, the block -4.7% |
+
+Both pass a CPU test (wide rays' hits within their footprint of solid,
+zero-width rays exact). Both change GI beyond noise, the same way, so the
+partial-occupancy answer is not the cause: a coarse hit is where the ray
+enters the node, not on a surface, and the probes shade it there (its
+shadow ray's origin, its bounce, the node's axis as its geometric
+normal). A prefiltered hit needs a surface per node (a plane: its offset
+and normal, as the octree's contours), which the tree holds only for
+natural heightfield tops; 16-cubes hold no coverage. Adding those per
+4-cube is a second representation built with the chunk (its build, its
+memory, its edits), a design decision, not a walk change: not built here.
