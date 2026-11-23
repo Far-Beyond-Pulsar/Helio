@@ -49,14 +49,14 @@ fn keys(@builtin(global_invocation_id) id: vec3<u32>) {
 fn mark_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= count.x { return; }
     let q = queries[id.x];
-    radiance_cache_mark(q.p.xyz, q.n.xyz, q.p.w, u32(q.n.w));
+    radiance_cache_mark(q.p.xyz, q.n.xyz, q.p.w, u32(q.n.w), RADIANCE_CACHE_FAR);
 }
 
 @compute @workgroup_size(64)
 fn read_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= count.x { return; }
     let q = queries[id.x];
-    let e = radiance_cache_read(q.p.xyz, q.n.xyz, q.p.w, u32(q.n.w), RADIANCE_CACHE_LEVELS);
+    let e = radiance_cache_read(q.p.xyz, q.n.xyz, q.p.w, u32(q.n.w), RADIANCE_CACHE_LEVELS, RADIANCE_CACHE_FAR);
     let at = id.x * 12u;
     out[at] = select(0u, 1u, e.found);
     out[at + 1u] = e.level;
