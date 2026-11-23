@@ -57,6 +57,11 @@ const RADIANCE_CACHE_NEAR: f32 = 0.03125;
 // each 45 degrees about its axis: a wall at an angle to a way bounds it no
 // nearer than 0.92 (cos 22.5 degrees) of its distance.
 const RADIANCE_CACHE_WAYS: u32 = 8u;
+// A cell's `point` while it has none: its rays found the point it was seated
+// at inside a solid (the surface it was taken on is no longer there: the
+// terrain streamed in finer, an edit, a finer level of detail drawn), so it
+// holds no value and the next mark seats it at that mark's hit.
+const RADIANCE_CACHE_UNSEATED: u32 = 0xffffffffu;
 
 // The frame's cache. `origin_xy`, `origin_z`: the frame's origin in whole
 // 1024 m (64-bit two's complement a component: x lo, x hi, y lo, y hi; z lo,
@@ -435,6 +440,17 @@ fn radiance_cache_mark_level(p: vec3<f32>, n: vec3<f32>, level: u32, space: u32)
         }
         retry = 0u;
         if state == check {
+            // An unseated cell takes this hit's point and normal, with no
+            // value and its ways unexplored (two marks at once may mix
+            // their points' bits: a point still in the cell, which its rays
+            // then judge again).
+            if radiance_cache_entries[s].point == RADIANCE_CACHE_UNSEATED {
+                let at = radiance_cache_pack_point(p, level);
+                radiance_cache_entries[s].normal = scene_pack_unit(n);
+                radiance_cache_entries[s].history = at.y;
+                radiance_cache_entries[s].clear = array<u32, 4>(0u, 0u, 0u, 0u);
+                radiance_cache_entries[s].point = at.x;
+            }
             if atomicLoad(&radiance_cache_slots[s].used) != frame {
                 atomicStore(&radiance_cache_slots[s].used, frame);
             }

@@ -86,6 +86,11 @@ pub const QUEUE_SHARE: u32 = 4;
 /// The directions along a cell's surface its clear distances are kept in
 /// (`RADIANCE_CACHE_WAYS`).
 pub const WAYS: u32 = 8;
+/// [`RadianceCacheEntry::point`] of a cell its publisher unseated
+/// (`RADIANCE_CACHE_UNSEATED`): its rays found its point inside a solid (the
+/// surface it was taken on is gone), so it holds no value and the next mark
+/// seats it at that mark's hit.
+pub const UNSEATED: u32 = u32::MAX;
 
 /// Slot rows [`SLOTS`]'s buffer holds for a cache of `slots` slots: the
 /// hash's, the new cells' queue's count and its places.
@@ -287,7 +292,8 @@ impl RadianceCacheKey {
 pub struct RadianceCacheEntry {
     pub key: RadianceCacheKey,
     /// Its point in the cell, 15 bits an axis: here the top 10 (10:10:10),
-    /// the low 5 in [`Self::history`] from bit 16 (5:5:5).
+    /// the low 5 in [`Self::history`] from bit 16 (5:5:5); [`UNSEATED`] while
+    /// it has none.
     pub point: u32,
     /// Its side's normal (`pack_unit`).
     pub normal: u32,
@@ -385,6 +391,8 @@ mod tests {
             let line = format!("const {name}: u32 = {value}u;");
             assert!(SNIPPET.source.contains(&line), "{line}");
         }
+        let line = format!("const RADIANCE_CACHE_UNSEATED: u32 = {UNSEATED:#x}u;");
+        assert!(SNIPPET.source.contains(&line), "{line}");
     }
 
     #[test]
