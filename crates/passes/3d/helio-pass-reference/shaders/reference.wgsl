@@ -153,16 +153,6 @@ fn first_share(flags: u32) -> vec3<f32> {
     return vec3<f32>(f32((flags >> 1u) & 1023u), f32((flags >> 11u) & 1023u), f32((flags >> 21u) & 1023u)) / 1023.0;
 }
 
-// The diffuse lobe's share packed into a path's flags (bits 1 to 30).
-fn first_share_bits(share: vec3<f32>) -> u32 {
-    let q = vec3<u32>(clamp(share, vec3<f32>(0.0), vec3<f32>(1.0)) * 1023.0 + 0.5);
-    return (q.x << 1u) | (q.y << 11u) | (q.z << 21u);
-}
-
-fn first_share(flags: u32) -> vec3<f32> {
-    return vec3<f32>(f32((flags >> 1u) & 1023u), f32((flags >> 11u) & 1023u), f32((flags >> 21u) & 1023u)) / 1023.0;
-}
-
 // `c` reaching the eye along path `path` at depth `depth`.
 fn add(path: ptr<function, Path>, c: vec3<f32>, depth: u32) {
     (*path).radiance += c;
