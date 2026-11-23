@@ -275,10 +275,11 @@ pub const INDIRECT_DIFFUSE: &str = "indirect_diffuse";
 /// world-space probes offer about twice their spacing (metres); GI's
 /// per-pixel gather offers where its rays start off the surface (millimetres),
 /// and a kind's own term then shrinks to its contact shadows. A publisher that
-/// traces from the pixels divides its estimate by the material occlusion of
-/// a surface whose occlusion is its own (`gbuffer_own_occlusion`) where it
-/// traced and multiplies it back where it resolves, so that term is never
-/// counted twice whatever reach the kind keeps.
+/// traces from the pixels and moves its estimate between them by occlusion
+/// divides the material occlusion of a surface whose occlusion is its own
+/// (`gbuffer_own_occlusion`) out of what it resolves (the lighting multiplies
+/// that in itself), so that term is never counted twice whatever reach the
+/// kind keeps.
 pub mod indirect_occlusion {
     use std::sync::Arc;
 
