@@ -2764,7 +2764,8 @@ refresh is 2,400 of them, the rest new cells the probes' moving hits keep
 making); at 2^22 slots its cells are 14% more (the finer eye angle) and
 `RadianceCache` 25% dearer, not sixteen times.
 
-**Open**:
+**Open** (as this step left them; measured again and partly closed in the
+next subsection):
 
 - **Cost.** The per-hit reads and marks near occluders and the cache rays'
   walk on voxel terrain cost 1.8-2 ms on voxel_craft and the planets
@@ -2781,3 +2782,148 @@ making); at 2^22 slots its cells are 14% more (the finer eye angle) and
 - **The standing wall's 0.15%**: the dark side's own cells hold it at every
   footprint, with no straddling cell read; its source is not found.
 - **VG classic wall** 1.06% after 60 frames (above).
+
+#### The radiance cache's open items, measured again
+
+Branch `render/r3-cache-open`, after the subsection above. The three
+faults it left (indirect too bright, cost on voxel terrain, thin walls),
+measured first and changed only where a measurement named a cause.
+
+**The reference first.** View 63, the reference's indirect diffuse, counted
+only first bounces drawn from the diffuse lobe; it now carries the diffuse
+lobe's share of every first bounce (Helio 84f05419, from
+`render/r3-gather`), 17.7% more in the converged cathedral. The comparisons
+below are against that view at frame 3000 (the cathedral held still,
+8 frames averaged: `HELIO_CAPTURE_FRAMES`, the GI examples' capture of
+several frames) and voxel_craft's reference pose (no foliage, 8-frame
+bursts); one run a build, so a few percent is noise (two single frames of
+one build differ by up to 13%).
+
+| / reference | merged base | as left | this |
+|---|---|---|---|
+| Cathedral indirect | 0.889 | 0.897 | 0.971 |
+| Cathedral whole frame | 0.914 | 1.063 | 0.945 |
+| voxel_craft indirect | 1.182 | 1.519 | 1.520 |
+| voxel_craft whole frame | 0.995 | 1.110 | 1.110 |
+
+voxel_craft's linear parts (mean luminance; reference: sky seen 0.0062,
+direct 0.0302, the indirect parts 0.0070): direct light (view 22) 0.0382
+in the base, 0.0381 as left and here; indirect (view 23) 0.0113 in the
+base, 0.0176 as left and here. The whole frame's extra light is all
+indirect.
+
+**Fault 1, the cathedral: not the branch's.** Against the corrected view the
+branch's indirect is the base's (0.897 against 0.889); the earlier 1.157
+against 1.004 was the old view 63 at frame 1200. Ablations on the old view
+(frame 1200, one run each, the branch's cache read from disk with one
+change): as left 1.128, 1.122, 1.071; clear distances off 0.939; probes
+keeping every hit (no hold, no projection over the hits with light only)
+1.014; the cache rays' unlit hits in the bounced part 1.019; converging
+cells in one need bin 0.969. The change tests restart 2 indirect parts a
+frame of 4,479 lit (both upward); the fold on a CPU stream of heavy-tailed
+updates is within 2% of the stream's mean, slightly dark. None of these is
+a bias the corrected view shows.
+
+**Fault 1 on voxel terrain: the probes' estimator.** voxel_craft's
+indirect, the branch's cache read from disk with one change each (the
+reference pose, one run): as left 1.473; probes projecting every hit, the
+probes' own irradiance standing in for a hit the cache has no light for
+(no projection over the lit hits alone) 1.373; probes never holding 1.295;
+both 1.188, the base's 1.182. A probe held an update when more than 1/32
+of its hits had no light, and with fewer projected the others alone,
+rescaled to the sphere: both bias it toward the light the cache already
+holds wherever cells stay unlit, and on voxel_craft, where 11,000 cells a
+frame are new (below), that is every update. Not changed here: holding
+only a probe never updated and projecting every hit with `GILight`'s
+stand-in (the merged base's estimator, with the hold kept for a first
+update) fails two of `probes`' tests, whose first updates the stand-in's
+lag reaches (the sun's sideways light 0.134 against 0.159 +- 0.025; under
+the roof 0.039 against a bound of 0.032). Both estimators are biased where
+a probe's hits lack light; the cure is a cache whose working set holds
+still (below), so that a hit lacks light only while its cell is new.
+
+**Faults 1 and 2 on voxel terrain: the cache did not light its cells.** On
+voxel_craft 32,727 of the 32,768 cache rays a frame started in a solid,
+and 8,182 of the 8,192 cells lit a frame had all four rays there: they
+never took a value, stayed "never lit" (first in need every frame, so the
+budget was always full), and every read of them fell to a stand-in. Lifting
+the rays' start by a quarter of the cell or starting them as wide as the
+cell changed nothing. Two causes, both GI's:
+
+- **A cell seated on a far side.** A hit that lets light through (a voxel
+  of leaves) read and marked the cell on its far side, seated at the hit
+  with the far side's normal: behind a voxel's face that is the voxel's
+  inside. With no marks from such hits, 6 cells a frame were left with no
+  ray out. The far side is now read, never marked (`gi_light`): its cells
+  are the ones rays from that side make.
+- **A point kept for life.** A cell's point is its first marking hit's; when
+  the surface it was taken on goes (terrain streamed in finer, an edit), its
+  rays start in a solid forever. A cell all of whose rays of an update start
+  in a solid is now unseated (`RADIANCE_CACHE_UNSEATED`): no value, its life
+  cleared, not lit until the next mark seats it at its hit (the contract's
+  mark does the seating; readers change nothing). With both, every one of
+  the 8,184 cells lit a frame folds.
+
+That does not make voxel_craft cheaper or its indirect darker (1.520, as
+left; the probes' estimator above is what raises it): the cache now works there, and what it costs is its working set.
+110,130 cells in use against 2^18 slots (eviction past half the slots), so
+14,261 cells are new and 11,293 evicted a frame, 25 settle, and the budget
+is spent every frame; without the clear distances the set is the same
+(116,895 cells, 19,033 new), so the descent to finer cells is not what
+makes it. The probes' footprints key each surface at several levels (one a
+band of probe distances) and the marks add an ancestor each. The merged
+base spent the same 32,768 rays a frame, most of them, by the same two
+causes, starting in a solid and ending at once: its 3.4 ms was a cache
+that lit little.
+
+| GI passes | merged base | as left | this |
+|---|---|---|---|
+| Cathedral, frame 240 (two runs) | 1.61, 1.47 ms | 2.02, 2.03 ms | 1.67, 1.85 ms |
+| voxel_craft, four poses (two runs) | 3.33, 3.40 ms | 5.42, 5.42 ms | 5.79, 6.27 ms |
+| voxel_flight Earth ground hold | 3.51, 3.47 ms | 5.29, 4.92 ms | 5.77, 5.59 ms |
+| voxel_flight Moon ground hold (one run) | 3.36 ms | 5.22, 5.14 ms | 4.53 ms |
+
+On voxel_craft `GILight` is 0.79 ms (0.63 without the clear distances: the
+descent's cost is 0.16 ms, not the 1 ms measured while reads of unlit cells
+took the stand-in path) and the cache rays' walk 3.1 ms (real rays now).
+The clear distances measured over the cathedral's lit cells (a way each):
+93.2% open past the cell, 2.7% under a cell, 2.6% under half, 0.4% under an
+eighth, 0.2% under a 32nd, 0.8% unexplored.
+
+**Fault 3.** Both walls pass with their bounds: the classic wall lets 0.72%
+through after 60 frames (bound 1%; 1.06% as left), and the VG wall 0.62%
+(bound: twice the classic). The thin wall's dark side holds 0.145% of the
+lit side standing (0.0118 of 8.1), 0.001% lying; without the clear
+distances it reads 1.3% at 1/8 m and fails. The standing residual is the
+ways' width: a way is 45 degrees wide and its bound was the along-surface
+distance of whichever low ray met the wall, up to 8% past the wall's near
+face for a ray 22.5 degrees off its normal, so a reader just behind a
+5 cm wall within that band read the lit side's cell. Measured with the
+bound taken to the plane of the face met (where it stands off the cell's
+surface): the standing dark side 0.037% (0.0030), and the classic wall
+0.09%, the base's level. Not taken here: with it the VG wall (0.50%, the
+same as without) fails the test's bound of twice the classic, a leak of
+the VG wall's own (its proxy) that the classic wall's leak hid. A growth
+of the bound between explorations is not the source (without it: 0.0183).
+
+**Verified** (RTX 3060, debug test builds): the contract's lib 31 and
+layouts 6, `radiance_cache_gpu` 2, `wgsl_validation`; GI's lib 13,
+`radiance_cache` 9 of 9 (the closed box's indirect -2.7%, +1.0%, -3.0%,
+-1.0% of the CPU radiosity, settled after 500 frames where the step before
+took 2,516: its corner cells no longer wait on rays that start in a solid),
+`probes` 16 of 16, `mesh_gi_graph` 2 of 2, `vg_ray_proxies` 3 of 3; the
+layer gate, `one_owner`, clippy and `cargo fmt -p` on the touched packages.
+
+**Open**:
+
+- **The working set on dense terrain.** voxel_craft keeps about 110,000
+  cells at 2^18 slots, so cells are evicted before they settle; a settled
+  frame costs the whole budget. The levels a surface is keyed at (one a
+  band of probe distances, and the marks' ancestors) are what to bound.
+- **Both scenes' indirect against the corrected reference** (the table):
+  what is left once the branch's own biases are gone is the probes' and
+  the cache's shared limits (the cache's cells a level a probe distance,
+  the probes' interpolation), which the pixels' gather (step 4) replaces
+  near the eye.
+- **The VG wall's leak** (0.50%, the classic wall 0.09% with the bound to the
+  face's plane), before the plane bound can land.
