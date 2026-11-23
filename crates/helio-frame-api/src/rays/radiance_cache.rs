@@ -79,8 +79,6 @@ const _: () = assert!(LEVELS as i32 + FINEST - 1 == 10);
 pub const BUCKET: u32 = 16;
 /// Levels a mark marks above the read's.
 pub const ANCESTOR: u32 = 3;
-/// One mark in this many of a used cell moves its point to the marking hit.
-pub const RESEAT: u32 = 8;
 /// The new cells' queue holds a place for every this many slots
 /// (`RADIANCE_CACHE_QUEUE_SHARE`): it follows the hash's slots in
 /// [`SLOTS`]'s buffer, its count first.
@@ -381,7 +379,6 @@ mod tests {
             ("RADIANCE_CACHE_LEVELS", LEVELS),
             ("RADIANCE_CACHE_BUCKET", BUCKET),
             ("RADIANCE_CACHE_ANCESTOR", ANCESTOR),
-            ("RADIANCE_CACHE_RESEAT", RESEAT),
             ("RADIANCE_CACHE_QUEUE_SHARE", QUEUE_SHARE),
             ("RADIANCE_CACHE_WAYS", WAYS),
         ] {

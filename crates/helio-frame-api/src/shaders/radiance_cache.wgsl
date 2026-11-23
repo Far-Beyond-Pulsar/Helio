@@ -37,9 +37,6 @@ const RADIANCE_CACHE_NONE: u32 = 0xffffffffu;
 // A mark also marks the cell this many levels coarser, so a fine cell's
 // read has a coarser one to answer from while it has no value of its own.
 const RADIANCE_CACHE_ANCESTOR: u32 = 3u;
-// One mark in this many of a cell already in use moves its point to the
-// marking hit (a uniform pick among the hits that read it, over time).
-const RADIANCE_CACHE_RESEAT: u32 = 8u;
 // The new cells' queue, after the hash's `slots` slots: its count in
 // `radiance_cache_slots[slots].state`, then a place a new cell
 // (`radiance_cache_slots[slots + 1 + i].state`: the cell's slot, or
@@ -52,6 +49,10 @@ const RADIANCE_CACHE_QUEUE_SHARE: u32 = 4u;
 // A cell's clear distance (`RadianceCacheEntry::clear`) along a way its
 // rays found open: as far as f16 holds.
 const RADIANCE_CACHE_FAR: f32 = 65504.0;
+// How near its point, in cells, a cell's light holds along a way its rays
+// have not explored yet: the point's own neighbourhood, thinner than any
+// wall a cell is wide enough to span.
+const RADIANCE_CACHE_NEAR: f32 = 0.03125;
 // The directions along a cell's surface its clear distances are kept in,
 // each 45 degrees about its axis: a wall at an angle to a way bounds it no
 // nearer than 0.92 (cos 22.5 degrees) of its distance.
@@ -287,7 +288,8 @@ fn radiance_cache_clear(e: RadianceCacheEntry, w: u32) -> f32 {
 // light on one side:
 // - RADIANCE_CACHE_HOLDS: the way from the cell's point to `p` along its
 //   surface is shorter than its rays found clear that way (a way they have
-//   not explored: `p` within an eighth of the cell of its point);
+//   not explored: `p` within RADIANCE_CACHE_NEAR of its point; a point
+//   moved: the old clear distances less the move);
 // - RADIANCE_CACHE_BLOCKED: `p` is past what its rays met that way: a finer
 //   cell is `p`'s;
 // - RADIANCE_CACHE_UNKNOWN: its rays have not explored that way yet: it has
@@ -300,7 +302,7 @@ fn radiance_cache_light_at(e: RadianceCacheEntry, p: vec3<f32>) -> u32 {
     let along = radiance_cache_along(scene_unpack_unit(e.normal), p - radiance_cache_entry_point(e));
     let clear = radiance_cache_clear(e, u32(along.x));
     if clear == 0.0 {
-        return select(RADIANCE_CACHE_UNKNOWN, RADIANCE_CACHE_HOLDS, along.y <= 0.125 * radiance_cache_size(e.key.tag & 31u));
+        return select(RADIANCE_CACHE_UNKNOWN, RADIANCE_CACHE_HOLDS, along.y <= RADIANCE_CACHE_NEAR * radiance_cache_size(e.key.tag & 31u));
     }
     return select(RADIANCE_CACHE_BLOCKED, RADIANCE_CACHE_HOLDS, along.y <= clear);
 }
@@ -310,11 +312,15 @@ fn radiance_cache_holds(e: RadianceCacheEntry, p: vec3<f32>) -> bool {
     return radiance_cache_light_at(e, p) == RADIANCE_CACHE_HOLDS;
 }
 
-// The finest cell at `level` or below whose light holds at `p` (side of
-// `n`, coordinate space `space`), starting from the cell at `level` whose
-// light does not: RADIANCE_CACHE_NONE when none does.
+// The finest cell below `level` whose light holds at `p` (side of `n`,
+// coordinate space `space`), starting from the cell at `level` whose light
+// does not, no finer than the eye angle's cells there (the cache's
+// resolution, its capacity's: the finer cells near occluders cost no more
+// cells than the eye angle allows a surface): RADIANCE_CACHE_NONE when none
+// does.
 fn radiance_cache_finer(p: vec3<f32>, n: vec3<f32>, level: u32, space: u32) -> u32 {
-    for (var at = level; at > 0u; at--) {
+    let finest = radiance_cache_level(p, 0.0);
+    for (var at = level; at > finest; at--) {
         let s = radiance_cache_find(radiance_cache_key(p, n, at - 1u, space));
         if s == RADIANCE_CACHE_NONE { break; }
         let e = radiance_cache_entries[s];
@@ -432,18 +438,6 @@ fn radiance_cache_mark_level(p: vec3<f32>, n: vec3<f32>, level: u32, space: u32)
             if atomicLoad(&radiance_cache_slots[s].used) != frame {
                 atomicStore(&radiance_cache_slots[s].used, frame);
             }
-            let pick = radiance_cache_mix(bitcast<u32>(p.x) ^ (bitcast<u32>(p.y) * 0x9e3779b9u) ^ (bitcast<u32>(p.z) * 0x85ebca6bu) ^ frame);
-            let e = radiance_cache_entries[s];
-            if pick % RADIANCE_CACHE_RESEAT == 0u && radiance_cache_same(e.key, key) && radiance_cache_holds(e, p) {
-                // Only to a hit its light holds at (not past an occluder,
-                // where a finer cell is marked instead). The history's low
-                // half is the publisher's to write (its fold runs in a pass
-                // of its own); a mark rewrites the high.
-                let at = radiance_cache_pack_point(p, level);
-                radiance_cache_entries[s].point = at.x;
-                radiance_cache_entries[s].history = (radiance_cache_entries[s].history & 0xffffu) | at.y;
-                radiance_cache_entries[s].normal = scene_pack_unit(n);
-            }
             break;
         }
         i++;
@@ -456,7 +450,7 @@ fn radiance_cache_mark_level(p: vec3<f32>, n: vec3<f32>, level: u32, space: u32)
 // `footprint`, coordinate space `space`) keys as used this frame, the cell
 // RADIANCE_CACHE_ANCESTOR levels coarser and, where a cell's light does not
 // hold at `p` (`radiance_cache_holds`), the finer ones a read goes to, down
-// to the first that holds or is new.
+// to the first that holds or is new, and no finer than the eye angle's.
 fn radiance_cache_mark(p: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32) {
     if !radiance_cache_present() { return; }
     let level = radiance_cache_level(p, footprint);
@@ -464,9 +458,10 @@ fn radiance_cache_mark(p: vec3<f32>, n: vec3<f32>, footprint: f32, space: u32) {
     if level + RADIANCE_CACHE_ANCESTOR < RADIANCE_CACHE_LEVELS {
         radiance_cache_mark_level(p, n, level + RADIANCE_CACHE_ANCESTOR, space);
     }
+    let finest = radiance_cache_level(p, 0.0);
     var at = level;
     loop {
-        if at == 0u { break; }
+        if at <= finest { break; }
         let s = radiance_cache_find(radiance_cache_key(p, n, at, space));
         if s == RADIANCE_CACHE_NONE { break; }
         let e = radiance_cache_entries[s];
