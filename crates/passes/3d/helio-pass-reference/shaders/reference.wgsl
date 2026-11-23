@@ -36,7 +36,13 @@ struct ReferenceFrame {
 
 // A path (48 bytes): what reaches the eye from here on is multiplied by
 // `throughput`; `radiance` what reached it so far; `diffuse` the part that
-// came by a first bounce off a diffuse lobe (`REFERENCE_DIFFUSE_FIRST`);
+// came by a first bounce off a diffuse lobe: each later contribution times
+// the diffuse lobe's share of the BSDF in the first bounce's direction
+// (`REFERENCE_DIFFUSE_FIRST` set, the share in `flags`' upper bits, 10 bits
+// a channel: `first_share`), so its mean is the first bounce's diffuse
+// lobe's integral whichever lobe drew the direction (a draw's lobe would
+// count a rough specular lobe's share as diffuse where the diffuse lobe's
+// density covers it);
 // `pdf` the density of its last BSDF sample.
 struct Path {
     throughput: vec3<f32>,
@@ -136,11 +142,21 @@ fn sky_radiance(p: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     return sky_table_eval((p - frame.eye.xyz) * 0.001, d, vec3<f32>(1.0, 1.5, 4.0));
 }
 
+// The diffuse lobe's share packed into a path's flags (bits 1 to 30).
+fn first_share_bits(share: vec3<f32>) -> u32 {
+    let q = vec3<u32>(clamp(share, vec3<f32>(0.0), vec3<f32>(1.0)) * 1023.0 + 0.5);
+    return (q.x << 1u) | (q.y << 11u) | (q.z << 21u);
+}
+
+fn first_share(flags: u32) -> vec3<f32> {
+    return vec3<f32>(f32((flags >> 1u) & 1023u), f32((flags >> 11u) & 1023u), f32((flags >> 21u) & 1023u)) / 1023.0;
+}
+
 // `c` reaching the eye along path `path` at depth `depth`.
 fn add(path: ptr<function, Path>, c: vec3<f32>, depth: u32) {
     (*path).radiance += c;
     if depth >= 1u && ((*path).flags & REFERENCE_DIFFUSE_FIRST) != 0u {
-        (*path).diffuse += c;
+        (*path).diffuse += c * first_share((*path).flags);
     }
 }
 
@@ -231,8 +247,17 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
                 }
                 if kept && random(pixel, depth, 7u) < survive {
                     throughput /= survive;
-                    if depth == 0u && (b.lobe == BSDF_LOBE_DIFFUSE || through) {
-                        path.flags |= REFERENCE_DIFFUSE_FIRST;
+                    if depth == 0u {
+                        // The diffuse lobe's share of the BSDF along the
+                        // direction (light through a thin surface is
+                        // diffuse): the BSDF less the same surface with
+                        // nothing to scatter (its specular lobe alone).
+                        var specular_only = s;
+                        specular_only.albedo = vec4<f32>(vec3<f32>(0.0), s.albedo.a);
+                        specular_only.subsurface_color = vec3<f32>(0.0);
+                        let full = bsdf_eval(s, wo, b.wi);
+                        let share = (full - bsdf_eval(specular_only, wo, b.wi)) / max(full, vec3<f32>(1e-30));
+                        path.flags |= REFERENCE_DIFFUSE_FIRST | first_share_bits(select(share, vec3<f32>(1.0), through));
                     }
                     path.throughput = throughput;
                     path.pdf = b.pdf;
