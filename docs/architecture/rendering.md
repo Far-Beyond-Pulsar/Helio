@@ -2639,7 +2639,17 @@ it as a hit from inside (`START_FACE`), so the reference and GI's shadow
 rays let no light through a leaf while the pixels' sun (`shadow`: the
 pages at the cell's far side) and local lights (`hit_walk`'s `through`)
 did. All three now take what reaches the leaf's far side, times the share
-its surface lets through.
+its surface lets through, at every level: at the exact levels, where the
+tracer walks the grid's own cells and a start is not placed in a chunk
+(`point_start`: the walk places itself), the start's cell is found in the
+drawn chunk at the point (`place_at`, as the walk finds it) in the grid's
+own cells (`cell_point`), and its exit by the grid's cell sides
+(`box_exit`); one path, `stream_enter`'s. Before, a ray starting in a
+coarse leaf ended at once whatever its material (and a ray on a coarse
+face was not inside its cell, as the contract says it is):
+`rays_pass_coarse_cells_that_let_light_through` (a smooth 3 km world,
+exact from 0.4 m cells; 150 starts in drawn cells of levels 2 to 4)
+failed on every ray before and passes after, against the CPU.
 
 **One slope.** A hit with no stored slope (a canopy's top, an edit) of
 cells a pixel or less was lit, on screen, by the slope of the hits two
@@ -2649,26 +2659,39 @@ of the rays'. `screen_ground` is deleted: both take the world's slope
 (`face_rule`, `face_lit`), which the cut keeps at about a pixel a cell.
 
 **Against the reference** (voxel_craft's first pose, grass and clouds off,
-the reference's direct part over about 6,000 paths a pixel, its first-hit
-albedo as the mask; `C:/t/r3t/ref`): real-time direct light over the
-reference's, this base 1.049 on hits (canopy 1.129, ground 1.044), with
-both changes 1.086 (canopy 1.105, ground 1.085). The reference's canopy is
-unchanged to four digits: its shadow rays start 2 mm into a leaf lit from
-behind, and below the exact levels they now pass the cell, but this
-pose's crowns are mostly far, at the exact levels, where a ray starting in
-a solid cell is not checked for a face (`on_solid_face` returns none
-there) and still ends at once: light through coarse leaves for rays is
-open (the walk's own first cell, at the exact levels, is the place). The
-ground's 4% is the slope's: with one description, distant ground lit by
-the screen's slope (darker) no longer hides that its far visibility (the
-coarse pages, the canopies' cut) is brighter than the reference's; that
-visibility is what is left, with the steps' shadowing (section above).
+about 6,000 paths a pixel; the reference's first-hit albedo as the mask:
+hits 86% of the image, canopy 10%, ground 76%; real-time direct (view 22)
+against the reference's direct part, indirect (view 23) against the whole
+reference less that; this branch's base 0eaf396 against the final build,
+`C:/t/r3t/ref`):
 
-**Holds** (voxel_flight, ground, 25 s, clouds off, against this base):
-Earth 0.0015 mean |difference|, luminance +0.06% (the same build twice:
-0.0006); the Moon 0.0015, -0.07% (twice: 0.0006). voxel_craft's other
-poses keep their shots (the gate's poses 9, 11 and 13 within run-to-run
-noise of the base).
+| real time / reference | base: hits / canopy / ground | final: hits / canopy / ground |
+|---|---|---|
+| direct | 1.053 / 1.140 / 1.048 | 1.087 / 1.107 / 1.085 |
+| indirect | 0.896 / 0.709 / 1.072 | 0.717 / 0.672 / 0.749 |
+| all light | 1.025 / 0.865 / 1.051 | 1.010 / 0.827 / 1.038 |
+
+What moved is mostly the reference: its paths now pass leaves (a bounce
+or a shadow ray from a leaf, into it), so the light through the canopy
+reaches the ground: the reference's indirect on the ground rose by 36%
+(0.00459 to 0.00625), on the canopy by 2.6%; its direct did not move to
+four digits (leaves still shade what is under them; this pose's visible
+leaves are lit from the front). Real time's own indirect fell by 3% on the
+canopy and 5% on the ground (GI's shadow rays from leaves). The canopy's
+indirect gap (0.76 in step 1's build, 0.709 at this base) is 0.672, and
+the ground's is now there too (0.749): light through the canopy that GI's
+probes do not carry, for r3's radiance cache and per-pixel indirect. The
+direct ground's 4% is the slope's: with one description, distant ground
+lit by the screen's slope (darker) no longer hides that its far
+visibility (the coarse pages, the canopies' cut) is brighter than the
+reference's; that, with the steps' shadowing, is r5's one shadow path.
+
+**Holds** (voxel_flight, ground, 25 s, clouds off, against this branch's
+base 0eaf396, the final build with light through coarse leaves): Earth
+0.0017 mean |difference|, luminance +0.03% (the same build twice: 0.0008);
+the Moon 0.0013, -0.09% (twice: 0.0004). The gate's pose 12 on the final
+build: 10.7 speckle pixels a frame. voxel_craft's other poses keep their
+shots (the gate's poses 9, 11 and 13 within run-to-run noise of the base).
 
 **Cost** (1080p, pose 11, pipelined frames, the last three 300-frame
 windows of each run, base and this build alternated twice): the denoiser
