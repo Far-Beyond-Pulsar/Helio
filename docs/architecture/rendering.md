@@ -3037,7 +3037,12 @@ binds the three under those names:
   "GI's last faults": `radiance_cache_read(p, n, space)`, no reach, and a
   `miss` saying why nothing was found; in "Relief is not a second
   surface": `radiance_cache_read_mark(p, n, space)` reads and marks with
-  one find a level, and `miss` ABSENT is only a key the hash turned away.)*
+  one find a level, and `miss` ABSENT is only a key the hash turned away; in
+  "Who claims a cell": `radiance_cache_read(p, n, space, footprint)` and the
+  mark's with the ray's footprint at the hit, the level the coarser of the
+  eye angle's and the footprint's, a read that finds no slot walking down to
+  the surface's level; ABSENT is again also a cell no marking reader
+  claimed.)*
 - `radiance_cache_mark(p, n, footprint, space)`: the hit's cell in use
   this frame, claimed with the hit's point and normal where no slot holds
   it (a place in the new cells' queue), the cell `ANCESTOR` (3) levels
@@ -5193,14 +5198,16 @@ burst.
 
 **Open**:
 
-- **The cache rays' closure.** A cell's rays claim the cells they hit, so
+- **The cache rays' closure** *(closed in "Who claims a cell": the cache's
+  rays read, never claim)*. A cell's rays claim the cells they hit, so
   the cells in use grow to the table at any size (full at 2^21 on
   voxel_craft). Bounding it is the next step: the bounced part from cells
   that readers use (a cache ray reads, never claims; k3: a third fewer new
   cells), or a claim limited to a cell's first bounce; its effect on the
   bounces (the cathedral's rows, the closed box) is what to measure.
-- **The readers' demand on volume-filling surfaces.** With the closure
-  bounded, the probes' rays (turned every update, from probes all through
+- **The readers' demand on volume-filling surfaces** *(closed in "Who
+  claims a cell": the pixels' gather is the one claimer, at its rays'
+  footprint)*. With the closure bounded, the probes' rays (turned every update, from probes all through
   the clipmap) still claim 20,000 cells a frame at 40 mrad in a forest:
   every leaf and blade face near every probe at the eye angle. The eye
   angle's derivation (one surface a direction about the eye) does not hold
@@ -5208,9 +5215,237 @@ burst.
   light) has to bound what readers claim, or the readers' resolution has to
   follow the cells' area mean (a cell whose light is its area's, so a wide
   reader can read a coarse one).
-- **The descent in clutter.** Clear distances bounded by leaves and blades
-  send 23-46% of reads finer at 160 mrad; an occluder that splits nothing
+- **The descent in clutter** *(closed in "Who claims a cell": leaves,
+  blades and relief within a layer bound no way)*. Clear distances bounded
+  by leaves and blades send 23-46% of reads finer at 160 mrad; an occluder that splits nothing
   (its finer cells' light the cell's within their noise) should not keep
   its finer cells.
 - **The speckle gate at the default** (126.8-135 against 20) waits on the
-  churn above.
+  churn above *(measured in "Who claims a cell": it does not; with the
+  cache settled the gather still makes 94-128)*.
+
+#### Who claims a cell
+
+GI plugin and Helio `render/r3-radiance-cache`, after "Relief is not a
+second surface". The fault it set out to close: the cache's working set did
+not settle on an open scene. On voxel_craft (a forest on stepped 10 cm
+terrain) the table sat at its load whatever its size (131,072 of 2^18 slots;
+full at 2^21), 37,000 cells were new a frame against 8,192 lit, and over 80%
+of the probes' hits found no cell with light.
+
+**The design.** A cell is claimed only by a reader whose hits are the
+working set, as SHaRC and AMD's GI-1.0 let only the camera's paths create
+entries:
+
+- **The screen's reader is the cache's one claimer**: the pixels' gather,
+  or, at the `probes` quality where there is none, the probes (GI's
+  `GI_PROBES_CLAIM`). The cache's own rays never claim; at the gather's
+  qualities the probes read the cells that exist (`radiance_cache_read`)
+  and claim and keep nothing. A probe's hit with no cell is lit on the spot (its
+  own light sample, the probes' irradiance: DDGI's recursion); a cache ray's
+  hit with no cell gives the bounced part nothing (the probes' irradiance
+  there carries light across what the cells keep apart: with it, the floor
+  under an opaque card read 0.0056 of light from the card's sunlit top, the
+  test's bound 1e-4). The bounces the cache carries are those between cells
+  the screen's rays reach: the cell's rays' hits read those cells' light,
+  which read the next. With nothing claiming at the `probes` quality (the
+  cache empty, the probes DDGI's recursion alone) the cathedral's indirect
+  read 0.737 of the reference (mean relative error 0.259) and the probes
+  test's roof 0.0346 under it (bound 0.032), the pixel tests' furnace 0.870
+  (bound 10%), for a GI update of 3.16 ms on voxel_craft's four poses
+  against the base exe's 3.43: the probes claim there, at their rays'
+  footprint (below).
+- **A read's level follows the reader's footprint** (`radiance_cache_
+  level_at`, the contract): the coarser of the eye angle's cell at the hit
+  and the ray's footprint there, as Lumen reads its surface cache at a
+  cone's mip. A gather ray from the ground to a canopy 5 m up is 2 m wide
+  there and claims a 2 m cell, not the eye angle's 40 cm ones. A surface
+  point holds a cell a level its readers' footprints round to; the levels
+  coarser than the eye angle's hold a quarter of the cells of the one finer,
+  so the finest, which only short rays reach, bounds the count. A read that
+  only reads and finds no slot at its level walks down to the surface's
+  (`radiance_cache_read`): the claimer's cells are as sharp as its rays,
+  which are sharper there than a probe's or a cell's own (a finer cell is
+  the same light, less prefiltered). Without it the cache rays' hits found
+  a cell 35% of the time on voxel_craft (the gather's claims at 0.44 t, the
+  cache rays' reads at 0.22 t) and the Earth-scale furnace never carried a
+  bounce.
+- **The gather's hit takes its direct light from a light sample of its
+  own**, and the cache's cell for its indirect light alone. A cell's direct
+  light is its point's (its seat, the first marking hit's): near a small
+  light it varies across a cell far more than its indirect does, and a
+  coarse cell's value is then one point of that variation for all its
+  readers. This is what "Relief is not a second surface"'s k5 hit (the
+  cathedral's default read 2.00 of the reference with a read at the
+  footprint's level): with the gather the only claimer, the cathedral read
+  0.818 with the footprint's level and 1.169 with the eye angle's alone, and
+  0.982 and 1.028 with the hit's own direct light (table below). The
+  probes keep the cell's whole light where it has one (their footprint is
+  wide, their irradiance an L1 average). The cost: a light query and a
+  shadow ray a gather hit (23,000-30,000 shadow rays a frame at a
+  sixteenth), which the gather's passes absorb (2.39-2.40 ms in the
+  cathedral before and after).
+- **Clutter bounds no way.** A cell's clear distances were bounded by any
+  low ray's hit, so in a forest or a meadow every way stopped a few
+  centimetres from the cell's point at a leaf, a blade or a voxel's riser,
+  and the reads past it went to finer cells (60% of the gather's new cells
+  a frame). Now a hit on a surface that lets light through (a leaf, a blade)
+  bounds nothing and opens a way no ray explored yet; a hit within the
+  cell's layer of its plane, farther along the surface than a layer
+  (relief the slab prefilters), says nothing of the way (a ray higher up
+  meets a wall there and bounds it, or passes over and opens it). Nearer
+  than a layer every low ray meets a wall's foot within the layer, so such
+  a hit still bounds: the thin wall test's lit read 2 cm from a 5 cm wall
+  at 1/4 m cells read the lit side's whole light on the dark side when it
+  did not.
+
+**Measured, one change at a time** (voxel_craft pose 12, the default
+quality and table, still camera then the burst after the look around; the
+shaders from disk, `HELIO_SHADER_FROM_DISK`, on one build):
+
+| step (one change each) | cells in use | new / evicted a frame | the gather's claims a frame (its level, finer) | the gather's hits with light | the probes' hits with light | speckle px a frame |
+|---|---|---|---|---|---|---|
+| before (every reader claims) | 131,072 | 37,248 / 35,409 | 6,684 (probes 20,047, cache rays 9,217) | 5.9% | 4.3% | 136.0 |
+| A: the probes and the cache's rays read only | 131,072 | 5,515 / 5,483 | 4,128, 1,171 | 41.2% | 15.4% | 120.0 |
+| B: + a read's level follows the footprint | 131,072 | 2,882 / 2,868 | 1,102, 1,728 | 72.6% | 36.7% | 112.9 |
+| C1 (diagnostic): B with no descent at all | 105,666 | 247 / 243 | 260, 0 | 98.9% | 51.9% | 99.6 |
+| B + relief bounds no way | 131,072 | 476 / 476 | 354, 158 | 97.1% | 59.0% | 98.7 |
+| + nor do leaves and blades | 116,816 | 294 / 279 | 238, 49 | 98.7% | 53.4% | 102.3 |
+| + the gather's own direct light (cathedral, below) | 125,118 | 323 / 316 | 235, 76 | 98.4% | 64.0% | 126.5 |
+| + relief nearer than a layer bounds (the thin wall test) | 131,072 | 1,886 / 1,863 | 1,480, 285 | 75.6% | 49.4% | 124.2 |
+| + a read walks down to the marking readers' cells (final) | 131,072 | 615 / 613 | 353, 251 | 95.0% | 50.3% | 127.6 |
+
+(The far sides' own light samples off: 94.1 speckle pixels a frame with
+C1; the gather's reuse off as well: 103.0.)
+
+The speckle gate is not the working set's: with the cache settled and 99%
+of the gather's hits finding a cell with light (C1), 99.6 speckle pixels a
+frame; without the far sides' own light samples 94.1; without the gather's
+reuse 103.0; at the probes 10.5. The speckles are the gather's: one ray a
+4x4 block meeting a canopy whose cells differ (sunlit tops, shaded
+insides), which its denoiser does not hold; the cache's state no longer
+moves them.
+
+**The cathedral** (the default quality, frame 3000, 16 frames, view 23
+against the corrected reference; ratio / mean relative error):
+
+| the gather alone claims, and | cells in use | / reference |
+|---|---|---|
+| before (every reader claims, the eye angle's level, the cells' direct light) | 83,700 | 0.965-0.971 / 0.079-0.082 |
+| the footprint's level, the cells' direct light | 9,981 | 0.818 / 0.181 |
+| the eye angle's level, the cells' direct light | 27,976 | 1.169 / 0.215 |
+| the same, the cache rays' hits with no cell left out of the bounce | 28,053 | 1.173 / 0.219 |
+| the eye angle's level, the hit's own direct light | 28,918 | 1.028 / 0.103 |
+| the footprint's level, the hit's own direct light | 10,698 | 0.982 / 0.106 |
+| final (run a) | 11,835 | 0.998 / 0.099 |
+
+**The probes claim at `probes`.** With nothing claiming there (the cache
+empty, the probes DDGI's recursion alone) the cathedral's indirect read
+0.737 of the reference (0.259), the probes test's roof 0.0346 under it
+(bound 0.032) and the pixel tests' furnace 0.870 at that quality (bound
+10%). The probes' claims, at their footprint, win it back: the cathedral
+0.922 and 0.988 (0.108, 0.115), the roof 0.0253 against the model's 0.0274,
+the furnace 0.962. On voxel_craft they churn (below): at `probes` the
+probes are the scene's reader, every surface about every probe.
+
+**Measured on the final tree** (release, RTX 3060, one build; the merged
+base exe `*_basec` for voxel_craft's probes cost, run in the same session):
+
+| cathedral, frame 3000, 16 frames, view 23 / reference | final (runs a, b) | before (runs a, b) |
+|---|---|---|
+| probes | 0.922 / 0.108, 0.988 / 0.115 | 0.903 / 0.115, 0.905 / 0.116 |
+| a sixteenth (default) | 0.998 / 0.099, 1.019 / 0.108 | 0.971 / 0.079, 0.965 / 0.082 |
+| a quarter (one run) | 0.975 / 0.100 | 0.950 / 0.084, 0.904 / 0.102 |
+| every pixel (one run) | 1.012 / 0.098 | 0.942 / 0.090, 0.938 / 0.091 |
+
+The ratios are within the reference's 5% at every quality (closer than
+before at a quarter and every pixel); the mean relative error at the
+default is 0.099-0.108 against 0.079-0.082, the hit's own direct light's
+noise (a shadow ray a gather hit; per-frame sd 0.0019 against 0.0009-0.0013).
+Cells in use 51,100 at the probes (82,300 before), 11,800 at the default
+(83,500), 14,800 at a quarter, 17,600 at every pixel, 12-23 new a frame;
+the GI update 1.64-1.65 ms at the probes (1.67-1.69), 1.42-1.44 ms at the
+default (1.24-1.28: the reads walking down), the gather 2.39-2.40 ms.
+
+| voxel_craft | GI update | gather | frame | cells in use, new / evicted a frame | the gather's / the probes' hits with light |
+|---|---|---|---|---|---|
+| four poses, base exe, probes | 3.43 ms | | 11.45 | | |
+| four poses, probes | 4.26 | | 12.57 | 131,072, 6,773 / 5,761 | - / 73.8% |
+| four poses, a sixteenth | 4.35 | 5.55 | 18.19 | 34,324, 74 / 63 (last pose) | 99.2% / 39.8% |
+| pose 12, a sixteenth, the burst after the look around | 4.59 | 4.54 | 21.25 | 131,072, 657 / 655 | 94.4% / 56.9% |
+| pose 12, probes | 4.37 | | 16.59 | 131,072, 6,827 / 5,885 | - / 71.2% |
+
+(Before, "Relief is not a second surface": four poses 4.63 ms at the
+probes, 4.54-4.60 and 5.54-5.58 at a sixteenth; 23,000-39,000 cells new a
+frame at both.) Speckle pixels a frame at pose 12: 124.6 at a sixteenth
+(136.0 before; gate 20), 10.1 at the probes (gate 20).
+
+The outdoor mesh scene (GI's new example `outdoor_gi`: a 2.4 km ground, 945
+blocks 6 to 60 m tall out to 1.1 km, 1,442 trees of 220 two-sided leaf
+cards each within 150 m of the eye, 663,000 triangles; 1080p, frame 1200,
+still, then 16 frames after a 1 radian turn):
+
+| outdoor_gi | cells in use | new / evicted a frame | the gather's / the probes' hits with light | GI update | gather | speckle px |
+|---|---|---|---|---|---|---|
+| a sixteenth, still | 93,038 | 232 / 259 | 97.7% / 69.8% | 1.67 ms | 3.11 ms | 0.0 |
+| a sixteenth, after the turn | 109,516 | 499 / 260 | 92.2% / 72.9% | 1.67 | 3.11 | 0.0 |
+| probes, still | 131,072 | 1,507 / 1,467 | - / 89.7% | 2.52 | | 0.0 |
+
+The flight holds (1600x900, 25 s ground holds, one run each, against the
+tree before this subsection run in the same session):
+
+| | frame | GI update | gather | cells, new a frame | mean abs. difference, luminance |
+|---|---|---|---|---|---|
+| Earth, probes | 14.09 (14.33) | 4.15 (4.55) | | 131,072, 1,955 | 0.0006, -0.03% |
+| Earth, a sixteenth | 22.11 (21.95) | 4.22 (4.18) | 8.07 (7.92) | 110,629, 283 | 0.0004, +0.00% |
+| Moon, probes | 11.88 (12.23) | 3.84 (4.15) | | 131,072, 2,281 | 0.0007, -0.04% |
+| Moon, a sixteenth | 17.53 (17.26) | 4.00 (3.97) | 5.44 (5.20) | 131,072, 459 | 0.0032, +0.31% |
+
+So the working set holds still where the gather claims: the cathedral, the
+outdoor scene and the Earth hold below the table's load with a few hundred
+new cells a frame against the 8,192 lit, and on voxel_craft and the Moon at
+its load with 460-660 new a frame (37,000 before), the gather's hits finding
+a cell with light 94-99% of the time (6% before). Where the probes claim
+(`probes`), a forest's surroundings still churn the table (6,800 new a
+frame on voxel_craft): their image holds (speckle 10.1), their cost is
+0.8 ms over the base exe.
+
+**Verified**: GI lib 18, `radiance_cache` 10 of 10 (the closed box's
+indirect -0.9%, +1.6%, -0.4%, -2.0% of the CPU radiosity, direct within
+0.2%; the thin wall's dark side 0.0000% at every cell size standing and
+lying; the card's floor 0.5024 and 0.2643 against 0.5020 and 0.2781; the
+light switched off in 740 frames), `probes` 16 of 16, `pixel_gather` 6 of
+6, `mesh_gi_graph` 2 of 2, `vg_ray_proxies` 3 of 3. Helio:
+`helio-frame-api` lib 37, layouts 7, `radiance_cache_gpu` 3 of 3,
+`wgsl_validation`, `denoise_gpu` 8, `pixels_gpu` 5. The voxel plugin:
+`wgsl` 2, its 5 GI tests. `one_owner`; the layer gate (no violation); `cargo
+fmt` on the touched packages; clippy with no warning in the touched crates.
+The tests' harness (`tests/common`) draws no G-buffer, so it runs GI at the
+`probes` quality (the probes claim); `radiance_cache`'s tests run the
+default quality, their reads marking as the gather's hits do, and where a
+test reads bounces between walls (the closed box, the light switched off,
+the Earth-scale furnace) a grid of reads marks the walls as a camera inside
+would (the box's four reads seat their cells first); the small cache's
+first set goes by age once unread; an origin change keeps the four reads'
+cells. Bounds unchanged. Not verified: XR eyes and captures, the editor, a
+cathedral run of the far sides' own samples.
+
+**Open**:
+
+- **The probes' working set at `probes` in a forest**: the table at its
+  load, 6,800 new cells a frame on voxel_craft. A probe's claims at its
+  footprint still cover every surface about every probe; a budget on what
+  the probes claim (cells a frame the cache can light), or claims from the
+  probes nearest the eye only, is the next step there.
+- **The default's working set on voxel_craft and the Moon** sits at the
+  table's load (131,072), 460-660 new cells a frame: the gather's surfaces
+  at the eye angle in a forest fill most of the load, and the descent at
+  relief nearer than a layer adds a few hundred finer cells a frame.
+- **The speckle gate at the default** (124.6 against 20) is the gather's,
+  not the cache's: with 99% of the gather's hits finding a cell with light
+  it still made 94-128 speckle pixels a frame. One ray a 4x4 block meets a
+  canopy whose cells differ (sunlit tops, shaded insides), and the
+  denoiser's history does not hold it; the gather's estimator and its
+  denoising are what to change.
+- **The default's mean relative error in the cathedral**: 0.099-0.108
+  against 0.079-0.082, the hit's own direct light's noise.

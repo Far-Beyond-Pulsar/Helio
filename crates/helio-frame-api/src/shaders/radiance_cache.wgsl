@@ -13,29 +13,44 @@
 // the stand-in (`radiance_cache::stand_in`), whose frame holds no slots: a
 // read then finds nothing and a mark does nothing.
 //
-// A reader with a hit calls `radiance_cache_read(p, n, space)` (what the
-// cache holds there, or nothing, and why) and `radiance_cache_mark(p, n,
-// space)` (the cell is in use; a cell first used takes its point and normal
-// from the hit), or `radiance_cache_read_mark(p, n, space)` for both with
-// one find a level, with the hit's frame-space point, the unit normal of the
-// side the ray arrived on (the face turned toward the ray) and its
-// coordinate space (`scene_ray_space`). Every reader reads a cell alike: a
+// A reader with a hit calls `radiance_cache_read(p, n, space, footprint)`
+// (what the cache holds there, or nothing, and why) and
+// `radiance_cache_mark(p, n, space, footprint)` (the cell is in use; a cell
+// first used takes its point and normal from the hit), or
+// `radiance_cache_read_mark(p, n, space, footprint)` for both with one find
+// a level, with the hit's frame-space point, the unit normal of the side
+// the ray arrived on (the face turned toward the ray), its coordinate space
+// (`scene_ray_space`) and its ray's width there (`scene_ray_footprint`; 0
+// for a reader as sharp as the eye angle). Every reader reads a cell alike: a
 // cell's light is the prefiltered irradiance of its surface about its
 // point, which is what a diffuse bounce gathers from there however far the
 // reader's ray came (as a surface cache supplies it), and a reader beside an
 // occluder the cell spans reads a finer cell. A Lambertian hit of albedo `a`
 // then leaves `a * (direct + indirect) / PI`; one that lights itself with
-// light samples (a mirror's hit) takes `indirect` alone.
+// light samples (a mirror's hit, a wide reader near small lights) takes
+// `indirect` alone: a cell's `direct` is its point's.
 //
-// A surface point has one level, whoever reads it and however wide their
-// ray: the eye angle's cell at its distance from the eye
-// (`radiance_cache_level`, as SHaRC and GI-1.0 key their hash grids), so
-// every reader of a place reads and marks the same cells. A wide ray takes
-// the cell's light as its own prefiltered value (a cell's light is its
-// rays' mean over its share of the scene), never a coarser cell's: a
-// coarser level spans thin walls and floors under them. Finer cells exist
-// only next to an occluder that splits a surface's cell
-// (RADIANCE_CACHE_DESCENT).
+// Who marks is the cache's working set: a mark claims a cell where none is,
+// and a cell no mark used for a while is evicted. A reader that only reads
+// keeps nothing alive and claims nothing (its misses say ABSENT), so a
+// publisher bounds its working set by which readers mark (GI: the pixels'
+// gather alone, so the cells in use are what the screen's rays reach).
+//
+// A read's level is the coarser of the surface's (the eye angle's cell at
+// its distance from the eye, `radiance_cache_level`, as SHaRC and GI-1.0
+// key their hash grids) and the reader's footprint at the hit
+// (`radiance_cache_level_at`: a wide ray takes the light of the patch its
+// cone covers, as Lumen reads its surface cache at the mip of a cone's
+// footprint). A cell finer than a reader's footprint is detail its estimate
+// averages away, and a cell a wide reader's rays would claim and rarely meet
+// again; a sharp reader (a short ray's hit) reads the eye angle's. A surface
+// point holds a cell at each level its readers' footprints round to: at
+// most log2(longest ray's footprint / eye cell) + 1 levels, and the levels
+// coarser than the eye angle's hold a quarter of the cells of the one
+// finer, so the finest, which only short rays reach, bounds the count.
+// Finer cells exist only next to an occluder that splits a cell
+// (RADIANCE_CACHE_DESCENT): a coarser cell spans thin walls and floors under
+// them and holds its light on its point's side.
 //
 // A cell is a slab lying on its surface: as wide as its level along the two
 // axes across its side, a RADIANCE_CACHE_LAYERS-th of that along its side's
@@ -233,6 +248,14 @@ fn radiance_cache_level(p: vec3<f32>) -> u32 {
     return u32(clamp(l, 0.0, f32(RADIANCE_CACHE_LEVELS - 1u)));
 }
 
+// The level a reader whose ray is `footprint` wide at frame point `p` reads
+// there: the surface's (`radiance_cache_level`), or the footprint's, the
+// nearest power of two, where that is coarser.
+fn radiance_cache_level_at(p: vec3<f32>, footprint: f32) -> u32 {
+    let l = round(log2(max(footprint, 1e-30))) - f32(RADIANCE_CACHE_FINEST);
+    return max(radiance_cache_level(p), u32(clamp(l, 0.0, f32(RADIANCE_CACHE_LEVELS - 1u))));
+}
+
 // The dominant side of unit `n`: axis * 2, plus 1 toward the negative.
 fn radiance_cache_side(n: vec3<f32>) -> u32 {
     let a = abs(n);
@@ -427,8 +450,9 @@ fn radiance_cache_holds(e: RadianceCacheEntry, p: vec3<f32>, n: vec3<f32>) -> bo
 }
 
 // The walk a read and a mark share, at frame point `p` on the side of unit
-// `n` (the face turned toward the ray) in coordinate space `space`: the
-// cell of the surface's level, then, while a cell's light is blocked at `p`
+// `n` (the face turned toward the ray) in coordinate space `space` for a
+// reader `footprint` wide there: the cell of the read's level
+// (`radiance_cache_level_at`), then, while a cell's light is blocked at `p`
 // (`radiance_cache_light_at`: an occluder between its point and `p`, a
 // surface turned away from its own), the next finer, at most
 // RADIANCE_CACHE_DESCENT levels finer. Each level's slot is found (`mark`
@@ -442,10 +466,14 @@ fn radiance_cache_holds(e: RadianceCacheEntry, p: vec3<f32>, n: vec3<f32>) -> bo
 // cell's light comes with it, which holds at its point; whether anything
 // along its surface stands between that and `p` is not known for a few of
 // its updates), or no cell up to the finest holds (OCCLUDED).
-fn radiance_cache_walk(p: vec3<f32>, n: vec3<f32>, space: u32, mark: bool) -> RadianceCacheIrradiance {
+fn radiance_cache_walk(p: vec3<f32>, n: vec3<f32>, space: u32, footprint: f32, mark: bool) -> RadianceCacheIrradiance {
+    return radiance_cache_walk_from(p, n, space, radiance_cache_level_at(p, footprint), mark);
+}
+
+// `radiance_cache_walk` from level `level`.
+fn radiance_cache_walk_from(p: vec3<f32>, n: vec3<f32>, space: u32, level: u32, mark: bool) -> RadianceCacheIrradiance {
     var none = RadianceCacheIrradiance(vec3<f32>(0.0), vec3<f32>(0.0), 0u, false, vec2<u32>(0u), RADIANCE_CACHE_MISS_ABSENT, false);
     if !radiance_cache_present() { return none; }
-    let level = radiance_cache_level(p);
     let finest = level - min(level, RADIANCE_CACHE_DESCENT);
     var at = level;
     loop {
@@ -489,26 +517,39 @@ fn radiance_cache_walk(p: vec3<f32>, n: vec3<f32>, space: u32, mark: bool) -> Ra
 }
 
 // The irradiance the cache holds at frame point `p` on the side of unit `n`
-// (the face turned toward the ray) in coordinate space `space`, or nothing
-// and why (`radiance_cache_walk`); it marks nothing.
-fn radiance_cache_read(p: vec3<f32>, n: vec3<f32>, space: u32) -> RadianceCacheIrradiance {
-    return radiance_cache_walk(p, n, space, false);
+// (the face turned toward the ray) in coordinate space `space`, for a
+// reader `footprint` wide there, or nothing and why (`radiance_cache_walk`);
+// it marks nothing. Where no slot holds the cell of the reader's level
+// (ABSENT), the next finer down to the surface's (`radiance_cache_level`):
+// the readers that mark, whose cells these are, may be sharper than this
+// one there (a finer cell is the same light, less prefiltered), and one
+// that only reads claims none of its own.
+fn radiance_cache_read(p: vec3<f32>, n: vec3<f32>, space: u32, footprint: f32) -> RadianceCacheIrradiance {
+    let surface = radiance_cache_level(p);
+    var at = radiance_cache_level_at(p, footprint);
+    loop {
+        let r = radiance_cache_walk_from(p, n, space, at, false);
+        if r.miss != RADIANCE_CACHE_MISS_ABSENT || at <= surface { return r; }
+        at -= 1u;
+    }
+    return radiance_cache_walk_from(p, n, space, surface, false);
 }
 
 // Marks the cells a read of frame point `p` (side of unit `n`, coordinate
-// space `space`) goes to as used this frame (`radiance_cache_walk`): the
-// surface's level's and, where a cell's light is blocked at `p`, the finer
-// ones, down to the first that holds or has no value yet.
-fn radiance_cache_mark(p: vec3<f32>, n: vec3<f32>, space: u32) {
-    _ = radiance_cache_walk(p, n, space, true);
+// space `space`, a reader `footprint` wide) goes to as used this frame
+// (`radiance_cache_walk`): the read's level's and, where a cell's light is
+// blocked at `p`, the finer ones, down to the first that holds or has no
+// value yet.
+fn radiance_cache_mark(p: vec3<f32>, n: vec3<f32>, space: u32, footprint: f32) {
+    _ = radiance_cache_walk(p, n, space, footprint, true);
 }
 
 // `radiance_cache_read` and `radiance_cache_mark` at once, with one find a
 // level: what a reader that does both calls. A cell this read claims holds
 // no value yet (RADIANCE_CACHE_MISS_NEW, where a read before the mark
 // would find it ABSENT): ABSENT is then only a key the hash turned away.
-fn radiance_cache_read_mark(p: vec3<f32>, n: vec3<f32>, space: u32) -> RadianceCacheIrradiance {
-    return radiance_cache_walk(p, n, space, true);
+fn radiance_cache_read_mark(p: vec3<f32>, n: vec3<f32>, space: u32, footprint: f32) -> RadianceCacheIrradiance {
+    return radiance_cache_walk(p, n, space, footprint, true);
 }
 
 // Frame point `p`'s place in its cell at `level` on side `side` (a key's

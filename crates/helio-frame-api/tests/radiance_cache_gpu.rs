@@ -6,7 +6,8 @@
 //! occluder or its reach (at most `DESCENT` levels, as the mark claims them),
 //! keeps sides and spaces apart, and finds nothing in the stand-in; two
 //! parallel surfaces in one cell's footprint are two cells of the surface's
-//! level, and stepped relief claims a cell a layer it spans, no finer ones.
+//! level, and stepped relief claims a cell a layer it spans, no finer ones;
+//! a wide reader reads its footprint's level.
 //! Skipped without a device.
 
 use helio_frame_api::rays::radiance_cache::{
@@ -18,7 +19,8 @@ use helio_frame_api::rays::stream::{self, SNIPPET as STREAM};
 const KERNEL: &str = r#"//!use frame_ray_stream
 //!use frame_radiance_cache
 //!use frame_surface_stops
-// p: the point; n: the side and in w the space.
+// p: the point and in w the reader's footprint; n: the side and in w the
+// space.
 struct Query {
     p: vec4<f32>,
     n: vec4<f32>,
@@ -54,14 +56,14 @@ fn keys(@builtin(global_invocation_id) id: vec3<u32>) {
 fn mark_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= count.x { return; }
     let q = queries[id.x];
-    radiance_cache_mark(q.p.xyz, q.n.xyz, u32(q.n.w));
+    radiance_cache_mark(q.p.xyz, q.n.xyz, u32(q.n.w), q.p.w);
 }
 
 @compute @workgroup_size(64)
 fn read_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= count.x { return; }
     let q = queries[id.x];
-    let e = radiance_cache_read(q.p.xyz, q.n.xyz, u32(q.n.w));
+    let e = radiance_cache_read(q.p.xyz, q.n.xyz, u32(q.n.w), q.p.w);
     let at = id.x * 12u;
     out[at] = select(0u, 1u, e.found);
     out[at + 1u] = e.level;
@@ -75,7 +77,7 @@ fn read_hits(@builtin(global_invocation_id) id: vec3<u32>) {
 fn read_mark_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= count.x { return; }
     let q = queries[id.x];
-    let e = radiance_cache_read_mark(q.p.xyz, q.n.xyz, u32(q.n.w));
+    let e = radiance_cache_read_mark(q.p.xyz, q.n.xyz, u32(q.n.w), q.p.w);
     let at = id.x * 12u;
     out[at] = select(0u, 1u, e.found);
     out[at + 1u] = e.level;
