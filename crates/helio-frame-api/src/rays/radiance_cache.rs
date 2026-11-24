@@ -30,15 +30,15 @@
 //! - **A read that finds nothing says why** (`miss`): no cell yet, no value
 //!   yet, its rays not yet past the way to the hit (the cell's light then
 //!   comes with it), all of which pass; or every cell that could answer holds
-//!   its light past an occluder or the reader's reach, which stays as long
-//!   as the cells do (`radiance_cache_miss_stays`): a reader stands in
+//!   its light past an occluder, which stays as long as the cells do (`radiance_cache_miss_stays`): a reader stands in
 //!   nothing there that cannot tell an occluder's two sides apart.
-//! - **The reach**: a reader says how far from its hit, along the surface,
-//!   a cell's point may stand for the hit: a ray that left a surface its
-//!   length (that surface is in the hit's way there, so light gathered
-//!   farther off is light the hit does not see: the floor beyond a contact),
-//!   a reader in the air (a probe) any distance. Past it a read goes finer,
-//!   as past an occluder.
+//! - **Every reader reads a cell alike**: a cell's light is the prefiltered
+//!   irradiance of its surface about its point, what a diffuse bounce
+//!   gathers there however far the reader's ray came. (A first version took
+//!   a reader's reach, a ray's length, past which a read went finer, after
+//!   SHaRC's "no short path ends in a coarse cell"; with one level a surface
+//!   and the clear distances it changed 0.1% of the pixels' hits, and the
+//!   cathedral and the speckle gate within noise.)
 //! - **The mark**: a reader marks the cell it read as used this frame, and
 //!   the finer ones it went to; a cell first used takes its point and normal
 //!   from the hit that marked it. What the publisher lights, how often and

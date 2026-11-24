@@ -3033,7 +3033,9 @@ binds the three under those names:
   cell's `history` (a reader's confidence), `found` (false: no cell at the
   hit's level or up to `reach` levels coarser has light for `p`).
   *(Changed in "GI on the merged tree": `radiance_cache_read(p, n, space,
-  reach)`, one level a surface point, `reach` the reader's in metres.)*
+  reach)`, one level a surface point, `reach` the reader's in metres; in
+  "GI's last faults": `radiance_cache_read(p, n, space)`, no reach, and a
+  `miss` saying why nothing was found.)*
 - `radiance_cache_mark(p, n, footprint, space)`: the hit's cell in use
   this frame, claimed with the hit's point and normal where no slot holds
   it (a place in the new cells' queue), the cell `ANCESTOR` (3) levels
@@ -4364,7 +4366,8 @@ reference shader held `first_share_bits` twice (no graph with the reference
 built: `mesh_gi_graph` showed the status screen), and a VG test exe built
 while the contract changed under it (rebuilt).
 
-**1. When a cell stands for a hit: the read's reach.** The gather kept a
+**1. When a cell stands for a hit: the read's reach** *(deleted in "GI's
+last faults": it changed 0.1% of the gather's hits)*. The gather kept a
 private rule (a cell no wider than the ray is long). The contract now
 answers it: `radiance_cache_read(p, n, space, reach)` and
 `radiance_cache_mark(p, n, space, reach)` take the reader's reach in
@@ -4720,3 +4723,42 @@ leaves have no far-side cell (their far side is a voxel's inside), so the
 far-side change moves its own-lit far sides 22,647 to 20,635 only; the
 canopy test (a sheet's far-side cells exist) reads 0.0956 under it against
 0.0965 to 0.114.
+
+**The default quality's speckles: what a speck is made of.** voxel_craft
+pose 12 at a sixteenth (the gate: at most 20 speckle pixels a frame;
+`flicker.py`, 16-frame bursts at 1080p), the gather's hits by state (frame
+statistics), one change a build:
+
+| build | speckle px / frame | pixels' hits: cache | absent | unexplored | occluded | reach | far sides own-lit |
+|---|---|---|---|---|---|---|---|
+| merged tree (as left) | 141 | | | | | | |
+| hits behind occluders (above) | 137, 141 | 50.8% | 48.1% | 1.0% | 0.0% | 0.1% | 13,936 of 24,034 |
+| + far sides from their cells | 141 | | | | | | |
+| + no reach | 133 | 52.8% | 46.0% | 1.2% | 0.1% | | 13,709 of 24,095 |
+
+The reach sent 0.1% of the gather's hits to their own light sample, not
+the two thirds the gather's branch measured before one level a surface:
+with a surface's cell the eye angle's at its distance, a ray long enough
+to leave the pixel's neighbourhood ends in a cell as fine as its readers
+resolve, and the clear distances keep an occluder's two sides apart. The
+cathedral at a sixteenth against the corrected reference: 0.942 / 0.088
+with the reach, 0.953 / 0.085 without (two runs of one build differ by
+0.01), per-frame sd 0.0013 both. The occluder tests (`radiance_cache`'s
+walls, `pixel_gather`'s occluders, `vg_ray_proxies`) pass without it. It
+is deleted: `radiance_cache_read(p, n, space)` and `radiance_cache_mark(p,
+n, space)` take no reach; `RADIANCE_CACHE_BEYOND` and `MISS_REACH` are
+gone. A cell's value is the prefiltered irradiance of its surface about its
+point, which is what a diffuse bounce's source supplies however long the
+ray that found it (Lumen's surface cache is read so by every final-gather
+ray past its screen trace; SHaRC's rule guards a cache whose cells span
+occluders, which ours tell apart).
+
+What a speck is made of, then, is not the reach: half of every reader's
+hits on voxel_craft find **no cell at all** (`ABSENT`: the probes' 44.7%,
+the cache rays' 68.5%, the pixels' 48.1%). The table is full (262,131 of
+2^18 slots) and the eviction never took a cell read within 64 frames, so
+new keys were turned away for good; those hits are lit on the spot with
+one light sample each, which the gather's resampling then favours where
+it is bright (the leaves' far sides add one more, 58% of the pixels' hits:
+a voxel of leaves has no far-side cell). The cure is the working set, not
+the hits: "The cache's resolution", below.

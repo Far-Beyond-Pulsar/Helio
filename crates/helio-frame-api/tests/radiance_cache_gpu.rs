@@ -16,7 +16,7 @@ use helio_frame_api::rays::stream::{self, SNIPPET as STREAM};
 const KERNEL: &str = r#"//!use frame_ray_stream
 //!use frame_radiance_cache
 //!use frame_surface_stops
-// p: the point and in w the reader's reach; n: the side and in w the space.
+// p: the point; n: the side and in w the space.
 struct Query {
     p: vec4<f32>,
     n: vec4<f32>,
@@ -52,14 +52,14 @@ fn keys(@builtin(global_invocation_id) id: vec3<u32>) {
 fn mark_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= count.x { return; }
     let q = queries[id.x];
-    radiance_cache_mark(q.p.xyz, q.n.xyz, u32(q.n.w), q.p.w);
+    radiance_cache_mark(q.p.xyz, q.n.xyz, u32(q.n.w));
 }
 
 @compute @workgroup_size(64)
 fn read_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= count.x { return; }
     let q = queries[id.x];
-    let e = radiance_cache_read(q.p.xyz, q.n.xyz, u32(q.n.w), q.p.w);
+    let e = radiance_cache_read(q.p.xyz, q.n.xyz, u32(q.n.w));
     let at = id.x * 12u;
     out[at] = select(0u, 1u, e.found);
     out[at + 1u] = e.level;
@@ -274,14 +274,13 @@ fn h(x: u32) -> f32 {
     ((v >> 22) ^ v) as f32 / u32::MAX as f32
 }
 
-/// Points about the eye within `within` metres (frame space), reaches from a
-/// millimetre to tens of metres, every side, spaces 0 to 3.
+/// Points about the eye within `within` metres (frame space), every side,
+/// spaces 0 to 3.
 fn queries(count: u32, within: f32) -> Vec<Query> {
     (0..count)
         .map(|i| {
             let r = i * 16;
             let p = [0, 1, 2].map(|k| (h(r + k) * 2.0 - 1.0) * within);
-            let reach = (h(r + 3) * 16.0 - 10.0).exp2();
             let axis = (h(r + 4) * 3.0) as usize % 3;
             let mut n = [0.2, -0.3, 0.1];
             n[axis] = if h(r + 5) < 0.5 { -1.0 } else { 1.0 };
@@ -289,7 +288,7 @@ fn queries(count: u32, within: f32) -> Vec<Query> {
             let n = n.map(|c: f32| c / l.sqrt());
             let space = (h(r + 6) * 4.0) as u32 % 4;
             Query {
-                p: [p[0], p[1], p[2], reach],
+                p: [p[0], p[1], p[2], 0.0],
                 n: [n[0], n[1], n[2], space as f32],
             }
         })
@@ -379,8 +378,8 @@ fn keys_match_the_rust_mirror_at_every_scale() {
 /// cell in use only marks it. A read finds no value until a publisher writes
 /// one, then finds it; a cell without a value finds nothing (no coarser cell
 /// answers); a point a third of a cell from a cell's point reads it while its
-/// ways are open and its reach is longer than that, and nothing once the
-/// ways are blocked or the reach is shorter, until the mark claims the finer
+/// ways are open, and nothing once the ways are blocked, until the mark
+/// claims the finer
 /// cell there and it holds a value; marks go finer at most `DESCENT` levels;
 /// sides and spaces are apart; the stand-in finds nothing and writes nothing.
 #[test]
@@ -391,9 +390,7 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
     // (1 to 1.9 m away).
     let frame = RadianceCacheFrame::new(origin, [0.0; 3], 0.18, 1 << 12, 5);
     let cache = gpu.cache(&frame);
-    // A floor's worth of hits seen from above, a metre down, in space 1, by
-    // readers in the air (any reach).
-    let far = 65504.0;
+    // A floor's worth of hits seen from above, a metre down, in space 1.
     let up = [0.0, 1.0, 0.0, 1.0];
     let floor: Vec<Query> = (0..40)
         .map(|i| Query {
@@ -401,7 +398,7 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
                 (i % 8) as f32 * 0.37 - 1.3,
                 -1.0,
                 (i / 8) as f32 * 0.41 - 1.0,
-                far,
+                0.0,
             ],
             n: up,
         })
@@ -518,8 +515,8 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
     } else {
         -size / 3.0
     };
-    let aside = |reach: f32| Query {
-        p: [q.p[0] + dx, q.p[1], q.p[2], reach],
+    let aside = Query {
+        p: [q.p[0] + dx, q.p[1], q.p[2], 0.0],
         n: q.n,
     };
     let read = |query: Query| {
@@ -527,29 +524,22 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
         (out[0], out[1], f32::from_bits(out[2]))
     };
     assert_eq!(
-        read(aside(far)),
+        read(aside),
         (1, fine_level, 1.0 + s as f32),
         "query {i}: open ways"
-    );
-    // A reach shorter than the way from the cell's point: past it.
-    assert_eq!(read(aside(size / 6.0)).0, 0, "query {i}: a short reach");
-    assert_eq!(
-        read(aside(size / 2.0)).0,
-        1,
-        "query {i}: a reach past the point"
     );
     // Something a millimetre away every way (f16 0.001, 0x1419, each half):
     // the cell's light is its point's side's, nothing for the aside point.
     entries[s].clear = [0x1419_1419; 4];
     gpu.queue
         .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&entries));
-    assert_eq!(read(aside(far)).0, 0, "query {i}: blocked ways");
+    assert_eq!(read(aside).0, 0, "query {i}: blocked ways");
     // Marks of the aside point claim the finer cells one level at a time (a
     // new cell holds where it was seated), each blocked in turn, down to
     // DESCENT levels and no finer.
     let p = [q.p[0] + dx, q.p[1], q.p[2]];
     for k in 1..=DESCENT + 1 {
-        gpu.run(&cache, 1, &[aside(far)], 1);
+        gpu.run(&cache, 1, &[aside], 1);
         let slots_now: Vec<RadianceCacheSlot> =
             bytemuck::cast_slice(&gpu.read(&cache.slots)).to_vec();
         let mut now: Vec<RadianceCacheEntry> =
@@ -566,7 +556,7 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
         gpu.queue
             .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&now));
         assert_eq!(
-            read(aside(far)),
+            read(aside),
             (1, fine_level - k, 1.0 + t as f32),
             "{k} finer"
         );
@@ -576,7 +566,7 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
         now[t].point ^= 1 << 9;
         gpu.queue
             .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&now));
-        assert_eq!(read(aside(far)).0, 0, "{k} finer, blocked");
+        assert_eq!(read(aside).0, 0, "{k} finer, blocked");
     }
     let mut entries: Vec<RadianceCacheEntry> =
         bytemuck::cast_slice(&gpu.read(&cache.entries)).to_vec();

@@ -227,8 +227,8 @@ fn the_radiance_cache_rows_have_their_contract_sizes() {
          fn main(@builtin(global_invocation_id) id: vec3<u32>) {
              let p = vec3<f32>(f32(id.x), 1.0, 2.0);
              let n = vec3<f32>(0.0, 1.0, 0.0);
-             let e = radiance_cache_read(p, n, SCENE_SPACE_ANY, RADIANCE_CACHE_FAR);
-             radiance_cache_mark(p, n, SCENE_SPACE_ANY, RADIANCE_CACHE_FAR);
+             let e = radiance_cache_read(p, n, SCENE_SPACE_ANY);
+             radiance_cache_mark(p, n, SCENE_SPACE_ANY);
              let at = radiance_cache_entry_point(radiance_cache_entries[id.x]);
              out[id.x] = vec4<f32>(e.direct + e.indirect + at, select(0.0, 1.0, e.found) + f32(e.level) * radiance_cache_size(e.level));
          }
