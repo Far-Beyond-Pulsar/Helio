@@ -18,15 +18,15 @@
 //! [`in_flight`] counts the jobs not finished in the process: what a host or
 //! a test waits on before it judges a frame.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
-/// Compile jobs started and not finished, process-wide.
-static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
-
-/// Compile jobs started and not finished in this process.
+/// Compile jobs started and not finished in this process (the host's count,
+/// shared with every copy of Helio: [`crate::runtime`]).
 pub fn in_flight() -> usize {
-    IN_FLIGHT.load(Ordering::Acquire)
+    crate::runtime::shared()
+        .compiles_in_flight
+        .load(Ordering::Acquire)
 }
 
 /// A bundle of pipelines being built off the frame.
@@ -83,11 +83,15 @@ impl<T: Send + Sync + 'static> Compiling<T> {
                     (started - asked).as_secs_f64(),
                     started.elapsed().as_secs_f64()
                 );
-                IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
+                crate::runtime::shared()
+                    .compiles_in_flight
+                    .fetch_sub(1, Ordering::AcqRel);
                 outcome.set(built);
             }
         };
-        IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        crate::runtime::shared()
+            .compiles_in_flight
+            .fetch_add(1, Ordering::AcqRel);
         // No threads on the web: the bundle builds where it is asked for.
         #[cfg(target_arch = "wasm32")]
         job();

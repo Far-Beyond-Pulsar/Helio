@@ -45,7 +45,6 @@ impl RendererConfig {
     /// temporal preset is the host's to resolve ([`TsrSetting`]): this sets
     /// the render scale it uses while TSR is off.
     pub fn with_settings(mut self, settings: &Resolved) -> Self {
-        use helio_pass_postprocess::HdrOutputMode;
         debug_assert!(std::ptr::eq(settings.group(), &helio_settings::RENDERER));
         let f = |key| settings.number(key) as f32;
         self.render_scale = f("render_scale").clamp(0.25, 1.0);
@@ -60,12 +59,6 @@ impl RendererConfig {
         self.views = helio_core::ViewBudget {
             max_depth: settings.number("capture_depth") as u32,
             max_views: settings.number("max_captures") as u32,
-        };
-        self.hdr_output_mode = match settings.text("hdr_output_mode") {
-            "hdr10" => HdrOutputMode::Hdr10,
-            "scrgb" => HdrOutputMode::ScRgb,
-            "passthrough" => HdrOutputMode::Passthrough,
-            _ => HdrOutputMode::Ldr,
         };
         self.background_color = settings.color("background_color");
         self.perf_overlay_mode = match settings.text("perf_overlay") {

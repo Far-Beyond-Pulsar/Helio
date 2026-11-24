@@ -2020,7 +2020,7 @@ origin, so a disabled plugin's are skipped):
   `set_virtual_geometry_settings`, `SceneRendererOptions::virtual_geometry`)
   is gone, and the meshes' `host_part` module has the two helpers. How
   others do it: Unreal's scene view extensions and per-scene subsystems
-  (Nanite's streaming manager), Bevy's render-world resources plugins
+  (its geometry streaming manager), Bevy's render-world resources plugins
   insert; ours is Bevy's line by registration.
 - `ContentGeometryRegistration` (`helio_renderer::interaction`): a kind's
   content geometry as the editor reads it: local bounds (framing, the

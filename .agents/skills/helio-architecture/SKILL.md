@@ -77,7 +77,7 @@ Pulsar's `crates/core/one_owner` test catches WGSL and key copies. Its `exceptio
 
 Before writing code, write a short design note answering four questions:
 
-1. **How do the best engines solve this?** Name concrete techniques and where they come from (e.g. UE5 Nanite/Lumen/VSM/RDG, Frostbite FrameGraph, Unity SRP/HDRP, Decima, id Tech, Bevy, published GDC/SIGGRAPH work). Use real knowledge, not vague references. Say what each costs and where each breaks.
+1. **How do the best engines solve this?** Name concrete techniques and where they come from (e.g. UE5 Lumen/VSM/RDG, Frostbite FrameGraph, Unity SRP/HDRP, Decima, id Tech, Bevy, published GDC/SIGGRAPH work). Use real knowledge, not vague references. Say what each costs and where each breaks.
 2. **Why is ours at least as good for our constraints?** The engine is generic: it serves any game, any world type and any mix of plugins, and no single setup is its target. Engine-wide constraints are:
    - tens of thousands of objects, many lights, volumes and views;
    - large worlds (f64 world positions rebased to the frame origin);

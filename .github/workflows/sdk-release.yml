@@ -1,0 +1,28 @@
+name: Release shared library
+
+# This repository's shared library (`helio_dylib`) is released from here, once; the editor and every plugin link it
+# dynamically (.agents/PLUGIN_SYSTEM.md in Pulsar-Native, "Shared libraries"). A push to `main` that raises the
+# version in `crates/helio_dylib/Cargo.toml` (or a manual run) builds it for six platforms and attaches the library, its SDK
+# (the crates inside it, already compiled: https://github.com/Far-Beyond-Pulsar/Cargo-SDK) and a manifest to the
+# release `shared-v<version>`. The build is written once, in Pulsar-Native:
+# .github/workflows/library-release.yml.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/helio_dylib/Cargo.toml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: Far-Beyond-Pulsar/Pulsar-Native/.github/workflows/library-release.yml@main
+    with:
+      package: helio_dylib
+      crate_dir: crates/helio_dylib
+      mono_path: "crates/renderer/helio"
+    permissions:
+      contents: write

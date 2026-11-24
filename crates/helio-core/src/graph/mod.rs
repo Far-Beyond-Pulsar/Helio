@@ -20,7 +20,7 @@ pub use executor::{
 };
 pub(crate) use membership::SceneRows;
 pub use membership::{MemberGate, RenderSize, SceneContent};
-pub(crate) use pipeline_cache::driver_cache_for_device;
+pub(crate) use pipeline_cache::{driver_cache_for_device, DriverCacheRecord};
 pub use pipeline_cache::{BindingOverrideBuilder, PipelineFormatCache, PipelineFormatKey};
 pub use resource::{
     GraphTexture, GraphTexturePool, ResSize, ResourceAccess, ResourceAllocator, ResourceBuilder,

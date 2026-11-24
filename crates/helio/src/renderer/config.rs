@@ -334,8 +334,6 @@ pub struct RendererConfig {
     /// `None` (default) keeps the existing FXAA-only path.
     pub tsr_quality: Option<helio_pass_tsr::TsrQuality>,
 
-    /// HDR display output mode. Default `Ldr`.
-    pub hdr_output_mode: helio_pass_postprocess::HdrOutputMode,
     pub render_mode: RenderMode,
     /// Enable the experimental multiview render-graph path. This is a low-level
     /// graph setting and does not discover or start OpenXR. For application
@@ -361,7 +359,6 @@ impl RendererConfig {
             views: helio_core::ViewBudget::default(),
             enable_environment_reflections: true,
             tsr_quality: None,
-            hdr_output_mode: helio_pass_postprocess::HdrOutputMode::Ldr,
             render_mode: RenderMode::Deferred,
             enable_xr: false,
         }
@@ -410,11 +407,6 @@ impl RendererConfig {
 
     pub fn with_render_mode(mut self, mode: RenderMode) -> Self {
         self.render_mode = mode;
-        self
-    }
-
-    pub fn with_hdr_output_mode(mut self, mode: helio_pass_postprocess::HdrOutputMode) -> Self {
-        self.hdr_output_mode = mode;
         self
     }
 

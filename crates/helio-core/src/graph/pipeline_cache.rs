@@ -21,15 +21,15 @@
 //! it ([`crate::compile`]).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
-struct DriverCacheRecord {
+/// One device's driver cache, in the process's shared state
+/// ([`crate::runtime::Shared`]).
+pub(crate) struct DriverCacheRecord {
     cache: Weak<wgpu::PipelineCache>,
     path: Option<std::path::PathBuf>,
     persist_lock: Arc<Mutex<()>>,
 }
-
-static DRIVER_CACHES: OnceLock<Mutex<HashMap<usize, DriverCacheRecord>>> = OnceLock::new();
 
 fn shared_driver_cache(
     device: &wgpu::Device,
@@ -46,8 +46,8 @@ fn shared_driver_cache(
     // All graphs and pass constructors using one Device share this cache.
     // Keep a weak registry entry so closing a renderer releases its Device.
     let device_key = device as *const wgpu::Device as usize;
-    let caches = DRIVER_CACHES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut caches = caches
+    let mut caches = crate::runtime::shared()
+        .driver_caches
         .lock()
         .expect("driver pipeline cache registry poisoned");
     // The registry is process-wide and its key is a raw Device address. Drop

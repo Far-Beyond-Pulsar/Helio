@@ -3,6 +3,9 @@ members = [
     "crates/*",
     "crates/passes/3d/*",
 ]
+# The shared library crate builds inside Pulsar-Native's workspace (its dependencies on the other
+# shared libraries resolve there, through its `[patch]` entries): it is not a member of this one.
+exclude = ["crates/helio_dylib"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -39,12 +42,12 @@ notify = "8.2.0"
 serde_json = "1"
 
 # SolidRS - 3D asset loading library
-solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
-solid-unreal = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "61b6638ab5495705117f41401ae2b9c53c3297ed" }
+solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
+solid-unreal = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "a87fdf07061c159963f7c73bbe22b68fec60bc12" }
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 thiserror = "2.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -55,8 +58,8 @@ helio-core = { path = "crates/helio-core" }
 helio-scene-join = { path = "crates/helio-scene-join" }
 helio-settings = { path = "crates/helio-settings" }
 helio-tasks = { path = "crates/helio-tasks" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f6769f61518e1e68475bb9b6191fa26a29cc09f6", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f6769f61518e1e68475bb9b6191fa26a29cc09f6" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f9589128fa018570c768663ed6820c2f6874a00f", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f9589128fa018570c768663ed6820c2f6874a00f" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's

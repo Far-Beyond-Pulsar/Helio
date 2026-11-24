@@ -219,17 +219,27 @@ struct State {
 /// Failed lookups, with none succeeding, before assuming there is no source tree.
 const GIVE_UP_AFTER: u32 = 4;
 
-static STATE: OnceLock<Mutex<State>> = OnceLock::new();
-static GENERATION: AtomicU64 = AtomicU64::new(0);
-static DIRTY: AtomicBool = AtomicBool::new(false);
-/// Bumped whenever a new file is registered, so the watcher knows to extend
-/// its watch set.
-static REGISTRY_EPOCH: AtomicU64 = AtomicU64::new(0);
-static WATCHER_STARTED: AtomicBool = AtomicBool::new(false);
+/// The registry and its flags: one per process, in the shared state
+/// ([`crate::runtime::Shared`]), so a plugin library's shaders register with
+/// the host's registry and watcher and not a copy of their own.
+#[derive(Default)]
+pub(crate) struct HotShared {
+    state: Mutex<State>,
+    generation: AtomicU64,
+    dirty: AtomicBool,
+    /// Bumped whenever a new file is registered, so the watcher knows to
+    /// extend its watch set.
+    registry_epoch: AtomicU64,
+    watcher_started: AtomicBool,
+}
+
+fn hot() -> &'static HotShared {
+    &crate::runtime::shared().hot
+}
 
 fn state() -> MutexGuard<'static, State> {
-    STATE
-        .get_or_init(Default::default)
+    hot()
+        .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -319,7 +329,7 @@ impl State {
             }
         }
         if changed {
-            REGISTRY_EPOCH.fetch_add(1, Ordering::Release);
+            hot().registry_epoch.fetch_add(1, Ordering::Release);
         }
     }
 
@@ -816,8 +826,8 @@ fn handle_change(path: &Path) {
             state.diagnostics.remove(&item.path);
         }
     }
-    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    DIRTY.store(true, Ordering::Release);
+    let generation = hot().generation.fetch_add(1, Ordering::AcqRel) + 1;
+    hot().dirty.store(true, Ordering::Release);
     log::info!(
         "[helio-shader] accepted {} (generation {generation}, {} shader(s) affected)",
         path.display(),
@@ -886,18 +896,18 @@ pub fn source_text(
 /// Whether any shader has registered as hot-reloadable. One relaxed load, so
 /// the renderer can ask every frame without touching the registry lock.
 pub fn has_registered() -> bool {
-    REGISTRY_EPOCH.load(Ordering::Relaxed) > 0
+    hot().registry_epoch.load(Ordering::Relaxed) > 0
 }
 
 /// Monotonic count of accepted shader changes.
 pub fn generation() -> u64 {
-    GENERATION.load(Ordering::Acquire)
+    hot().generation.load(Ordering::Acquire)
 }
 
 /// Returns `true` once per accepted change (or batch of changes), clearing the
 /// flag. The host calls this at a frame boundary and rebuilds on `true`.
 pub fn take_dirty() -> bool {
-    DIRTY.swap(false, Ordering::AcqRel)
+    hot().dirty.swap(false, Ordering::AcqRel)
 }
 
 /// The most recent rejected edit per file, for display in an editor UI.
@@ -919,8 +929,8 @@ pub fn registered_shader_count() -> usize {
 /// pending set like a watcher-accepted edit.
 pub fn set_override(path: impl Into<PathBuf>, text: impl Into<String>) {
     state().accept(path.into(), text.into());
-    GENERATION.fetch_add(1, Ordering::AcqRel);
-    DIRTY.store(true, Ordering::Release);
+    hot().generation.fetch_add(1, Ordering::AcqRel);
+    hot().dirty.store(true, Ordering::Release);
 }
 
 /// Takes every change accepted since the previous call, as the batch the host
@@ -955,7 +965,7 @@ pub fn attribute_changes(changed: &[PathBuf]) -> Attribution {
 /// more are registered) and, recursively, each of `extra_roots`. Only `*.wgsl`
 /// events matter.
 pub fn start_watcher(extra_roots: Vec<PathBuf>) -> bool {
-    if !enabled() || WATCHER_STARTED.swap(true, Ordering::AcqRel) {
+    if !enabled() || hot().watcher_started.swap(true, Ordering::AcqRel) {
         return false;
     }
     // It waits on the file system for as long as the process runs.
@@ -1019,7 +1029,7 @@ fn watch_loop(extra_roots: Vec<PathBuf>) {
 
         // Passes register shaders as the graph is built (and rebuilt), so the
         // set of directories to watch grows over time.
-        let epoch = REGISTRY_EPOCH.load(Ordering::Acquire);
+        let epoch = hot().registry_epoch.load(Ordering::Acquire);
         if epoch != synced_epoch {
             synced_epoch = epoch;
             let dirs: HashSet<PathBuf> = {
