@@ -4695,7 +4695,8 @@ marks a stream short only while its kernels compile; the test waits for
 that), and the cache rays' width (started as wide as their cell: 99 cells
 folded, no change). Why the cache's rays start in a solid on this world and not on
 voxel_craft's is not found within the diagnostic budget (the voxel plugin
-is paused).
+is paused); the test itself passes since "The readiness hold under churn"
+below, whose cause it shared.
 
 **Light queries and shadow rays only where used.** They already were made
 only for hits lit on the spot (`gi_light` and `gi_shadow` compact a
@@ -4832,3 +4833,18 @@ finest the descent resolves: a step or bump finer than that is the cell's
 surface, prefiltered), where "GI's last faults" first took a 32nd. The
 thin wall's dark side at 4 m cells reads 0.78% of the lit side with it
 (0.79% with a 32nd); the cathedral's working set and rows did not move.
+
+**The readiness hold under churn.** With the least recently read evicted,
+a working set larger than the slots churns, and a probe never updated
+whose hits met new cells held its first update, came back, met new cells
+again, and held for good: the voxel GI tests' world updated 3,900-4,700
+probes against 17,500-19,200 with keys turned away, and
+`a_mesh_slab_on_terrain_shades_the_probes_under_it` failed its count. A
+probe holds once now (`GI_HELD_ONCE`, bit 1 of its state, cleared when it
+re-enters the clipmap); held again, it updates with its hits lit on the
+spot. With that, all five of the voxel plugin's GI tests pass, including
+`a_terrain_wall_shadows_a_local_light_from_the_probes`, which had failed
+since the merge with the same cause: on its open world the cache's rays
+start in a solid for most cells (above), so their cells stay new and the
+probes over the open ground never took their first update while the
+light changed (its gain 0).
