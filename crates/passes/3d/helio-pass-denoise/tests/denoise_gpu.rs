@@ -46,14 +46,89 @@ impl Field {
     }
 }
 
+/// How a producer's samples scatter about the field (each a factor of it,
+/// of mean 1).
+#[derive(Clone, Copy, Debug)]
+enum Noise {
+    /// Uniform, of this relative standard deviation.
+    Uniform(f64),
+    /// One block of each group of `k` (2x2 for 4, 4x4 for 16), a new one
+    /// each frame, carries the light of all `k`; the others none (a few
+    /// rays that find a bright source among many that find nothing).
+    OneIn(u32),
+    /// Log-normal of this standard deviation of the logarithm, each 4x4
+    /// group of blocks normalised to its mean.
+    LogNormal(f64),
+}
+
+/// The hit distance a sample reports, from the hit it was traced at, the
+/// frame, the block's index and the sample's factor of the field (`None`:
+/// 3 m everywhere).
+type HitDistance = std::sync::Arc<dyn Fn(&support::Hit, u64, u32, f64) -> f32>;
+
 /// The producer: one sample at each block's traced pixel.
 struct Producer {
     signal: Signal,
     textures: [wgpu::Texture; 2],
     views: [wgpu::TextureView; 2],
-    /// Relative standard deviation of each sample (uniform noise).
-    noise: f64,
-    hit_distance: f32,
+    noise: Noise,
+    hit_distance: Option<HitDistance>,
+}
+
+/// Each block's factor of the field on `frame` (`Noise`). Over a group the
+/// factors of `OneIn` and `LogNormal` average exactly 1 every frame, so a
+/// whole image's input mean is the field's, frame by frame: what a test of
+/// the denoiser's mean compares with.
+fn factors(noise: Noise, traced: [u32; 2], frame: u32) -> Vec<f64> {
+    let index = |bx: u32, by: u32| by * traced[0] + bx;
+    let mut out = vec![1.0; (traced[0] * traced[1]) as usize];
+    match noise {
+        Noise::Uniform(sigma) => {
+            for (i, f) in out.iter_mut().enumerate() {
+                let u = random(frame, i as u32) * 2.0 - 1.0;
+                *f = 1.0 + sigma * 3f64.sqrt() * u;
+            }
+        }
+        Noise::OneIn(k) => {
+            let g = if k == 4 { 2 } else { 4 };
+            assert!(traced[0].is_multiple_of(g) && traced[1].is_multiple_of(g));
+            for gy in 0..traced[1] / g {
+                for gx in 0..traced[0] / g {
+                    let pick =
+                        (random(frame ^ 0x51ed_270b, gy * traced[0] + gx) * f64::from(k)) as u32;
+                    for slot in 0..k {
+                        let i = index(gx * g + slot % g, gy * g + slot / g);
+                        out[i as usize] = if slot == pick { f64::from(k) } else { 0.0 };
+                    }
+                }
+            }
+        }
+        Noise::LogNormal(sigma) => {
+            assert!(traced[0].is_multiple_of(4) && traced[1].is_multiple_of(4));
+            for gy in 0..traced[1] / 4 {
+                for gx in 0..traced[0] / 4 {
+                    let slots: Vec<u32> = (0..16)
+                        .map(|s| index(gx * 4 + s % 4, gy * 4 + s / 4))
+                        .collect();
+                    // Box-Muller from two uniforms a block.
+                    let v: Vec<f64> = slots
+                        .iter()
+                        .map(|&i| {
+                            let u1 = random(frame.wrapping_mul(3) + 1, i).max(1e-12);
+                            let u2 = random(frame.wrapping_mul(3) + 2, i);
+                            let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+                            (sigma * z).exp()
+                        })
+                        .collect();
+                    let mean = v.iter().sum::<f64>() / 16.0;
+                    for (&i, v) in slots.iter().zip(&v) {
+                        out[i as usize] = v / mean;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// A uniform in [0, 1) from `a` and `b` (PCG).
@@ -69,6 +144,10 @@ fn random(a: u32, b: u32) -> f64 {
 
 impl Producer {
     fn new(gpu: &support::Gpu, signal: Signal, noise: f64) -> Self {
+        Self::with_noise(gpu, signal, Noise::Uniform(noise))
+    }
+
+    fn with_noise(gpu: &support::Gpu, signal: Signal, noise: Noise) -> Self {
         let size = signal.traced_size(SIZE);
         let textures = [0, 1].map(|i| {
             gpu.device.create_texture(&wgpu::TextureDescriptor {
@@ -94,7 +173,7 @@ impl Producer {
             textures,
             views,
             noise,
-            hit_distance: 3.0,
+            hit_distance: None,
         }
     }
 
@@ -105,6 +184,7 @@ impl Producer {
         let traced = self.signal.traced_size(SIZE);
         let mut texels = [Vec::new(), Vec::new()];
         let colour = COLOUR.map(|c| c / luminance(COLOUR));
+        let factors = factors(self.noise, traced, f.frame as u32);
         for by in 0..traced[1] {
             for bx in 0..traced[0] {
                 let t = denoise::traced_pixel([bx, by], f.frame as u32, side, SIZE);
@@ -115,8 +195,12 @@ impl Producer {
                     continue;
                 };
                 let e = field(&hit).at(hit.point, hit.normal);
-                let u = random(f.frame as u32, by * traced[0] + bx) * 2.0 - 1.0;
-                let scale = 1.0 + self.noise * 3f64.sqrt() * u;
+                let index = by * traced[0] + bx;
+                let scale = factors[index as usize];
+                let hit_distance = self
+                    .hit_distance
+                    .as_ref()
+                    .map_or(3.0, |h| h(&hit, f.frame, index, scale));
                 let y = e * scale;
                 let rgb = colour.map(|c| c * y);
                 let co = 0.5 * (rgb[0] - rgb[2]);
@@ -124,7 +208,7 @@ impl Producer {
                 // The luminance-weighted direction whose first-order term is
                 // the field's b (DENOISE_IRRADIANCE_SLOPE = 3/4).
                 let d = field(&hit).b / 0.75 * scale;
-                texels[0].push([y as f32, co as f32, cg as f32, self.hit_distance]);
+                texels[0].push([y as f32, co as f32, cg as f32, hit_distance]);
                 texels[1].push([d.x as f32, d.y as f32, d.z as f32, confidence]);
             }
         }
@@ -192,12 +276,25 @@ fn lengths(f: &Fixture) -> Vec<f32> {
         .collect()
 }
 
-/// The denoised luminance at each pixel's own normal (`None`: sky).
+/// The denoised luminance at each pixel's own normal (`None`: sky); the
+/// chroma came through as the field's.
 fn denoised(f: &Fixture) -> Vec<Option<f64>> {
+    let (out, chroma) = denoised_and_chroma(f);
+    assert!(chroma < 0.01, "chroma off by {chroma}");
+    out
+}
+
+/// The denoised luminance at each pixel's own normal (`None`: sky), and
+/// the worst difference of a lit pixel's chroma ratios from the field's.
+fn denoised_and_chroma(f: &Fixture) -> (Vec<Option<f64>>, f64) {
     let (_, out) = pass(f).textures().expect("a frame ran");
     let a = support::read(f.gpu, &out[0]);
     let b = support::read(f.gpu, &out[1]);
-    f.texels
+    let c = COLOUR.map(|c| c / luminance(COLOUR));
+    let expected = [0.5 * (c[0] - c[2]), -0.25 * c[0] + 0.5 * c[1] - 0.25 * c[2]];
+    let mut worst: f64 = 0.0;
+    let out = f
+        .texels
         .iter()
         .enumerate()
         .map(|(i, t)| {
@@ -207,18 +304,21 @@ fn denoised(f: &Fixture) -> Vec<Option<f64>> {
                 + f64::from(b[i][0]) * n.x
                 + f64::from(b[i][1]) * n.y
                 + f64::from(b[i][2]) * n.z;
-            // The chroma came through as the field's.
-            let chroma = [a[i][1], a[i][2]];
-            let c = COLOUR.map(|c| c / luminance(COLOUR));
-            let expected = [0.5 * (c[0] - c[2]), -0.25 * c[0] + 0.5 * c[1] - 0.25 * c[2]];
             if y > 1e-3 && a[i][3] >= 0.0 {
-                for (got, want) in chroma.iter().zip(expected) {
-                    assert!((f64::from(*got) - want).abs() < 0.01, "chroma {chroma:?}");
+                for (got, want) in [a[i][1], a[i][2]].iter().zip(expected) {
+                    worst = worst.max((f64::from(*got) - want).abs());
                 }
             }
             Some(y.max(0.0))
         })
-        .collect()
+        .collect();
+    (out, worst)
+}
+
+/// The mean denoised luminance over the pixels that see a surface.
+fn image_mean(out: &[Option<f64>]) -> f64 {
+    let lit: Vec<f64> = out.iter().flatten().copied().collect();
+    lit.iter().sum::<f64>() / lit.len() as f64
 }
 
 /// Runs frames (`step`) until every pixel that sees a surface holds the full
@@ -520,6 +620,285 @@ fn a_frame_origin_change_mid_run_changes_nothing() {
         assert!(worst <= 5.0 * step, "{worst}");
         assert!((sum / n).abs() <= step, "{}", sum / n);
     }
+}
+
+/// The noise kinds of the mean tests: one block in 4 and in 16 carrying all
+/// the light (relative deviations 1.7 and 3.9), log-normal of log-deviation
+/// 0.75 and 1.5.
+const HEAVY_TAILED: [Noise; 4] = [
+    Noise::OneIn(4),
+    Noise::OneIn(16),
+    Noise::LogNormal(0.75),
+    Noise::LogNormal(1.5),
+];
+
+/// Heavy-tailed positive signals over a uniformly lit wall, whose input's
+/// image mean is the field's every frame (`factors`): once the history has
+/// settled, the denoiser's output keeps that mean, its luminance within 2%
+/// (a 32-frame mean of the image mean: the output's own noise in it is under
+/// a tenth of that), and its colour (chroma within 0.01, as every test
+/// asks). Once more with each sample's hit distance going with its light
+/// (the bright ones short). A weight that falls with a sample's own
+/// estimated variance or its own ray's length, or a chroma averaged
+/// without its luminance, fails here.
+#[test]
+fn a_heavy_tailed_signal_keeps_its_mean() {
+    let Some(gpu) = support::gpu() else { return };
+    let scene = wall_scene();
+    let view = front_view();
+    let mut failures = Vec::new();
+    let cases = HEAVY_TAILED
+        .map(|noise| (noise, false))
+        .into_iter()
+        .chain([(Noise::OneIn(16), true)]);
+    for (noise, short_bright) in cases {
+        for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
+            let signal = Signal::irradiance("test_mean", block);
+            let mut f = fixture(gpu, signal);
+            let mut p = Producer::with_noise(gpu, signal, noise);
+            if short_bright {
+                // A sample's ray length going with its light: the bright
+                // ones met a source 5 cm away, the others nothing within
+                // 5 m (a gather's rays beside a lamp).
+                p.hit_distance = Some(std::sync::Arc::new(
+                    |_: &support::Hit, _, _, factor: f64| {
+                        if factor > 1.0 {
+                            0.05
+                        } else {
+                            5.0
+                        }
+                    },
+                ));
+            }
+            let noise = format!(
+                "{noise:?}{}",
+                if short_bright {
+                    " (bright rays short)"
+                } else {
+                    ""
+                }
+            );
+            let field = |_: &support::Hit| Field::flat(1.0);
+            converge(&mut f, |f| {
+                frame(f, &p, &scene, &view, DVec3::ZERO, field, 1.0)
+            });
+            for _ in 0..MAX_HISTORY as usize {
+                frame(&mut f, &p, &scene, &view, DVec3::ZERO, field, 1.0);
+            }
+            let (mut sum, mut chroma): (f64, f64) = (0.0, 0.0);
+            let frames = 32;
+            for _ in 0..frames {
+                frame(&mut f, &p, &scene, &view, DVec3::ZERO, field, 1.0);
+                let (out, c) = denoised_and_chroma(&f);
+                sum += image_mean(&out) / f64::from(frames);
+                chroma = chroma.max(c);
+            }
+            println!("{noise} {block:?}: output mean over input mean {sum:.4}, chroma off by {chroma:.4}");
+            if (sum - 1.0).abs() >= 0.02 || chroma >= 0.01 {
+                failures.push(format!("{noise} {block:?}: {sum:.4} (chroma {chroma:.4})"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// The same signals in the first frames after a disocclusion: the wall
+/// jumps between 4 and 6 m every 12 frames, so its history is rejected
+/// everywhere (checked: no pixel keeps more than one frame's weight) and
+/// the output rests on one to four frames of samples, filtered wide. 32
+/// jumps a case; the output's image mean on each of the four frames after
+/// a jump, averaged over the jumps, within 3% of the input's: a frame's
+/// stratified samples have the field's mean exactly, and what the filter's
+/// renormalisation at the image's edges and its residual noise leave in an
+/// image mean of one to four frames' samples is under that.
+#[test]
+fn a_heavy_tailed_signal_keeps_its_mean_after_a_disocclusion() {
+    let Some(gpu) = support::gpu() else { return };
+    let near = wall_scene();
+    let far = Scene::new(vec![Quad::wall(
+        DVec3::new(0.0, 0.0, -6.0),
+        DVec2::new(30.0, 30.0),
+    )]);
+    let view = front_view();
+    let field = |_: &support::Hit| Field::flat(1.0);
+    let mut failures = Vec::new();
+    for noise in [Noise::OneIn(16), Noise::LogNormal(1.5)] {
+        for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
+            let signal = Signal::irradiance("test_mean_short", block);
+            let mut f = fixture(gpu, signal);
+            let p = Producer::with_noise(gpu, signal, noise);
+            converge(&mut f, |f| {
+                frame(f, &p, &near, &view, DVec3::ZERO, field, 1.0)
+            });
+            let jumps = 32;
+            let mut ratios = vec![Vec::new(); 4];
+            for jump in 0..jumps {
+                let scene = if jump % 2 == 0 { &far } else { &near };
+                for (k, ratio) in ratios.iter_mut().enumerate() {
+                    frame(&mut f, &p, scene, &view, DVec3::ZERO, field, 1.0);
+                    if k == 0 {
+                        let kept = lengths(&f)
+                            .iter()
+                            .zip(hits(&f))
+                            .filter(|(_, hit)| *hit)
+                            .map(|(l, _)| *l)
+                            .fold(0.0f32, f32::max);
+                        assert!(kept <= 4.0 + 1e-3, "{block:?}: history kept ({kept})");
+                    }
+                    ratio.push(image_mean(&denoised_and_chroma(&f).0));
+                }
+                for _ in 0..8 {
+                    frame(&mut f, &p, scene, &view, DVec3::ZERO, field, 1.0);
+                }
+            }
+            for (k, r) in ratios.iter().enumerate() {
+                let mean = r.iter().sum::<f64>() / r.len() as f64;
+                let sd = (r.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (r.len() - 1) as f64)
+                    .sqrt();
+                println!("{noise:?} {block:?}: frame {} after the jump, output over input {mean:.4} (jumps' sd {sd:.4})", k + 1);
+                if (mean - 1.0).abs() >= 0.03 {
+                    failures.push(format!("{noise:?} {block:?} frame {}: {mean:.4}", k + 1));
+                }
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// An occluder's foot: a wall 1 m tall and 2 cm thick standing on a floor,
+/// seen from right above it, so the floor either side of it lies two or
+/// three pixels apart in the image (the wall's top between them), on the
+/// same plane with the same normal: the geometry weight cannot tell them
+/// apart. The floor before the wall is lit (1), behind it dark (0.2), the
+/// wall 0.5; 50% noise a sample. The producer reports each sample's hit
+/// distance as a gather does: one cosine-distributed ray traced into the
+/// scene, no nearer than a block's footprint. Measured on the denoiser's
+/// own output over 256 frames, so a level common to a side does not count:
+/// the light carried behind (the floor within 10 cm behind the wall, the
+/// reach of a block's footprint and its filter there, against the floor
+/// more than 60 cm behind, as a share of the two far floors' difference)
+/// and the dark carried before it, each under 2% (a ghost at a fiftieth of
+/// the difference, as the disocclusion test bounds one; the bands' own
+/// noise is under a third of that), and the far floors' noise
+/// reduced as on the plain wall (relative RMS within sigma / sqrt(N), plus
+/// 15%).
+#[test]
+fn light_is_not_carried_past_an_occluder_s_foot() {
+    let Some(gpu) = support::gpu() else { return };
+    let (wall_z, height, half_thickness) = (-3.0, 1.0, 0.01);
+    let scene = Scene::new(vec![
+        Quad::ground(DVec3::new(0.0, 0.0, -10.0), DVec2::new(30.0, 30.0)),
+        // Its top, and its two faces (seen edge-on from the eye above it).
+        Quad::ground(
+            DVec3::new(0.0, height, wall_z),
+            DVec2::new(30.0, half_thickness),
+        ),
+        Quad::wall(
+            DVec3::new(0.0, 0.5 * height, wall_z + half_thickness),
+            DVec2::new(30.0, 0.5 * height),
+        ),
+        Quad::wall(
+            DVec3::new(0.0, 0.5 * height, wall_z - half_thickness),
+            DVec2::new(30.0, 0.5 * height),
+        ),
+    ]);
+    let view = View::looking(DVec3::new(0.0, 2.5, wall_z), DVec3::new(0.0, -1.0, -0.15));
+    let (lit, dark, wall) = (1.0, 0.2, 0.5);
+    let field = move |hit: &support::Hit| {
+        Field::flat(if hit.quad != 0 {
+            wall
+        } else if hit.point.z > wall_z {
+            lit
+        } else {
+            dark
+        })
+    };
+    let sigma = 0.5;
+    let mut failures = Vec::new();
+    for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
+        let signal = Signal::irradiance("test_foot", block);
+        let mut f = fixture(gpu, signal);
+        let mut p = Producer::new(gpu, signal, sigma);
+        // A block's footprint at the hit: its side in pixels at the view's
+        // pixel width a metre of depth.
+        let traced_scene = scene.clone();
+        let side = f64::from(block.side());
+        let pixel = 2.0 * (view.fov * 0.5).tan() / f64::from(SIZE[1]);
+        let (eye, forward) = (view.eye, view.forward);
+        p.hit_distance = Some(std::sync::Arc::new(
+            move |hit: &support::Hit, frame: u64, index: u32, _: f64| {
+                let n = hit.normal;
+                let t = if n.x.abs() < 0.9 { DVec3::X } else { DVec3::Y };
+                let u = n.cross(t).normalize();
+                let v = n.cross(u);
+                let r1 = random(frame as u32 ^ 0x2545_f491, index);
+                let r2 = random(frame as u32 ^ 0x9e37_79b9, index);
+                let (r, phi) = (r1.sqrt(), std::f64::consts::TAU * r2);
+                let dir = u * (r * phi.cos()) + v * (r * phi.sin()) + n * (1.0 - r1).sqrt();
+                let origin = hit.point + n * 1e-6;
+                let footprint = side * pixel * (hit.point - eye).dot(forward);
+                let t = traced_scene
+                    .cast(origin, dir.normalize())
+                    .map_or(1e9, |h| (h.point - origin).length());
+                t.max(footprint) as f32
+            },
+        ));
+        converge(&mut f, |f| {
+            frame(f, &p, &scene, &view, DVec3::ZERO, field, 1.0)
+        });
+        for _ in 0..MAX_HISTORY as usize {
+            frame(&mut f, &p, &scene, &view, DVec3::ZERO, field, 1.0);
+        }
+        // Sums and counts: behind near, behind far, before near, before
+        // far; the far floors' squared relative error.
+        let mut bands = [(0.0, 0.0); 4];
+        let (mut sum_sq, mut n) = (0.0, 0.0);
+        for _ in 0..256 {
+            frame(&mut f, &p, &scene, &view, DVec3::ZERO, field, 1.0);
+            let out = denoised(&f);
+            for (y, t) in out.iter().zip(&f.texels) {
+                let (Some(y), Some(hit)) = (y, t.hit) else {
+                    continue;
+                };
+                if hit.quad != 0 {
+                    continue;
+                }
+                let d = hit.point.z - wall_z;
+                let band = match d {
+                    d if d < 0.0 && d > -0.1 => 0,
+                    d if d < -0.6 => 1,
+                    d if d > 0.0 && d < 0.1 => 2,
+                    d if d > 0.6 => 3,
+                    _ => continue,
+                };
+                bands[band].0 += y;
+                bands[band].1 += 1.0;
+                if band == 1 || band == 3 {
+                    let truth = if band == 1 { dark } else { lit };
+                    sum_sq += (y / truth - 1.0).powi(2);
+                    n += 1.0;
+                }
+            }
+        }
+        let mean = bands.map(|(s, n)| s / n);
+        let difference = mean[3] - mean[1];
+        let carried = (mean[0] - mean[1]) / difference;
+        let darkened = (mean[3] - mean[2]) / difference;
+        let rms = (sum_sq / n).sqrt();
+        let bound = sigma / f64::from(MAX_HISTORY).sqrt() * 1.15;
+        println!(
+            "{block:?}: carried behind the wall {carried:+.4}, dark carried before it {darkened:+.4} (far floors {:.4} / {:.4}; pixel-frames {:?}), far floors' relative rms {rms:.4} (bound {bound:.4})",
+            mean[1],
+            mean[3],
+            bands.map(|b| b.1)
+        );
+        if carried.abs() >= 0.02 || darkened.abs() >= 0.02 || rms >= bound {
+            failures.push(format!(
+                "{block:?}: {carried:+.4} {darkened:+.4} rms {rms:.4}"
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 /// The stages' GPU cost at 1920x1080 internal, pipelined (two frames in

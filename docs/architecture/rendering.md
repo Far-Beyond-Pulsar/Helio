@@ -2081,9 +2081,11 @@ through, so a producer needs no denoiser to build.
 The implementation is `helio-pass-denoise`, a pass crate that needs only
 frame contracts: reprojection through the frame's history, accumulation
 whose length follows geometric validity times the producer's confidence, a
-wide reconstruction where history is short, and a variance-guided spatial
-stage stopped by depth, normal and hit distance (near occluders keep
-contact detail). A vendor's reconstruction (r7) registers as another
+wide reconstruction where history is short, and a spatial stage stopped by
+geometry alone (depth, normal, an occluder the depth shows between two
+receivers, and the hit distance, so near occluders keep contact detail).
+No weight depends on the light being filtered, so a signal's mean is kept
+whatever its noise (as built: "The denoiser keeps the mean"). A vendor's reconstruction (r7) registers as another
 denoiser under the same contract.
 
 Its first signal is the pixels' indirect diffuse; r4 brings reflections and
@@ -2589,8 +2591,9 @@ depth and normal) runs once a pixel.
 1. **Temporal** (`Denoise: temporal`, a pixel). A pixel's new sample is the
    traced pixels of its four nearest blocks, each weighted by a tent one
    block wide over its distance (a partition of unity in expectation: one
-   sample a block's area) times the geometry weight; their sum is how much
-   this frame says about the pixel. Its history is the bilinear read where
+   sample a block's area) times the geometry weight's surface and occluder
+   stops (no hit-distance radius here: below); their sum is how much this
+   frame says about the pixel. Its history is the bilinear read where
    `PIXELS` says it was, from the taps that held the surface, renormalised.
    The history's length times the producer's confidence times the
    footprint's valid share, plus this frame's weight, capped at
@@ -2604,29 +2607,25 @@ depth and normal) runs once a pixel.
    records to a record's `length` frames, so every estimate rests on about
    16 frames' worth (wide where history is short, which is the history fix
    ReLAX runs as a separate pass; one block from 16 frames on). Each tap is
-   weighted by the luminance stop (the difference of two estimates, the
-   neighbour's at this record's normal, against 3 standard errors of the
-   difference, sqrt(sp^2 + sq^2), from the moments over the length; 3:
-   99.7% of noise differences; variance propagated as sum w^2 s^2 / (sum
-   w)^2) and the geometry weight. A record already within the half floats'
-   rounding is left as it is.
+   weighted by the geometry weight alone, its radius one for all taps: the
+   harmonic mean hit distance of the footprint's records counted alike.
+   Each record carries the samples' worth it holds (a weighted mean of
+   estimates of n_q samples holds (sum w)^2 / sum (w^2 / n_q)) and its
+   standard error (propagated as sum w^2 s^2 / (sum w)^2).
 4. **Reconstruction** (`Denoise: reconstruct`, a pixel): the filtered
    records of the nearest 2x2 blocks (a tent of the block times the
    geometry weight; the 4x4 around them where none holds the pixel's
    surface, a feature narrower than a block), at the pixel's own normal,
-   combined with the pixel's own temporal result by inverse variance. The
-   records' variance includes the bias their difference from the pixel
-   shows beyond both noises, so a still view, whose rotating samples have
-   given each pixel its own converged value, keeps its per-pixel detail;
-   below `FIX_HISTORY` = 4 frames the pixel's own moments do not measure its
-   variance yet (SVGF's threshold) and it counts by its length. The result
-   is the output and the next frame's history: the spatial stage is
-   recurrent (its work accumulates over frames, as ReBLUR's post-blur
-   history does), while the moments stay the raw samples' (the temporal
-   result's moments are the next frame's history moments, swapped, not
-   copied), so the variance never sees the filter. The bias recurrence costs
-   is bounded the same way: the records only enter a pixel by as much as
-   their error and bias let them.
+   combined with the pixel's own temporal result by the samples each rests
+   on: the pixel's own its length, the records' what the spatial stage left
+   them times the share of the pixel's tent their geometry lets them serve
+   (1 on an open surface, toward 0 at a contact, where the pixel keeps its
+   own). The result is the output and the next frame's history: the
+   spatial stage is recurrent (its work accumulates over frames, as
+   ReBLUR's post-blur history does), while the moments stay the raw
+   samples' (the temporal result's moments are the next frame's history
+   moments, swapped, not copied), so the variance never sees the filter;
+   the standard error is reported in the output, and no weight uses it.
 
 The geometry weight, one function in every stage: irradiance caching's
 error bound (Ward, Rubinstein and Clear 1988; Tabellion and Lamorlette
@@ -2638,10 +2637,15 @@ normal; a normal tilted by t sees a share (1 - cos t)/2 of its
 cosine-weighted hemisphere never sampled; weight 0 at 1/8, t = 41 degrees)
 and a plane stop (two points of a surface whose normals differ by those 41
 degrees leave each other's tangent plane by tan(20.7) = 0.378 of their
-separation; a step by a whole one). Positions are view space from the
-frame's guide depth through the inverse projection (the raw depth
-recovered from the projection's z and w rows), so the frame origin's size
-never enters.
+separation; a step by a whole one), and an occluder stop: no pixel on the
+screen's segment between the two may hold a point standing out of both
+receivers' tangent planes, toward their side, by more than the plane stop
+accepts of a neighbour (0.378 of its distance and a pixel's footprint).
+Positions are view space from the frame's guide depth through the inverse
+projection (the raw depth recovered from the projection's z and w rows),
+so the frame origin's size never enters; the guides' normals are frame
+space, turned into view space by the view's rotation (a uniform) for the
+plane and occluder stops.
 
 What is stored and read back on the next frame (the temporal result, the
 records, the history) is rounded to half floats stochastically (up with
@@ -2657,10 +2661,11 @@ read as a 0.6% standard error on converged pixels.
 the running mean's noise falls as its square root (5.7 times; NRD's default
 is 30) and light that changes without the producer's confidence lags by it
 (half a second at 60 Hz). Memory a signal and view: 64 bytes a pixel
-(history 16, the outputs; moments 2 x 16; the temporal result 16) and 20
-bytes a record in two sets (three for blocks of 4 and 16): 216 MB at
-1920x1080 traced at every pixel, 164 MB at a quarter, 140 MB at a
-sixteenth (the first version: 166 MB at any block).
+(history 16, the outputs; moments 2 x 16; the temporal result 16) and 24
+bytes a record in two sets (three for blocks of 4 and 16; 20 before the
+records carried their samples' worth): 232 MB at
+1920x1080 traced at every pixel, 170 MB at a quarter, 142 MB at a
+sixteenth (216, 164 and 140 at 20 bytes) (the first version: 166 MB at any block).
 
 **What the per-block design replaced, and what it loses.** The first version
 ran a 5x5 fix and four 3x3 a-trous iterations at steps of 1, 2, 4 and 8
@@ -2705,10 +2710,11 @@ denoiser re-traces can tell, and it costs the denoiser nothing); the
 history fix is ReBLUR's (a spatial footprint that widens as the history
 shortens) rather than ReLAX's separate pass; the spatial stage is recurrent
 as ReBLUR's is, with the variance kept on the unfiltered samples as SVGF
-keeps it; the luminance stop is SVGF's, on the standard error
-of the difference rather than one sample's deviation (so it relaxes as
-history grows); the hit distance enters as irradiance caching's record
-radius, which is ReBLUR's hit-distance radius with a bound it derives from;
+keeps it; there is no luminance stop (SVGF's and ReLAX's), which weighs a
+heavy-tailed signal's bright samples down ("The denoiser keeps the mean");
+the hit distance enters as irradiance caching's record radius, which is
+ReBLUR's hit-distance radius with a bound it derives from, pooled over the
+footprint so that a record's own ray lengths do not weigh its light;
 the SH representation is NRD's, made exact at each sample's traced normal so
 samples from neighbours average. History is judged once, by the frame's
 history, for every temporal pass. What it lacks against NRD: an
@@ -2755,7 +2761,10 @@ one signal's); ours is under **Verified**.
   every block, where one value a block would err by 0.165; two runs, one
   moving the frame's origin mid-run: worst difference 0.0009, mean 0.00001
   at every block (bound five half-float steps, 0.0024). Readiness is the
-  history's length read back under a wall-clock guard. `pixels_gpu` (5
+  history's length read back under a wall-clock guard. (After the mean
+  fix, bounds unchanged: 0.0054 / 0.0090 / 0.0244 and +0.0002 / +0.0017 /
+  +0.0026; the moving box and camera 0.0000; the bumpy surface 0.0008; the
+  origin change 0.0008. Its own tests: "The denoiser keeps the mean".) `pixels_gpu` (5
   tests, with the history now publishing this frame's guides) passes.
 - **TSR**: its suite (14 tests, the reprojection and origin cases driven
   through the history's pass) passes; its image on real frames: below.
@@ -2834,6 +2843,165 @@ stopped while the GPU queue was held for hours by other work.
   a view (one texture a view).
 - Captures build the denoiser into their graphs like the primary view when
   a producer is in them; nothing does today.
+
+#### The denoiser keeps the mean
+
+**The fault.** The first version weighed what it averaged by the light it
+carried. The spatial stage's luminance stop (SVGF's edge-stopping weight
+`exp(-|y_p - y_q| / (3 sqrt(s_p^2 + s_q^2)))`, with the standard errors
+estimated from each pixel's own moments), the reconstruction's
+inverse-variance mix of a pixel's own estimate with the records (with a
+bias term from their difference), and the skip of a record whose standard
+error was under the half floats' rounding all depend on the samples' own
+values. For a positive heavy-tailed signal (a few rays a block that find a
+bright source among many that find little) the estimates holding a bright
+sample are exactly those with a high estimated variance, so they count
+less: the mean is biased down, and the recurrence (the output is the next
+frame's history) carries the bias into the history. Three more terms
+showed once those were found: chroma ratios were averaged with the
+samples' weights rather than their luminance (a sample of no light pulled
+the colour toward grey); the temporal stage held each sample over the
+radius of its own hit distance, and a ray's length goes with what it
+found (a near lamp is short), so a bright sample's own short radius
+counted it less; and the plane stop dotted frame-space normals with
+view-space offsets, which only agree when the camera is not turned (no
+bias, a lost neighbour on a tilted view's floor).
+
+**The rule.** A weight that decides how much a sample counts must not
+depend on that sample's light. If every weight of a normalised filter
+`out_i = sum_j w_ij y_j / sum_j w_ij` is independent of the values, then
+for a stationary signal of mean `mu` its expectation is `sum_j w_ij mu /
+sum_j w_ij = mu` at every pixel, whatever the noise's distribution; a
+convex mix of two such estimates with weights independent of both keeps it
+too, and so does the recurrence. Chroma is a ratio: its luminance-weighted
+mean `sum w Y c / sum w Y` is the ratio of the means of `Y c` and `Y`, so
+colour is kept the same way.
+
+**What the stages weigh by now.**
+
+- Temporal: the tent of the block, the surface stops (normal and plane, in
+  view space) and the occluder stop; no hit-distance radius (contact
+  detail finer than a block is the producer's, the gather's near field,
+  which is also why the gather floors its hit distance at a block's
+  footprint). The blend by weight over history length is unchanged.
+- Spatial: the B-spline taps, the surface and occluder stops and the
+  distance against one radius for the whole footprint: the harmonic mean
+  hit distance of its records counted alike, so one record's ray lengths
+  move it by a ninth rather than set its own weight.
+- Reconstruction: tents, geometry and the occluder stop, mixed with the
+  pixel's own estimate by the samples each rests on (the pixel's length;
+  the records' samples' worth carried through the spatial stage, times the
+  share of the tent their geometry serves).
+
+The standard error is still computed from the raw samples' moments and
+reported in the output (output 0's w); nothing weighs by it.
+
+**The occluder's foot.** Two points of one floor either side of a thin
+wall are close, on one plane, with one normal: depth, normal and plane
+weights pass them. The hit distance cannot tell them apart either: their
+hemispheres meet the wall alike, mirror images (it does narrow the filter
+near any occluder, both sides equally). What distinguishes them is the
+wall standing between, which the frame's depth shows: the occluder stop
+walks the screen's segment between the two pixels and fails where a
+pixel's point stands out of both receivers' tangent planes, toward their
+side, by more than the plane stop accepts of a neighbour (0.378 of the
+chord and a pixel's footprint). It depends on geometry alone, so it keeps
+the mean; it is symmetric in the two pixels. The gather's spatial reuse
+makes the same test (`seen_between` in `gi_gather.wgsl`) on its own
+positions. The first version's luminance stop also separated the two sides
+in the synthetic test, but only by their light, which is the bias above.
+
+**How others do it.** SVGF (Schied et al. 2017) and ReLAX (NRD) stop the
+a-trous filter by luminance against the variance estimated from the
+samples' moments: the weight falls with the sample's own estimated
+variance, biased for heavy tails exactly as above (SVGF's paper accepts
+it; ReLAX adds an anti-firefly clamp of the centre to its neighbourhood's
+range, a bias by design, and clamps history to the neighbourhood after a
+disocclusion). ReBLUR (NRD) has no luminance stop in its blur: its radius
+follows the hit distance and the accumulated frames, its weights are
+geometry, normal and hit distance; its hit-distance weight compares the
+centre's and the tap's normalised hit distances, which correlates with
+light where ray length does; its anti-firefly and history clamping are
+optional and biased. Ours is ReBLUR's choice made exact: geometry,
+counts and a hit distance pooled so that no sample's own ray sets its
+weight, and the occluder taken from the depth rather than from the light.
+
+**What it costs and what it leaves.**
+
+- *Tests* (`denoise_gpu.rs`, 160x112, every block; each fails on the first
+  version):
+  - *A heavy-tailed signal keeps its mean*: a uniformly lit wall, one block
+    in 4 and in 16 carrying all the light (relative deviations 1.7 and
+    3.9), log-normal of log-deviation 0.75 and 1.5, and one in 16 whose
+    bright samples' rays are short (5 cm against 5 m), each 4x4 group's
+    factors averaging 1 every frame so the input's image mean is the
+    field's; a 32-frame mean of the output's image mean once the history
+    has settled, bound 2%, chroma 0.01. Now 0.998-1.001 everywhere (the
+    short rays 1.0001 / 1.0002 / 1.0009 at blocks of 1 / 4 / 16), chroma
+    0.0000-0.0002. The first version: one in 4 0.940 / 0.992 / 0.992, one
+    in 16 0.578 / 0.914 / 0.928, log-normal 1.5 0.957 / 0.988 / 0.986, the
+    short rays 0.571 / 0.329 / 0.037, chroma off by 0.12-0.15. With each
+    sample held over its own hit distance (this design before the pooled
+    radius) the short rays read 0.974 / 0.982 / 0.967.
+  - *After a disocclusion*: the wall jumps between 4 and 6 m every 12
+    frames (history rejected everywhere, checked), 32 jumps, the output
+    over the input on each of the four frames after a jump, bound 3%: one
+    in 16 0.989-1.000, log-normal 0.992-1.003 (the jumps' spread 0.02-0.05
+    at a sixteenth). The first version: 0.13-0.61 and 0.82-0.96.
+  - *An occluder's foot*: a wall 1 m tall and 2 cm thick seen from above,
+    the floor lit before it (1) and dark behind (0.2), samples traced into
+    the scene for their hit distance and floored at a block's footprint as
+    the gather does, 50% noise; light carried behind within 10 cm and dark
+    carried before, each as a share of the far floors' difference, bound
+    2%: now -0.0006 / +0.0007 / +0.0000 and -0.0014 / +0.0020 / -0.0008;
+    the far floors' relative RMS 0.022 / 0.042 / 0.044 (the first version
+    0.029 / 0.046 / 0.052; bound 0.10). Without the occluder stop this
+    design (as it stood before the temporal and spatial radius changes
+    below) carries 4.7% behind and 3.4% before at a sixteenth. The first
+    version passes it (-0.0006 / +0.0044 at worst): its luminance stop
+    told the sides apart by their light.
+  - The existing tests pass with their bounds unchanged (above).
+- *GI's `pixel_gather`* (6 tests pass): the occluder test's output over
+  input, still camera / swaying, plain rays 0.848 / 0.767 before,
+  0.998-1.011 / 0.988-0.993 now (two runs); the resampled signal 0.951 /
+  0.969 before, 0.996-1.011 / 0.980-0.986 now (asserted within 3%). Found on the way: held over its own hit distance
+  in the temporal stage the plain rays read 0.962 / 0.957; over the
+  pixel's history's, 0.985 / 0.981; with no radius there, 0.995 / 0.991.
+- *Cost* (`indoor_cathedral_gi`, the default quality, a sixteenth; frames
+  60 to 1500 pipelined, `HELIO_CAPTURE_TIMINGS`, medians; the first
+  version's and this exe alternated, the denoiser's shader from disk in
+  both): Denoise 0.706 / 0.705 ms before, 1.004 / 0.962 now (temporal
+  0.29 to 0.38, spatial 0.17 to 0.22, reconstruct 0.20 to 0.33-0.34,
+  records 0.036 alike). The 1920x1080 stage test (`the_stages_cost`, the
+  GPU at the low clocks other sessions' runs left it in: the first version
+  3.36-3.42 ms at a sixteenth, 3.89-3.92 at a quarter) reads 5.29-5.44 and
+  5.36-5.44, and 3.56 and 4.40 without the occluder stop: the stop is
+  almost all of the extra (the samples' worth, the pooled radius, the
+  luminance-weighted chroma and the view-space normals are +6% and +13%).
+  What the extra buys is the stop the mean needs: with no luminance stop,
+  only it keeps a thin occluder's two sides apart (above). Three cheaper
+  forms were measured and not kept: the tile's depth in workgroup memory
+  (5.60), a tile-wide one-surface test that skips the walks (6.90) and the
+  walks gathered before the blend's state is live (6.64); the walk's memory
+  traffic is not what costs, and the next step is a profiler capture of the
+  stages (not done here).
+- *Noise on real frames* (the cathedral, view 23, 64 frames from frame
+  3000, still camera; reference-free): mean luminance 0.01542 before,
+  0.01694 now (+9.9%, the light the first version lost; against the path
+  tracer's reference 0.954 before, 1.048 now); the per-pixel temporal
+  standard deviation over the mean 0.0116 before, 0.0140 now over 16
+  frames (0.0194 and 0.0236 over 64), the frame mean's 0.0023 and 0.0012;
+  boiling (a 40x40 tile 30% over its burst mean in a frame) none in either.
+  Per pixel the noise is about a fifth higher: the first version's weights
+  damped exactly the bright samples, which was its bias; on the synthetic
+  tests (no heavy tail) the noise is unchanged on the front-facing wall
+  and lower on a tilted floor (the view-space plane stop).
+- *Not verified*: voxel_craft and the planets with this denoiser (the
+  example and the setups that use it all run the same pass); an XR pair of
+  views. The gather keeps its own copy of the denoiser's surface stops and
+  its own `seen_between` (`gi_gather.wgsl`, frame space); one function for
+  both belongs in a frame snippet, which the merged gather would have to
+  take (not done here).
 
 #### The radiance cache
 
@@ -3599,7 +3767,7 @@ chosen estimate and the hit's light, 80 a row of the pixels' stream at 1.25
 rows, 48 a row of the shadow and of the visibility streams, 64 a light
 query and its sample) and 8 a pixel for the near field: at 1920x1080,
 67 MB at a sixteenth, 218 MB at a quarter, 821 MB at every pixel, plus the
-denoiser's (140-216 MB). Nothing scales with the scene, the lights or the
+denoiser's (142-232 MB). Nothing scales with the scene, the lights or the
 world's size: an Earth costs what a room does.
 
 **Verified** (RTX 3060):
@@ -3691,11 +3859,15 @@ world's size: an Earth costs what a room does.
     side); after it the two part by 13-21%. Over a whole image the
     denoiser's output keeps 0.95 of the resampled signal's mean and 0.77 of
     one plain ray a block's (`pixel_gather`'s occluder test: output over
-    input, 1 where the mean is kept): it weighs records by their variance,
+    input, 1 where the mean is kept): it weighed records by their variance,
     and with the variance estimated from the samples a noisier signal's
-    bright records count less. The settings' differences on the cathedral
-    (a sixteenth's noisier signal darker than a quarter's) carry that
-    bias. It is the denoiser's (`helio-pass-denoise`), not the gather's.
+    bright records counted less. Fixed in the denoiser ("The denoiser keeps
+    the mean", above): the same test now reads 0.998-1.011 / 0.988-0.993
+    for the plain rays (still camera / swaying, two runs; were 0.848 /
+    0.767 in this build's baseline) and 0.996-1.011 / 0.980-0.986 for the
+    resampled signal (were 0.951 / 0.969), and asserts both within 3%; the
+    two sides' reuse over plain after the denoiser 0.95-1.00 behind the
+    wall and 0.98-1.03 before it (were 0.69-1.29 and 1.13-1.22).
   - *Bright specks on voxel_craft* (its first pose, 16 frames, view 23):
     443 pixels a frame of block-sized green specks that come and go
     (3,394 pixels specked in some frame, 90 in half of them; the probes
@@ -3843,12 +4015,11 @@ world's size: an Earth costs what a room does.
   pixels' rays (their sky samples walk the shell's height): the terrain
   walk's footprint, above.
 - **The cache's level** (the furnace's 4-8%): the cache owner's.
-- **The denoiser keeps 0.77 of a noisy signal's mean** (one plain ray a
-  block) and 0.95 of a resampled one's, and its spatial filter carries
-  light over an occluder's foot (above): `helio-pass-denoise`'s. A quarter's
-  cathedral runs settle at 1.06-1.17 of the reference, the left wall at
-  1.2-1.4 in both, a sixteenth's and every pixel's at 0.92-1.03: not
-  resolved here.
+- **The cathedral against its reference**: with the denoiser keeping the
+  mean, a sixteenth's indirect view reads 1.048 of the reference (was
+  0.954; "The denoiser keeps the mean"), so what the denoiser's bias hid
+  is the gather's and the cache's excess (a quarter's runs settled at
+  1.06-1.17 before it, the left wall at 1.2-1.4): not resolved here.
 - **The material occlusion path** (voxel_craft's terrain, 16 frames): with
   it switched off (own-occlusion surfaces take the horizon like any
   other) the indirect diffuse of the terrain's half of the image reads
