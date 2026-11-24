@@ -12,7 +12,10 @@
 //!    pixel's new sample is the traced pixels of its four nearest blocks,
 //!    each weighted by a tent of one block over its distance (a partition of
 //!    unity in expectation: one sample a block's area) times the geometry
-//!    weight below; their sum is how much this frame says about the pixel.
+//!    weight's surface and occluder stops (below; no hit-distance radius:
+//!    a sample's own ray length goes with the light it found, and contact
+//!    detail finer than a block is the producer's, a gather's near field);
+//!    their sum is how much this frame says about the pixel.
 //!    Its history is read where the frame's history says it was, from the
 //!    bilinear taps that held the same surface, renormalised. The history's
 //!    length is multiplied by the producer's confidence and by the share of
@@ -24,41 +27,61 @@
 //!    pixels are the records.
 //! 3. **Spatial** (a block), twice: an a-trous filter of the linear
 //!    B-spline's 3x3 over the records, at steps of s and 2s blocks, `s =
-//!    sqrt(16 / length)` within 1 to 4 (the footprint adds about s^2 records,
-//!    so every estimate rests on about 16 frames' worth: wide where history
-//!    is short, which is the history fix, one block from 16 frames on), each
-//!    tap weighted by the luminance stop (the difference of two estimates
-//!    against the standard error of their difference, from the pixel's two
-//!    moments over its length) and the geometry weight. A record within the
-//!    half floats' rounding is left as it is.
+//!    sqrt(16 / length)` within 1 to 4 (the footprint adds about s^2
+//!    records, so every estimate rests on about 16 frames' worth: wide where
+//!    history is short, which is the history fix, one block from 16 frames
+//!    on), each tap weighted by geometry alone (below). Each record also
+//!    carries how many samples' worth it holds: a weighted mean of
+//!    estimates of `n_q` samples holds `(sum w)^2 / sum (w^2 / n_q)`.
 //! 4. **Reconstruction** (a pixel): the filtered records of the pixel's
 //!    nearest 2x2 blocks (a tent of the block times the geometry weight; a
 //!    4x4 where none holds the pixel's surface), at the pixel's own normal,
-//!    combined with the pixel's own temporal result by inverse variance,
-//!    the records' variance holding the bias their difference from the pixel
-//!    shows beyond both noises (so a still view keeps the per-pixel detail
-//!    the rotating samples give it), the pixel's own counting by its length
-//!    below [`FIX_HISTORY`] frames (its moments do not measure its variance
-//!    yet). The result is the output and the next frame's history: the
-//!    spatial stage is recurrent, as ReBLUR's post-blur history is, while the
-//!    moments stay the raw samples' (the variance never sees the filter).
+//!    combined with the pixel's own temporal result by the samples each
+//!    rests on (the pixel's own its length; the records' what the spatial
+//!    stage left them, times the share of the pixel's tent their geometry
+//!    lets them serve, so at a contact the pixel keeps its own). The result
+//!    is the output and the next frame's history: the spatial stage is
+//!    recurrent, as ReBLUR's post-blur history is, while the moments stay
+//!    the raw samples' (the variance never sees the filter).
+//!
+//! **The mean is kept.** No weight that decides how much a sample counts
+//! depends on the light it carries: tents, geometry, the hit distance's
+//! radius, history lengths and sample counts. Every stage is then a
+//! normalised linear filter with weights independent of the values, whose
+//! expectation for a stationary signal is the signal's mean, and chroma is
+//! averaged weighted by the luminance it scales (a ratio's mean so weighted
+//! is the ratio of the means). A luminance stop or an inverse-variance
+//! combination with the variance estimated from the samples themselves (the
+//! first version's) weighs a positive heavy-tailed signal's bright samples
+//! down, since those are the ones whose estimated variance is high.
 //!
 //! **Geometry weight** (one function in every stage): irradiance caching's
 //! error bound (Ward, Rubinstein and Clear 1988; Tabellion and Lamorlette
 //! 2004): a record holds over its harmonic mean hit distance (the producer's
 //! hit distance, accumulated as its inverse), so near occluders keep contact
 //! detail and open ground filters wide; never narrower than its pixel's
-//! diagonal. Times a normal stop (the share of the hemisphere a tilted
+//! diagonal. The spatial stage takes one radius for all its taps, the
+//! harmonic mean over the footprint's records counted alike: a record's own
+//! ray lengths go with its light (a near source is short), so a radius of
+//! its own would weigh it by its light. Times a normal stop (the share of the hemisphere a tilted
 //! normal sees that the sample never did) and a plane stop (a step leaves
-//! the plane by its whole separation). Positions and normals are the frame's
-//! guides (`helio_frame_api::history::DEPTH`, `NORMAL`), one copy a view.
+//! the plane by its whole separation), in view space. And an occluder
+//! stop: nothing the frame's depth shows between the two pixels may stand
+//! out of both receivers' tangent planes by more than the plane stop
+//! accepts, which tells the floor either side of a wall's foot apart (same
+//! plane, same normal, close; a hit distance cannot, the two sides' rays
+//! meeting the wall alike). Positions and normals are the frame's guides
+//! (`helio_frame_api::history::DEPTH`, `NORMAL`), one copy a view.
 //!
 //! **Cost** (internal pixels `P`, blocks `P / side^2`): temporal 4 sample and
 //! 4 history taps a pixel, reconstruction 4 record taps a pixel, records and
-//! 2 x 9 spatial taps a block. Memory: a pixel's history 16 bytes (its A
+//! 2 x 9 spatial taps a block, each tap that passes the geometry weight also
+//! reading the depth of the pixels between (the occluder stop: under a
+//! block's side a tap in the temporal stage and the reconstruction, the
+//! step in the spatial stage). Memory: a pixel's history 16 bytes (its A
 //! and B, the outputs), its moments 2 x 16 (length and two f32 moments,
 //! swapped with the temporal result's, never copied), the temporal result
-//! 16: 64 bytes a pixel; records 20 bytes a block in two or three sets.
+//! 16: 64 bytes a pixel; records 24 bytes a block in two or three sets.
 //! Nothing scales with the scene.
 
 use std::sync::{Arc, Mutex};
@@ -70,11 +93,10 @@ use helio_frame_api::denoise::{self, Denoiser, RegisterDenoiser, Signal, SignalK
 use helio_frame_api::history::{self, Need};
 use helio_settings::{number, Group, Resolved};
 
-/// Below this many frames of history a pixel's moments do not measure its
-/// variance yet (the moments of fewer than four samples are dominated by
-/// their own noise: SVGF's threshold), so its own estimate counts by its
-/// length against the records'. Also the least history a setting may ask.
-pub const FIX_HISTORY: f32 = 4.0;
+/// The least history a setting may ask: the standard error the output
+/// reports comes from a pixel's moments, which over fewer than four samples
+/// are dominated by their own noise (SVGF's threshold for trusting them).
+pub const MIN_HISTORY: f32 = 4.0;
 
 /// The denoiser's settings (a renderer config's `features`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -98,7 +120,7 @@ pub static DENOISE: Group = Group {
     key: "denoise",
     title: "Denoiser",
     description: "The frame's denoiser: temporal accumulation through the frame's history, a wide \
-                  reconstruction where history is short, a variance-guided spatial stage",
+                  reconstruction where history is short, a spatial stage stopped by geometry",
     settings: &[number(
         "max_history",
         "Denoiser History",
@@ -123,7 +145,7 @@ impl DenoiseSettings {
 
     fn clamped(self) -> Self {
         Self {
-            max_history: self.max_history.clamp(FIX_HISTORY, 1024.0),
+            max_history: self.max_history.clamp(MIN_HISTORY, 1024.0),
         }
     }
 }
@@ -183,6 +205,7 @@ pub const SNIPPETS: [helio_core::shader::ShaderSnippet; 2] =
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Params {
     inv_proj: [f32; 16],
+    view_rotation: [f32; 16],
     proj_zw: [f32; 4],
     size: [u32; 2],
     traced: [u32; 2],
@@ -201,7 +224,7 @@ const SPATIAL_ITERATIONS: usize = 2;
 
 const HALF: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const MOMENTS: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
-const LENGTH: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
+const LENGTH: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 
 /// One view's textures.
 struct Targets {
@@ -216,7 +239,7 @@ struct Targets {
     moments: [wgpu::TextureView; 2],
     /// The moments the last frame wrote.
     moments_latest: usize,
-    /// Records (traced size): A, B and length. The blocks' records first
+    /// Records (traced size): A, B and N (length, samples). The blocks' records first
     /// (none for a signal traced at every pixel: its pixels are its
     /// records), then the spatial stage's ping-pong.
     records: Vec<[wgpu::TextureView; 3]>,
@@ -399,6 +422,7 @@ impl Kernels {
                 texture(25),
                 storage(26, HALF),
                 storage(27, HALF),
+                texture(28),
             ],
         );
         let module = helio_core::shader::module_with(
@@ -591,8 +615,15 @@ impl RenderPass for DenoisePass {
         // scale: 2 / (P[1][1] h)).
         let pixel_scale = 2.0 / (p[5].abs().max(1e-12) * size[1] as f32);
         let primed = views[index].targets.as_ref().unwrap().primed;
+        // The view matrix's rotation alone (frame space to view space).
+        let v = camera.view;
+        let view_rotation = [
+            v[0], v[1], v[2], 0.0, v[4], v[5], v[6], 0.0, v[8], v[9], v[10], 0.0, 0.0, 0.0, 0.0,
+            1.0,
+        ];
         let params = Params {
             inv_proj,
+            view_rotation,
             // P[2][2], P[2][3], P[3][2], P[3][3] (column-major).
             proj_zw: [p[10], p[11], p[14], p[15]],
             size,
@@ -715,7 +746,7 @@ impl RenderPass for DenoisePass {
             iteration(0, first, &targets.records[ping]),
             iteration(1, [pa, pb, pn], &targets.records[pong]),
         ];
-        let [fa, fb, _] = &targets.records[pong];
+        let [fa, fb, fn_] = &targets.records[pong];
         let reconstruct = group(
             &k.reconstruct_layout,
             &[
@@ -726,6 +757,7 @@ impl RenderPass for DenoisePass {
                 texture_entry(25, fb),
                 texture_entry(26, ha),
                 texture_entry(27, hb),
+                texture_entry(28, fn_),
             ],
         );
         let pixel_groups = [targets.size[0].div_ceil(8), targets.size[1].div_ceil(8)];

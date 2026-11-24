@@ -2,7 +2,7 @@
 name = "helio-pass-denoise"
 version = "0.1.0"
 edition = "2021"
-description = "Helio's denoiser (helio_frame_api::denoise): temporal accumulation through the frame's history, a wide reconstruction where history is short, a variance-guided spatial stage"
+description = "Helio's denoiser (helio_frame_api::denoise): temporal accumulation through the frame's history, a wide reconstruction where history is short, a spatial stage stopped by geometry"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
