@@ -54,14 +54,21 @@ pub const SNIPPET: ShaderSnippet = helio_core::wgsl_snippet!(MARKER, "shaders/hi
 
 /// Marker opting a shader into [`SURFACE_STOPS_SNIPPET`].
 pub const SURFACE_STOPS_MARKER: &str = "//!use frame_surface_stops";
-/// The surface stops (`shaders/surface_stops.wgsl`): whether two pixels'
-/// points lie on one surface (`surface_stops_weight`: the normal and plane
-/// stops) and whether the frame's depth shows an occluder standing between
-/// them (`surface_stops_seen`, over the shader's own
-/// `surface_stops_point`): the one test the denoiser's weights and a
-/// resampler's reuse across pixels take.
+/// The surface stops (`shaders/surface_stops.wgsl`): whether two points lie
+/// on one surface (`surface_stops_weight`: the normal and plane stops), the
+/// one test the denoiser's weights, a resampler's reuse across pixels and
+/// the radiance cache's reads take.
 pub const SURFACE_STOPS_SNIPPET: ShaderSnippet =
     helio_core::wgsl_snippet!(SURFACE_STOPS_MARKER, "shaders/surface_stops.wgsl");
+
+/// Marker opting a shader into [`SURFACE_SEEN_SNIPPET`].
+pub const SURFACE_SEEN_MARKER: &str = "//!use frame_surface_seen";
+/// The surface stops' depth walk (`shaders/surface_stops_seen.wgsl`, with
+/// [`SURFACE_STOPS_SNIPPET`]): whether the frame's depth shows an occluder
+/// standing between two pixels (`surface_stops_seen`, over the shader's own
+/// `surface_stops_point`).
+pub const SURFACE_SEEN_SNIPPET: ShaderSnippet =
+    helio_core::wgsl_snippet!(SURFACE_SEEN_MARKER, "shaders/surface_stops_seen.wgsl");
 
 /// The view's reprojection: a uniform buffer holding one [`HistoryReprojection`].
 pub const REPROJECTION: &str = "history_reprojection";

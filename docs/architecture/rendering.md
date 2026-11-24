@@ -3096,7 +3096,8 @@ size. The api crate holds no `static`, `thread_local!` or
   standing there), a miss leaving it open; a ray higher up says nothing of
   the surface (a ceiling over a floor is no occluder along it). A way not
   bounded again grows by `2^(1/8)` an update (twice in 8 updates), so a way
-  that opened is found again. For a reader at `p`: within the way's clear
+  that opened is found again *(changed in "GI's last faults": only an
+  update whose ray explores the way grows it, by `2^(1/2)`)*. For a reader at `p`: within the way's clear
   distance the cell's light **holds**; past it, **blocked**: the read takes
   the finest finer cell whose light holds at `p`, and the mark claims those
   finer cells, down to the first that holds, and no finer than the eye
@@ -4534,22 +4535,161 @@ XR eyes and captures with the one-level cache.
   the eye angle's derivation has to count the descent's cells, or the
   descent has to stop at what a reader resolves. GI passes +25-40% on
   voxel_craft and the planets against the base, outside the 10-15% target.
-- **The thin wall at 4 m cells** (`a_wall_thinner_than_its_cells...`, the eye
+- **The thin wall at 4 m cells** *(closed in "GI's last faults": two
+  surfaces facing one way in one cell, and clear distances that grew
+  between explorations)* (`a_wall_thinner_than_its_cells...`, the eye
   100 m off): the dark side's 2 m cell reads 9% of the lit side (0.75 of
   8.1), its own direct light 0 (its point is on the dark side) and its
   indirect from the room's other straddling cells (every surface's cell
   straddles the wall at that distance). 1/8 m to 2 m pass (0.0000-0.24%).
   Not fixed.
-- **`probes`**: `a_roof_shadows_the_sun` 0.039 under the roof against a
+- **`probes`** *(closed in "GI's last faults": transient hits lit with the
+  probes' irradiance, and one probe's Monte Carlo noise)*:
+  `a_roof_shadows_the_sun` 0.039 under the roof against a
   bound of 0.032 (0.035 on the merge before these items: the L1 harmonics'
   horizon band, about 10% of the open probe's light, is at the bound, and
   the probes' recursion for hits lit on the spot feeds it back);
   `light_through_a_canopy_lights_probes_under_it` up to 0.139 against the
   series' 0.114 at the first updates.
-- **voxel `voxel_pass_graph`**: `a_terrain_wall_shadows_a_local_light_from_the_probes`
+- **voxel `voxel_pass_graph`** *(the slab test passes since "GI's last
+  faults"; the terrain wall is measured there)*:
+  `a_terrain_wall_shadows_a_local_light_from_the_probes`
   (the local light's gain on the open ground's probes 0) and
   `a_mesh_slab_on_terrain_shades_the_probes_under_it` (too few probes updated
   under the slab) fail on the final tree; not investigated (the voxel
   plugin is paused).
 - **The speckle gate at the default** (the gather's hits beyond their reach
   sample their own light): 141 a frame at pose 12 against the gate of 20 (10.6 at the probes): the reach makes more of the gather's hits light themselves with one light sample, which resampling favours (two thirds of the specks were the hits' own light, "Indirect diffuse at a pixel"); the cure is the cache holding cells fine enough where short rays end, which the working set above bounds.
+
+#### GI's last faults: hits the cache has no light for
+
+GI plugin and Helio `render/r3-radiance-cache`, after "GI on the merged
+tree". Each fault measured before it was changed; the frame statistics
+below are permanent (`gi.hits.<reader>.<state>`).
+
+**A read says why it found nothing.** `RadianceCacheIrradiance::miss`
+(`RADIANCE_CACHE_MISS_*`): `ABSENT` (no slot holds the cell: not marked
+yet, or its key turned away), `NEW` (no value yet), `UNEXPLORED` (its rays
+have not explored the way to the point yet: the cell's light comes with
+the read, `found` false), `OCCLUDED` (the cell of the point's level and
+every finer one up to `DESCENT` hold their light past what is between),
+`REACH` (past the reader's reach, no finer cell holds). The first three
+pass (the read's own mark claims the cell, the cache lights it, its rays
+explore its ways); the last two stay as long as the cells do
+(`radiance_cache_miss_stays`). GI counts every hit of its three readers
+(probes, cache rays, the pixels' gather) by the state of the side its ray
+met, and the hits whose far side took the reader's own light sample
+(`far_own`): `gi.hits.probes.*`, `gi.hits.cache.*`, `gi.hits.pixels.*`.
+
+**What the failing tests' hits were** (frame statistics a frame, at the
+update the test reads):
+
+| test | cache | absent | new | unexplored | occluded | reach |
+|---|---|---|---|---|---|---|
+| `a_roof_shadows_the_sun`, third update | 46,508 | 153 | 196 | 15,830 | 0 | 0 |
+| the same, 40 updates on | 43,660 | 283 | 0 | 0 | 0 | 0 |
+| `light_through_a_canopy...`, first updates | 26,704 | 4,271 | 947 | 56,574 | 0 | 0 |
+| thin wall, 4 m cells, cache rays (settled) | 252 | 0 | 0 | 0 | 16 | 0 |
+
+So the first hypothesis (hits blocked for good, lit with the probes) is
+not what failed these tests: no probe hit was `OCCLUDED` or `REACH`. What
+failed them was the transient `UNEXPLORED` (a quarter of the roof's probe
+hits and two thirds of the canopy's at the updates they read: a cold cache
+of 64,000-90,000 cells lighting 8,192 a frame explores a cell's eight ways
+in four updates, about 40 frames), lit on the spot with the probes'
+irradiance, which a thin sheet's probes above leak into (the canopy: the
+worst probe under it 0.148 against at most 0.114 at its first updates,
+0.106 two hundred frames on) and the L1 horizon band lifts under a roof.
+The settled probes were right all along: the roof's probe at 11 to 43
+updates 0.0287 to 0.0262, the 49 probes about it at 2 to 4 updates 0.0279,
+where a CPU model of the L1 projection over the scene's exact radiance
+gives 0.0272 (0.0283 over those 49 places).
+
+**What a hit with no cache light takes** (`gi_hit_cell`). The direct light
+is the reader's own light sample at the hit, exact, in every case. The
+indirect light, by why:
+
+- `UNEXPLORED`: the cell's own (it holds a value; only whether something
+  along its surface stands between its point and the hit is not known, for
+  a few of its updates). Not the probes.
+- `ABSENT`, `NEW`: the probes' irradiance (DDGI's recursion), as before:
+  a transient, a few hundred hits a frame once a scene started.
+- `OCCLUDED`, `REACH`: none. Every cell that could answer holds its light
+  on an occluder's other side, and the probes cannot tell the two sides
+  apart (they see a thin wall's, a sheet's, a contact's point from both).
+  What is lost is the indirect part of a hit beside an occluder thinner
+  than an eighth of its surface's cell; never a leak. Seating the deepest
+  cell on the reader's side was not taken: a key bit for "which side of
+  the occluder" needs the occluder's plane in the key, and the clear
+  distances already place it to the descent's eighth of a cell.
+
+**The 0.035 at the merge.** Not bisected (no build spent): the roof test
+read one probe's third update, a Monte Carlo estimate of 192 rays of light
+that a few percent of the probe's view holds. The CPU model of that
+estimator over the exact radiance (random rotations of the 64-ray
+Fibonacci set, three updates) gives 0.0272 with a standard deviation of
+0.0055: an exact renderer fails the bound (0.032) one run in five. The
+deterministic rotation sequence of the test's frames read 0.035 to 0.039
+on every build since the merge (the frames its probe updates on moved),
+and 0.0359 with the fix above; the probes about it read the model's value.
+The test now reads the mean of the 3x3 finest probes about the point
+(each at three updates; nine times the rays, the model's deviation 0.0018),
+its bound unchanged: 0.0312. The table test reads the same way.
+
+**The thin wall at 4 m cells: two causes in the cache, both fixed.**
+
+- **Two surfaces facing one way in one cell.** A cell is keyed by its
+  world cell and its side, and its clear distances are along its surface:
+  nothing told a reader on another surface facing the same way within the
+  cell (the room's far wall and the thin wall's lit face, 1.7 m apart, in
+  one 4 m cell) from one on the cell's own. `radiance_cache_light_at` now
+  takes the reader's side normal and blocks (a finer cell is the point's)
+  a reader the frame's surface stops put off the cell's surface:
+  `surface_stops_weight` (the normal and plane stops, the denoiser's) and
+  `surface_stops_on_plane` (new, the plane stop's own derivation at the
+  two normals' actual angle: the chord of a smooth surface whose normals
+  differ by t leaves the tangent plane by tan(t / 2) of its length, so two
+  parallel surfaces are apart by their gap however close), both to a
+  `RADIANCE_CACHE_NEAR` of the cell. The denoiser's 0.378 bound alone let
+  the far corners of a 4 m cell through (dark side 0.092 of 8.09 with it
+  alone; the exact-angle bound took it to 0.073 before the next fix).
+  The surface stops' depth walk is its own snippet now
+  (`frame_surface_seen`, `surface_stops_seen`): a reader of the cache opts
+  into `frame_surface_stops`, which needs no pixels.
+- **Clear distances grew between explorations.** A way not explored in an
+  update grew by 2^(1/8); a way is explored once in four updates, so its
+  bound stood at up to 1.3 times its wall's distance three updates in
+  four, and a 4 m cell's readers up to a metre past a 5 cm wall read the
+  lit side (2 m cells: dark side 0.019 with the growth, 0.0027 without).
+  A way no ray explored this update keeps its bound; one explored takes
+  the nearer of its ray's bound and what it held grown by 2^(1/2)
+  (`CLEAR_GROWTH`), so an opened way still doubles in eight updates.
+
+| thin wall, dark / lit side | 1/8 m | 1/4 m | 1/2 m | 1 m | 2 m | 4 m |
+|---|---|---|---|---|---|---|
+| standing, as left | 0.0000% | 0.0006% | 0.008% | 0.012% | 0.24% | 9.4% |
+| standing, now | 0.0000% | 0.0006% | 0.008% | 0.001% | 0.10% | 0.79% |
+| lying, now | 0 | 0 | 0 | 0 | 0 | 0.013% |
+
+The closed box against the CPU radiosity: direct within 0.2%, indirect
+-4.5%, -1.6%, -2.9%, +1.3% (bound 10%), settled after 1,319 frames (605
+before: finer cells along the box's corners, where the plane bound now
+splits a cell its two walls met in).
+
+**The voxel GI tests.** `a_mesh_slab_on_terrain_shades_the_probes_under_it`
+passes (under the slab above 0.186 and below 0.159, in the open 0.493 and
+0.256: 0.38 and 0.62 of the open, bounds 0.6 and 0.8).
+`a_terrain_wall_shadows_a_local_light_from_the_probes` still fails, as on
+the merged tree (the local light's gain on the open ground's probes 0 to
+0.0008 against at least 0.02; one run of five found no probe of the
+region updated at all). Measured on its open world, settled: the cache
+full (260,700-262,000 cells of 2^18), its 32,768 rays a frame spent, but
+56-165 cells a frame folding a value: the rest had every ray start in a
+solid (their points unseated, seated again by the next mark, the same
+again), so 58,000-60,000 probe hits a frame read cells that are `NEW` and
+are lit on the spot. Ruled out: a short shadow stream (the terrain's tracer
+marks a stream short only while its kernels compile; the test waits for
+that), and the cache rays' width (started as wide as their cell: 99 cells
+folded, no change). Why the cache's rays start in a solid on this world and not on
+voxel_craft's is not found within the diagnostic budget (the voxel plugin
+is paused).

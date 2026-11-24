@@ -15,6 +15,7 @@ use helio_frame_api::rays::stream::{self, SNIPPET as STREAM};
 
 const KERNEL: &str = r#"//!use frame_ray_stream
 //!use frame_radiance_cache
+//!use frame_surface_stops
 // p: the point and in w the reader's reach; n: the side and in w the space.
 struct Query {
     p: vec4<f32>,
@@ -128,7 +129,14 @@ fn gpu() -> Option<Gpu> {
             uniform(5),
         ],
     });
-    let source = helio_core::shader::resolve_with(KERNEL, &[STREAM, SNIPPET]);
+    let source = helio_core::shader::resolve_with(
+        KERNEL,
+        &[
+            STREAM,
+            SNIPPET,
+            helio_frame_api::history::SURFACE_STOPS_SNIPPET,
+        ],
+    );
     #[allow(clippy::disallowed_methods)] // a test's one-off module, not a pass's
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: None,

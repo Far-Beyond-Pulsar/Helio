@@ -23,9 +23,16 @@
 //!   (as SHaRC and GI-1.0 key their hash grids), so every reader of a place
 //!   reads and marks the same cell; a wide ray takes the cell's light as its
 //!   prefiltered value. Next to what splits a cell (an occluder between the
-//!   cell's point and the hit, found by the cell's own rays), a read goes to
-//!   finer cells, at most [`DESCENT`] levels; a cell without a value, or one
-//!   whose rays have not explored the way to the hit, answers nothing.
+//!   cell's point and the hit, found by the cell's own rays; a surface beside
+//!   the cell's facing the same way, which the frame's surface stops tell
+//!   from the cell's own: `frame_surface_stops`, which a reader opts into
+//!   too), a read goes to finer cells, at most [`DESCENT`] levels.
+//! - **A read that finds nothing says why** (`miss`): no cell yet, no value
+//!   yet, its rays not yet past the way to the hit (the cell's light then
+//!   comes with it), all of which pass; or every cell that could answer holds
+//!   its light past an occluder or the reader's reach, which stays as long
+//!   as the cells do (`radiance_cache_miss_stays`): a reader stands in
+//!   nothing there that cannot tell an occluder's two sides apart.
 //! - **The reach**: a reader says how far from its hit, along the surface,
 //!   a cell's point may stand for the hit: a ray that left a surface its
 //!   length (that surface is in the hit's way there, so light gathered

@@ -1,6 +1,7 @@
 //!use helio_prelude
 //!use frame_history
 //!use frame_surface_stops
+//!use frame_surface_seen
 //!use frame_denoise_irradiance
 // The denoiser's stages for an irradiance signal (lib.rs documents them and
 // where each constant comes from). Light is spread where the information is,

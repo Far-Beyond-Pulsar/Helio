@@ -218,6 +218,7 @@ fn the_radiance_cache_rows_have_their_contract_sizes() {
     let source = helio_core::shader::resolve_with(
         "//!use frame_ray_stream
          //!use frame_radiance_cache
+         //!use frame_surface_stops
          @group(0) @binding(0) var<uniform> radiance_cache_frame: RadianceCacheFrame;
          @group(0) @binding(1) var<storage, read_write> radiance_cache_slots: array<RadianceCacheSlot>;
          @group(0) @binding(2) var<storage, read_write> radiance_cache_entries: array<RadianceCacheEntry>;
@@ -232,7 +233,11 @@ fn the_radiance_cache_rows_have_their_contract_sizes() {
              out[id.x] = vec4<f32>(e.direct + e.indirect + at, select(0.0, 1.0, e.found) + f32(e.level) * radiance_cache_size(e.level));
          }
 ",
-        &[STREAM, SNIPPET],
+        &[
+            STREAM,
+            SNIPPET,
+            helio_frame_api::history::SURFACE_STOPS_SNIPPET,
+        ],
     );
     assert_eq!(
         struct_size(&source, "RadianceCacheFrame"),
