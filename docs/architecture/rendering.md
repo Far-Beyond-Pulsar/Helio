@@ -4848,3 +4848,93 @@ since the merge with the same cause: on its open world the cache's rays
 start in a solid for most cells (above), so their cells stay new and the
 probes over the open ground never took their first update while the
 light changed (its gain 0).
+
+**Measured on the final tree** (RTX 3060, release; cathedral 1280x720 at
+frame 3000, 16 frames averaged, view 23 against `C:/t/r3f/meas/ref/
+cath63.png`, view 250 against the step-1 reference; base: the merged base
+exe `*_basec`, its runs alternated with these):
+
+| / reference (runs a, b) | indirect (view 23) | whole frame (view 250) | per-frame sd |
+|---|---|---|---|
+| base exe, probes | 0.859 / 0.162, 0.900 / 0.142 | | 0.0003 |
+| probes | 0.910 / 0.115, 0.914 / 0.116 | 0.908 / 0.117, 0.916 / 0.113 | 0.0000-0.0002 |
+| a sixteenth (default) | 0.967 / 0.083, 0.906 / 0.101 | 0.958 / 0.090, 0.955 / 0.091 | 0.0006-0.0013 |
+| a quarter | 0.945 / 0.086, 0.963 / 0.082 | 0.918 / 0.106, 0.955 / 0.088 | 0.0001-0.0004 |
+| every pixel | 0.925 / 0.099, 0.983 / 0.101 | 0.950 / 0.091, 0.938 / 0.096 | 0.0001-0.0002 |
+
+(Ratio of the 16-frame mean / mean relative error.) Within the merged
+tree's spread at every quality (0.90-0.96), the default's per-frame sd no
+worse (0.0006-0.0013 against 0.0011-0.0015). Per-pixel temporal noise at
+the default over a 64-frame burst (view 23, frame 3000), the build after
+"GI's last faults" against the final: mean per-pixel sd 0.00242 and
+0.00248, p99 0.0095 both, pixels changing more than 2% a frame 0.23% and
+0.22%: no new boiling.
+
+The GI update's passes in the cathedral at the probes (medians over
+frames 60-3000):
+
+| ms | base exe | final | |
+|---|---|---|---|
+| `RadianceCache` | 0.137 | 0.285 | cells in use 63,200 against 120,000: the eye angle's one level a surface |
+| `GILight` | 0.193 | 0.491 | the reads and marks: two buckets a find, the surface stops, the descent |
+| `GIShadow` | 0.078 | 0.137 | |
+| `GIIntegrate` | 0.214 | 0.263 | reads the shadow stream |
+| `RadianceCacheFold` | 0.043 | 0.098 | cells in use |
+| the GI update | 1.42, 1.51 | 2.24, 2.24 | +51-58% |
+
+The probes' hits add no rows to the light batch or the shadow stream
+(99.9% lit by the cache, 48,223 shadow rays: the cache's own); what holds
+the update over the base is the working set and the reads, which the
+merged tree's one level a surface and clear distances bought (the
+cathedral's indirect 0.91 / 0.115 against the base's 0.86-0.90 / 0.14-0.16
+at the probes). Not brought within 5% of the base: a read and its mark each
+find the same slot (a merged read-and-mark would share the finds), and the
+working set is the eye angle's.
+
+voxel_craft (1080p, four poses, `cost.py`'s GI passes over the run's
+windows; base runs alternated):
+
+| ms | GI update | gather | frame | cells in use, new a frame |
+|---|---|---|---|---|
+| base exe, probes (two runs) | 3.39, 3.42 | | 11.20, 11.24 | |
+| probes (two runs) | 4.98, 4.98 | | 13.16, 13.16 | 131,072, 19,800-21,600 |
+| a sixteenth (two runs) | 4.89, 4.91 | 5.77, 5.78 | 18.97, 19.03 | 131,072, 23,700-24,300 |
+
+(The merged tree measured 5.41-5.71 at the probes against the base's
+4.47-4.57 in its own runs.) The cache churns at its load on this terrain
+(the stair-stepped working set, "The cache's resolution"): 8-11% of the
+probes' and the pixels' hits are lit by a cell, the rest on the spot.
+Against the base exe at the probes the four poses differ by 0.42-1.09%
+mean |difference| and -0.25% to +0.03% luminance (the merged tree:
+0.17-0.66% and -0.6% to +0.5%). The speckle gate at pose 12: 10.3 a frame
+at the probes (gate 20; 10.6 on the merged tree), 132 at a sixteenth (141
+on the merged tree; 90 in one run of the eviction build): not met, for the
+working set's reason above.
+
+The flight holds (1600x900 ground holds, 25 s, one run each; the GI passes
+from the graph's pass list): Earth 4.73 ms at the probes and 4.46 at a
+sixteenth against the base exe's 3.45 (the merged tree: 5.65 / 5.19); the
+Moon 4.46 / 4.27 against 3.42 (the merged tree: 5.12 / 4.75); `GILight`
+0.78 and 0.59 (0.19 and 0.16 in the base). Against the base exe's frame:
+Earth 0.0019 mean |difference| and +0.08% luminance at the probes, 0.0032
+and +0.12% at a sixteenth; Moon 0.0017 / +0.08% and 0.0066 / +0.70%.
+
+**Open**:
+
+- **The working set on stepped terrain.** On voxel_craft every coarse cell
+  splits down the descent wherever the ground is a staircase of voxel
+  faces (risers bound the clear distances, treads leave the cell's plane),
+  so the cells in use do not follow the eye angle (at the table's load at
+  40, 80 and 160 mrad) and the table churns: the speckle gate at the
+  default (132 against 20), the GI update +45% against the base. How a
+  stepped surface keys its cells (the cells' plane on the voxel plugin's
+  smoothed normal, or a relief bound in the key) is the next step, a
+  design decision for the voxel plugin's surface rather than the cache's
+  size.
+- **The cathedral's GI update** +51-58% against the base exe at the probes:
+  the working set (63,200 to 120,000 cells: `RadianceCache` and the fold)
+  and the reads (`GILight`: a read and its mark each find the same slot,
+  two buckets a find); a merged read-and-mark in the contract would share
+  the finds.
+- **The cache rays that start in a solid** on the voxel GI tests' open
+  world (above): the test passes, the cause is not found.
