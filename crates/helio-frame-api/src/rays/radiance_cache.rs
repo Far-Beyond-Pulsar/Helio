@@ -28,11 +28,16 @@
 //!   version keyed cubes and sent a reader off the cell's plane by more than
 //!   an eighth of the cell to finer cells: stepped ground's every tread
 //!   descended three levels, up to 64 cells where one did.)
-//! - **The level** of a surface point: one, whoever reads it and however
-//!   wide their ray, the publisher's eye angle at its distance from the eye
-//!   (as SHaRC and GI-1.0 key their hash grids), so every reader of a place
-//!   reads and marks the same cell; a wide ray takes the cell's light as its
-//!   prefiltered value. Next to what splits a cell (an occluder between the
+//! - **The level** of a read: the coarser of the surface's (the publisher's
+//!   eye angle at its distance from the eye, as SHaRC and GI-1.0 key their
+//!   hash grids) and the reader's footprint at the hit (a wide ray takes the
+//!   light of the patch its cone covers, as Lumen reads its surface cache
+//!   at a cone's mip): a cell finer than a reader's rays is detail its
+//!   estimate averages away. A cell's `direct` is its point's, so a reader
+//!   whose cells are wide near small lights takes its direct light from a
+//!   light sample of its own. Who marks is the working set: a reader that
+//!   only reads claims nothing and keeps nothing alive. Next to what splits
+//!   a cell (an occluder between the
 //!   cell's point and the hit, found by the cell's own rays; a surface turned
 //!   away from the cell's, which the frame's surface stops tell from the
 //!   cell's own: `frame_surface_stops`, which a reader opts into too), a
@@ -183,6 +188,14 @@ impl RadianceCacheFrame {
         let size = self.offset[3] * d;
         let l = size.max(1e-30).log2().round() - FINEST as f32;
         l.clamp(0.0, (LEVELS - 1) as f32) as u32
+    }
+
+    /// `radiance_cache_level_at`: the level a reader whose ray is
+    /// `footprint` wide at frame point `p` reads there (the surface's, or
+    /// the footprint's where that is coarser).
+    pub fn level_at(&self, p: [f32; 3], footprint: f32) -> u32 {
+        let l = footprint.max(1e-30).log2().round() - FINEST as f32;
+        self.level(p).max(l.clamp(0.0, (LEVELS - 1) as f32) as u32)
     }
 
     /// `radiance_cache_origin_cell`: the origin's place in a key of `level`
@@ -540,6 +553,11 @@ mod tests {
         assert_eq!(frame.level([0.0, -128.0, 0.0]), 8);
         // Past the coarsest: the coarsest.
         assert_eq!(frame.level([1e7, 0.0, 0.0]), LEVELS - 1);
+        // A reader as wide as 2 m there reads 2 m cells; a sharp one the
+        // surface's.
+        assert_eq!(frame.level_at([32.0, 0.0, 0.0], 2.0), 7);
+        assert_eq!(frame.level_at([32.0, 0.0, 0.0], 0.0), 6);
+        assert_eq!(frame.level_at([32.0, 0.0, 0.0], 0.3), 6);
     }
 
     #[test]
