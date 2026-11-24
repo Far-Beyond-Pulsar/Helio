@@ -4762,3 +4762,73 @@ one light sample each, which the gather's resampling then favours where
 it is bright (the leaves' far sides add one more, 58% of the pixels' hits:
 a voxel of leaves has no far-side cell). The cure is the working set, not
 the hits: "The cache's resolution", below.
+
+**The cache's resolution.** The eye angle was the slots' (`a = sqrt(4 pi
+LEVELS / (slots / 2))`, 0.040 rad at 2^18 slots: a cell 52 pixels wide at
+1080p under the cathedral's 45 degree field of view, 31 under voxel_craft's
+70). It is a setting now, `radiance_cache_cell_angle` (`GiSettings::
+cache_cell_angle`, milliradians, 5 to 500; 0 the slots' own), through
+`helio-settings` like the other GI settings, so the editor lists it.
+Measured on the cathedral at a sixteenth (view 23 against the corrected
+reference, frame 3000, 16 frames; the cells in use and the frame's new and
+evicted cells settled):
+
+| cell angle | cells in use | new / evicted a frame | ratio / mean rel. error (runs) | per-frame sd |
+|---|---|---|---|---|
+| 40 mrad (the slots' 40.4) | 122,593, 122,528 | 106 / 72, 114 / 95 | 0.952 / 0.084, 0.942 / 0.088 | 0.0012-0.0014 |
+| 56 mrad | 80,210 | 94 / 66 | 0.871 / 0.129 | 0.0002 |
+| 80 mrad | 49,708, 50,104 | 41 / 49, 42 / 43 | 0.917 / 0.103, 0.930 / 0.090 | 0.0005-0.0006 |
+| 160 mrad | 23,862 | 23 / 17 | 0.961 / 0.103 | 0.0002 |
+
+Every coarser angle moved the error beyond two runs' spread (0.004 at 40
+mrad), and not monotonically (56 mrad worst: which cells straddle the
+nave's thin walls and column bases changes with the grid). So the default
+stays the slots' own angle, which at the default slots is the finest
+measured; a host with less memory gets coarser cells by the same rule
+rather than a table its probes overrun, and a host can set it. The GI test
+scenes (`radiance_cache`, `probes`) were passed at the default only.
+
+**The refresh** follows the cells in use: `max(21, ceil(cells / cells lit a
+frame))` frames (`cache_begin` from the last frame's count), so a full
+refresh takes the cells over the budget and the budget stays the cap
+(before: once in 21 frames, which 262,000 cells and an 8,192-cell budget
+could not meet). With the eviction below the cells in use stay at most half
+the slots, 2^17 at the default, 16 frames' budget, so at the defaults the
+period is the probes' 21 and longer only for a host with more slots than
+budget.
+
+**A full table** degrades by the least recently read now: past half the
+slots, whole bins of age from the oldest while all their cells are excess,
+then exactly the excess of the bin it ends in (`PLAN_EVICT_PART`, a share
+claimed by an atomic counter), down to cells read two frames ago, never
+one marked this frame or the last (before: never one read within 64
+frames, so a working set larger than the slots kept every slot and turned
+new keys away for good: voxel_craft's half of hits `ABSENT`). The slot
+count stays a setting.
+
+| voxel_craft pose 12, a sixteenth | cells in use | new / evicted a frame | settled | speckle px / frame |
+|---|---|---|---|---|
+| before (keys turned away) | 262,131 | 12 / 13 | 216,630 | 137-141 |
+| 40 mrad, least recently read evicted | 131,072 | 28,711 / 27,131 | 4 | 90.5 |
+| 80 mrad | 131,072 | 19,991 / 18,620 | 3 | 129.9 |
+| 160 mrad | 131,072 | 10,377 / 9,466 | 27 | 128.4 |
+
+On voxel_craft the working set does not follow the angle: at 160 mrad,
+sixteen times fewer cells a level than at 40, the table is still at its
+load, churning. Its terrain is a staircase of 10 cm voxel faces, and every
+cell's readers on it meet risers (which bound the clear distances) and
+treads off the cell's plane (which the surface stops tell apart): every
+coarse cell splits down the descent's three levels wherever the slope is
+not flat. That is how a stepped surface keys its cells, the voxel plugin's
+surface and not a cache size, and it is left as the open item below; the
+gate at the default (20) is not met (90.5 with the eviction, from 141).
+Seated finer cells on stair-stepped ground are where the remaining specks
+are made (the pixels' hits: 6% cache, 20% absent, 50% new, 24%
+unexplored at 40 mrad).
+
+**The surface test's relief.** A reader is on a cell's surface while it
+stands off the cell's plane by no more than an eighth of the cell (the
+finest the descent resolves: a step or bump finer than that is the cell's
+surface, prefiltered), where "GI's last faults" first took a 32nd. The
+thin wall's dark side at 4 m cells reads 0.78% of the lit side with it
+(0.79% with a 32nd); the cathedral's working set and rows did not move.

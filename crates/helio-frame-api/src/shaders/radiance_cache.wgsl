@@ -357,8 +357,13 @@ fn radiance_cache_light_at(e: RadianceCacheEntry, p: vec3<f32>, n: vec3<f32>) ->
     let point = radiance_cache_entry_point(e);
     let normal = scene_unpack_unit(e.normal);
     let along = radiance_cache_along(normal, p - point);
-    let near = RADIANCE_CACHE_NEAR * radiance_cache_size(e.key.tag & 31u);
-    if surface_stops_weight(point, normal, p, n, near) <= 0.0 || !surface_stops_on_plane(point, normal, p, n, near) { return RADIANCE_CACHE_BLOCKED; }
+    let size = radiance_cache_size(e.key.tag & 31u);
+    let near = RADIANCE_CACHE_NEAR * size;
+    // Off the cell's surface by more than the finest the descent resolves
+    // (an eighth of the cell: a step, a bump finer than that is the cell's
+    // surface, prefiltered; a parallel wall farther off is another).
+    let relief = size / f32(1u << RADIANCE_CACHE_DESCENT);
+    if surface_stops_weight(point, normal, p, n, relief) <= 0.0 || !surface_stops_on_plane(point, normal, p, n, relief) { return RADIANCE_CACHE_BLOCKED; }
     let clear = radiance_cache_clear(e, u32(along.x));
     if clear == 0.0 {
         return select(RADIANCE_CACHE_UNKNOWN, RADIANCE_CACHE_HOLDS, along.y <= near);
