@@ -1,5 +1,6 @@
 //!use helio_prelude
 //!use frame_history
+//!use frame_surface_stops
 //!use frame_denoise_irradiance
 // The denoiser's stages for an irradiance signal (lib.rs documents them and
 // where each constant comes from). Light is spread where the information is,
@@ -114,17 +115,6 @@ struct DenoiseParams {
 @group(1) @binding(27) var hist_b_out: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(28) var rec_n: texture_2d<f32>;
 
-// The normal stop: a sample's irradiance holds the hemisphere about the
-// normal it was traced at; seen from a normal tilted by t, a share
-// (1 - cos t) / 2 of the cosine-weighted hemisphere was never sampled. The
-// weight falls to 0 where that share reaches 1/8 (t = 41 degrees).
-const NORMAL_SHARE: f32 = 0.125;
-// The plane stop: the chord between two points of a surface whose normals
-// differ by the normal stop's 41 degrees leaves the tangent plane by
-// tan(41 / 2 degrees) = 0.378 of its length; a step (a silhouette, a ledge)
-// by a whole length or more. The same bound says how far a surface between
-// two such points may come nearer the eye than their chord (`seen`).
-const PLANE_SLOPE: f32 = 0.378;
 // An irradiance record is valid over a radius of its harmonic mean hit
 // distance (Ward 1988: the error of using it at distance d is d / R), never
 // below the diagonal of the pixel that holds it.
@@ -151,6 +141,18 @@ struct Guide {
     sky: bool,
 }
 
+// The view-space point at pixel `q` (clamped into the image) of view depth
+// `vd` (positive).
+fn view_point(q: vec2<i32>, vd: f32) -> vec3<f32> {
+    // The raw depth of view depth vd (`helio_view_depth` inverted), then
+    // the view-space point through the inverse projection.
+    let z = params.proj_zw;
+    let d = (z.z - vd * z.x) / (z.w - vd * z.y);
+    let uv = (vec2<f32>(q) + 0.5) / vec2<f32>(params.size);
+    let v = params.inv_proj * vec4<f32>(helio_uv_to_ndc(uv), d, 1.0);
+    return v.xyz / v.w;
+}
+
 fn guide(p: vec2<i32>) -> Guide {
     let size = vec2<i32>(params.size);
     let q = clamp(p, vec2<i32>(0), size - 1);
@@ -160,13 +162,7 @@ fn guide(p: vec2<i32>) -> Guide {
     if g.sky {
         return g;
     }
-    // The raw depth of view depth vd (`helio_view_depth` inverted), then
-    // the view-space point through the inverse projection.
-    let z = params.proj_zw;
-    let d = (z.z - vd * z.x) / (z.w - vd * z.y);
-    let uv = (vec2<f32>(q) + 0.5) / vec2<f32>(size);
-    let v = params.inv_proj * vec4<f32>(helio_uv_to_ndc(uv), d, 1.0);
-    g.x = v.xyz / v.w;
+    g.x = view_point(q, vd);
     g.depth = vd;
     g.n = normalize(textureLoad(guide_normal, q, 0).xyz);
     g.nv = (params.view_rotation * vec4<f32>(g.n, 0.0)).xyz;
@@ -188,12 +184,10 @@ fn record_radius(g: Guide, inverse_hit: f32) -> f32 {
     return max(1.0 / max(inverse_hit, 1e-12), RADIUS_MIN_PIXELS * footprint(g));
 }
 
-// Whether `q` lies on `p`'s surface: the normal and plane stops.
+// Whether `q` lies on `p`'s surface: the frame's surface stops, in view
+// space.
 fn surface_weight(p: Guide, q: Guide) -> f32 {
-    let w_normal = saturate(1.0 - (1.0 - dot(p.n, q.n)) / (2.0 * NORMAL_SHARE));
-    let plane = abs(dot(p.nv, q.x - p.x));
-    let w_plane = saturate(1.0 - plane / (PLANE_SLOPE * distance(p.x, q.x) + footprint(p)));
-    return w_normal * w_plane;
+    return surface_stops_weight(p.x, p.nv, q.x, q.nv, footprint(p));
 }
 
 // How well the irradiance of a record at `q`, valid over `radius`, serves `p`.
@@ -201,38 +195,20 @@ fn geometry_weight(p: Guide, q: Guide, radius: f32) -> f32 {
     return saturate(1.0 - distance(p.x, q.x) / radius) * surface_weight(p, q);
 }
 
+// The view-space point at pixel `q` and a pixel's footprint there (0: the
+// sky), as the surface stops' walk reads the frame's depth
+// (`surface_stops_seen`).
+fn surface_stops_point(q: vec2<i32>) -> vec4<f32> {
+    let vd = textureLoad(guide_depth, q, 0).r;
+    if vd <= 0.0 { return vec4<f32>(0.0); }
+    return vec4<f32>(view_point(q, vd), params.pixel_scale * vd);
+}
+
 // Whether the frame's depth shows nothing between pixels `a` and `b` (their
-// guides `ga`, `gb`) that stands out of both receivers' surfaces: no pixel on
-// the screen's segment between them holds a point in front of both tangent
-// planes by more than the plane stop accepts of a neighbour (PLANE_SLOPE of
-// its distance and a pixel's footprint). Two points of one floor either side
-// of a ledge, a thin wall's or a pillar's foot are close, on one plane and
-// share a normal, so the geometry weight passes them; what tells them apart
-// is the occluder standing between, which hides from each the light the
-// other receives. The test is symmetric in a and b and reads only the
-// frame's depth. (A view ray at view depth 1 is affine in the pixel: the
-// point at pixel q is its view depth times a's ray moved by q - a.)
+// guides `ga`, `gb`) that stands out of both receivers' surfaces
+// (`surface_stops_seen`).
 fn seen(a: vec2<i32>, b: vec2<i32>, ga: Guide, gb: Guide) -> bool {
-    let d = b - a;
-    let steps = max(abs(d.x), abs(d.y));
-    let ray = ga.x / ga.depth;
-    let per_pixel = vec2<f32>(2.0 * params.inv_proj[0][0] / f32(params.size.x),
-        -2.0 * params.inv_proj[1][1] / f32(params.size.y));
-    for (var k = 1; k < steps; k++) {
-        let q = a + vec2<i32>(round(vec2<f32>(d) * (f32(k) / f32(steps))));
-        let vd = textureLoad(guide_depth, q, 0).r;
-        // The sky (vd <= 0) is behind everything.
-        if vd <= 0.0 {
-            continue;
-        }
-        let o = vd * (ray + vec3<f32>(per_pixel * vec2<f32>(q - a), 0.0));
-        let above_a = dot(ga.nv, o - ga.x) - PLANE_SLOPE * distance(o, ga.x);
-        let above_b = dot(gb.nv, o - gb.x) - PLANE_SLOPE * distance(o, gb.x);
-        if min(above_a, above_b) > params.pixel_scale * vd {
-            return false;
-        }
-    }
-    return true;
+    return surface_stops_seen(a, b, ga.x, ga.nv, gb.x, gb.nv);
 }
 
 fn inverse_hit(hit: f32) -> f32 {

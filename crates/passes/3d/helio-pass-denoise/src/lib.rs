@@ -197,8 +197,11 @@ fn filter(build: &mut NodeBuild<'_, '_>, signal: &Signal) -> Result<(), String> 
 }
 
 /// The snippets `irradiance.wgsl` is built with.
-pub const SNIPPETS: [helio_core::shader::ShaderSnippet; 2] =
-    [history::SNIPPET, denoise::IRRADIANCE_SNIPPET];
+pub const SNIPPETS: [helio_core::shader::ShaderSnippet; 3] = [
+    history::SNIPPET,
+    history::SURFACE_STOPS_SNIPPET,
+    denoise::IRRADIANCE_SNIPPET,
+];
 
 /// `DenoiseParams` (irradiance.wgsl).
 #[repr(C)]

@@ -34,6 +34,7 @@ const SNIPPETS: &[helio_core::shader::ShaderSnippet] = &[
     helio_frame_api::diagnostics::HEATMAP_SNIPPET,
     helio_frame_api::denoise::IRRADIANCE_SNIPPET,
     helio_frame_api::history::SNIPPET,
+    helio_frame_api::history::SURFACE_STOPS_SNIPPET,
     helio_frame_api::gbuffer::OUTPUT_SNIPPET,
     helio_frame_api::gbuffer::SURFACE_SNIPPET,
     helio_frame_api::gbuffer::BSDF_SNIPPET,

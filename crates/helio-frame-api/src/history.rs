@@ -52,6 +52,17 @@ pub const MARKER: &str = "//!use frame_history";
 /// (`history_taps`) (`shaders/history.wgsl`). Needs the prelude.
 pub const SNIPPET: ShaderSnippet = helio_core::wgsl_snippet!(MARKER, "shaders/history.wgsl");
 
+/// Marker opting a shader into [`SURFACE_STOPS_SNIPPET`].
+pub const SURFACE_STOPS_MARKER: &str = "//!use frame_surface_stops";
+/// The surface stops (`shaders/surface_stops.wgsl`): whether two pixels'
+/// points lie on one surface (`surface_stops_weight`: the normal and plane
+/// stops) and whether the frame's depth shows an occluder standing between
+/// them (`surface_stops_seen`, over the shader's own
+/// `surface_stops_point`): the one test the denoiser's weights and a
+/// resampler's reuse across pixels take.
+pub const SURFACE_STOPS_SNIPPET: ShaderSnippet =
+    helio_core::wgsl_snippet!(SURFACE_STOPS_MARKER, "shaders/surface_stops.wgsl");
+
 /// The view's reprojection: a uniform buffer holding one [`HistoryReprojection`].
 pub const REPROJECTION: &str = "history_reprojection";
 /// This frame's view depth (`R32Float`, positive, 0 for sky or nothing):
