@@ -192,7 +192,7 @@ struct GpuFrame {
     ground: [f32; 4],
 }
 
-const PATH_BYTES: u64 = 48;
+const PATH_BYTES: u64 = 64;
 const OWNER_BYTES: u64 = 32;
 
 /// The streams and batches of a graph's stages (names `reference_d<d>`,

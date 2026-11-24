@@ -1594,10 +1594,25 @@ tracer over the streams and light batches, knowing no kind:
   sun being a delta light the sampler samples, so it is counted once.
   Emissive surfaces are emission at hits (no sampler offers them), weight 1.
 - **Ray cones**: a camera ray starts with no width and a pixel's spread; a
-  ray leaving a hit is as wide as the footprint that found it (the stream
-  contract's), a bounce spreading by its lobe, twice the GGX alpha for a
-  specular sample and a 90-degree cone for a diffuse one (Akenine-Moller et
-  al., RTG II, 2021), a shadow ray with no spread.
+  path's cone past a hit is as wide as the footprint that found it, a
+  bounce spreading by its lobe, twice the GGX alpha for a specular sample
+  and a 90-degree cone for a diffuse one (Akenine-Moller et al., RTG II,
+  2021), a shadow ray with no spread. Since r3 the path keeps that cone
+  itself (`Path::cone`, `Owner::cone`): it sets how far a ray leaving a hit
+  starts off it (`ray_offset`) and the light query's footprint, and its
+  bounce and shadow rays are sent with no width (`exact_cone`), so every
+  tracer answers them with its exact geometry and finest surface detail (a
+  tracer may answer a wide ray with coarser geometry: the voxel terrain's
+  walk meets a node its footprint covers as a plane). Its camera rays keep
+  their pixel's spread: that is the image's own detail, the G-buffer's,
+  and it is what the terrain lights sub-pixel cells by (with no spread the
+  canopies' and the far ground's cells were lit by their own faces, the
+  image 4.6% darker). Measured on voxel_craft's first pose (grass and
+  clouds off, 6,000 paths a pixel): before the walk change, the same build
+  twice 0.9995 of the luminance, mean |difference| 0.00004; bounce and
+  shadow rays sent with no width 0.9975, 0.00077: their hits are shaded at
+  their finest detail (the terrain's cells by their own faces where the
+  footprint had lit them by the slope), a reference's answer.
 - **The black terrain was not the rays' width.** A first version took
   voxel_craft's terrain going black under wide shadow rays for a tracer
   fault and gave the reference's rays zero width. It was the reference
