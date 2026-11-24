@@ -3032,11 +3032,15 @@ binds the three under those names:
   (the cell's indirect and bounced parts), the `level` it came from, the
   cell's `history` (a reader's confidence), `found` (false: no cell at the
   hit's level or up to `reach` levels coarser has light for `p`).
+  *(Changed in "GI on the merged tree": `radiance_cache_read(p, n, space,
+  reach)`, one level a surface point, `reach` the reader's in metres.)*
 - `radiance_cache_mark(p, n, footprint, space)`: the hit's cell in use
   this frame, claimed with the hit's point and normal where no slot holds
   it (a place in the new cells' queue), the cell `ANCESTOR` (3) levels
   coarser, and the finer cells a read goes to where a cell's rays met
-  something between its point and `p`.
+  something between its point and `p`. *(Changed: `radiance_cache_mark(p,
+  n, space, reach)`, no ancestor, finer cells at most `DESCENT` (3) levels
+  below the surface's.)*
 - `radiance_cache_present()`, `radiance_cache_size(level)`,
   `RadianceCacheIrradiance`: as before. For a publisher: `_key`, `_find`,
   `_level`, `_cells`, `_entry_point`, `_side`, `_light_at`, `_holds`,
@@ -3060,7 +3064,8 @@ size. The api crate holds no `static`, `thread_local!` or
   near zero.
 - **The level** of a read: `round(log2(max(footprint, a * d)))`, the coarser
   of the ray's footprint at the hit and the eye angle `a` at the hit's
-  distance `d`. `a = sqrt(4 pi 17 / (slots / 2))`, 0.040 rad at the default
+  distance `d` *(changed: `round(log2(a * d))` alone, "GI on the merged
+  tree")*. `a = sqrt(4 pi 17 / (slots / 2))`, 0.040 rad at the default
   2^18 slots (cells at least `a d` wide hold at most `4 pi / a^2` cells a
   level round the eye, over 17 levels half the slots).
 - **The side** (the dominant axis of the face turned toward the ray, and its
@@ -3107,7 +3112,8 @@ size. The api crate holds no `static`, `thread_local!` or
   A cell's point does not move (above). A cell whose light holds everywhere its readers meet it (open
   ground, a room's middle) is read at its footprint's level as before;
   finer cells exist only along the occluders that split coarse ones.
-- **A mark's ancestor**: the cell 3 levels coarser is marked with it.
+- **A mark's ancestor**: the cell 3 levels coarser is marked with it
+  *(deleted in "GI on the merged tree")*.
 
 **The update** (GI's node, after the probes' rays). The cells in use are a
 list on the GPU, two halves, one current: what the last frame kept, then
@@ -3187,7 +3193,10 @@ cache's size.
    unrestarted 996 times in 1000); the bounced part restarts with the
    indirect.
 
-**The probes read the cache** (GI's `gi_light`): a probe ray's hit is
+**The probes read the cache** (GI's `gi_light`; *the stand-ins, the hold
+and the projection over the lit hits below are replaced in "GI on the
+merged tree": a hit the cache has no light for is lit on the spot*): a
+probe ray's hit is
 `albedo * (direct + indirect) / pi + emission`, plus its transmission share
 of the far side's cell, at the probe ray's footprint, with a reach of one
 level. Where the cache has no light for a probe's hit yet, a stand-in:
@@ -3554,7 +3563,9 @@ one copy for the probes', the cache's and the pixels' rays.
    `RETRACE_PERIOD` (4), a second ray from its previous reservoir's
    receiver along its kept sample, after every texel's row.
 2. The tracers (`stream::trace`).
-3. `GIGatherHits` (a texel, 64 a workgroup): each hit's light. A cell of
+3. `GIGatherHits` (a texel, 64 a workgroup): each hit's light. *(The rule
+   below moved behind the cache's read in "GI on the merged tree": the
+   ray's length is the read's reach.)* A cell of
    the radiance cache no wider than the ray is long (`radiance_cache_size`
    of the level the hit's footprint reads, against the hit distance) stands
    for the hit's light: `gi_hit_light`, the cell claimed. A wider cell
@@ -4336,3 +4347,209 @@ and normal, as the octree's contours), which the tree holds only for
 natural heightfield tops; 16-cubes hold no coverage. Adding those per
 4-cube is a second representation built with the chunk (its build, its
 memory, its edits), a design decision, not a walk change: not built here.
+
+#### GI on the merged tree
+
+The three r3 branches merged (the cache rework, the pixels' gather, the
+terrain's rays), then GI's faults fixed once on the result, then the
+denoiser's mean (`render/r3-denoise-mean`) merged in and the surface stops
+made one copy. GI plugin `render/r3-radiance-cache`, Helio the same branch.
+
+**The merge.** One hit-lighting path, `gi_hit.wgsl`, for the cache's rays,
+the probes' hits and the gather's: the sky a miss takes is the atmosphere's
+radiance table (`sky_radiance_eval`) in all three; the gather binds it as
+GILight does (`sky_radiance_layout`). Two merge faults found on the way: the
+reference shader held `first_share_bits` twice (no graph with the reference
+built: `mesh_gi_graph` showed the status screen), and a VG test exe built
+while the contract changed under it (rebuilt).
+
+**1. When a cell stands for a hit: the read's reach.** The gather kept a
+private rule (a cell no wider than the ray is long). The contract now
+answers it: `radiance_cache_read(p, n, space, reach)` and
+`radiance_cache_mark(p, n, space, reach)` take the reader's reach in
+metres, how far from the hit along the surface a cell's point may stand for
+it: a ray that left a surface passes its length (that surface is in the
+hit's way there; light gathered farther off is light the hit does not see),
+a reader in the air (a probe) `RADIANCE_CACHE_FAR`. Past the reach a read
+goes finer, as past an occluder its rays found (`radiance_cache_light_at`).
+The gather passes its ray's length; the cache's own rays pass any reach (a
+hit's cell is their bounced part, a bounce on; finer cells at every contact
+the cache's rays meet multiplied the cells in use), the probes any. The
+gather's `trusted` is deleted. Ward's split-sphere test is the same idea
+(a record valid within its rays' distances); SHaRC's rule compares the cell
+with the path length.
+
+**2. One level a surface point.** `radiance_cache_level(p)` is the eye
+angle's cell at the point's distance from the eye, whoever reads it (SHaRC's
+and GI-1.0's keying); the footprint, the coarser-level fallback
+(`GI_CACHE_REACH`) and the mark's ancestor are deleted. A wide reader takes
+the cell's light as its prefiltered value. Next to an occluder (or past the
+reach) a read goes finer, at most `DESCENT` = 3 levels (an eighth of the
+cell: the clear distances place an occluder to 8% of its distance, the
+ways' width; the finer cell a blocked mark claims is seated at its own hit,
+so one level holds unless a reader past the same occluder seated it first).
+A key sits in its bucket or, where that was full, the next (one bucket
+turned away 0.4% of keys at half load, which a single level leaves without
+any light). Eviction past half the slots never takes a cell marked within
+64 frames (`EVICT_AGE / 2`, past the probes' longest period of 41). A cell's
+clear distance along a way is where the plane of the face its low ray met
+crosses the cell's surface, no farther than the hit (the cache author's
+unlanded change: needed here, since with one level the thin-wall test's
+reads at 2 m cells read the lit side through the ways' 8%). Several views:
+the frame has one eye, the primary view's; XR eyes (centimetres apart) key
+the same levels, and captures resolve the probes, whose cells are the
+primary's. An origin change moves no level (distances are frame-space,
+both ends rebased).
+
+**3. The probes take every ray.** A side the cache has no light for is lit
+on the spot (`gi_hit_light`'s `own`): the probes' irradiance there for its
+indirect light (DDGI's recursion) and a light sample of the reader's own
+with its shadow ray for the direct; a far side without cache light passes
+on nothing of the probes' (at a point on a thin surface they hold the near
+side's light too). No hold on missing light, no rescale; the cells'
+stand-ins, `GI_UNLIT` and `GI_STOOD_IN` are deleted. GI's light batch and
+shadow stream hold a row a probe ray more; `gi_shadow` runs a workgroup a
+probe; the integration reads the shadow stream and holds on a short frame of
+either stream. The readiness hold stays for probes never updated more than
+1/32 of whose hits met cells the cache holds without a value
+(`GI_ROW_WAITING`); a key the hash turned away waits on nothing (the voxel
+tests' probes otherwise never updated once the table filled).
+
+**4. Light through two-sided surfaces.** Every reader that lights a side
+itself takes a two-sided hit's far-side direct light from its own light
+sample through the frame BSDF's thin lobe (`bsdf_eval`), the shadow ray from
+the lit side, and the far side's cell for its indirect part alone. Test
+`a_thin_card_lets_the_sun_through_to_the_floor_under_it` (a card 2 m square
+a metre over a black floor under the sun, transmission 1/2 of base 1/2):
+the floor's cell reads direct 0.5024 (analytic 0.5020) and indirect 0.2836
+(0.2781 from the card's four corner form factors); under an opaque card
+1.9e-9 and 0.
+
+**5. One copy of the surface stops.** `//!use frame_surface_stops`
+(`helio_frame_api::history::SURFACE_STOPS_SNIPPET`): `surface_stops_weight`
+(the normal stop, a 1/8 share of the hemisphere unseen, and the plane stop,
+0.378 of the separation) and `surface_stops_seen` (the frame's depth between
+two pixels: nothing standing out of both receivers' planes), over a
+shader's own `surface_stops_point`. The denoiser's constants, weight and
+walk and the gather's `same_surface` test and `seen_between` walk are
+deleted; the gather now rejects an occluder by the denoiser's rule in place
+of its nearer-than-the-chord one. The denoiser's walk reads only the depth
+(no normal load). `one_owner` passes with no exception.
+
+**Measured** (RTX 3060, release; cathedral 1280x720 at frame 3000, 16
+frames averaged, view 23 against `C:/t/r3f/meas/ref/cath63.png` and the
+whole frame against the step-1 reference; mean of the 16-frame image and
+the mean relative error after a 5-pixel blur; per-frame sd of the ratio):
+
+| / reference (runs a, b) | indirect (view 23) | whole frame | per-frame sd |
+|---|---|---|---|
+| merged base exe (`*_basec`), probes | 0.883 / 0.152, 0.911 / 0.131 | 0.892, 0.912 | 0.0002 |
+| probes | 0.897 / 0.122, 0.901 / 0.118 | 0.914, 0.925 | 0.0002-0.0003 |
+| a sixteenth (default) | 0.940 / 0.088, 0.958 / 0.084 | 0.958, 0.955 | 0.0011-0.0015 |
+| a quarter | 0.956 / 0.085, 0.948 / 0.084 | 0.956, 0.922 | 0.0002-0.0004 |
+| every pixel | 0.944 / 0.091, 0.929 / 0.097 | 0.911, 0.946 | 0.0001-0.0002 |
+
+(Ratio of the 16-frame mean / mean relative error.) The quarter's runs,
+1.06-1.17 apart on the gather branch (the left wall at 1.2-1.4), now agree
+within 0.8%: what differed between runs was the cache's state (cells keyed
+by the readers' footprints, which a run's timing seated differently); with
+one level a surface and no coarser fallback it no longer does, and no
+diagnostic was spent. Every setting now reads 0.93-0.96 of the reference
+and the probes 0.90; with the denoiser keeping the mean, what is left low
+is shared by every row that lights hits from the cache (the closed box's
+4-8%), the cache's.
+
+Costs (the GI update: its passes, its streams' tracers, the samplers, the
+resolve; the gather: its passes, its streams' tracers, the denoiser and the
+history; medians over the run; voxel_craft 1080p four poses, voxel_flight
+1600x900 ground holds):
+
+| ms | GI update | gather | frame | cells in use |
+|---|---|---|---|---|
+| cathedral, base exe, probes (two runs, alternated) | 2.03, 2.03 | | 10.46, 10.44 | 63,200 |
+| cathedral, probes (alternated with those) | 2.57, 2.56 | | 11.55, 11.47 | 107,500 |
+| cathedral, a sixteenth (two runs) | 1.28, 1.31 | 2.11, 2.15 | 10.42, 10.63 | 110,300 |
+| cathedral, a quarter | 1.19, 1.19 | 2.54, 2.52 | 10.71, 10.65 | 112,400 |
+| cathedral, every pixel | 1.15, 1.16 | 5.97, 5.96 | 17.30, 17.36 | 115,300 |
+| voxel_craft, base exe, probes (two runs) | 4.47, 4.57 | | 16.92, 16.96 | |
+| voxel_craft, probes | 5.71, 5.41 | | 17.37, 16.45 | 262,050 |
+| voxel_craft, a sixteenth | 5.55, 5.31 | | 22.50, 21.75 | 262,070 |
+| Earth hold, base exe, probes (two runs) | 3.92, 4.67 | | 13.76, 16.58 | |
+| Earth hold, probes / a sixteenth | 5.65 / 5.19 | | 15.50 / 23.91 | |
+| Moon hold, base exe, probes (two runs) | 4.18, 5.80 | | 12.58, 18.12 | |
+| Moon hold, probes / a sixteenth | 5.12 / 4.75 | | 13.26 / 18.65 | |
+
+(Cathedral: medians over frames 60-3000 of each pass, the frame as their
+sum; voxel_craft: `gi_cost.py`'s GI passes over the run's windows; the
+holds: the graph's GPU p50 and the same passes from its pass list, one run
+each; the holds' base runs differ by 20-40% between runs, so only the GI
+passes' ratio is read: +20-30%.) GILight is about 1.1 ms on voxel_craft and
+the Earth hold (0.23-0.42 on the base), 0.8 on the Moon. In the cathedral
+the GI update at the probes is 26% dearer than the base's, outside the
+cache rework's 1.67-1.85 ms (its own measure, frame 240).
+
+The working set, still camera, settled (frame statistics a frame):
+
+| | cells in use | new | evicted | settled | lit |
+|---|---|---|---|---|---|
+| voxel_craft before (`render/r3-cache-open`) | 110,130 | 14,261 | 11,293 | 25 | 8,192 |
+| voxel_craft, probes (two runs) | 262,045, 262,066 | 100, 63 | 86, 70 | 198,839, 198,524 | 8,192 |
+| voxel_craft, a sixteenth | 262,062, 262,077 | 72, 62 | 76, 61 | 204,604, 204,759 | 8,192 |
+| cathedral, base exe | 63,200 | 22 | 21 | | 8,192 |
+| cathedral, a sixteenth | 110,203, 110,483 | 109 | 74, 76 | 92,810 | 8,192 |
+
+New and evicted cells fall to about a hundred a frame (from 14,000 and
+11,000), and most cells in use are settled. On voxel_craft the cells in use
+fill the table (2^18 slots): the eye angle's derivation assumes half the
+slots over 17 levels of surfaces about the eye; the terrain's voxel steps
+split every coarse cell (the descent's cells), and every cell is read again
+within the revisit period, so nothing goes. The refresh alone (262,000 / 21
+= 12,500 cells a frame) is more than the budget (8,192), so a settled
+voxel scene still spends the whole budget, and GILight (on-spot light
+queries for hits whose keys the full table turned away, two-bucket finds)
+is 1.1-1.6 ms against 0.2-0.4.
+
+**Regressions** (against the merged base exes, `*_basec`): voxel_craft's
+four poses at the probes differ by 0.17-0.66% mean |difference| and -0.6% to +0.5% luminance at the probes (two base runs: 0.31-0.63% and 0.0% to +2.2%), 0.34-1.03% and -0.7% to +1.0% at a sixteenth; the Earth hold 0.0014-0.0015 mean |difference| at the probes, luminance +0.01-0.02% (the base twice: 0.0007), 0.0038 and -0.49% at a sixteenth; the
+Moon 0.0016-0.0017, +0.04-0.07% (the base twice: 0.0007), 0.0046 and +0.16% at a sixteenth. The speckle gate (pose 12): 10.6 speckle pixels a frame at the probes (the gate: 20), 141 at the default (a sixteenth).
+
+**The walls** (GI's tests, the final tree): the closed box within its 10%;
+the thin wall's dark side at 1/8, 1/4, 1/2, 1 and 2 m cells 0.0000%,
+0.0006%, 0.008%, 0.012% and 0.24% of the lit side (bound 1%), at 4 m 9%
+(fails, below); the VG wall's far half 0.000022 against the classic wall's
+0.000006 (bound twice that plus 1e-4: passes; on the merge, before items 1
+to 5, 0.0106 at the default and passing at the probes setting alone: the
+pixels' rays that start behind the VG proxy were the way in, and with their
+hits read by reach and their reuse stopped by the frame's surface stops it
+is gone, so the proxy's offset from its surface needs no contract change
+for this test). The plane-of-the-face clear distance landed with item 2.
+
+**Not measured**: the shared walk's cost in the denoiser's stage test (no
+build spent on it); per-pixel temporal noise beyond the per-frame sd above;
+XR eyes and captures with the one-level cache.
+
+**Open**:
+
+- **The working set on voxel terrain** fills the table and the budget (above);
+  the eye angle's derivation has to count the descent's cells, or the
+  descent has to stop at what a reader resolves. GI passes +25-40% on
+  voxel_craft and the planets against the base, outside the 10-15% target.
+- **The thin wall at 4 m cells** (`a_wall_thinner_than_its_cells...`, the eye
+  100 m off): the dark side's 2 m cell reads 9% of the lit side (0.75 of
+  8.1), its own direct light 0 (its point is on the dark side) and its
+  indirect from the room's other straddling cells (every surface's cell
+  straddles the wall at that distance). 1/8 m to 2 m pass (0.0000-0.24%).
+  Not fixed.
+- **`probes`**: `a_roof_shadows_the_sun` 0.039 under the roof against a
+  bound of 0.032 (0.035 on the merge before these items: the L1 harmonics'
+  horizon band, about 10% of the open probe's light, is at the bound, and
+  the probes' recursion for hits lit on the spot feeds it back);
+  `light_through_a_canopy_lights_probes_under_it` up to 0.139 against the
+  series' 0.114 at the first updates.
+- **voxel `voxel_pass_graph`**: `a_terrain_wall_shadows_a_local_light_from_the_probes`
+  (the local light's gain on the open ground's probes 0) and
+  `a_mesh_slab_on_terrain_shades_the_probes_under_it` (too few probes updated
+  under the slab) fail on the final tree; not investigated (the voxel
+  plugin is paused).
+- **The speckle gate at the default** (the gather's hits beyond their reach
+  sample their own light): 141 a frame at pose 12 against the gate of 20 (10.6 at the probes): the reach makes more of the gather's hits light themselves with one light sample, which resampling favours (two thirds of the specks were the hits' own light, "Indirect diffuse at a pixel"); the cure is the cache holding cells fine enough where short rays end, which the working set above bounds.
