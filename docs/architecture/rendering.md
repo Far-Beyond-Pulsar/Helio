@@ -4693,3 +4693,30 @@ that), and the cache rays' width (started as wide as their cell: 99 cells
 folded, no change). Why the cache's rays start in a solid on this world and not on
 voxel_craft's is not found within the diagnostic budget (the voxel plugin
 is paused).
+
+**Light queries and shadow rays only where used.** They already were made
+only for hits lit on the spot (`gi_light` and `gi_shadow` compact a
+workgroup's rows from row 0; the light batch and the shadow stream are
+sized for a row a probe ray, but nothing traces the rows not written), with
+one exception: every two-sided hit took a light sample for its far side
+whether or not the far side's cell had light. Now the far side's cell
+answers where it has light (its direct and indirect parts through the thin
+lobe), and the reader's own sample only where it has none. Measured
+(frame statistics, settled, still camera):
+
+| | probe hits the cache lit | lit on the spot | far sides own-lit | shadow rays |
+|---|---|---|---|---|
+| cathedral, a sixteenth | 99.9% | 0.1% | 0 | 48,187 (the cache's own: 32,768 rays, a cell sample each) |
+| voxel_craft pose 12, a sixteenth | 54.4% | 45.6% (44.7% `ABSENT`) | 22,647 of 53,031 | 70,870 |
+
+The cathedral's probes add no shadow rays: its GI update's 26% over the
+base (per pass, base against the merged tree: `RadianceCache` +0.11 ms,
+`GILight` +0.29, `GIShadow` +0.05, `GIIntegrate` +0.07,
+`RadianceCacheFold` +0.06) is the working set (63,200 cells against
+110,000-122,000) and the reads, not the rows: below, "The cache's
+resolution". On voxel_craft nearly half of every reader's hits find no
+cell at all (`ABSENT`: the table is full and turns keys away, below), and
+leaves have no far-side cell (their far side is a voxel's inside), so the
+far-side change moves its own-lit far sides 22,647 to 20,635 only; the
+canopy test (a sheet's far-side cells exist) reads 0.0956 under it against
+0.0965 to 0.114.
