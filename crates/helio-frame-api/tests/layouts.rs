@@ -229,8 +229,9 @@ fn the_radiance_cache_rows_have_their_contract_sizes() {
              let n = vec3<f32>(0.0, 1.0, 0.0);
              let e = radiance_cache_read(p, n, SCENE_SPACE_ANY);
              radiance_cache_mark(p, n, SCENE_SPACE_ANY);
+             let m = radiance_cache_read_mark(p, n, SCENE_SPACE_ANY);
              let at = radiance_cache_entry_point(radiance_cache_entries[id.x]);
-             out[id.x] = vec4<f32>(e.direct + e.indirect + at, select(0.0, 1.0, e.found) + f32(e.level) * radiance_cache_size(e.level));
+             out[id.x] = vec4<f32>(e.direct + e.indirect + m.direct + at, select(0.0, 1.0, e.found) + f32(e.level) * radiance_cache_size(e.level));
          }
 ",
         &[

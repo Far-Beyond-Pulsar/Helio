@@ -3039,7 +3039,9 @@ binds the three under those names:
   *(Changed in "GI on the merged tree": `radiance_cache_read(p, n, space,
   reach)`, one level a surface point, `reach` the reader's in metres; in
   "GI's last faults": `radiance_cache_read(p, n, space)`, no reach, and a
-  `miss` saying why nothing was found.)*
+  `miss` saying why nothing was found; in "Relief is not a second
+  surface": `radiance_cache_read_mark(p, n, space)` reads and marks with
+  one find a level, and `miss` ABSENT is only a key the hash turned away.)*
 - `radiance_cache_mark(p, n, footprint, space)`: the hit's cell in use
   this frame, claimed with the hit's point and normal where no slot holds
   it (a place in the new cells' queue), the cell `ANCESTOR` (3) levels
@@ -4653,7 +4655,8 @@ its bound unchanged: 0.0312. The table test reads the same way.
   takes the reader's side normal and blocks (a finer cell is the point's)
   a reader the frame's surface stops put off the cell's surface:
   `surface_stops_weight` (the normal and plane stops, the denoiser's) and
-  `surface_stops_on_plane` (new, the plane stop's own derivation at the
+  `surface_stops_on_plane` (new; *deleted in "Relief is not a second
+  surface"*: the plane stop's own derivation at the
   two normals' actual angle: the chord of a smooth surface whose normals
   differ by t leaves the tangent plane by tan(t / 2) of its length, so two
   parallel surfaces are apart by their gap however close), both to a
@@ -4831,7 +4834,9 @@ Seated finer cells on stair-stepped ground are where the remaining specks
 are made (the pixels' hits: 6% cache, 20% absent, 50% new, 24%
 unexplored at 40 mrad).
 
-**The surface test's relief.** A reader is on a cell's surface while it
+**The surface test's relief** *(deleted in "Relief is not a second
+surface": a cell is a slab an eighth of its width thick, and the plane test
+is gone)*. A reader is on a cell's surface while it
 stands off the cell's plane by no more than an eighth of the cell (the
 finest the descent resolves: a step or bump finer than that is the cell's
 surface, prefiltered), where "GI's last faults" first took a 32nd. The
@@ -4925,7 +4930,11 @@ and +0.12% at a sixteenth; Moon 0.0017 / +0.08% and 0.0066 / +0.70%.
 
 **Open**:
 
-- **The working set on stepped terrain.** On voxel_craft every coarse cell
+- **The working set on stepped terrain** *(measured again in "Relief is
+  not a second surface": relief no longer descends, cells are slabs; what
+  fills the table on voxel_craft is not the relief but the readers' and
+  the cache rays' claims, which the next subsection's Open list carries)*.
+  On voxel_craft every coarse cell
   splits down the descent wherever the ground is a staircase of voxel
   faces (risers bound the clear distances, treads leave the cell's plane),
   so the cells in use do not follow the eye angle (at the table's load at
@@ -4935,10 +4944,277 @@ and +0.12% at a sixteenth; Moon 0.0017 / +0.08% and 0.0066 / +0.70%.
   smoothed normal, or a relief bound in the key) is the next step, a
   design decision for the voxel plugin's surface rather than the cache's
   size.
-- **The cathedral's GI update** +51-58% against the base exe at the probes:
+- **The cathedral's GI update** *(closed in "Relief is not a second
+  surface": one find a level for a read and its mark, and slab cells)*
+  +51-58% against the base exe at the probes:
   the working set (63,200 to 120,000 cells: `RadianceCache` and the fold)
   and the reads (`GILight`: a read and its mark each find the same slot,
   two buckets a find); a merged read-and-mark in the contract would share
   the finds.
 - **The cache rays that start in a solid** on the voxel GI tests' open
   world (above): the test passes, the cause is not found.
+
+#### Relief is not a second surface
+
+GI plugin and Helio `render/r3-radiance-cache`, after "GI's last faults".
+The fault it set out to close: a surface's own relief sent the cache to its
+finest cells (a reader off its cell's plane by more than an eighth of the
+cell read three levels finer), so rough geometry filled the table.
+
+**The key: a cell is a slab.** A cell is as wide as its level across its
+side and a `LAYERS`-th of that (8, the descent's finest: `1 << DESCENT`)
+along its side's axis: the key's 64-bit count along the side's axis is in
+layers (the origin's count shifted by 3 more), `radiance_cache_place` puts
+a frame point in a key's units, and a layer starts at `k - PHASE`
+thicknesses (`PHASE` = 0.381966, 2 minus the golden ratio), so a surface on
+the levels' dyadic grid (a floor at 0 m) sits 0.38 of a thickness inside its
+layer and one on a decimal grid (10 cm voxel faces) 0.07% to 2% of a
+thickness from a boundary at every level: far past its hits' rounding.
+(Cubes put a floor at 0 m on a cell boundary at every level, its hits split
+between two cells by their rounding.)
+
+- Relief thinner than a layer is the cell's surface, prefiltered; a parallel
+  surface farther off along the side's axis (a slab's top and the floor
+  under it, a wall's top and the floor beside it, the thin wall's lit face
+  and the room's far wall 1.7 m behind it in a 4 m cell) is another cell of
+  the same level, with no descent. A surface's relief over a cell's width
+  claims a cell a layer it spans, at its own level: at most
+  `floor(relief / thickness) + 2` cells a footprint (the contract test:
+  steps of 1 cm over a quarter-metre cell, 4 cm of relief, 2 cells against a
+  bound of 3; steps of 5 cm, 20 cm, 5 against 8), never the 64 cells three
+  levels down. A plane tilted from its side's axis is relief along that
+  axis: about `1 + 8 tan t` cells a footprint at a tilt `t`, at most 9 at
+  45 degrees, where the side turns (the cathedral's vaults and columns
+  among them; its cells in use fell all the same, below).
+- The layer is a position along an axis, never a normal: a hit's noisy
+  normal changes its key only where it changes the dominant side (45
+  degrees, as before), and a reader between two layers reads the cell of
+  the layer its point is in (a surface across a boundary is two cells, each
+  seated on it, each holding its light).
+- The key is 28 bytes and the entry 96, as before: the layer is in the
+  key's axis count and the point's 15 bits an axis are in the key's units
+  (an eighth of the cell along the side's axis: finer than before).
+- `surface_stops_on_plane` is deleted (the frame's surface stops snippet
+  and the cache's read): a parallel surface past a layer is another cell, so
+  a read no longer tests it. The cell's light still takes
+  `surface_stops_weight` (the normal stop, a surface turned away; the plane
+  stop at a layer's thickness) and its clear distances (an occluder between
+  its point and the reader), and a read goes finer for those alone: the
+  thin standing wall's case.
+
+Against the alternatives: SHaRC and GI-1.0 key a cube a level with a few
+normal bits and share light across whatever the cube holds; Ward's
+irradiance caching weights a record's validity by the distance along its
+normal more than across (`|x - xi| / R + sqrt(1 - n . ni)`, with a "behind
+the record" test, Tabellion and Lamorlette 2004). A slab cell is that
+anisotropy in a hash key: tangential reuse at the eye angle's width, a
+separation along the normal at an eighth of it, with no search.
+
+**One find a level for a read and its mark.** The contract's read and mark
+are one walk (`radiance_cache_walk`): the cell of the surface's level, then
+finer while a cell's light is blocked at the point, each level's slot found
+(`radiance_cache_read`) or found and marked, claimed where no slot holds it
+(`radiance_cache_mark`); `radiance_cache_read_mark` does both with one find
+a level, and GI's hits (`gi_hit_cell`: the probes', the cache rays', the
+pixels') call it, with no third find for `waiting` (the read says NEW).
+`radiance_cache_finer` is deleted. A read that marks claims the cell it
+misses, so its miss is NEW (no value yet, its own claim included) and
+ABSENT is only a key the full table turned away; `level` says where a miss
+stopped. The frame statistics gain `gi.hits.<reader>.finer` (the read went
+finer than its surface's level), `.claimed` and `.claimed_finer` (the
+reader's share of the cache's new cells, at its surface's level and finer).
+
+**The cathedral** (frame 3000, 16 frames, view 23 against the corrected
+reference; costs medians over frames 60-3000):
+
+| cathedral, probes | before | final (runs a, b) | base exe (runs a, b) |
+|---|---|---|---|
+| cells in use | 119,742 | 82,340, 82,462 | 63,204, 63,210 |
+| new a frame | 101 | 52, 59 | 20, 19 |
+| cells lit a frame (cap 8,192) | 8,192 | 6,305, 6,293 | 8,192 |
+| the GI update | 2.28 ms | 1.665, 1.692 ms | 1.498, 1.532 ms |
+| `GILight` | 0.498 | 0.235 | 0.191 |
+| `RadianceCache` | 0.290 | 0.192 | 0.137 |
+| `RadianceCacheFold` | 0.100 | 0.074 | 0.043 |
+| `GIShadow` | 0.139 | 0.117 | 0.077 |
+| `GIIntegrate` | 0.266 | 0.264 | 0.212 |
+
+(Before: the tree this subsection starts from, one run, not alternated;
+final and base alternated, run a's passes.) At a sixteenth the GI update is
+1.45 ms before, 1.24 and 1.28 now, with 83,700 and 83,200 cells. The GI
+update at the probes is 10-11% over the base exe's (the target: 15%); the
+rest is the cells in use (82,000 against 63,000: `RadianceCache` and the
+fold +0.09 ms) and the probes' hits that read finer cells on their side of
+an occluder (`GIShadow`, `GIIntegrate` +0.09 ms). The rows against the
+corrected reference (view 23 against `C:/t/r3f/meas/ref/cath63.png`, view
+250 against the step-1 reference; ratio of the 16-frame mean / mean
+relative error):
+
+| runs a, b | indirect (view 23) | whole frame (view 250) | per-frame sd |
+|---|---|---|---|
+| base exe, probes | 0.888 / 0.145, 0.978 / 0.112 | | 0.0002-0.0006 |
+| probes | 0.903 / 0.115, 0.905 / 0.116 | 0.926 / 0.107, 0.932 / 0.104 | 0.0002-0.0004 |
+| a sixteenth (default) | 0.971 / 0.079, 0.965 / 0.082 | 0.975 / 0.086, 0.964 / 0.089 | 0.0009-0.0013 |
+| a quarter | 0.950 / 0.084, 0.904 / 0.102 | 0.961 / 0.087, 0.957 / 0.088 | 0.0002 |
+| every pixel | 0.942 / 0.090, 0.938 / 0.091 | 0.963 / 0.088, 0.952 / 0.089 | 0.0002-0.0003 |
+
+Every row within or better than "GI's last faults" (the default 0.906-0.967
+/ 0.083-0.101 there, 0.965-0.971 / 0.079-0.082 here; the whole frame
+0.908-0.958 there, 0.926-0.975 here).
+
+`GILight` 0.498 -> 0.235 ms at the probes: one find a level instead of
+three (the read, the mark, the waiting check). The cells in use fall from
+119,700 to 82,300-82,500: the plane test's descent at curved and stepped surfaces
+(column bases, mouldings) is gone, and the budget is no longer spent
+(6,400 cells lit a frame of 8,192).
+
+**voxel_craft: what fills the table is not relief.** Pose 12 at the
+default quality and angle, still camera, settled, before and after:
+
+| voxel_craft pose 12, a sixteenth | before | final |
+|---|---|---|
+| cells in use | 131,072 | 131,072 |
+| new / evicted a frame | 37,745 / 36,018 | 37,248 / 35,409 |
+| probes' hits: cache, absent, new, unexplored | 4.3, 43.5, 39.2, 13.1% | 4.3, 0.0, 82.3, 13.4% |
+| cache rays' hits | 2.4, 50.9, 39.1, 7.6% | 2.4, 0.1, 88.8, 8.7% |
+| pixels' hits | 5.1, 31.0, 45.7, 18.3% | 5.9, 0.1, 74.2, 19.8% |
+| speckle px a frame | 135.7 | 136.0 |
+
+(A read that marks now claims before it answers, so a hit whose cell it
+claimed is NEW where it was ABSENT; absent and new together are the hits
+with no cell that has light: probes 82.7 and 82.3%, cache rays 90.0 and
+88.9%, pixels 76.7 and 74.3%.)
+
+The working set did not move. Six diagnostic builds (pose 12, the speckle
+gate's burst, `HELIO_GI_CELL_ANGLE` the example's A/B switch), one change
+each:
+
+| build | change | angle | cells in use | new a frame | claims a frame: probes, cache rays, pixels (finer) | finer reads: probes, cache, pixels | speckle px |
+|---|---|---|---|---|---|---|---|
+| before | | 40 | 131,072 | 37,745 | | | 135.7 |
+| k1 | slab key, one find | 40 / 80 / 160 | full at each | 38,369 / 17,334 / 8,906 | | | 135.6 / 133.3 / 114.8 |
+| k2 | + `finer` | 40 / 160 | full | 36,649 / 6,635 | | 0.4 1.3 0.6% / 30 37 46% | 135.4 / 115.3 |
+| k3 | cache rays read, never claim | 40 | full | 25,395 | | | 128.4 |
+| k4 | + `claimed` (the final tree) | 40 / 160 | full | 39,440 / 8,354 | 20,047 9,217 6,684 (410) / 1,439 1,740 272 (5,055) | 0.4 0.6 1.5% / 23 33 41% | 132.9 / - |
+| k5 | a read's level the coarser of the surface's and the reader's footprint | 40 | full | 28,123 | 8,738 11,779 2,214 (1,039) | | 127.4 |
+| k6 | 2^21 slots (load 2^20) | 40 | 1,048,576 (full) | 10,701 | 2,375 4,196 397 (2,249) | | 126.8 (10.6 at the probes) |
+
+What each ruled out:
+
+- **The relief's descent is not what fills the table at the default
+  angle.** At 40 mrad a cell is evicted before it is lit (37,000-39,000 new
+  cells a frame against 8,192 lit), so almost no read finds a value to
+  descend from: 0.4-1.5% of reads go finer, 1% of the new cells are finer
+  ones. The table fills with the surface level's own cells.
+- **At coarser angles the descent is most of the new cells.** At 160 mrad
+  cells hold values and 23-46% of reads go finer; 5,055 of 8,500 new cells
+  a frame are finer cells. The plane test is gone in these builds, so this
+  is the clear distances: leaves, grass blades and voxel risers bound a
+  cell's ways a few centimetres from its point. Clutter is an occluder to
+  the descent.
+- **The readers' footprint (k5) is not the cure.** Keying a wide ray's hit
+  at its footprint's level cut the probes' claims from 20,000 to 8,700 a
+  frame, but a coarse cell holds its point's light, not its area's mean: the
+  cathedral's default read 2.00 of the reference (mean relative error 1.05)
+  and the probes 1.025. Reverted.
+- **The cache's own rays make the working set unbounded.** With 2^21 slots
+  the table still fills (1,048,576 cells, 9,700-10,700 new a frame, at both
+  qualities), and the cache rays are the largest claimer (4,200 of 7,000 a
+  frame): every cell's rays mark the cells they hit, those cells' rays mark
+  theirs, so the cells in use are the closure of the readers' cells under
+  the cache's rays, bounded by the table rather than by the readers. Without
+  their claims (k3) the new cells fall by a third at 2^18.
+- **The speckles follow the churn, not the table's size**: 126.8 a frame at
+  2^21 slots, 135 at 2^18 (10.6 at the probes): pixels' hits find a cell
+  with light 6-20% of the time, the rest are new or unexplored cells lit on
+  the spot.
+
+**Measured on the final tree** (release, RTX 3060; base: the merged base
+exe `*_basec`, alternated):
+
+| voxel_craft 1080p, four poses | GI update | gather | frame | cells in use, new a frame |
+|---|---|---|---|---|
+| base exe, probes (a, b) | 3.42, 3.43 ms | | 11.23, 11.25 ms | |
+| before, probes / a sixteenth | 4.98 / 4.90 | 5.77 | 13.15 / 18.97 | 131,072, 23,000-24,000 |
+| probes (a, b) | 4.63, 4.63 | | 12.85, 12.82 | 131,072, 29,000 |
+| a sixteenth (a, b) | 4.54, 4.60 | 5.54, 5.58 | 18.36, 18.51 | 131,072, 33,500 |
+
+The GI update 7% cheaper than before (`GILight`'s single find), still 35%
+over the base exe: the churning table. The frames against the tree before
+this subsection: 0.0003-0.0004 mean |difference| at the probes, 0.0003-0.0013
+at a sixteenth (luminance within 0.07%); against the base exe at the
+probes 0.0054-0.0104 and -0.56% to +0.57% (two base runs: 0.0014-0.0048,
+-0.37% to +1.15%), at a sixteenth 0.0059-0.0159 and -1.40% to +4.60% (the
+gather's own: the tree before reads +2.46% to +4.53% and -1.46% there too).
+The speckle gate at pose 12: 10.3 a frame at the probes (gate 20), 136.0 at
+a sixteenth (135.7 before): not met.
+
+The flight holds (1600x900 ground holds, 25 s, one run each; the GI passes
+from the graph's pass list; "GI's last faults" in brackets): Earth 4.53 ms
+at the probes [4.73] and 4.18 at a sixteenth [4.46] against the base exe's
+3.44; the Moon 4.17 [4.46] and 4.00 [4.27] against 3.49; `GILight` 0.49
+and 0.35 [0.78, 0.59] (base 0.20, 0.16). Against the base exe's frame:
+Earth 0.0019 mean |difference| and +0.08% luminance at the probes, 0.0032
+and +0.10% at a sixteenth; Moon 0.0017 / +0.06% and 0.0055 / +0.46%. The
+holds' logs carry no frame statistics, so their cells in use are not
+measured.
+
+**The roof test reads what it means.** `a_roof_shadows_the_sun` now makes
+two statements about the 3x3 finest probes about its point: settled (40
+updates each, past the integration's floor of 1/33 a step) under the roof
+below a tenth of the open probes' light, the bound unchanged; and at their
+third update within 4 standard deviations of a CPU model of what those
+probes must read (the L1 projection of the scene's exact radiance over
+their places, 2^18 directions; one update's deviation over 2,000 random
+turns of the 64-ray set; updates on one frame counted as one draw, the
+bound for probes that see the scene alike). Settled: 0.0274 under the roof (the model's 0.0274, deviation 0.0010),
+against the bound 0.032 (a tenth of the open probes' 0.320). The third
+update: 0.0250 against the model's 0.0274, deviation 0.0031 for the frames
+those updates came on (so the statement fails an early value 0.0124 or more
+off the model, 45% of it; probes that update on more distinct frames would
+tighten it). The previous measure (the 3x3 mean at the third update against
+the bound) read 0.0312.
+
+**Verified**: GI: lib 18, `radiance_cache` 10 of 10 (the closed
+box's indirect +0.9%, +0.3%, -0.4%, -2.8% of the CPU radiosity, direct
+within 0.2%, settled after 1,119 frames; the thin wall standing 0.0000%,
+0.0000%, 0.007%, 0.007%, 0.004%, 0.21% of the lit side at 1/8 m to 4 m cells
+["GI's last faults": up to 0.79%], lying at most 0.034%; the thin plate 2
+and 0; the card's floor direct 0.5024 and indirect 0.2767 against 0.5020
+and 0.2781), `probes` 16 of 16, `pixel_gather` 6 of 6, `mesh_gi_graph` 2 of
+2, `vg_ray_proxies` 3 of 3 (the classic wall's far half 0.000005; one
+measurement ignored, as before). Helio: `helio-frame-api` lib 37 and
+layouts 7, `radiance_cache_gpu` 3 of 3 (the new test: two parallel surfaces
+8 cm apart in a quarter-metre cell's footprint read 1 and 5, their own, at
+the surface's level; steps of 1 cm claim 2 cells against a bound of 3, of 5
+cm 5 against 8, none finer), `wgsl_validation`, `denoise_gpu` 8 (one
+measurement ignored), `pixels_gpu` 5. The voxel plugin (no change there):
+`wgsl` 2, its 5 GI tests. `one_owner`; the layer gate (no violation);
+`cargo fmt -p helio-frame-api`, `-p helio-pass-gi`; clippy with no warning
+in either. Not verified: the flight holds' cells in use, XR eyes and
+captures, the editor, the cathedral's per-pixel temporal noise over a
+burst.
+
+**Open**:
+
+- **The cache rays' closure.** A cell's rays claim the cells they hit, so
+  the cells in use grow to the table at any size (full at 2^21 on
+  voxel_craft). Bounding it is the next step: the bounced part from cells
+  that readers use (a cache ray reads, never claims; k3: a third fewer new
+  cells), or a claim limited to a cell's first bounce; its effect on the
+  bounces (the cathedral's rows, the closed box) is what to measure.
+- **The readers' demand on volume-filling surfaces.** With the closure
+  bounded, the probes' rays (turned every update, from probes all through
+  the clipmap) still claim 20,000 cells a frame at 40 mrad in a forest:
+  every leaf and blade face near every probe at the eye angle. The eye
+  angle's derivation (one surface a direction about the eye) does not hold
+  where readers fill a volume; a budget (the cells a frame the cache can
+  light) has to bound what readers claim, or the readers' resolution has to
+  follow the cells' area mean (a cell whose light is its area's, so a wide
+  reader can read a coarse one).
+- **The descent in clutter.** Clear distances bounded by leaves and blades
+  send 23-46% of reads finer at 160 mrad; an occluder that splits nothing
+  (its finer cells' light the cell's within their noise) should not keep
+  its finer cells.
+- **The speckle gate at the default** (126.8-135 against 20) waits on the
+  churn above.

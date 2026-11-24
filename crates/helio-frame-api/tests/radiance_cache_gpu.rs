@@ -4,12 +4,14 @@
 //! cell with the hit's point and normal; a read finds a value a publisher
 //! wrote and nothing where its cell has none, goes to a finer cell past an
 //! occluder or its reach (at most `DESCENT` levels, as the mark claims them),
-//! keeps sides and spaces apart, and finds nothing in the stand-in. Skipped
-//! without a device.
+//! keeps sides and spaces apart, and finds nothing in the stand-in; two
+//! parallel surfaces in one cell's footprint are two cells of the surface's
+//! level, and stepped relief claims a cell a layer it spans, no finer ones.
+//! Skipped without a device.
 
 use helio_frame_api::rays::radiance_cache::{
     self, RadianceCacheEntry, RadianceCacheFrame, RadianceCacheKey, RadianceCacheSlot, DESCENT,
-    SNIPPET,
+    LAYERS, PHASE, SNIPPET,
 };
 use helio_frame_api::rays::stream::{self, SNIPPET as STREAM};
 
@@ -45,7 +47,7 @@ fn keys(@builtin(global_invocation_id) id: vec3<u32>) {
     out[at + 7u] = k.z_hi;
     out[at + 8u] = radiance_cache_bucket(k);
     out[at + 9u] = radiance_cache_checksum(k);
-    out[at + 10u] = radiance_cache_pack_point(q.p.xyz, level).x;
+    out[at + 10u] = radiance_cache_pack_point(q.p.xyz, level, radiance_cache_side(q.n.xyz)).x;
 }
 
 @compute @workgroup_size(64)
@@ -65,6 +67,21 @@ fn read_hits(@builtin(global_invocation_id) id: vec3<u32>) {
     out[at + 1u] = e.level;
     out[at + 2u] = bitcast<u32>(e.direct.x);
     out[at + 3u] = bitcast<u32>(e.indirect.y);
+    out[at + 4u] = e.miss;
+}
+
+// `radiance_cache_read_mark`: as `read_hits`, marking as it reads.
+@compute @workgroup_size(64)
+fn read_mark_hits(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= count.x { return; }
+    let q = queries[id.x];
+    let e = radiance_cache_read_mark(q.p.xyz, q.n.xyz, u32(q.n.w));
+    let at = id.x * 12u;
+    out[at] = select(0u, 1u, e.found);
+    out[at + 1u] = e.level;
+    out[at + 2u] = bitcast<u32>(e.direct.x);
+    out[at + 3u] = bitcast<u32>(e.indirect.y);
+    out[at + 4u] = e.miss;
 }
 
 // Each slot's entry's point back in the frame's space.
@@ -89,7 +106,7 @@ struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     layout: wgpu::BindGroupLayout,
-    pipelines: [wgpu::ComputePipeline; 4],
+    pipelines: [wgpu::ComputePipeline; 5],
 }
 
 fn gpu() -> Option<Gpu> {
@@ -147,7 +164,7 @@ fn gpu() -> Option<Gpu> {
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
     });
-    let pipelines = ["keys", "mark_hits", "read_hits", "points"].map(|entry| {
+    let pipelines = ["keys", "mark_hits", "read_hits", "points", "read_mark_hits"].map(|entry| {
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry),
             layout: Some(&pipeline_layout),
@@ -201,7 +218,8 @@ impl Gpu {
         cache
     }
 
-    /// Runs entry `which` (0 keys, 1 mark, 2 read, 3 points) over `queries`;
+    /// Runs entry `which` (0 keys, 1 mark, 2 read, 3 points, 4 read and
+    /// mark) over `queries`;
     /// the output words.
     fn run(&self, cache: &Cache, which: usize, queries: &[Query], groups: u32) -> Vec<u32> {
         let input = self.buffer(
@@ -354,12 +372,18 @@ fn keys_match_the_rust_mirror_at_every_scale() {
                 "{origin:?} query {i}: bucket"
             );
             assert_eq!(w[9], key.checksum(), "{origin:?} query {i}: checksum");
-            // The world cell holds the world point (f64), at the key's level.
-            let size = f64::from(radiance_cache::cell_size(level));
+            // The world cell holds the world point (f64), at the key's level:
+            // its cells across the key's side, its layers along the side's
+            // axis.
             let world: [f64; 3] = std::array::from_fn(|k| origin[k] + f64::from(p[k]));
             let cell = key.cell();
             for k in 0..3 {
-                let lo = cell[k] as f64 * size;
+                let mut size = f64::from(radiance_cache::cell_size(level));
+                let mut lo = cell[k] as f64 * size;
+                if k as u32 == key.side() / 2 {
+                    size /= f64::from(LAYERS);
+                    lo = (cell[k] as f64 - f64::from(PHASE)) * size;
+                }
                 assert!(
                     world[k] >= lo - 1e-3 * size.max(1.0)
                         && world[k] < lo + size + 1e-3 * size.max(1.0),
@@ -601,4 +625,135 @@ fn marks_claim_cells_and_reads_find_what_a_publisher_wrote() {
     gpu.run(&empty, 1, &floor, groups);
     assert!(gpu.read(&empty.slots).iter().all(|&w| w == 0));
     assert!(gpu.read(&empty.entries).iter().all(|&w| w == 0));
+}
+
+/// The slots holding a cell, and their entries.
+fn occupied(gpu: &Gpu, cache: &Cache, slots: u32) -> (Vec<usize>, Vec<RadianceCacheEntry>) {
+    let rows: Vec<RadianceCacheSlot> = bytemuck::cast_slice(&gpu.read(&cache.slots)).to_vec();
+    let entries: Vec<RadianceCacheEntry> = bytemuck::cast_slice(&gpu.read(&cache.entries)).to_vec();
+    let used = (0..slots as usize)
+        .filter(|&s| rows[s].state != 0)
+        .collect();
+    (used, entries)
+}
+
+/// A publisher's value in cell `e`: direct `direct`, indirect 0, every way
+/// open.
+fn lit(e: &mut RadianceCacheEntry, direct: f32) {
+    e.history = (e.history & 0xffff_0000) | 0x0101;
+    e.direct = [direct, 0.0, 0.0];
+    e.indirect = [0.0; 3];
+    e.bounced = [0.0; 3];
+    e.clear = [0x7bff_7bff; 4];
+}
+
+/// Hits facing up on a grid of `x` by `z` within one quarter-metre cell's
+/// footprint (x and z in [0, 1/4) m), at heights `y(x)`.
+fn footprint(y: impl Fn(f32) -> f32) -> Vec<Query> {
+    (0..10)
+        .flat_map(|i| (0..4).map(move |j| (i, j)))
+        .map(|(i, j)| {
+            let x = 0.0125 + 0.025 * i as f32;
+            Query {
+                p: [x, y(x), 0.03 + 0.06 * j as f32, 0.0],
+                n: [0.0, 1.0, 0.0, 1.0],
+            }
+        })
+        .collect()
+}
+
+/// Two parallel surfaces inside one cell's footprint, 8 cm apart (a slab's
+/// top over the floor beside it: one cube of the quarter-metre level holds
+/// both), are two cells of the surface's level, each read with its own
+/// light, none finer; stepped relief claims one cell a layer it spans at the
+/// surface's level (at most `floor(relief / thickness) + 2`), and reads it
+/// there once lit, claiming nothing finer: steps of 1 cm (under a layer's
+/// 1/32 m) and of 5 cm (over it), 4 cm and 20 cm of relief.
+#[test]
+fn relief_shares_a_level_and_parallel_surfaces_keep_their_light() {
+    let Some(gpu) = gpu() else { return };
+    let origin = [6_371_000.0 - 6_371_000.0 % 1024.0, 0.0, -1024.0 * 7.0];
+    // Quarter-metre cells for every hit below (1.2 to 1.5 m away).
+    let frame = RadianceCacheFrame::new(origin, [0.0; 3], 0.18, 1 << 12, 5);
+    let level = frame.level([0.0, -1.48, 0.0]);
+    assert_eq!(radiance_cache::cell_size(level), 0.25);
+    let thickness = 0.25 / LAYERS as f32;
+    let reads = |cache: &Cache, qs: &[Query], which: usize| {
+        let out = gpu.run(cache, which, qs, 1);
+        (0..qs.len())
+            .map(|i| {
+                (
+                    out[i * 12],
+                    out[i * 12 + 1],
+                    f32::from_bits(out[i * 12 + 2]),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    // The floor at -1.48 m under x < 1/8 m, the slab's top at -1.40 m past it.
+    let floor_at = -1.48;
+    let top_at = -1.40;
+    let both = footprint(|x| if x < 0.125 { floor_at } else { top_at });
+    for q in &both {
+        assert_eq!(frame.level([q.p[0], q.p[1], q.p[2]]), level);
+    }
+    let cache = gpu.cache(&frame);
+    // Read and marked: new cells, nothing found.
+    assert!(reads(&cache, &both, 4).iter().all(|r| r.0 == 0));
+    let (used, mut entries) = occupied(&gpu, &cache, frame.slots());
+    assert_eq!(used.len(), 2, "a cell a surface");
+    for &s in &used {
+        assert_eq!(entries[s].key.level(), level);
+        let on_top = (radiance_cache_point_y(&frame, &entries[s]) - top_at).abs() < 0.01;
+        lit(&mut entries[s], if on_top { 5.0 } else { 1.0 });
+    }
+    gpu.queue
+        .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&entries));
+    for (q, r) in both.iter().zip(reads(&cache, &both, 4)) {
+        let want = if q.p[1] == top_at { 5.0 } else { 1.0 };
+        assert_eq!(r, (1, level, want), "{:?}", q.p);
+    }
+    assert_eq!(
+        occupied(&gpu, &cache, frame.slots()).0.len(),
+        2,
+        "nothing finer"
+    );
+    // Stepped relief across the footprint.
+    for step in [0.01f32, 0.05] {
+        let stairs = footprint(|x| floor_at + step * (x / 0.05).floor());
+        let relief = step * 4.0;
+        let cache = gpu.cache(&frame);
+        gpu.run(&cache, 1, &stairs, 1);
+        let (used, mut entries) = occupied(&gpu, &cache, frame.slots());
+        let bound = (relief / thickness).floor() as usize + 2;
+        println!("steps of {step} m: {} cells (bound {bound})", used.len());
+        assert!(
+            !used.is_empty() && used.len() <= bound,
+            "steps of {step} m: {} cells, bound {bound}",
+            used.len()
+        );
+        for &s in &used {
+            assert_eq!(entries[s].key.level(), level, "steps of {step} m");
+            lit(&mut entries[s], 2.0);
+        }
+        gpu.queue
+            .write_buffer(&cache.entries, 0, bytemuck::cast_slice(&entries));
+        for (q, r) in stairs.iter().zip(reads(&cache, &stairs, 4)) {
+            assert_eq!(r, (1, level, 2.0), "steps of {step} m at {:?}", q.p);
+        }
+        assert_eq!(
+            occupied(&gpu, &cache, frame.slots()).0.len(),
+            used.len(),
+            "steps of {step} m: nothing finer"
+        );
+    }
+}
+
+/// Entry `e`'s point's height, frame space (its layer and its place in it).
+fn radiance_cache_point_y(frame: &RadianceCacheFrame, e: &RadianceCacheEntry) -> f32 {
+    let level = e.key.level();
+    let o = frame.origin_cell(level, e.key.side());
+    let size = radiance_cache::cell_size(level) / LAYERS as f32;
+    let layer = (e.key.cell()[1] - o[1]) as f32 + e.point_in_cell()[1] - PHASE;
+    layer * size - frame.offset[1]
 }
