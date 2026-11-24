@@ -18,15 +18,25 @@
 //!   is a multiple of 1024 m, so it is a whole number of cells at every
 //!   level, a frame point's cell is the origin's plus the point's, and an
 //!   origin change moves no entry.
+//! - **A cell is a slab** lying on its surface: the level's width across its
+//!   side, a [`LAYERS`]-th of it along the side's axis (its layer, from
+//!   [`PHASE`]). Relief thinner than a layer (a step, a bump) is the cell's
+//!   surface, prefiltered; a parallel surface farther off (a slab's top and
+//!   the floor under it, a wall's top and the floor beside it) is another
+//!   cell at the same level; a surface's relief over a cell's width claims
+//!   one cell a layer it spans, at its own level, never finer ones. (A first
+//!   version keyed cubes and sent a reader off the cell's plane by more than
+//!   an eighth of the cell to finer cells: stepped ground's every tread
+//!   descended three levels, up to 64 cells where one did.)
 //! - **The level** of a surface point: one, whoever reads it and however
 //!   wide their ray, the publisher's eye angle at its distance from the eye
 //!   (as SHaRC and GI-1.0 key their hash grids), so every reader of a place
 //!   reads and marks the same cell; a wide ray takes the cell's light as its
 //!   prefiltered value. Next to what splits a cell (an occluder between the
-//!   cell's point and the hit, found by the cell's own rays; a surface beside
-//!   the cell's facing the same way, which the frame's surface stops tell
-//!   from the cell's own: `frame_surface_stops`, which a reader opts into
-//!   too), a read goes to finer cells, at most [`DESCENT`] levels.
+//!   cell's point and the hit, found by the cell's own rays; a surface turned
+//!   away from the cell's, which the frame's surface stops tell from the
+//!   cell's own: `frame_surface_stops`, which a reader opts into too), a
+//!   read goes to finer cells, at most [`DESCENT`] levels.
 //! - **A read that finds nothing says why** (`miss`): no cell yet, no value
 //!   yet, its rays not yet past the way to the hit (the cell's light then
 //!   comes with it), all of which pass; or every cell that could answer holds
@@ -41,8 +51,9 @@
 //!   cathedral and the speckle gate within noise.)
 //! - **The mark**: a reader marks the cell it read as used this frame, and
 //!   the finer ones it went to; a cell first used takes its point and normal
-//!   from the hit that marked it. What the publisher lights, how often and
-//!   what it evicts is its own.
+//!   from the hit that marked it. A reader that reads and marks calls
+//!   `radiance_cache_read_mark` (one find a level for both). What the
+//!   publisher lights, how often and what it evicts is its own.
 //!
 //! The WGSL ([`SNIPPET`], `//!use frame_radiance_cache`) holds the rows, the
 //! read and the mark; the Rust here mirrors the key's arithmetic for tests
@@ -92,6 +103,14 @@ pub const BUCKET: u32 = 16;
 /// Levels finer than a surface's own a read goes to where the surface's
 /// cell does not hold for it (`RADIANCE_CACHE_DESCENT`).
 pub const DESCENT: u32 = 3;
+/// The layers a cell's width holds along its side's axis
+/// (`RADIANCE_CACHE_LAYERS`): as thin as the finest cell a read descends
+/// to.
+pub const LAYERS: u32 = 1 << DESCENT;
+/// Where a layer starts within its thickness (`RADIANCE_CACHE_PHASE`):
+/// layers start at `k - PHASE` thicknesses, so surfaces on the levels'
+/// dyadic grid or a decimal one sit inside a layer, not on its boundary.
+pub const PHASE: f32 = 0.381966;
 /// The new cells' queue holds a place for every this many slots
 /// (`RADIANCE_CACHE_QUEUE_SHARE`): it follows the hash's slots in
 /// [`SLOTS`]'s buffer, its count first.
@@ -166,27 +185,46 @@ impl RadianceCacheFrame {
         l.clamp(0.0, (LEVELS - 1) as f32) as u32
     }
 
-    /// `radiance_cache_origin_cell`: the origin's cell at `level`, an axis.
-    pub fn origin_cell(&self, level: u32) -> [i64; 3] {
+    /// `radiance_cache_origin_cell`: the origin's place in a key of `level`
+    /// on side `side`, an axis (cells across the side, layers along it).
+    pub fn origin_cell(&self, level: u32, side: u32) -> [i64; 3] {
         let whole = |lo: u32, hi: u32| ((u64::from(hi) << 32) | u64::from(lo)) as i64;
         let s = LEVELS - 1 - level;
-        [
+        let along = (side / 2) as usize;
+        let o = [
             whole(self.origin_xy[0], self.origin_xy[1]),
             whole(self.origin_xy[2], self.origin_xy[3]),
             whole(self.origin_z[0], self.origin_z[1]),
-        ]
-        .map(|c| c.wrapping_shl(s))
+        ];
+        std::array::from_fn(|k| {
+            let layer = if k == along { DESCENT } else { 0 };
+            o[k].wrapping_shl(s + layer)
+        })
+    }
+
+    /// `radiance_cache_place`: frame point `p` in a key's units at `level`
+    /// on side `side` (the level's cells across it, layers along its axis).
+    pub fn place(&self, p: [f32; 3], level: u32, side: u32) -> [f32; 3] {
+        let inv = (-((level as i32 + FINEST) as f32)).exp2();
+        let along = (side / 2) as usize;
+        std::array::from_fn(|k| {
+            let q = (p[k] + self.offset[k]) * inv;
+            if k == along {
+                q * LAYERS as f32 + PHASE
+            } else {
+                q
+            }
+        })
     }
 
     /// `radiance_cache_key`: the cell of frame point `p` at `level`, on the
     /// side of unit `n`, in coordinate space `space`.
     pub fn key(&self, p: [f32; 3], n: [f32; 3], level: u32, space: u32) -> RadianceCacheKey {
-        let inv = (-((level as i32 + FINEST) as f32)).exp2();
-        let o = self.origin_cell(level);
-        let c: [i64; 3] = std::array::from_fn(|k| {
-            o[k].wrapping_add(((p[k] + self.offset[k]) * inv).floor() as i32 as i64)
-        });
-        RadianceCacheKey::new(c, level, side(n), space)
+        let side = side(n);
+        let o = self.origin_cell(level, side);
+        let q = self.place(p, level, side);
+        let c: [i64; 3] = std::array::from_fn(|k| o[k].wrapping_add(q[k].floor() as i32 as i64));
+        RadianceCacheKey::new(c, level, side, space)
     }
 }
 
@@ -267,7 +305,8 @@ impl RadianceCacheKey {
         (self.tag >> 8) & 0x1ff
     }
 
-    /// The world cell, an axis.
+    /// The world cell, an axis (the level's cells across its side, its
+    /// layers along the side's axis).
     pub fn cell(&self) -> [i64; 3] {
         let whole = |lo: u32, hi: u32| ((u64::from(hi) << 32) | u64::from(lo)) as i64;
         [
@@ -337,7 +376,8 @@ impl RadianceCacheEntry {
         self.history & 0xffff != 0
     }
 
-    /// The point's place in its cell, each axis in [0, 1).
+    /// The point's place in its cell (its layer along the side's axis),
+    /// each axis in [0, 1).
     pub fn point_in_cell(&self) -> [f32; 3] {
         let fine = self.history >> 16;
         [0, 1, 2].map(|k| {
@@ -400,11 +440,14 @@ mod tests {
             ("RADIANCE_CACHE_DESCENT", DESCENT),
             ("RADIANCE_CACHE_QUEUE_SHARE", QUEUE_SHARE),
             ("RADIANCE_CACHE_WAYS", WAYS),
+            ("RADIANCE_CACHE_LAYERS", LAYERS),
         ] {
             let line = format!("const {name}: u32 = {value}u;");
             assert!(SNIPPET.source.contains(&line), "{line}");
         }
         let line = format!("const RADIANCE_CACHE_UNSEATED: u32 = {UNSEATED:#x}u;");
+        assert!(SNIPPET.source.contains(&line), "{line}");
+        let line = format!("const RADIANCE_CACHE_PHASE: f32 = {PHASE};");
         assert!(SNIPPET.source.contains(&line), "{line}");
     }
 
@@ -452,7 +495,13 @@ mod tests {
                     "{world:?} {level}: {keys:?}"
                 );
                 let size = f64::from(cell_size(level));
-                let want = world.map(|c| (c / size).floor() as i64);
+                let want: [i64; 3] = std::array::from_fn(|k| {
+                    if k == 1 {
+                        (world[k] / size * f64::from(LAYERS) + f64::from(PHASE)).floor() as i64
+                    } else {
+                        (world[k] / size).floor() as i64
+                    }
+                });
                 assert_eq!(keys[0].cell(), want, "{world:?} at {level}");
                 assert_eq!(keys[0].level(), level);
             }

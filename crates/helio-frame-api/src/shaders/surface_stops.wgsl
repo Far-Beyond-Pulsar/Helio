@@ -29,18 +29,3 @@ fn surface_stops_weight(p: vec3<f32>, np: vec3<f32>, q: vec3<f32>, nq: vec3<f32>
     let w_plane = saturate(1.0 - plane / (SURFACE_STOPS_PLANE_SLOPE * distance(p, q) + footprint));
     return w_normal * w_plane;
 }
-
-// Whether point `q` (unit normal `nq`) lies on the plane the surface of point
-// `p` (unit normal `np`) can reach that far, for normals that are the
-// surface's geometry (faces, not shading normals): the chord between two
-// points of a smooth surface whose normals differ by t leaves the tangent
-// plane by tan(t / 2) of its length (the plane stop's own derivation, at the
-// two normals' angle instead of the normal stop's bound), and a surface
-// beside it facing the same way (a room's wall and a thin wall's face
-// before it, a step's two treads) by its gap however near their normals:
-// more than `footprint` off that is another surface.
-fn surface_stops_on_plane(p: vec3<f32>, np: vec3<f32>, q: vec3<f32>, nq: vec3<f32>, footprint: f32) -> bool {
-    let c = clamp(dot(np, nq), -1.0, 1.0);
-    let slope = sqrt(max(1.0 - c, 0.0) / max(1.0 + c, 1e-6));
-    return abs(dot(np, q - p)) <= slope * distance(p, q) + footprint;
-}
