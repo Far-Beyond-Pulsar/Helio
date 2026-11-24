@@ -4368,6 +4368,74 @@ natural heightfield tops; 16-cubes hold no coverage. Adding those per
 4-cube is a second representation built with the chunk (its build, its
 memory, its edits), a design decision, not a walk change: not built here.
 
+**A node's surface derived from its masks: measured, not built.** The
+decision taken next: no stored plane; derive each node's plane from the
+occupancy the tree holds, as volume-of-fluid methods place an interface
+in a cell from its fill (PLIC). Built and measured on Pulsar
+`render/r3-walk` (48b0dc2b8, the gather merged; the patch is
+`C:/t/r3walk/walk_derived_final.patch`):
+
+- *The surface.* A 4-cube's 64 cells, or a 16-cube's 64 4-cubes (full
+  ones 1, partly solid ones a half), by popcounts: along the axis the
+  fill's first moment leans on most, which side is solid; across it the
+  least-squares slope of the fill's height over the 4 x 4 columns (the
+  moment over 20), exact for a plane that crosses every column. The
+  centroid alone, or the low and high halves' difference, underestimate a
+  slope: a 30-degree plane through a node's middle reads 23 and 22
+  degrees. The offset fills the node as its children do (Scardovelli and
+  Zaleski's analytic inverse). A wide ray (nearest and occlusion streams)
+  meets a 4- or 16-cube its footprint covers, more than its diagonal from
+  both ends of the ray, at the plane; zero-width rays walk the cells as
+  before.
+- *Against the fine cells* (`chunks.rs`, an Earth: the ground with the
+  brick ball, and a forest; GI-like rays, no width spreading 0.443 a
+  metre, from probe places). On the ground the hit lies within 0.27 of
+  the footprint of the exact hit (p99), its normal 10 degrees from the
+  fine cells' mean normal over the footprint (mean; p90 18), closer than
+  the cells' own faces are (12, p90 35). In the forest 8.6% of the rays
+  that hit a crown passed it (a plane through scattered leaves), and the
+  normals were no better than the faces.
+- *The image* (voxel_craft, four poses, GI at its default, against the
+  same tree without the walk change; the same build twice: 0.0003-0.0005
+  mean |difference|, blocks within 0.3%). Hits on the coverage plane:
+  luminance -1.3 to -3.4%, the held block and the trunks 16-25% darker.
+  One switch a build: occlusion rays on the cells, no change; node hits
+  lit by their cell's face, worse; *the hit's position* moves it: the
+  coverage plane cuts through a rough fill's cell tops, so a hit under
+  them is lit from inside the ground (its shadow ray, its cache cell).
+  The plane raised to the top of the node's solid, and a node walked
+  finer where a child lies wholly on the plane's wrong side (a canopy's
+  scattered leaves, a pillar, a 4-cube that is not full under a 16-cube's
+  plane): -0.5 to +0.0% luminance, blocks to -4.9%, still eight to ten
+  times the noise; what remains is the raised plane meeting rays the
+  cells let past (the forest's rays met early 0.6% walking the cells,
+  5.6% on the nodes).
+- *The cost* (pipelined, alternated twice, 1080p voxel_craft pose 11 and
+  the 1600x900 Earth and Moon ground holds; base / coverage plane /
+  raised and checked plane, ms):
+
+  | | voxel_craft | Earth | Moon |
+  |---|---|---|---|
+  | probe and cache rays' walk (`gi`), `probes` | 2.04-2.29 / 1.85-1.87 / 3.00-3.26 | | |
+  | the same, `pixels_16` | 2.04-2.05 / 1.79-1.85 / 3.02-3.12 | 2.08-2.09 / 1.93 / 2.64-2.65 | 2.11 / 1.97-2.04 / 2.67-2.68 |
+  | the gather's pixel rays | 1.01-1.02 / 0.85-0.87 / 1.35-1.39 | 1.87 / 2.10 / 2.21-2.22 | 1.49 / 1.69-1.74 / 1.77-1.78 |
+  | the gather's visibility rays | 0.51-0.52 / 0.45-0.46 / 0.39-0.41 | 1.10 / 1.19-1.20 / 1.16 | 0.47-0.48 / 0.49-0.50 / 0.46-0.47 |
+  | the frame, `pixels_16` | 20.67-20.76 / 20.22-20.31 / 22.23-22.80 | 21.93-21.96 / 21.80-21.81 / 22.78-22.92 | 17.27-17.30 / 17.06-17.39 / 18.03-18.18 |
+
+  Even the unchecked coverage plane saves at most 13% of a walk, and the
+  pixel rays on the planets walk 12-17% longer (a plane test costs more
+  than the cells it skips: their footprints cover a node only well away
+  from their origin, where the walk crosses air). The check that makes
+  the plane stand for its node (a pass over its 64 children) costs the
+  walks 25-50%. The walk's cost is not where a footprint can save it:
+  rays end at the first surface either way, and the earlier -38% came
+  from stopping at any occupied node, which thickens the ground.
+- What is missing for a surface that is right and cheap is a node's solid
+  top and its plane known without the pass: stored with the chunk, which
+  is the second representation this step was to avoid. With the walk's
+  cost not in its descents, it would not reach the target either. Not
+  built; the reference's rays (above, `exact_cone`) are the part kept.
+
 #### GI on the merged tree
 
 The three r3 branches merged (the cache rework, the pixels' gather, the
