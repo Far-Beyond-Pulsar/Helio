@@ -10,6 +10,7 @@
 //! build, the status screen takes its place with the reason. Nothing else is
 //! ever drawn in a pipeline's stead.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,6 +28,7 @@ use super::pipeline_status::{
 };
 use super::renderer_impl::{GraphRebuilder, Renderer};
 use super::status_screen;
+use crate::IntoGraph;
 
 /// What a pipeline's build reads, owned: the build runs on a worker, which
 /// borrows nothing of the renderer.
@@ -108,10 +110,22 @@ pub(crate) struct PipelineBuild {
     id: String,
     kind: BuildKind,
     slot: Arc<BuildSlot>,
+    /// Set when the build is dropped unfinished (replaced, superseded): the
+    /// job stops at its next node and compiles nothing more.
+    cancel: Arc<AtomicBool>,
+    /// A copy of the pipeline being built, so a build whose configuration
+    /// changed under it can start again ([`Renderer::supersede_build`]).
+    again: Option<Box<dyn IntoGraph>>,
     started: Instant,
     /// The size the build was made for: a resize while it ran is applied to
     /// its graph when it is installed (a graph resizes in place).
     built_for: (u32, u32, f32),
+}
+
+impl Drop for PipelineBuild {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
+    }
 }
 
 impl Renderer {
@@ -257,12 +271,22 @@ impl Renderer {
             inputs.config.render_scale,
         );
         let slot = Arc::new(BuildSlot::default());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let again = pipeline.duplicate();
         let started = Instant::now();
         let job = {
             let slot = Arc::clone(&slot);
+            let cancel = Arc::clone(&cancel);
             move || {
                 let device = Arc::clone(&inputs.device);
-                let built = guard_build(&device, || Some(pipeline.into_graph(inputs.context())));
+                helio_core::shader::set_build_cancel(Some(cancel));
+                // Its pipelines compile side by side when the build ends.
+                let built = guard_build(&device, || {
+                    Some(helio_core::shader::batched(|| {
+                        pipeline.into_graph(inputs.context())
+                    }))
+                });
+                helio_core::shader::set_build_cancel(None);
                 slot.set(built.expect("a pipeline's build always ends in a result"));
             }
         };
@@ -283,6 +307,8 @@ impl Renderer {
             id,
             kind: BuildKind::Pipeline { inherit },
             slot,
+            cancel,
+            again,
             started,
             built_for,
         });
@@ -313,22 +339,28 @@ impl Renderer {
             .clone()
             .unwrap_or_else(|| UNNAMED_PIPELINE.to_owned());
         let slot = Arc::new(BuildSlot::default());
+        let cancel = Arc::new(AtomicBool::new(false));
         let started = Instant::now();
         let job = {
             let slot = Arc::clone(&slot);
+            let cancel = Arc::clone(&cancel);
             move || {
                 let device = Arc::clone(&inputs.device);
+                helio_core::shader::set_build_cancel(Some(cancel));
                 let built = guard_build(&device, || {
-                    Some(rebuilder(
-                        &inputs.device,
-                        &inputs.queue,
-                        inputs.config.clone(),
-                        inputs.debug_state.clone(),
-                        &inputs.camera_buffer,
-                        &inputs.debug_camera_buffer,
-                        &inputs.stats,
-                    ))
+                    Some(helio_core::shader::batched(|| {
+                        rebuilder(
+                            &inputs.device,
+                            &inputs.queue,
+                            inputs.config.clone(),
+                            inputs.debug_state.clone(),
+                            &inputs.camera_buffer,
+                            &inputs.debug_camera_buffer,
+                            &inputs.stats,
+                        )
+                    }))
                 });
+                helio_core::shader::set_build_cancel(None);
                 slot.set(built.expect("a rebuild always ends in a result"));
             }
         };
@@ -343,17 +375,67 @@ impl Renderer {
             id,
             kind: BuildKind::Rebuild,
             slot,
+            cancel,
+            again: None,
             started,
             built_for,
         });
     }
 
+    /// Starts a build that was asked for while another ran from a
+    /// configuration that has changed since: the running build is abandoned
+    /// (it stops at its next node and compiles nothing more) and the new one
+    /// starts from the configuration as it is now, instead of waiting for the
+    /// stale one to finish and building again after it. Returns whether it
+    /// did; a build that cannot start again from its own copy is left to end.
+    pub(crate) fn supersede_build(&mut self) -> bool {
+        let Some(running) = self.pipeline_build.as_mut() else {
+            return false;
+        };
+        let (id, kind) = (running.id.clone(), running.kind);
+        match kind {
+            BuildKind::Pipeline { .. } => {
+                let Some(again) = running.again.take() else {
+                    return false;
+                };
+                log::info!(
+                    target: "helio::pipeline",
+                    "render pipeline `{id}`: its configuration changed {:.0} ms into the build; building it again from the new one",
+                    running.started.elapsed().as_secs_f64() * 1000.0
+                );
+                self.pipeline_build = None;
+                self.start_pipeline_build(NamedPipeline { id, pipeline: again }, false);
+                true
+            }
+            BuildKind::Rebuild => {
+                if self.graph_rebuilder.is_none() {
+                    return false;
+                }
+                log::info!(
+                    target: "helio::pipeline",
+                    "render pipeline `{id}`: its configuration changed {:.0} ms into the rebuild; rebuilding from the new one",
+                    running.started.elapsed().as_secs_f64() * 1000.0
+                );
+                self.pipeline_build = None;
+                self.begin_rebuild();
+                true
+            }
+        }
+    }
+
     /// What a build reads, owned (the worker borrows nothing of the renderer).
     fn build_inputs(&self) -> BuildInputs {
+        // What the scene holds now, for nodes that start content-dependent
+        // work early (`helio_core::BuildHints`).
+        let mut config = self.renderer_config();
+        config.features.insert(helio_core::BuildHints {
+            payloads: self.scene_payloads.clone(),
+            first_build: !self.pipeline_status.is_ready(),
+        });
         BuildInputs {
             device: self.device.clone(),
             queue: self.queue.clone(),
-            config: self.renderer_config(),
+            config,
             debug_state: self.debug_state.clone(),
             camera_buffer: self.camera_buffer.clone(),
             debug_camera_buffer: self.debug_camera_buffer.clone(),
@@ -387,11 +469,11 @@ impl Renderer {
         match (build.kind, result) {
             (BuildKind::Pipeline { inherit }, Ok(graph)) => {
                 self.install_pipeline_graph(graph, inherit && self.pipeline_status.is_ready());
-                self.pipeline_id = Some(build.id);
+                self.pipeline_id = Some(build.id.clone());
                 self.pipeline_status = PipelineStatus::Ready;
                 self.resize_to_current(build.built_for);
             }
-            (BuildKind::Pipeline { .. }, Err(failure)) => self.show_invalid(build.id, failure),
+            (BuildKind::Pipeline { .. }, Err(failure)) => self.show_invalid(build.id.clone(), failure),
             (BuildKind::Rebuild, Ok(replacement)) => {
                 self.install_replacement_graph(replacement);
                 self.clear_target_next_frame = true;

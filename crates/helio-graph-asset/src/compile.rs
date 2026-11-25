@@ -55,6 +55,8 @@ pub(crate) fn build_graph(
     observe: NodeObserver<'_>,
 ) -> Result<RenderGraph, Vec<Diagnostic>> {
     let lock = purpose == Purpose::Pipeline;
+    let build_started = std::time::Instant::now();
+    let mut node_times: Vec<(String, f64)> = Vec::new();
     let validation = match purpose {
         Purpose::Pipeline => validate(asset, registry),
         Purpose::Probe | Purpose::View => validate_structure(asset, registry),
@@ -94,6 +96,13 @@ pub(crate) fn build_graph(
         prepare(env);
     }
     for &index in &plan.order {
+        if helio_core::shader::build_cancelled() {
+            return Err(vec![Diagnostic {
+                severity: Severity::Error,
+                node: None,
+                message: "the build was abandoned: the renderer's configuration changed".to_owned(),
+            }]);
+        }
         let node = &flat.nodes[index];
         let descriptor = registry
             .get(&node.kind)
@@ -126,18 +135,26 @@ pub(crate) fn build_graph(
         // A node's passes create their GPU pipelines as they are built: the
         // nodes that take most of a pipeline's build are named in the log.
         let node_ms = node_started.elapsed().as_secs_f64() * 1000.0;
+        let cost = helio_core::shader::take_build_cost();
         if node_ms >= SLOW_NODE_MS {
             log::info!(
                 target: "helio::pipeline",
-                "node `{}` ({}) built {} pass(es) in {:.0} ms",
+                "node `{}` ({}) built {} pass(es) in {:.0} ms: {} shader module(s) {:.0} ms, {} pipeline(s) {:.0} ms ({} without the driver cache)",
                 node.id,
                 node.kind,
                 graph.pass_count() - first_pass,
-                node_ms
+                node_ms,
+                cost.modules,
+                cost.module_time.as_secs_f64() * 1000.0,
+                cost.pipelines,
+                cost.pipeline_time.as_secs_f64() * 1000.0,
+                cost.uncached_pipelines
             );
         }
+        node_times.push((node.id.clone(), node_ms));
         observe(node, &graph, first_pass..graph.pass_count());
     }
+    let nodes_ms = build_started.elapsed().as_secs_f64() * 1000.0;
     for finish in registry.finishers() {
         finish(env, &mut graph).map_err(|message| {
             vec![Diagnostic {
@@ -151,8 +168,29 @@ pub(crate) fn build_graph(
     graph.set_scene_derivations(registry.scene_derivations().to_vec());
     graph.set_untraced_geometry(registry.untraced_geometry().to_vec());
 
+    let lock_started = std::time::Instant::now();
     if lock {
         graph.lock_sized(env.frame.render_size());
+    }
+    if purpose == Purpose::Pipeline {
+        // Where a build's time goes, in the log: the nodes (most of it their
+        // pipelines' compile, queued or not), locking the graph, and the
+        // slowest nodes.
+        node_times.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let slowest: Vec<String> = node_times
+            .iter()
+            .take(6)
+            .map(|(id, ms)| format!("{id} {ms:.0} ms"))
+            .collect();
+        log::info!(
+            target: "helio::pipeline",
+            "graph `{}`: {} node(s) built in {:.0} ms (to here), locked in {:.0} ms; slowest: {}",
+            asset.name,
+            node_times.len(),
+            nodes_ms,
+            lock_started.elapsed().as_secs_f64() * 1000.0,
+            slowest.join(", ")
+        );
     }
     Ok(graph)
 }
@@ -289,6 +327,14 @@ impl IntoGraph for GraphAssetPipeline {
         ctx: PassBuildContext<'_>,
     ) -> Result<RenderGraph, PipelineFailure> {
         build(Arc::new(*self), ctx)
+    }
+
+    fn duplicate(&self) -> Option<Box<dyn IntoGraph>> {
+        Some(Box::new(Self {
+            source: self.source.clone(),
+            registry: Arc::clone(&self.registry),
+            views: self.views.clone(),
+        }))
     }
 }
 

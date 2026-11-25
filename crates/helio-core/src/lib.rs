@@ -270,7 +270,7 @@ pub use scene_derivation::{
     SceneDerivationOutput,
 };
 pub use scene_input::{
-    BufferContract, BufferHandle, BufferKey, ContractError, FlushedRows, PayloadContract,
+    BufferContract, BufferHandle, BufferKey, BuildHints, ContractError, FlushedRows, PayloadContract,
     PoolContract, SceneBufferProjection, SceneInput, ScenePayloads, CAMERA_BUFFER_KEY,
     ENTITY_GENERATIONS_KEY,
 };

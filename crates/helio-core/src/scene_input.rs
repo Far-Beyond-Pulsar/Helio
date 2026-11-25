@@ -147,6 +147,21 @@ impl<T: std::any::Any + Send + Sync> PayloadContract<T> {
     }
 }
 
+/// What a pipeline build knows of the scene when it starts: a feature's node
+/// reads it as a setting (`BuildEnv::setting::<BuildHints>()`) to start work
+/// that depends on content (a voxel world's pipeline compiles, UE5's PSO
+/// precaching at proxy creation) while the graph is still being built, not
+/// when its pass first draws.
+#[derive(Clone, Default)]
+pub struct BuildHints {
+    /// The payloads the host had published when the build started.
+    pub payloads: ScenePayloads,
+    /// The renderer has no pipeline running yet (a first build, or one that
+    /// replaces a failed or absent one): no pass has state to inherit, so
+    /// whatever a node starts early is not thrown away by a rebuild.
+    pub first_build: bool,
+}
+
 /// A frame's payloads ([`PayloadContract`]): what the host published, by
 /// key. Cheap to clone (shared values).
 #[derive(Clone, Default)]

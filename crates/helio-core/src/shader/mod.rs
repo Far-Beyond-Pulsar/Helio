@@ -56,6 +56,60 @@
 
 use std::borrow::Cow;
 
+/// What the shader compiler cost the current thread since [`take_build_cost`]:
+/// shader modules (WGSL parse and validation) and pipelines (the backend's
+/// shader compile). A graph build reads it per node, so a slow node says
+/// whether its time is the front end or the driver.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BuildCost {
+    pub modules: u32,
+    pub module_time: std::time::Duration,
+    pub pipelines: u32,
+    pub pipeline_time: std::time::Duration,
+    /// Pipelines created with no driver cache attached (`create_*_pipeline`
+    /// called straight on the device by a pass, or no cache configured).
+    pub uncached_pipelines: u32,
+}
+
+thread_local! {
+    static BUILD_COST: std::cell::Cell<BuildCost> = const { std::cell::Cell::new(BuildCost {
+        modules: 0,
+        module_time: std::time::Duration::ZERO,
+        pipelines: 0,
+        pipeline_time: std::time::Duration::ZERO,
+        uncached_pipelines: 0,
+    }) };
+}
+
+/// This thread's [`BuildCost`] so far, reset to zero.
+pub fn take_build_cost() -> BuildCost {
+    BUILD_COST.with(|cost| cost.replace(BuildCost::default()))
+}
+
+/// A single compile this slow is named in the log (target `helio::pipeline`).
+const SLOW_COMPILE: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn note_compile(
+    what: &str,
+    label: Option<&str>,
+    took: std::time::Duration,
+    update: impl FnOnce(&mut BuildCost),
+) {
+    BUILD_COST.with(|cost| {
+        let mut value = cost.get();
+        update(&mut value);
+        cost.set(value);
+    });
+    if took >= SLOW_COMPILE {
+        log::info!(
+            target: "helio::pipeline",
+            "{what} `{}` took {:.0} ms",
+            label.unwrap_or("unlabelled"),
+            took.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// Create a render pipeline with the device's shared driver cache when one is
 /// configured. wgpu persists backend compiled pipeline data, including shader
 /// compilation results; WGSL module parsing still uses the normal source path.
@@ -64,11 +118,20 @@ pub fn create_render_pipeline(
     descriptor: wgpu::RenderPipelineDescriptor<'_>,
 ) -> wgpu::RenderPipeline {
     let cache = crate::graph::driver_cache_for_device(device);
+    let cached = cache.is_some() || descriptor.cache.is_some();
     let descriptor = wgpu::RenderPipelineDescriptor {
         cache: descriptor.cache.or(cache.as_deref()),
         ..descriptor
     };
-    device.create_render_pipeline(&descriptor)
+    let started = std::time::Instant::now();
+    let pipeline = device.create_render_pipeline(&descriptor);
+    let took = started.elapsed();
+    note_compile("render pipeline", descriptor.label, took, |cost| {
+        cost.pipelines += 1;
+        cost.pipeline_time += took;
+        cost.uncached_pipelines += u32::from(!cached);
+    });
+    pipeline
 }
 
 /// Create a compute pipeline with the device's shared driver cache when one is
@@ -78,18 +141,32 @@ pub fn create_compute_pipeline(
     descriptor: wgpu::ComputePipelineDescriptor<'_>,
 ) -> wgpu::ComputePipeline {
     let cache = crate::graph::driver_cache_for_device(device);
+    let cached = cache.is_some() || descriptor.cache.is_some();
     let descriptor = wgpu::ComputePipelineDescriptor {
         cache: descriptor.cache.or(cache.as_deref()),
         ..descriptor
     };
-    device.create_compute_pipeline(&descriptor)
+    let started = std::time::Instant::now();
+    let pipeline = device.create_compute_pipeline(&descriptor);
+    let took = started.elapsed();
+    note_compile("compute pipeline", descriptor.label, took, |cost| {
+        cost.pipelines += 1;
+        cost.pipeline_time += took;
+        cost.uncached_pipelines += u32::from(!cached);
+    });
+    pipeline
 }
 
+pub mod deferred;
 pub mod directives;
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub mod hot;
 pub mod reflection;
 mod value_arrays;
+pub use deferred::{
+    batched, build_cancelled, create_compute_pipeline_deferred, create_render_pipeline_deferred,
+    set_build_cancel, Deferred, DeferredCompute, DeferredRender,
+};
 pub use directives::{parse as parse_directives, PipelineDirectives};
 #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]
 pub use hot::ShaderFile;
@@ -516,10 +593,16 @@ pub fn module_with<'a>(
     let text = Cow::Borrowed(source.text);
     // The one sanctioned call: every other site goes through here so the
     // shader is hot reloadable (see clippy.toml).
-    #[allow(clippy::disallowed_methods, clippy::let_and_return)]
+    let started = std::time::Instant::now();
+    #[allow(clippy::disallowed_methods)]
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
         source: wgpu::ShaderSource::Wgsl(resolve_with(&text, snippets)),
+    });
+    let took = started.elapsed();
+    note_compile("shader module", Some(label), took, |cost| {
+        cost.modules += 1;
+        cost.module_time += took;
     });
     module
 }

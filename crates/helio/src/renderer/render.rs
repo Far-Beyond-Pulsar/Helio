@@ -81,6 +81,9 @@ impl Renderer {
         // A rebuild waits for a pipeline still building: that pipeline is
         // built from the configuration as it was asked for, and installs
         // before the next one starts (`begin_rebuild` defers the same way).
+        if self.pending_rebuild && self.pipeline_build.is_some() && self.supersede_build() {
+            self.pending_rebuild = false;
+        }
         if self.pipeline_build.is_none() && std::mem::take(&mut self.pending_rebuild) {
             helio_core::cpu_scope!("Helio: rebuild graph");
             self.begin_rebuild();

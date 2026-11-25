@@ -40,12 +40,28 @@ fn shared_driver_cache(
     Option<Arc<Mutex<()>>>,
 ) {
     if !device.features().contains(wgpu::Features::PIPELINE_CACHE) {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+            log::warn!(
+                target: "helio::pipeline",
+                "the device lacks PIPELINE_CACHE: every pipeline compiles without a driver cache (device features: {:?})",
+                device.features()
+            );
+        });
         return (None, requested_path, None);
     }
 
     // All graphs and pass constructors using one Device share this cache.
     // Keep a weak registry entry so closing a renderer releases its Device.
-    let device_key = device as *const wgpu::Device as usize;
+    // The device's identity, not the address of the handle asked with: a
+    // handle is cloned freely (a compile worker holds its own), and a key per
+    // address made every clone load the cache file again.
+    let device_key = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        device.hash(&mut hasher);
+        hasher.finish() as usize
+    };
     let mut caches = crate::runtime::shared()
         .driver_caches
         .lock()
@@ -72,6 +88,15 @@ fn shared_driver_cache(
     let path = requested_path
         .or_else(|| std::env::var_os("PULSAR_PIPELINE_CACHE").map(std::path::PathBuf::from));
     let data = path.as_ref().and_then(|path| std::fs::read(path).ok());
+    log::info!(
+        target: "helio::pipeline",
+        "driver pipeline cache: {} (file {})",
+        match &data {
+            Some(data) => format!("{} bytes loaded", data.len()),
+            None => "starting empty".to_owned(),
+        },
+        path.as_ref().map_or_else(|| "none: not persisted".to_owned(), |p| p.display().to_string())
+    );
     let cache = Arc::new(unsafe {
         device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
             label: Some("Helio Pipeline Cache"),
@@ -344,6 +369,7 @@ impl PipelineFormatCache {
     /// the same compatible adapter; wgpu performs that validation on load.
     pub fn persist(&self) -> std::io::Result<()> {
         let Some(path) = &self.persistent_path else {
+            log::debug!(target: "helio::pipeline", "driver pipeline cache: not saved (no file configured)");
             return Ok(());
         };
         let _persist_guard = self.persist_lock.as_ref().map(|lock| {
@@ -355,6 +381,7 @@ impl PipelineFormatCache {
             .as_ref()
             .and_then(|cache| cache.get_data())
         else {
+            log::debug!(target: "helio::pipeline", "driver pipeline cache: not saved (the device has no cache or the backend gave no data)");
             return Ok(());
         };
         if let Some(parent) = path.parent() {
@@ -362,8 +389,16 @@ impl PipelineFormatCache {
         }
         // Per-process temp name: several game instances may share one cache file.
         let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-        std::fs::write(&tmp, data)?;
-        std::fs::rename(tmp, path)
+        std::fs::write(&tmp, &data)?;
+        let saved = std::fs::rename(tmp, path);
+        log::info!(
+            target: "helio::pipeline",
+            "driver pipeline cache: saved {} bytes to {} ({})",
+            data.len(),
+            path.display(),
+            if saved.is_ok() { "ok" } else { "rename failed" }
+        );
+        saved
     }
 }
 

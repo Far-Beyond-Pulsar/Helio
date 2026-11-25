@@ -40,6 +40,14 @@ pub trait IntoGraph: Send {
         self: Box<Self>,
         ctx: PassBuildContext<'_>,
     ) -> Result<RenderGraph, PipelineFailure>;
+
+    /// A copy that builds the same graph, for a host that starts the build
+    /// again when its configuration changed while it ran
+    /// (`Renderer::supersede_build`). A pipeline that cannot be copied is
+    /// left to finish, and the change is applied by a rebuild after it.
+    fn duplicate(&self) -> Option<Box<dyn IntoGraph>> {
+        None
+    }
 }
 
 /// A hand-written builder always produces its graph (one that cannot panics,

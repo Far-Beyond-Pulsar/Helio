@@ -350,7 +350,7 @@ impl<'a> SideBySide<'a> {
 
 /// A future that is ready when asked (a native device's error scope).
 #[cfg(not(target_arch = "wasm32"))]
-fn ready<T>(future: impl std::future::Future<Output = Option<T>>) -> Option<T> {
+pub(crate) fn ready<T>(future: impl std::future::Future<Output = Option<T>>) -> Option<T> {
     let mut future = std::pin::pin!(future);
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     match future.as_mut().poll(&mut context) {
