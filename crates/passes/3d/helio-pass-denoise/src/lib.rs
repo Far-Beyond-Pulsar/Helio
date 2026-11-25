@@ -17,20 +17,25 @@
 //!    detail finer than a block is the producer's, a gather's near field);
 //!    their sum is how much this frame says about the pixel.
 //!    Its history is read where the frame's history says it was, from the
-//!    bilinear taps that held the same surface, renormalised. The history's
-//!    length is multiplied by the producer's confidence and by the share of
-//!    the footprint that held the surface, then grows by this frame's weight
-//!    up to [`DenoiseSettings::max_history`]; the running mean blends by
-//!    weight over length.
+//!    bilinear taps that held the same surface, renormalised, with the
+//!    samples those taps hold (how much of the footprint held the surface
+//!    says where the history is read, not how many samples it rests on: a
+//!    pixel under sub-pixel detail the camera's jitter moves, a canopy's
+//!    leaves, keeps part of its taps every frame, and a length scaled by
+//!    that part each frame never grew past one or two). The length is
+//!    multiplied by the producer's confidence, then grows by this frame's
+//!    weight up to [`DenoiseSettings::max_history`]; the running mean
+//!    blends by weight over length.
 //! 2. **Records** (a block; blocks of 4 and 16): the temporal result at the
 //!    block's representative pixel (its centre). Traced at every pixel, the
 //!    pixels are the records.
 //! 3. **Spatial** (a block), twice: an a-trous filter of the linear
 //!    B-spline's 3x3 over the records, at steps of s and 2s blocks, `s =
-//!    sqrt(16 / length)` within 1 to 4 (the footprint adds about s^2
-//!    records, so every estimate rests on about 16 frames' worth: wide where
-//!    history is short, which is the history fix, one block from 16 frames
-//!    on), each tap weighted by geometry alone (below). Each record also
+//!    sqrt(SETTLED_SAMPLES / length)` within 1 to 4 (the footprint adds
+//!    about s^2 records, so every estimate rests on a settled estimate's
+//!    worth, 16 frames, where the geometry lets it: wide where history is
+//!    short, which is the history fix, one block from 16 frames on), each
+//!    tap weighted by geometry alone (below). Each record also
 //!    carries how many samples' worth it holds: a weighted mean of
 //!    estimates of `n_q` samples holds `(sum w)^2 / sum (w^2 / n_q)`.
 //! 4. **Reconstruction** (a pixel): the filtered records of the pixel's
@@ -41,8 +46,11 @@
 //!    stage left them, times the share of the pixel's tent their geometry
 //!    lets them serve, so at a contact the pixel keeps its own). The result
 //!    is the output and the next frame's history: the spatial stage is
-//!    recurrent, as ReBLUR's post-blur history is, while the moments stay
-//!    the raw samples' (the variance never sees the filter).
+//!    recurrent, as ReBLUR's post-blur history is. The output reports the
+//!    samples' worth behind each estimate (the two mixed: their sum), which
+//!    a reader with a prior of its own leans on where it is short of
+//!    `denoise::SETTLED_SAMPLES` (`helio_frame_api::denoise`); the prior
+//!    never enters the history.
 //!
 //! **The mean is kept.** No weight that decides how much a sample counts
 //! depends on the light it carries: tents, geometry, the hit distance's
@@ -79,9 +87,9 @@
 //! reading the depth of the pixels between (the occluder stop: under a
 //! block's side a tap in the temporal stage and the reconstruction, the
 //! step in the spatial stage). Memory: a pixel's history 16 bytes (its A
-//! and B, the outputs), its moments 2 x 16 (length and two f32 moments,
-//! swapped with the temporal result's, never copied), the temporal result
-//! 16: 64 bytes a pixel; records 24 bytes a block in two or three sets.
+//! and B, the outputs), its length 2 x 4 (f32, swapped with the temporal
+//! result's, never copied), the temporal result 16: 40 bytes a pixel;
+//! records 24 bytes a block in two or three sets.
 //! Nothing scales with the scene.
 
 use std::sync::{Arc, Mutex};
@@ -93,9 +101,9 @@ use helio_frame_api::denoise::{self, Denoiser, RegisterDenoiser, Signal, SignalK
 use helio_frame_api::history::{self, Need};
 use helio_settings::{number, Group, Resolved};
 
-/// The least history a setting may ask: the standard error the output
-/// reports comes from a pixel's moments, which over fewer than four samples
-/// are dominated by their own noise (SVGF's threshold for trusting them).
+/// The least history a setting may ask: a 2x2 block's traced pixel comes
+/// back every four frames, so a shorter history would never hold a sample
+/// of a pixel's own.
 pub const MIN_HISTORY: f32 = 4.0;
 
 /// The denoiser's settings (a renderer config's `features`).
@@ -227,22 +235,22 @@ const PARAMS_BYTES: u64 = std::mem::size_of::<Params>() as u64;
 const SPATIAL_ITERATIONS: usize = 2;
 
 const HALF: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-const MOMENTS: wgpu::TextureFormat = wgpu::TextureFormat::Rgba32Float;
+const LENGTHS: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 const LENGTH: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 
 /// One view's textures.
 struct Targets {
     size: [u32; 2],
-    /// A pixel's state (internal size): A (a, Co / Y, Cg / Y, standard
-    /// error), B (b, 1 / hit); the history's are the signal's outputs.
+    /// A pixel's state (internal size): A (a, Co / Y, Cg / Y, samples'
+    /// worth), B (b, 1 / hit); the history's are the signal's outputs.
     history: [wgpu::TextureView; 2],
     /// The temporal result, the same layout.
     temp: [wgpu::TextureView; 2],
-    /// M (length, mean, mean square), two: the temporal stage reads the
+    /// M (length), two: the temporal stage reads the
     /// history's and writes the other, which is the next frame's history's.
-    moments: [wgpu::TextureView; 2],
-    /// The moments the last frame wrote.
-    moments_latest: usize,
+    lengths: [wgpu::TextureView; 2],
+    /// The lengths the last frame wrote.
+    lengths_latest: usize,
     /// Records (traced size): A, B and N (length, samples). The blocks' records first
     /// (none for a signal traced at every pixel: its pixels are its
     /// records), then the spatial stage's ping-pong.
@@ -282,9 +290,9 @@ impl Targets {
             texture("Denoise history A", size, HALF),
             texture("Denoise history B", size, HALF),
         ];
-        let moments = [
-            texture("Denoise moments A", size, MOMENTS),
-            texture("Denoise moments B", size, MOMENTS),
+        let lengths = [
+            texture("Denoise lengths A", size, LENGTHS),
+            texture("Denoise lengths B", size, LENGTHS),
         ];
         let temp = [
             texture("Denoise temporal A", size, HALF),
@@ -305,8 +313,8 @@ impl Targets {
             size,
             history,
             temp,
-            moments,
-            moments_latest: 0,
+            lengths,
+            lengths_latest: 0,
             records,
             primed: false,
             textures,
@@ -390,7 +398,7 @@ impl Kernels {
                 texture(4),
                 storage(5, HALF),
                 storage(6, HALF),
-                storage(7, MOMENTS),
+                storage(7, LENGTHS),
             ],
         );
         let records_layout = layout(
@@ -534,18 +542,18 @@ impl DenoisePass {
     }
 
     /// The active view's history `[A, B, M]` (A and B are the outputs; M the
-    /// length and the luminance's moments) and output `[out0, out1]`
+    /// history's length) and output `[out0, out1]`
     /// textures (for tests and tools that read them back).
     pub fn textures(&self) -> Option<([wgpu::Texture; 3], [wgpu::Texture; 2])> {
         let views = self.views.lock().unwrap();
         let targets = views.get(self.active?)?.targets.as_ref()?;
-        // Made in order: history A, B, moments A, B, temporal A, B, ...
+        // Made in order: history A, B, lengths A, B, temporal A, B, ...
         let t = &targets.textures;
         Some((
             [
                 t[0].clone(),
                 t[1].clone(),
-                t[2 + targets.moments_latest].clone(),
+                t[2 + targets.lengths_latest].clone(),
             ],
             [t[0].clone(), t[1].clone()],
         ))
@@ -690,8 +698,8 @@ impl RenderPass for DenoisePass {
         );
         let [ha, hb] = &targets.history;
         let [ta, tb] = &targets.temp;
-        let latest = targets.moments_latest;
-        let (hm, tm) = (&targets.moments[latest], &targets.moments[latest ^ 1]);
+        let latest = targets.lengths_latest;
+        let (hm, tm) = (&targets.lengths[latest], &targets.lengths[latest ^ 1]);
         let temporal = group(
             &k.temporal_layout,
             &[
@@ -824,7 +832,7 @@ impl RenderPass for DenoisePass {
             pixel_groups,
         );
         targets.primed = true;
-        targets.moments_latest = latest ^ 1;
+        targets.lengths_latest = latest ^ 1;
         drop(views);
         self.ran = true;
         Ok(())

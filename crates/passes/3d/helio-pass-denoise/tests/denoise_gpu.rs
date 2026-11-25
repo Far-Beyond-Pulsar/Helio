@@ -269,7 +269,7 @@ fn pass(f: &Fixture) -> &DenoisePass {
 /// The history's length at each pixel.
 fn lengths(f: &Fixture) -> Vec<f32> {
     let (history, _) = pass(f).textures().expect("a frame ran");
-    // M: (length, mean, mean square).
+    // M: (length).
     support::read(f.gpu, &history[2])
         .iter()
         .map(|t| t[0])
@@ -700,6 +700,62 @@ fn a_heavy_tailed_signal_keeps_its_mean() {
         }
     }
     assert!(failures.is_empty(), "{failures:?}");
+}
+
+/// The output reports the samples' worth behind each estimate (output 0's
+/// w), what a reader leans its prior on where it is short of
+/// `denoise::SETTLED_SAMPLES`: on the plain wall with a full history every
+/// pixel rests on at least that many; on the first frame after the wall
+/// jumps from 4 to 6 m (its history rejected everywhere) the worth is what
+/// this frame's samples and the spatial stage's widening give, less than
+/// the settled worth.
+#[test]
+fn the_output_reports_the_samples_it_rests_on() {
+    let Some(gpu) = support::gpu() else { return };
+    let near = wall_scene();
+    let far = Scene::new(vec![Quad::wall(
+        DVec3::new(0.0, 0.0, -6.0),
+        DVec2::new(30.0, 30.0),
+    )]);
+    let view = front_view();
+    let field = |_: &support::Hit| Field::flat(1.0);
+    for block in [TraceBlock::One, TraceBlock::Four, TraceBlock::Sixteen] {
+        let signal = Signal::irradiance("test_samples", block);
+        let mut f = fixture(gpu, signal);
+        let p = Producer::new(gpu, signal, 0.5);
+        converge(&mut f, |f| {
+            frame(f, &p, &near, &view, DVec3::ZERO, field, 1.0)
+        });
+        let worth = |f: &Fixture| -> Vec<f32> {
+            let (_, out) = pass(f).textures().expect("a frame ran");
+            support::read(f.gpu, &out[0])
+                .iter()
+                .zip(hits(f))
+                .filter(|(_, hit)| *hit)
+                .map(|(t, _)| t[3])
+                .collect()
+        };
+        let settled = worth(&f);
+        frame(&mut f, &p, &far, &view, DVec3::ZERO, field, 1.0);
+        // Pixels with light (a pixel none of whose samples hold its
+        // surface yet reports none: below 0).
+        let young: Vec<f32> = worth(&f).into_iter().filter(|w| *w >= 0.0).collect();
+        let mean = |v: &[f32]| v.iter().sum::<f32>() / v.len() as f32;
+        let least = |v: &[f32]| v.iter().copied().fold(f32::MAX, f32::min);
+        println!(
+            "{block:?}: settled worth mean {:.2} least {:.2}; after the jump mean {:.2} least {:.2}",
+            mean(&settled),
+            least(&settled),
+            mean(&young),
+            least(&young)
+        );
+        assert!(
+            least(&settled) >= denoise::SETTLED_SAMPLES - 1e-2,
+            "{block:?}: a settled pixel rests on {}",
+            least(&settled)
+        );
+        assert!(mean(&young) < mean(&settled), "{block:?}");
+    }
 }
 
 /// The same signals in the first frames after a disocclusion: the wall

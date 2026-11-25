@@ -2570,7 +2570,9 @@ design says.
   half the value along it), so first-order harmonics of luminance and two
   chroma terms, and samples traced at other normals average.
 - Outputs: 0 = (a, Co/Y, Cg/Y, the luminance's standard error; -1: no light
-  yet), 1 = (b, 1/hit distance, harmonic mean). `denoise_irradiance(out0,
+  yet), 1 = (b, 1/hit distance, harmonic mean). *(Output 0's w is the
+  samples' worth behind the estimate since "A young pixel leans on a
+  prior"; the standard error had no reader and is deleted.)* `denoise_irradiance(out0,
   out1, n)` is the RGB irradiance at a pixel's own normal.
 - Registration: `RegisterDenoiser::denoiser(Denoiser { name, supports,
   filter })` (a feature's prepare hook), `denoise::offer` for a host or test;
@@ -2616,7 +2618,10 @@ depth and normal) runs once a pixel.
    `PIXELS` says it was, from the taps that held the surface, renormalised.
    The history's length times the producer's confidence times the
    footprint's valid share, plus this frame's weight, capped at
-   `max_history`, sets the blend (weight over length).
+   `max_history`, sets the blend (weight over length). *(The footprint's
+   share no longer scales the length since "A young pixel leans on a
+   prior": under the camera's jitter it cut a canopy's histories to a
+   frame or two.)*
 2. **Records** (`Denoise: records`, a block, for blocks of 4 and 16): the
    temporal result at the block's representative pixel (its centre). Traced
    at every pixel, the pixels are the records and this stage is skipped.
@@ -2913,7 +2918,10 @@ colour is kept the same way.
   share of the tent their geometry serves).
 
 The standard error is still computed from the raw samples' moments and
-reported in the output (output 0's w); nothing weighs by it.
+reported in the output (output 0's w); nothing weighs by it. *(Deleted with
+the moments in "A young pixel leans on a prior": output 0's w is the
+samples' worth behind the estimate, which a reader with a prior weighs its
+prior against, the prior never entering the history.)*
 
 **The occluder's foot.** Two points of one floor either side of a thin
 wall are close, on one plane, with one normal: depth, normal and plane
@@ -5528,11 +5536,226 @@ cathedral run of the far sides' own samples.
   table's load (131,072), 460-660 new cells a frame: the gather's surfaces
   at the eye angle in a forest fill most of the load, and the descent at
   relief nearer than a layer adds a few hundred finer cells a frame.
-- **The speckle gate at the default** (124.6 against 20) is the gather's,
-  not the cache's: with 99% of the gather's hits finding a cell with light
-  it still made 94-128 speckle pixels a frame. One ray a 4x4 block meets a
-  canopy whose cells differ (sunlit tops, shaded insides), and the
-  denoiser's history does not hold it; the gather's estimator and its
-  denoising are what to change.
+- ~~**The speckle gate at the default** (124.6 against 20) is the gather's,
+  not the cache's~~: closed in "A young pixel leans on a prior" (16.6 and
+  17.1): the denoiser's history held in part lost its length every frame
+  under the camera's jitter, and a young pixel showed its one heavy-tailed
+  sample in full.
 - **The default's mean relative error in the cathedral**: 0.099-0.108
   against 0.079-0.082, the hit's own direct light's noise.
+
+#### A young pixel leans on a prior
+
+GI plugin and Helio `render/r3-radiance-cache`, after "Who claims a cell".
+The fault: GI's per-pixel gather speckled in voxel_craft's crowns at the
+default quality (pose 12, the crowns 16 frames after a 1-radian look
+around: 120.6 speckle pixels a frame on this branch's tree, 10.1 with the
+probes alone; the gate 20), and nowhere in the mesh scene `outdoor_gi`.
+
+**What a speck is made of.** A diagnostic build (not kept) dumped, for every
+internal pixel of the burst's frames, the denoiser's state (its history's
+length, how much of its history's footprint held its surface, the samples
+its 2x2 tent took, the samples' worth its records served it with), the
+gather's block (its reservoir's domains and M, whether its sample was this
+frame's, the previous frame's or a neighbour's, a far-side hit, a miss, the
+visibility ray), the near-field factor and the probes' irradiance at the
+pixel; the speck pixels are `flicker.py`'s own mask on the same run's shots.
+One run, 1,675 speck pixels against 255,042 canopy pixels around them that
+are not specks:
+
+| condition | speck px | canopy around |
+|---|---|---|
+| history length <= 1 frame | 87.8% | 78.1% |
+| history length 2-3 / 4-15 / >= 16 | 7.1% / 1.5% / 0.0% | 10.4% / 6.1% / 1.4% |
+| history's taps all rejected | 12.1% | 5.1% |
+| history's taps held in part | 66.4% | 63.8% |
+| no tent sample on the pixel's surface | 21.6% | 35.4% |
+| records worth under 2 samples | 70.6% | 65.4% |
+| block: temporal reservoir held / chose it | 19.5% / 5.4% | 24.4% / 10.5% |
+| block: chose a neighbour's sample | 7.3% | 13.5% |
+| block: no neighbour accepted | 64.3% | 63.6% |
+| block: this frame's hit lets light through | 65.9% | 59.5% |
+| block: this frame's ray a miss | 13.8% | 18.2% |
+| pixel on the traced pixel's surface | 27.2% | 23.3% |
+| near-field factor over 1.5 | 29.2% | 34.0% |
+| output over 4 times the probes' | 66.1% | 8.3% |
+| block's estimate over 3 times its 5x5 blocks' median | 57.0% | 24.7% |
+
+A speck pixel shows a median 33 times the probes' irradiance (the canopy
+around it 0.78 times); the near field is not it (median factor 1.19 against
+1.25). Every canopy pixel is young, not only the specks: after 16 frames of
+history four in five hold one frame's worth or less. Of the gather's own
+samples, 0.22% of blocks carry 28% of the light, nearly all this frame's own
+hit (not a reused sample) on a leaf a centimetre or less from the receiver
+(3% of the rays end within 1 cm and carry 35% of the light, 11 times the
+mean sample): voxel faces in a crown's concave corners, the neighbouring
+cell's face sunlit. Turning off the hits' far-side light samples changed
+nothing (43.4 against 42.9 with the change below), and neither did a
+shadow ray as thin as a point (44.1): the tail is the near side's direct
+light, real and unbiased, at a scale below the block that one sample a
+block cannot resolve. What the denoiser must do with it is average it, and
+in a crown it had nothing to average with.
+
+**Two causes, one each.**
+
+- *A history held in part lost its length.* The denoiser's temporal stage
+  multiplied a history's length by the share of its bilinear footprint whose
+  taps held the pixel's surface. Under TSR's jitter a sub-pixel leaf moves
+  under a pixel every frame, so most canopy pixels keep two or three of
+  their four taps every frame, and a length scaled by 0.5-0.75 each frame
+  settles at `w / (1 - share)`, one or two frames, however long the camera
+  stays. The taps that held the surface hold its samples, renormalised; the
+  share says where the history is read from, not how many samples it rests
+  on. Now the length is the held taps' (`irradiance.wgsl`, `temporal`).
+  Alone: 120.6 to 42.9 at pose 12; canopy pixels at one frame or less 78% to
+  18%. 256 frames after the turn the base still read 25.9 (44.1 over the
+  first 16 in that run): the length loss was steady, not only the turn's.
+- *A young pixel showed its few samples in full.* Where a history is
+  genuinely short (a disocclusion, a view just turned, the leaves the jitter
+  swaps) and the surface stops leave no neighbours, the denoiser's estimate
+  rests on a sample or two, and one of them is the tail above. The
+  denoiser now reports the samples' worth `N` behind each estimate (output
+  0's w: the history's length, the records' samples' worth, the two mixed:
+  their sum), and a reader with a low-variance estimate of the same light,
+  its **prior**, weights the two by the samples each is worth: the prior
+  `hold * max(SETTLED_SAMPLES - N, 0)` (`helio_frame_api::denoise::
+  SETTLED_SAMPLES`, 16: the worth the spatial stage widens to, so the
+  prior fills exactly the deficit the geometry left;
+  `denoise_irradiance_with_prior`, one function in the contract's snippet).
+  GI's resolve offers the probes' irradiance at the pixel, `hold` the
+  probes' own (0 past the clipmap). With the length fix: 15.0 at pose 12 in
+  a diagnostic of shaders from disk, 16.6 and 17.1 in the final build.
+
+**Where it lives, and why.** The samples' worth is the denoiser's to report:
+only it knows what its history and its records rest on, and it is a
+property of every signal it filters (r4's reflections, r5's shadows). The
+prior is the client's: only it holds a second estimate of its own light. So
+the contract carries `N` out and the blend as one snippet function, and the
+client applies it after the denoiser, never into its history: fed back each
+frame, a prior worth `k` samples holds a running mean of light `mu` at
+`(mu + k p) / (1 + k)` whatever its length, a bias that never settles.
+Applied at the reader, a settled estimate (`N >= 16`) is the denoiser's own
+exactly and a young one moves from the prior to its samples as they come.
+r5's clients: shadows lean on the shadow pages' filtered visibility, direct
+light on the light's unshadowed term times that visibility. The standard
+error that output 0's w carried had no reader; it, the two f32 moments a
+pixel kept for it (Rgba32Float, now R32Float: its length alone) and the
+spatial stage's variance sums are deleted, so the denoiser keeps 40 bytes a
+pixel where it kept 64. `MIN_HISTORY` (4) lost its reason (the moments');
+its new one: a 2x2 block's traced pixel comes back every 4 frames.
+
+**The bias it adds.** None to a settled estimate (`N >= 16`: the prior's
+weight is 0; the cathedral's default at frame 3000 is settled everywhere but
+at the image's edge, and its rows did not move). A young one is pulled to the
+probes by `(16 - N) / 16` of their difference: the probes read 0.89-0.99 of
+the reference in the cathedral where the gather reads 0.97-1.03, so a pixel
+with no samples yet is up to about 10% darker than its settled self for the
+frames its history takes to fill (at a sixteenth, records widen to 16
+samples' worth in a frame on an open surface; in a crown the length now
+grows a sample a frame of the pixel's tent). The mean the denoiser keeps is
+unchanged (no weight depends on the light, the prior's included): its
+tests pass with their bounds.
+
+**How others do it.** NVIDIA's ReBLUR and ReLAX widen their blur and
+accelerate accumulation for pixels whose history was rejected (the "history
+fix") and clamp a short history to its neighbourhood's range or apply an
+anti-firefly filter (biased by design: toward the local mean, and for a
+heavy-tailed signal toward darkness). Lumen ends its screen probes' short
+traces in a world-space radiance cache and AMD's GI-1.0 lights its screen
+probes from a world-space hash grid: both lean on a low-variance world
+estimate where screen-space data is thin, but as the light a trace finds,
+not as an estimate a short history is weighted against. Ours keeps the
+widening (the spatial stage's step) and, where the geometry stops it, weights
+the denoiser's estimate and the client's prior by the samples each is worth
+(shrinkage toward the prior, James and Stein's idea): a weight that depends
+on counts alone, so it neither clamps nor favours a value, and leaves a
+settled pixel untouched. What it scales with: one probe read a pixel where
+`N < 16` (none where settled), nothing with the scene.
+
+**Measured** (release, RTX 3060; this branch's tree before the change, base,
+against the final build, fix):
+
+| voxel_craft, speckle px a frame | base | fix |
+|---|---|---|
+| pose 12 (the gate, 20), two runs | 120.6, 119.6 | 16.6, 17.1 |
+| pose 12 at `probes` | 10.1 | 10.4 |
+| poses 9 / 10 / 11 / 12 / 13 (one tour) | 0.9 / 10.9 / 5.4 / 83.6 / 26.6 | 0.4 / 8.5 / 1.4 / 12.7 / 6.7 |
+
+(Pose 10 walks with the sun turning: every frame of its burst is an event
+frame in both, the light moving under the canopy; its speckle count moved
+with the rest.)
+
+| cathedral, frame 3000, 16 frames, view 23 / corrected reference | base (runs a, b) | fix (runs a, b) |
+|---|---|---|
+| probes | 0.922 / 0.108, 0.988 / 0.115 (before, same path) | 0.942 / 0.105, 0.887 / 0.129 |
+| a sixteenth (default) | 1.030 / 0.103, 1.062 / 0.120 | 1.034 / 0.105, 1.010 / 0.101 |
+| a quarter | 0.975 / 0.100 (one run, before) | 0.988 / 0.100, 0.972 / 0.104 |
+| every pixel | 1.012 / 0.098 (one run, before) | 1.017 / 0.102, 1.035 / 0.109 |
+
+(The probes' path does not read the denoiser: its two runs spread 0.89-0.99
+as before, the cache settling differently a run.)
+
+**Sharpness** (gradient energy of the burst's mean image of view 23 over its
+lit pixels, relative to the squared mean, split into the frames' noise, the
+half difference of the even and odd frames' means, and the rest, detail):
+the cathedral, base a / b against fix a / b: 0.970 and 1.072 (base against
+base 0.934); as the detail two independent runs share (the cross product of
+their mean images' gradients, where noise independent between runs cancels):
+1.018. voxel_craft's four poses (8-frame bursts after the tour's settle; the
+frames' noise fell 3 to 100 times in every pose): the shared detail 0.97 /
+0.91 / 0.78 / 1.00 of base's, 0.97 / 0.91 / 0.83 / 1.00 with the prior
+switched off (the length change alone; shaders from disk). The first pose
+is within base's own spread (base against base 1.19 there);
+pose 2, a crown seen from below against the sky, keeps 0.78-0.83 of base's
+measure. The game's clock follows real time, so every run's sun stands
+elsewhere (the trunk's lit side moves between runs), and the crowns' crops
+side by side show the same leaf cells; what the measure loses there is, to
+about three quarters, the length change (the canopy's histories now reproject
+through more frames of jittered taps, as every other surface's already did)
+and the rest the prior. Not separated further.
+
+**Cost** (interleaved runs; base a, fix a, base b, fix b): the cathedral's
+`Denoise` 0.729-0.739 ms base, 0.715 fix (the moments gone), `GIResolve`
+0.058-0.059 both, the gather's passes 1.80 against 1.79 ms. voxel_craft's
+four poses (1080p, the last four 240-frame windows; the clock moved between
+runs, so against `HistoryPixels`, the same code in both): `Denoise` 8.7
+times `HistoryPixels` base, 8.3-8.5 fix; `GIResolve` 0.55-0.56 base,
+0.57-0.59 fix (the probes read where `N < 16`, a few microseconds).
+`outdoor_gi` (a sixteenth, frame 1200): speckle 0.0 still and after the
+turn, cells 91,120 / 107,532 and 225 / 491 new a frame, GI update 1.66-1.67
+ms, gather 3.10-3.11 ms (base still: 90,923, 225, 1.70, 3.15). The Earth
+and Moon holds (voxel_flight, 1600x900, 25 s, a sixteenth): mean |difference|
+from base 0.0012 / 0.0058, luminance +0.07% / +0.06%; gather 7.97 / 5.27 ms
+against 8.08 / 5.42, GI update 4.33 / 4.02 against 4.25 / 4.04.
+
+**Verified**: the pose-12 gate twice and the tour's poses 9-13 (above); GI lib 18,
+`radiance_cache` 10 of 10, `probes` 16 of 16, `pixel_gather` 7 of 7 (new:
+`a_short_history_leans_on_the_probes_and_a_settled_one_shows_its_own`, a
+clutter of 12 cm blocks at hashed heights cut to from another view: the
+eight frames after the cut change 3.7 times as much frame to frame as
+settled ones, 8.5 times with the prior switched off from disk; bound 6),
+`mesh_gi_graph` 2 of 2, `vg_ray_proxies` 3 of 3 (1 ignored as before).
+Helio: `denoise_gpu` 9 of 9 (bounds unchanged: the plain wall 0.0054 /
+0.0090 / 0.0244, the heavy tails after a disocclusion 0.989-1.003, the
+occluder's foot within 0.0020; new: `the_output_reports_the_samples_it_rests_on`,
+settled at least 116-407 samples' worth, 23-40 on the frame after a
+disocclusion), `pixels_gpu` 5, `helio-frame-api` lib 38 (new: the
+snippet's settled samples are the contract's) and layouts 7,
+`radiance_cache_gpu` 3, `wgsl_validation`. The voxel plugin: `wgsl` 2, its
+5 GI tests, `chunks`' three terrain shadow tests (release). `one_owner`;
+the layer gate (no violation); `cargo fmt` on the touched packages; clippy
+with no warning in the touched crates. Not verified: XR eyes, captures, the
+editor; a real-frames check of r4/r5 clients (none exists yet).
+
+**Open**:
+
+- *Light finer than a block.* A crown's concave corners send 3% of a
+  block's rays into a face a centimetre away whose sunlit light is a tenth
+  of the block's whole indirect light. One ray a block resolves it only
+  through the denoiser's samples; a hit nearer than its own footprint could
+  read its light prefiltered over that footprint (its direct light with
+  the cone's width, as its indirect is read from the cell at the
+  footprint's level) rather than at the point, which would make the sample
+  lighter-tailed where the block cannot resolve the point anyway. Not
+  built: the gate passes without it, and it changes what a hit means for
+  every reader of a stream.
