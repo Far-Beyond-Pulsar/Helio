@@ -235,6 +235,27 @@ pub type JobWork = Box<dyn FnOnce(&TaskContext) + Send>;
 pub trait TaskHost: Send + Sync {
     fn spawn_service(&self, spec: ServiceSpec, work: ServiceWork) -> io::Result<Service>;
     fn submit(&self, spec: JobSpec, work: JobWork);
+
+    /// Threads the host can run at once for compute: the width a fan-out
+    /// ([`parallel`](Self::parallel)) is sized from. The default is the
+    /// machine's parallelism.
+    fn parallelism(&self) -> usize {
+        std::thread::available_parallelism().map_or(1, |n| n.get())
+    }
+
+    /// Runs `work(lane)` for every lane in `0..lanes` at the same time and
+    /// returns when all have ended. The caller is a lane, and work not started
+    /// by a free thread is done by the callers, so it never waits for a
+    /// thread the host does not have. A host runs the lanes on its compute pool;
+    /// the default starts scoped std threads.
+    fn parallel(&self, lanes: usize, work: &(dyn Fn(usize) + Sync)) {
+        std::thread::scope(|scope| {
+            for lane in 1..lanes.max(1) {
+                scope.spawn(move || work(lane));
+            }
+            work(0);
+        });
+    }
 }
 
 /// Named std threads: the work of a process that installed no host.
@@ -312,6 +333,17 @@ static HOST: OnceLock<Arc<dyn TaskHost>> = OnceLock::new();
 /// it was given.
 pub fn install(host: Arc<dyn TaskHost>) -> Result<(), Arc<dyn TaskHost>> {
     HOST.set(host)
+}
+
+/// Threads the host can run at once for compute ([`TaskHost::parallelism`]).
+pub fn parallelism() -> usize {
+    host().parallelism()
+}
+
+/// Runs `work(lane)` for every lane in `0..lanes` at the same time and
+/// returns when all ended ([`TaskHost::parallel`]).
+pub fn parallel(lanes: usize, work: &(dyn Fn(usize) + Sync)) {
+    host().parallel(lanes, work);
 }
 
 /// Whether a host was installed ([`install`]).

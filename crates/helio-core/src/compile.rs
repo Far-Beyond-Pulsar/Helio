@@ -254,3 +254,178 @@ where
         self.entries.is_empty()
     }
 }
+
+/// One pipeline's build: what it could not build, if so.
+type Job<'a> = Box<dyn FnOnce() -> Result<(), String> + Send + 'a>;
+
+/// The pipelines of one bundle, compiled side by side.
+///
+/// A pipeline's compile is the backend's shader compiler at work: seconds for
+/// a long kernel, and a bundle holds dozens. One after another they keep a
+/// bundle's content from the frame for the sum of them; side by side, for about
+/// the longest one (the same shape as UE5's parallel PSO precache). `SideBySide`
+/// collects a bundle's pipelines as they are named ([`add`](Self::add)) and
+/// compiles them together ([`compile`](Self::compile)) on the host's compute
+/// lanes ([`helio_tasks::parallel`]), inside the bundle's own compile job
+/// ([`Compiling`]): the lanes are the host's compute pool, so a job that
+/// waited on further jobs would wait on the host's few long-task workers it
+/// is itself holding. As many lanes as a quarter of the host's parallelism (2 to
+/// 8), so the pool keeps serving the frame.
+pub struct SideBySide<'a> {
+    device: &'a wgpu::Device,
+    jobs: Vec<Job<'a>>,
+}
+
+/// A pipeline of a [`SideBySide`]: taken once they are compiled.
+pub struct Slot<T>(Arc<Mutex<Option<T>>>);
+
+impl<T> Slot<T> {
+    /// The pipeline, after [`SideBySide::compile`].
+    pub fn take(self) -> T {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .expect("taken once, after its bundle compiled")
+    }
+}
+
+impl<'a> SideBySide<'a> {
+    pub fn new(device: &'a wgpu::Device) -> Self {
+        Self {
+            device,
+            jobs: Vec::new(),
+        }
+    }
+
+    /// A pipeline `build` makes, compiled with the others.
+    pub fn add<T: Send + 'a>(&mut self, build: impl FnOnce() -> T + Send + 'a) -> Slot<T> {
+        let slot = Arc::new(Mutex::new(None));
+        let (out, device) = (slot.clone(), self.device);
+        self.jobs.push(Box::new(move || {
+            // Error scopes are a thread's: each build answers for itself, on
+            // whichever thread runs it.
+            #[cfg(not(target_arch = "wasm32"))]
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let built = build();
+            #[cfg(not(target_arch = "wasm32"))]
+            let error = ready(scope.pop());
+            #[cfg(target_arch = "wasm32")]
+            let error: Option<wgpu::Error> = {
+                let _ = device;
+                None
+            };
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(built);
+            error.map_or(Ok(()), |error| Err(error.to_string()))
+        }));
+        Slot(slot)
+    }
+
+    /// Compiles every pipeline added, side by side, each lane taking the next
+    /// one not started. Panics with the first failure's reason: the bundle's
+    /// compile job reports it as the bundle's ([`Compiling::failed`]).
+    pub fn compile(self) {
+        let lanes = (helio_tasks::parallelism() / 4)
+            .clamp(2, 8)
+            .min(self.jobs.len().max(1));
+        let next = Mutex::new(self.jobs.into_iter());
+        let failures = Mutex::new(Vec::<String>::new());
+        helio_tasks::parallel(lanes, &|_lane| loop {
+            let job = next.lock().unwrap_or_else(|e| e.into_inner()).next();
+            match job {
+                Some(job) => {
+                    if let Err(reason) = job() {
+                        failures.lock().unwrap_or_else(|e| e.into_inner()).push(reason);
+                    }
+                }
+                None => break,
+            }
+        });
+        let failures = failures.into_inner().unwrap_or_else(|e| e.into_inner());
+        if let Some(reason) = failures.first() {
+            panic!("{reason}");
+        }
+    }
+}
+
+/// A future that is ready when asked (a native device's error scope).
+#[cfg(not(target_arch = "wasm32"))]
+fn ready<T>(future: impl std::future::Future<Output = Option<T>>) -> Option<T> {
+    let mut future = std::pin::pin!(future);
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut context) {
+        std::task::Poll::Ready(value) => value,
+        std::task::Poll::Pending => None,
+    }
+}
+
+#[cfg(test)]
+mod side_by_side_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn device() -> Option<wgpu::Device> {
+        let instance = wgpu::Instance::new(crate::wgpu_instance_descriptor());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).ok()?;
+        pollster::block_on(adapter.request_device(&Default::default()))
+            .ok()
+            .map(|(device, _)| device)
+    }
+
+    /// Every pipeline added is built once and taken as its own, several at a
+    /// time: a bundle takes about its longest build, not their sum.
+    #[test]
+    fn a_bundles_builds_run_side_by_side_and_keep_their_places() {
+        let Some(device) = device() else { return };
+        let (running, most) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let mut bundle = SideBySide::new(&device);
+        let slots: Vec<Slot<usize>> = (0..24)
+            .map(|n| {
+                let (running, most) = (&running, &most);
+                bundle.add(move || {
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    most.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                    n * 7
+                })
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        bundle.compile();
+        let took = started.elapsed();
+        for (n, slot) in slots.into_iter().enumerate() {
+            assert_eq!(slot.take(), n * 7);
+        }
+        let lanes = (helio_tasks::parallelism() / 4).clamp(2, 8);
+        assert!(
+            most.load(Ordering::SeqCst) <= lanes,
+            "no more than its lanes at a time"
+        );
+        if helio_tasks::parallelism() >= 2 {
+            assert!(most.load(Ordering::SeqCst) >= 2, "side by side");
+            assert!(took.as_millis() < 24 * 20, "{took:?} for 24 builds of 20 ms");
+        }
+    }
+
+    /// A pipeline the backend rejects fails the bundle with the reason,
+    /// whichever thread built it.
+    #[test]
+    fn a_rejected_pipeline_is_the_bundles_failure() {
+        let Some(device) = device() else { return };
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut bundle = SideBySide::new(&device);
+            let _fine = bundle.add(|| 1);
+            let _bad = bundle.add(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("not wgsl"),
+                    source: wgpu::ShaderSource::Wgsl("fn broken( {".into()),
+                })
+            });
+            bundle.compile();
+        }));
+        let reason = failure.expect_err("the bundle fails");
+        let reason = reason.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(!reason.is_empty(), "with the backend's reason");
+    }
+}

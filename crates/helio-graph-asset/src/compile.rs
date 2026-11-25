@@ -44,6 +44,9 @@ pub(crate) enum Purpose {
 }
 
 /// The shared build (see [`Purpose`]).
+/// A node that takes this long to build is named in the log.
+const SLOW_NODE_MS: f64 = 150.0;
+
 pub(crate) fn build_graph(
     asset: &GraphAsset,
     registry: &NodeRegistry,
@@ -97,6 +100,7 @@ pub(crate) fn build_graph(
             .expect("validated node kinds are registered");
         let params = descriptor.effective_params(&node.params);
         let first_pass = graph.pass_count();
+        let node_started = std::time::Instant::now();
         {
             let mut build = NodeBuild {
                 graph: &mut graph,
@@ -118,6 +122,19 @@ pub(crate) fn build_graph(
                     marker(&mut build, &node.kind);
                 }
             }
+        }
+        // A node's passes create their GPU pipelines as they are built: the
+        // nodes that take most of a pipeline's build are named in the log.
+        let node_ms = node_started.elapsed().as_secs_f64() * 1000.0;
+        if node_ms >= SLOW_NODE_MS {
+            log::info!(
+                target: "helio::pipeline",
+                "node `{}` ({}) built {} pass(es) in {:.0} ms",
+                node.id,
+                node.kind,
+                graph.pass_count() - first_pass,
+                node_ms
+            );
         }
         observe(node, &graph, first_pass..graph.pass_count());
     }

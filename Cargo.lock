@@ -869,6 +869,7 @@ dependencies = [
  "helio-pass-status-screen",
  "helio-pass-tsr",
  "helio-settings",
+ "helio-tasks",
  "helio-xr",
  "image",
  "log",
