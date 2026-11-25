@@ -5837,3 +5837,134 @@ there. The level's woods ask for grass or dirt ground (surfaces 1 and 2)
 and moisture over 0.28-0.36, and the camera stands over sand: most likely
 a dry region by the generator's rules rather than missing trees. Not
 checked further.
+
+#### Integration
+
+The steps merged (Helio and the plugins' `render/r3-radiance-cache`), with
+Pulsar-Native `main` 2a2358c75 and each repository's `main` merged in (the
+shared libraries, one library a plugin, `-C prefer-dynamic`), on an RTX 3060.
+
+**What merging `main` needed.**
+
+- *The workspace hack* (`tools/workspace_hack`, `cargo run -p hack_gen`)
+  regenerated: `helio-pass-denoise` and `helio-pass-history` are inside
+  `helio_dylib`'s closure. The tool also drops `pulsar_scenedb`'s `telemetry`
+  feature, which nothing of r3's asks for or removes: `main`'s own file was
+  written before the scenedb inspector moved behind its feature.
+- *The lock files.* Pulsar's keeps the wgpu fork at d1bb54f8 (the compute
+  pass's overlapping spans; `main` had put it back to 205c219e after a lock
+  refresh floated it and re-resolved `windows`: here only the revision
+  moves). Helio's own lock takes SceneDB at the revision its manifest pins.
+- *The runtime statics gate* (`helio-core/tests/runtime_statics.rs`): the
+  denoiser's settings group is a read-only table of constants, listed with
+  its reason like the other passes' tables.
+- *A test executable* links `std` and the shared libraries dynamically: run
+  outside cargo it needs `target/<profile>/deps` and the toolchain's
+  `lib/rustlib/<triple>/lib` on its path.
+
+**Faults found here and fixed.**
+
+- *Two meshes tests stale since r2*, when the forward drawers moved to the
+  frame's BSDF: the composition test listed the lights' forward snippet
+  without the BSDF it calls, and the transparent pass's legacy program was
+  made by replacing a return statement the program no longer has. The second
+  now asserts that its edit took effect.
+- *Glowing discs on the ground in the editor's view of the voxel planet
+  example*, found by starting the editor (built with `tools/plugin_builder`)
+  on a fresh copy of the project beside an editor built from `main` alone:
+  the gather's reservoir packed its receiver as a distance and a 16:16
+  direction (`Bright discs in the editor`, above). The editor's camera stands tens of metres over the ground, where
+  that error passes GI's ray offset; voxel_craft's stands on it. The fix
+  also took the canopy pose's speckles from 16.9 to 10.0 a frame.
+- The faults of the cache, the gather and the denoiser on the merged tree
+  are the subsections above (`GI on the merged tree` to `A young pixel leans
+  on a prior`).
+
+**Gates**, every test executable on its own under the GPU lock.
+
+- Helio (its own workspace): 85 test executables, none failing; the layer
+  gate, 0 violations; the runtime statics gate; `hack_gen --check`.
+- GI: lib 18, `radiance_cache` 10, `probes` 16, `pixel_gather` 7,
+  `mesh_gi_graph` 2, `vg_ray_proxies` 4 (1 ignored as on `main`); lights'
+  deferred and host tests; `one_owner`.
+- Lights, sky, water and meshes feature crates: 123 of 124 executables (968
+  tests before the two repairs above).
+- Voxel in release: lib 35, `chunks` 56 of 56 (2,014 s on a quiet machine),
+  `clouds` 6, `foliage_on_voxels` 1, `presets` 1, `volumes` 8,
+  `voxel_pass_graph` 14, `wgsl` 2, `wide_products` 1. In a run that shared
+  the machine with other builds three `chunks` tests did not settle in their
+  4,000 frames (`sun_pages_under_a_canopy`,
+  `terrain_behind_meshes_is_not_traced`,
+  `terrain_shadows_fall_on_meshes_in_front_of_it`); each passes alone in
+  62 to 126 frames. The settle guard counts frames, so a starved generation
+  thread fails it: a wall-clock guard is the voxel plugin's to make.
+- The engine's installed suites: `render_acceptance` 41 of 41 (a process a
+  test), `ray_tier_acceptance` 4 of 4, `runtime_render_parity` 2,
+  `memory_over_ticks`, `gameplay_defaults`, `asset_reload`.
+- Red as on `main`, in code r3 does not touch: `catalog` and `traits`
+  (trait definitions the blueprint and trait editor plugins do not declare,
+  as at r2), `api_statics` (a `static` in the materials plugin's api crate),
+  the test targets `languages` and `virtual_geometry_dense_acceptance`
+  (`ort_sys` has no rlib form under `prefer-dynamic`), and
+  `helio-vg-stream`'s `a_fallback_cut_carries_its_vertices_attribute_records`.
+
+**Frames on the integration build** (release, 1080p).
+
+| | Default (`pixels_16`) | Probes |
+|---|---|---|
+| voxel_craft pose 12, speckle px a frame (gate 20) | 10.0, 10.1 | 10.5 |
+| voxel_craft pose 12, the pixels' hits lit by a cell | 94.4%, 94.6% | |
+| voxel_craft pose 12, GI update / gather / frame | 4.6 / 4.4 / 21.1 ms | 4.3 / 0 / 16.5 ms |
+| Cathedral, indirect over the reference (16 frames at 3000) | 1.017, 1.037 (error 0.099, 0.107) | 1.011 (0.124) |
+| Cathedral, GI update / gather / frame | 1.44 / 2.39 / 11.8 ms | 1.64 / 0 / 8.0 ms |
+| Cathedral, cells in use | 11,800 | 51,100 |
+
+**The editor** (release, every plugin a library of its own): starts on a
+fresh copy of `assets/examples/voxel_planet` with no error, 34 plugin
+libraries loaded and no renderer warning; its settled view is the one an
+editor built from `main` 2a2358c75 shows (sand under the level's camera: the
+level's woods grow where the generator finds grass or soil and moisture). On
+this machine the build needs the MSVC linker (the shared libraries' native
+exports do not link with `rust-lld`) and no sccache wrapper (the workspace
+hack's command line is too long for it).
+
+`main` moved by three commits after the gates (cabf51b7a): merged without
+conflicts, none in a repository r3 changes. The four plugin commits they pin
+(blueprint editor, character, gameplay, input) were not on their remotes, so
+that combination was not built here.
+
+**Not verified.** XR eyes and captures with the gather; DX12 and Metal (the
+fork's spans, the gather); the shared-library build on any platform but
+Windows x86_64; the gather's cost with 36-byte reservoirs against 32 (the
+frames above are with 36); a faint warm patch a few metres across at about
+400 m in the indirect view of the voxel planet example, not visible lit.
+
+**What r4 carries.**
+
+- *A sampling texture as a frame contract* (blue noise / STBN), r4's first
+  step, for the gather's and the reflections' rays.
+- *The cache's working set where the probes are the reader that claims*
+  (`probes` quality, a forest): voxel_craft still takes 9,655 new cells a
+  frame with 5,858 settled, GI update 4.3 ms against 3.4 before the cache;
+  bound the probes' claims (those nearest the eye, or a budget). At the
+  default the table sits at its load on voxel_craft and the Moon hold,
+  steady (about 650 new cells a frame).
+- *A hit nearer than its ray's footprint* takes its direct light at one
+  point: 3% of the gather's rays carry 35% of its light in a crown.
+  Prefiltering that light over the footprint changes what a hit means for
+  every stream's readers.
+- *The gather's cost*: 4.6 ms a frame on voxel_craft and 3.7 ms in the
+  cathedral at the default; on terrain it is the walk of its rays. The walk
+  honouring a ray's width was measured twice and not built (above): start
+  the next attempt from a profile of the walk.
+- *The denoiser's occluder walk* is most of its cost at full resolution.
+- *The detail of indirect light under a crown* (voxel_craft's second pose:
+  0.78 of the base's shared detail, most of it from histories that now
+  accumulate).
+- For r5 (direct light): the gather's hits take one light sample and one
+  shadow ray each (the cathedral's error 0.10 against 0.08 with the cells'
+  direct light); the steps' shadowing and the ground's far visibility (direct
+  1.085 of the reference on voxel_craft's ground); the terrain's and HLFS's
+  shadow denoisers onto the frame's history and denoiser, with their priors.
+- The probes test `a_roof_shadows_the_sun`'s early statement only catches a
+  leak of 45% of the value.
