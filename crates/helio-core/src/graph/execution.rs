@@ -2522,11 +2522,17 @@ impl RenderGraph {
         #[cfg(not(target_arch = "wasm32"))]
         let readback_scope =
             profiling::ProfileScope::new_static("RenderGraph: read GPU timestamps");
+        // Never wait for the GPU here: a blocking readback serialises the CPU
+        // with the frame it just submitted (the CPU idles for the GPU's whole
+        // frame, every frame, and the frame after starts late), which costs
+        // the frame rate and the input latency the timings are meant to
+        // help with. The timings arrive a frame or two late instead
+        // (`gpu_lag_frames`); a device the graph owns gets a non-blocking
+        // poll so the map callbacks of finished frames are delivered.
         if self.owns_device {
-            self.profiler.read_gpu_timestamps_blocking(scene.device());
-        } else {
-            self.profiler.read_gpu_timestamps_deferred();
+            let _ = scene.device().poll(wgpu::PollType::Poll);
         }
+        self.profiler.read_gpu_timestamps_deferred();
         #[cfg(not(target_arch = "wasm32"))]
         drop(readback_scope);
         {
