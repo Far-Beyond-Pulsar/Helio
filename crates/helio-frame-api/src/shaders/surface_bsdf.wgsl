@@ -11,6 +11,9 @@
 //                             `wi` with (for multiple importance sampling)
 //   bsdf_sample(s, wo, u)     one direction from three uniform numbers, its
 //                             weight `bsdf_eval / bsdf_pdf` and its density
+//   bsdf_diffuse_reflectance(s, cos_o)
+//                             the diffuse lobe's reflectance of light from
+//                             every direction above (an irradiance's factor)
 //   bsdf_prepare(s), bsdf_eval_prepared(p, wo, wi)
 //                             `bsdf_eval` with the surface's frame made once,
 //                             for a model that lights a point by many lights
@@ -175,6 +178,31 @@ fn bsdf_diffuse_loss(s: SurfaceData, cos_o: f32) -> f32 {
     let by_roughness = clamp((r - 0.195) / 0.075, 0.0, 1.0) * clamp((0.66 - r) / 0.34, 0.0, 1.0);
     let by_view = min(0.58 + 12.0 * cos_o, 1.0) * clamp((0.58 - cos_o) / 0.32, 0.0, 1.0);
     return 0.0385 * reflectance * by_roughness * by_view;
+}
+
+// The diffuse lobe's reflectance under light from every direction above
+// the surface, seen from `cos_o` (n.wo): what an irradiance is multiplied by
+// (a lighting model's indirect diffuse and ambient light, which come from
+// all directions), as `bsdf_eval`'s diffuse lobe integrates it. Its
+// `1 - F(wo.h)` averaged over cosine-distributed light is
+// `1 - f0 - (f90 - f0) P(cos_o)`, P the mean of `(1 - wo.h)^5`:
+// `0.0283 (1 - cos_o)^2.5` within 0.001 of quadrature (0.028 at grazing
+// views, below 0.0001 at normal ones). A wrapped lobe (`SURFACE_FLAG_SUBSURFACE`)
+// takes light by `(cos + w) / (1 + 2w)`: a cosine share `1 / (1 + 2w)` and
+// a uniform share `2w / (1 + 2w)`, whose mean of `(1 - wo.h)^5` is
+// `0.048 (1 - cos_o)^2` within 0.001. Metals reflect none of it.
+fn bsdf_diffuse_reflectance(s: SurfaceData, cos_o: f32) -> vec3<f32> {
+    let f90 = clamp(50.0 * max(s.specular_f0.r, max(s.specular_f0.g, s.specular_f0.b)), 0.0, 1.0);
+    let o = clamp(1.0 - cos_o, 0.0, 1.0);
+    var p = 0.0283 * pow(o, 2.5);
+    var albedo = s.albedo.rgb;
+    if (s.flags & SURFACE_FLAG_SUBSURFACE) != 0u {
+        albedo = mix(albedo, s.subsurface_color, 0.5);
+        let w = bsdf_wrap(s);
+        p = (p + 2.0 * w * 0.048 * o * o) / (1.0 + 2.0 * w);
+    }
+    let f = s.specular_f0 + (f90 - s.specular_f0) * p;
+    return albedo * (1.0 - f) * (1.0 - s.metallic) * (1.0 - bsdf_diffuse_loss(s, cos_o));
 }
 
 // A surface with its frame, made once where many lights light it (a

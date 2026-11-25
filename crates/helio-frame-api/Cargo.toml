@@ -9,6 +9,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 helio-core = { workspace = true }
 bytemuck = { workspace = true }
+# The history's reprojection, composed in f64 (`history::HistoryReprojection`).
+glam = { workspace = true }
 helio-feature-api = { path = "../helio-feature-api" }
 wgpu = { workspace = true }
 

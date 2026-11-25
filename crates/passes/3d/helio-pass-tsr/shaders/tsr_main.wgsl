@@ -1,4 +1,5 @@
 //!use helio_prelude
+//!use frame_history
 // Temporal Super-Resolution: a reconstruction dispatch, one resolve dispatch
 // and one sharpening draw.
 //
@@ -182,18 +183,10 @@ struct TsrUniform {
     flags:          u32,       // bit 0: reset, bit 1: transparency coverage, bit 2: motion vectors
     previous_jitter_uv: vec2<f32>,
     _pad: vec2<f32>,
-    // Reprojection (lib.rs `Reprojection`), applied to this frame's clip
-    // position c = (ndc, raw depth, 1): last frame's clip position of the
-    // homogeneous world point is clip_to_previous_clip * c, the point's w
-    // is dot(clip_to_world_w, c), last frame's eye's clip position
-    // eye_to_previous_clip, and last frame's view z times w is
-    // dot(clip_to_previous_view_z, c). Composed on the CPU in f64.
-    clip_to_previous_clip: mat4x4<f32>,
-    clip_to_world_w: vec4<f32>,
-    eye_to_previous_clip: vec4<f32>,
-    clip_to_previous_view_z: vec4<f32>,
 }
 @group(0) @binding(6) var<uniform> tsr: TsrUniform;
+// The frame's reprojection of this view (`helio_frame_api::history`).
+@group(0) @binding(21) var<uniform> history: HistoryReprojection;
 // xy: view depths, 0 = sky: x dilated, y the pixel's own surface's.
 // zw: the coarse detector's slow and fast mean log luminance.
 @group(0) @binding(7) var history_depth_coarse: texture_2d<f32>;
@@ -338,17 +331,8 @@ fn sample_history(uv: vec2<f32>) -> vec3<f32> {
 // jitter after reprojection. z: positive where the point was in front of
 // last frame's camera; w: its view depth then (0 for sky).
 fn reproject_history(raster_uv: vec2<f32>, depth: f32) -> vec4<f32> {
-    let c = vec4<f32>(raster_uv * vec2<f32>(2.0,-2.0) + vec2<f32>(-1.0,1.0), depth, 1.0);
-    let w = dot(tsr.clip_to_world_w, c);
-    // Sky texels reproject as directions: the homogeneous point minus w times
-    // the eye, exact for any w including the w = 0 of depth 0 (infinity).
-    // Sky has no history depth.
-    let sky = helio_is_sky(depth);
-    let prev_clip = tsr.clip_to_previous_clip * c - select(0.0, w, sky) * tsr.eye_to_previous_clip;
-    let uv = prev_clip.xy/prev_clip.w * vec2<f32>(0.5,-0.5)+0.5;
-    // A point's clip w is the homogeneous one over w (same sign as times w).
-    let front = select(prev_clip.w * w, prev_clip.w, sky);
-    return vec4<f32>(uv-tsr.previous_jitter_uv, front, select(-dot(tsr.clip_to_previous_view_z, c) / w, 0.0, sky));
+    let r = history_reproject(history, raster_uv, depth);
+    return vec4<f32>(r.xy - tsr.previous_jitter_uv, r.zw);
 }
 
 // The motion of input texel `texel` (xy) if it moves by itself (z 1), else

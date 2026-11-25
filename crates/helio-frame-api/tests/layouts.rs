@@ -29,6 +29,53 @@ fn the_sky_frame_has_its_contract_size() {
     assert_eq!(struct_size(&source, "SkyFrame"), SKY_FRAME_BYTES);
 }
 
+/// The sky tables' WGSL dimensions are the ones their Rust constants size
+/// the buffers and textures by.
+#[test]
+fn the_sky_tables_have_their_contract_sizes() {
+    use helio_frame_api::lighting::sky::{
+        SKY_RADIANCE_SIZE, SKY_TABLE_BYTES, SKY_TABLE_ENTRIES, SKY_VIEW_SIZE,
+    };
+    let constant = |name: &str| -> u64 {
+        let line = SKY_SNIPPET
+            .source
+            .lines()
+            .find(|l| l.starts_with(&format!("const {name}: u32 = ")))
+            .unwrap_or_else(|| panic!("no `{name}`"));
+        line.split('=')
+            .nth(1)
+            .unwrap()
+            .trim()
+            .trim_end_matches(';')
+            .trim_end_matches('u')
+            .parse()
+            .unwrap()
+    };
+    let entries = constant("SKY_TABLE_R") * constant("SKY_TABLE_MU");
+    assert_eq!(entries, SKY_TABLE_ENTRIES);
+    assert_eq!(SKY_TABLE_BYTES, entries * constant("SKY_TABLE_COEFFS") * 16);
+    assert_eq!(
+        SKY_RADIANCE_SIZE.map(u64::from),
+        [
+            constant("SKY_RADIANCE_AZIMUTH"),
+            constant("SKY_RADIANCE_ZENITH"),
+            entries
+        ]
+    );
+    let view = SKY_SNIPPET
+        .source
+        .lines()
+        .find(|l| l.starts_with("const SKY_VIEW_SIZE: vec2<f32> = "))
+        .expect("no `SKY_VIEW_SIZE`");
+    assert!(
+        view.contains(&format!(
+            "vec2<f32>({}.0, {}.0)",
+            SKY_VIEW_SIZE[0], SKY_VIEW_SIZE[1]
+        )),
+        "{view} against {SKY_VIEW_SIZE:?}"
+    );
+}
+
 /// Parses and validates `source` (types, packing builtins).
 fn validate(source: &str) {
     let module = naga::front::wgsl::parse_str(source)
@@ -158,4 +205,93 @@ fn the_light_sample_rows_have_their_contract_sizes() {
     assert_eq!(struct_size(&source, "LightQuery"), LightQuery::BYTES);
     assert_eq!(struct_size(&source, "LightSample"), LightSample::BYTES);
     validate(&source);
+}
+
+/// The radiance cache's rows are the sizes their Rust mirrors are, and a
+/// reader's read and mark validate (a probe or a pixel with a hit).
+#[test]
+fn the_radiance_cache_rows_have_their_contract_sizes() {
+    use helio_frame_api::rays::radiance_cache::{
+        RadianceCacheEntry, RadianceCacheFrame, RadianceCacheKey, RadianceCacheSlot, SNIPPET,
+    };
+    use helio_frame_api::rays::stream::SNIPPET as STREAM;
+    let source = helio_core::shader::resolve_with(
+        "//!use frame_ray_stream
+         //!use frame_radiance_cache
+         //!use frame_surface_stops
+         @group(0) @binding(0) var<uniform> radiance_cache_frame: RadianceCacheFrame;
+         @group(0) @binding(1) var<storage, read_write> radiance_cache_slots: array<RadianceCacheSlot>;
+         @group(0) @binding(2) var<storage, read_write> radiance_cache_entries: array<RadianceCacheEntry>;
+         @group(0) @binding(3) var<storage, read_write> out: array<vec4<f32>>;
+         @compute @workgroup_size(64)
+         fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+             let p = vec3<f32>(f32(id.x), 1.0, 2.0);
+             let n = vec3<f32>(0.0, 1.0, 0.0);
+             let e = radiance_cache_read(p, n, SCENE_SPACE_ANY, 0.0);
+             radiance_cache_mark(p, n, SCENE_SPACE_ANY, 0.0);
+             let m = radiance_cache_read_mark(p, n, SCENE_SPACE_ANY, 1.0);
+             let at = radiance_cache_entry_point(radiance_cache_entries[id.x]);
+             out[id.x] = vec4<f32>(e.direct + e.indirect + m.direct + at, select(0.0, 1.0, e.found) + f32(e.level) * radiance_cache_size(e.level));
+         }
+",
+        &[
+            STREAM,
+            SNIPPET,
+            helio_frame_api::history::SURFACE_STOPS_SNIPPET,
+        ],
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheFrame"),
+        RadianceCacheFrame::BYTES
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheSlot"),
+        RadianceCacheSlot::BYTES
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheKey"),
+        std::mem::size_of::<RadianceCacheKey>() as u64
+    );
+    assert_eq!(
+        struct_size(&source, "RadianceCacheEntry"),
+        RadianceCacheEntry::BYTES
+    );
+    validate(&source);
+}
+
+/// The history's reprojection uniform is the size its Rust mirror is, and
+/// the history and irradiance snippets validate with what they decode.
+#[test]
+fn the_history_and_denoise_contracts_have_their_sizes() {
+    use helio_frame_api::denoise::IRRADIANCE_SNIPPET;
+    use helio_frame_api::history::{HistoryReprojection, SNIPPET};
+    let source = helio_core::shader::resolve_with(
+        "//!use helio_prelude
+         //!use frame_history
+         //!use frame_denoise_irradiance
+         @group(0) @binding(0) var<uniform> history: HistoryReprojection;
+         @group(0) @binding(1) var pixels: texture_2d<f32>;
+         @group(0) @binding(2) var<storage, read_write> out: array<vec4<f32>>;
+         @compute @workgroup_size(8, 8)
+         fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+             let r = history_reproject(history, vec2<f32>(0.5), 0.25);
+             let p = history_pixel(textureLoad(pixels, vec2<i32>(id.xy), 0), id.xy);
+             let t = history_taps(p);
+             let at = history_tap(t, 3u);
+             var input: DenoiseIrradianceInput;
+             input = denoise_irradiance_add(input, vec3<f32>(1.0), vec3<f32>(0.0, 0.0, 1.0));
+             let l = denoise_irradiance_linear(input.signal0, input.signal1, vec3<f32>(0.0, 0.0, 1.0));
+             let e = denoise_irradiance(vec4<f32>(l.x, 0.0, 0.0, 0.0), vec4<f32>(l.yzw, 0.0), vec3<f32>(0.0, 1.0, 0.0))
+                 + denoise_irradiance_input(input.signal0, input.signal1, vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(1.0, 0.0, 0.0));
+             let px = denoise_traced_pixel(id.xy / 4u, 7u, 4u, vec2<u32>(64u));
+             out[id.x] = vec4<f32>(r.xy + vec2<f32>(at) + vec2<f32>(px), history_taps_weight(t), e.x);
+         }
+",
+        &[SNIPPET, IRRADIANCE_SNIPPET],
+    );
+    validate(&source);
+    assert_eq!(
+        struct_size(&source, "HistoryReprojection"),
+        HistoryReprojection::BYTES
+    );
 }

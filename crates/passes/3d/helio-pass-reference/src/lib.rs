@@ -60,7 +60,8 @@ use helio_feature_api::{
     BuildEnv, Feature, FeatureRegistrar, NodeBuild, NodeDescriptor, ParamDesc,
 };
 use helio_frame_api::lighting::sky::{
-    SKY_FRAME, SKY_FRAME_BYTES, SKY_SNIPPET, SKY_TABLE, SKY_TABLE_BYTES, SKY_TABLE_SNIPPET,
+    sky_radiance_sampler, sky_radiance_stand_in, SKY_FRAME, SKY_FRAME_BYTES, SKY_RADIANCE,
+    SKY_RADIANCE_SNIPPET, SKY_SNIPPET,
 };
 use helio_frame_api::rays::light_samples::{self, LightBatch, LightBatchBuffers};
 use helio_frame_api::rays::stream::{self, RayClass, Stream, StreamBuffers, SurfaceDetail};
@@ -73,8 +74,10 @@ pub use stages::{ReferenceAccumulate, ReferenceDisplay, ReferenceImage, Referenc
 /// The debug view of the reference's image.
 pub const REFERENCE_VIEW: u32 = 62;
 /// The debug view of its indirect diffuse: the light that reached the
-/// camera's hit by a first bounce off a diffuse lobe (what a real-time
-/// indirect diffuse, the deferred lighting's own debug view 23, holds).
+/// camera's hit by a first bounce off a diffuse lobe, each first bounce
+/// weighted by the diffuse lobe's share of the BSDF in its direction (what a
+/// real-time indirect diffuse, the deferred lighting's own debug view 23,
+/// holds: irradiance times the diffuse lobe's reflectance).
 pub const REFERENCE_DIFFUSE_VIEW: u32 = 63;
 
 /// The most stages a graph unrolls.
@@ -174,7 +177,7 @@ pub const SNIPPETS: [helio_core::shader::ShaderSnippet; 7] = [
     helio_frame_api::gbuffer::BSDF_SNIPPET,
     light_samples::SNIPPET,
     SKY_SNIPPET,
-    SKY_TABLE_SNIPPET,
+    SKY_RADIANCE_SNIPPET,
 ];
 
 /// `ReferenceFrame` (`reference.wgsl`).
@@ -189,7 +192,7 @@ struct GpuFrame {
     ground: [f32; 4],
 }
 
-const PATH_BYTES: u64 = 48;
+const PATH_BYTES: u64 = 64;
 const OWNER_BYTES: u64 = 32;
 
 /// The streams and batches of a graph's stages (names `reference_d<d>`,
@@ -339,7 +342,8 @@ struct Kernels {
     /// A uniform a stage holding its depth.
     stages: Vec<wgpu::Buffer>,
     no_sky: wgpu::Buffer,
-    no_sky_table: wgpu::Buffer,
+    no_sky_radiance: wgpu::TextureView,
+    sky_radiance_sampler: wgpu::Sampler,
     stats: wgpu::Buffer,
     stat: helio_core::StatSlot,
     stats_handle: helio_core::FrameStats,
@@ -389,7 +393,27 @@ impl Kernels {
         for b in 1..=20 {
             entries.push(storage(b, b == 5 || b == 13));
         }
-        entries.extend([uniform(21), uniform(22), storage(23, false), uniform(24)]);
+        entries.extend([uniform(21), storage(23, false), uniform(24)]);
+        // The sky a miss takes (`sky_radiance_eval`): the radiance table and
+        // its sampler.
+        entries.extend([
+            wgpu::BindGroupLayoutEntry {
+                binding: 22,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 25,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ]);
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Reference"),
             entries: &entries,
@@ -444,7 +468,8 @@ impl Kernels {
                 .map(|_| uniform_buffer("Reference stage", 16))
                 .collect(),
             no_sky: uniform_buffer("Reference no sky", SKY_FRAME_BYTES),
-            no_sky_table: uniform_buffer("Reference no sky table", SKY_TABLE_BYTES),
+            no_sky_radiance: sky_radiance_stand_in(device),
+            sky_radiance_sampler: sky_radiance_sampler(device),
             stats: stats.buffer().clone(),
             stat: stats.slot("rays.reference"),
             stats_handle: stats.clone(),
@@ -454,13 +479,7 @@ impl Kernels {
 
 impl Shared {
     /// Depth `d`'s bind group: its stream (`d % 2`) current, the other next.
-    fn group(
-        &self,
-        device: &wgpu::Device,
-        b: &Buffers,
-        d: u32,
-        sky: [&wgpu::Buffer; 2],
-    ) -> wgpu::BindGroup {
+    fn group(&self, device: &wgpu::Device, b: &Buffers, d: u32, sky: Sky<'_>) -> wgpu::BindGroup {
         let k = &self.kernels;
         let (cur, next) = ((d % 2) as usize, ((d + 1) % 2) as usize);
         let surfaces = b.rays[cur]
@@ -494,22 +513,40 @@ impl Shared {
                     entry(18, &b.pending),
                     entry(19, &b.image),
                     entry(20, &b.diffuse),
-                    entry(21, sky[0]),
-                    entry(22, sky[1]),
+                    entry(21, sky.frame),
+                    wgpu::BindGroupEntry {
+                        binding: 22,
+                        resource: wgpu::BindingResource::TextureView(sky.radiance),
+                    },
                     entry(23, &k.stats),
                     entry(24, &k.stages[d as usize]),
+                    wgpu::BindGroupEntry {
+                        binding: 25,
+                        resource: wgpu::BindingResource::Sampler(&k.sky_radiance_sampler),
+                    },
                 ],
             },
         )
     }
 
-    fn sky<'a>(&'a self, registry: &helio_core::ResourceRegistry<'a>) -> [&'a wgpu::Buffer; 2] {
-        let get = |name| registry.get::<&'a wgpu::Buffer>(helio_core::ResourceKey::new(name));
-        [
-            get(SKY_FRAME).unwrap_or(&self.kernels.no_sky),
-            get(SKY_TABLE).unwrap_or(&self.kernels.no_sky_table),
-        ]
+    fn sky<'a>(&'a self, registry: &helio_core::ResourceRegistry<'a>) -> Sky<'a> {
+        Sky {
+            frame: registry
+                .get::<&'a wgpu::Buffer>(helio_core::ResourceKey::new(SKY_FRAME))
+                .unwrap_or(&self.kernels.no_sky),
+            radiance: registry
+                .get::<&'a wgpu::TextureView>(helio_core::ResourceKey::new(SKY_RADIANCE))
+                .unwrap_or(&self.kernels.no_sky_radiance),
+        }
     }
+}
+
+/// The frame's sky a stage binds: the sky frame and the radiance table (or
+/// their stand-ins).
+#[derive(Clone, Copy)]
+struct Sky<'a> {
+    frame: &'a wgpu::Buffer,
+    radiance: &'a wgpu::TextureView,
 }
 
 /// The reference as a feature: its node, its views, its settings.
@@ -695,7 +732,7 @@ impl RenderPass for ReferenceBegin {
     fn reads(&self) -> &'static [&'static str] {
         &[
             SKY_FRAME,
-            SKY_TABLE,
+            SKY_RADIANCE,
             helio_core::resource_keys::RENDER_ENVIRONMENT,
         ]
     }

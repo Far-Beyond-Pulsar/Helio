@@ -53,21 +53,112 @@ struct SkyFrame {
     directional_light_count: vec4<u32>,
 }
 
-// The sky's irradiance / pi (unit sun) on a surface anywhere in the
-// atmosphere (`sky_table_kernel`, published as `sky_table`): per
-// altitude (SKY_TABLE_R rows, by the square root of the height) and sun
-// cosine (SKY_TABLE_MU columns, SKY_TABLE_MU_LO to 1), the six L2
-// harmonics symmetric about the sun's vertical plane, in the local frame
-// (y up, x towards the sun), SKY_TABLE_COEFFS vec4s an entry.
+// The sky anywhere in the atmosphere, for a unit sun, by altitude
+// (SKY_TABLE_R rows, by the square root of the height) and sun cosine
+// (SKY_TABLE_MU columns from SKY_TABLE_MU_LO to 1, dense about the horizon,
+// where the sky changes fastest with the sun: `sky_table_column_mu`), in
+// each entry's local frame
+// (y up, x towards the sun's azimuth; the sky is symmetric about the sun's
+// vertical plane). Two tables share these entries:
+//
+// - `sky_radiance` (`sky_radiance_kernel`): the sky's radiance by
+//   direction, what a ray that meets nothing takes (`sky_radiance_eval`).
+//   A 3D texture: entry `ir * SKY_TABLE_MU + im` is slice `ir * MU + im`, a
+//   SKY_RADIANCE_AZIMUTH x SKY_RADIANCE_ZENITH map, rows as the sky-view
+//   LUT's at the row's radius (`sky_radiance_uvw`), computed as the
+//   sky-view LUT is (`sky_integrate`, 32 steps, the lit ground below the
+//   horizon).
+// - `sky_table` (`sky_table_kernel`, from `sky_radiance`): irradiance / pi
+//   on a surface, the six L2 harmonics symmetric about the sun's plane,
+//   cosine-convolved, SKY_TABLE_COEFFS vec4s an entry (`sky_table_eval`).
 const SKY_TABLE_R: u32 = 16u;
-const SKY_TABLE_MU: u32 = 24u;
+const SKY_TABLE_MU: u32 = 40u;
 const SKY_TABLE_MU_LO: f32 = -0.4;
+// Columns below the horizon: column SKY_TABLE_MU_BELOW is a sun on it.
+const SKY_TABLE_MU_BELOW: u32 = 16u;
 const SKY_TABLE_COEFFS: u32 = 6u;
+// The irradiance table's vec4s (a reader binding it as a uniform sizes its
+// array by this).
+const SKY_TABLE_VEC4S: u32 = SKY_TABLE_R * SKY_TABLE_MU * SKY_TABLE_COEFFS;
+const SKY_RADIANCE_AZIMUTH: u32 = 32u;
+const SKY_RADIANCE_ZENITH: u32 = 64u;
+
+// Height (km) of the sky tables' lowest row (an eye stands above it): the
+// ground seen just below the horizon is as far as the horizon, which grows
+// as the square root of the eye's height, so an eye below the lowest row
+// sees it nearer than any row does.
+const SKY_TABLE_LOWEST: f32 = 0.001;
+
+// Radius of the sky tables' row `ir`: quadratic in the height from
+// SKY_TABLE_LOWEST to the top of the air.
+fn sky_table_row_radius(p: SkyMedium, ir: u32) -> f32 {
+    let x = f32(ir) / f32(SKY_TABLE_R - 1u);
+    return p.bottom_radius + SKY_TABLE_LOWEST
+        + x * x * (p.top_radius - p.bottom_radius - SKY_TABLE_LOWEST);
+}
+
+// Sun cosine of the sky tables' column `im`: quadratic away from the
+// horizon on either side (the sun's path through the air, and so the sky,
+// changes fastest as it nears the horizon).
+fn sky_table_column_mu(im: u32) -> f32 {
+    if im < SKY_TABLE_MU_BELOW {
+        let x = f32(SKY_TABLE_MU_BELOW - im) / f32(SKY_TABLE_MU_BELOW);
+        return SKY_TABLE_MU_LO * x * x;
+    }
+    let x = f32(im - SKY_TABLE_MU_BELOW) / f32(SKY_TABLE_MU - 1u - SKY_TABLE_MU_BELOW);
+    return x * x;
+}
+
+// The fractional row (0..SKY_TABLE_R - 1) of radius `r`
+// (`sky_table_row_radius`'s inverse).
+fn sky_table_row(p: SkyMedium, r: f32) -> f32 {
+    let span = p.top_radius - p.bottom_radius - SKY_TABLE_LOWEST;
+    let x = clamp((r - p.bottom_radius - SKY_TABLE_LOWEST) / span, 0.0, 1.0);
+    return sqrt(x) * f32(SKY_TABLE_R - 1u);
+}
+
+// The fractional column (0..SKY_TABLE_MU - 1) of sun cosine `mu_s`
+// (`sky_table_column_mu`'s inverse).
+fn sky_table_column(mu_s: f32) -> f32 {
+    let below = f32(SKY_TABLE_MU_BELOW);
+    if mu_s < 0.0 {
+        return below * (1.0 - sqrt(clamp(mu_s / SKY_TABLE_MU_LO, 0.0, 1.0)));
+    }
+    return below + f32(SKY_TABLE_MU - 1u - SKY_TABLE_MU_BELOW) * sqrt(min(mu_s, 1.0));
+}
+
+// A sky table entry's local frame for a sun `sun` seen at `up`: x towards
+// the sun's azimuth, y up, z = x cross y.
+fn sky_table_frame(up: vec3<f32>, sun: vec3<f32>) -> mat3x3<f32> {
+    var x = sun - up * dot(up, sun);
+    if dot(x, x) < 1e-8 { x = cross(up, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(up.x) > 0.9)); }
+    x = normalize(x);
+    return mat3x3<f32>(x, up, cross(x, up));
+}
+
+// The radiance table's texture coordinate (xy in the entry's map, z the
+// slice's centre) of local direction `l` (y up, x towards the sun) at radius
+// `r` in entry `entry` (`ir * SKY_TABLE_MU`, plus a fractional column).
+fn sky_radiance_uvw(p: SkyMedium, r: f32, l: vec3<f32>, entry: f32) -> vec3<f32> {
+    let u = sqrt(clamp(abs(atan2(l.z, l.x)) / SKY_PI, 0.0, 1.0));
+    return vec3<f32>(u, sky_zenith_v(p, r, acos(clamp(l.y, -1.0, 1.0))),
+        (entry + 0.5) / f32(SKY_TABLE_R * SKY_TABLE_MU));
+}
+
+// The direction (y up, x towards the sun) of texel coordinate `uv` of a
+// radiance table entry's map at radius `r`: one side of the sun's vertical
+// plane (an entry holds one sun, about whose plane its sky is symmetric),
+// columns concentrated near the sun's azimuth, rows at the horizon.
+fn sky_radiance_direction(p: SkyMedium, r: f32, uv: vec2<f32>) -> vec3<f32> {
+    let zenith = sky_v_zenith(p, r, uv.y);
+    let azimuth = uv.x * uv.x * SKY_PI;
+    return vec3<f32>(sin(zenith) * cos(azimuth), cos(zenith), sin(zenith) * sin(azimuth));
+}
 
 const SKY_PI: f32 = 3.14159265358979;
 const TRANSMITTANCE_SIZE: vec2<f32> = vec2<f32>(256.0, 64.0);
 const MULTI_SCATTERING_SIZE: f32 = 32.0;
-const SKY_VIEW_SIZE: vec2<f32> = vec2<f32>(192.0, 108.0);
+const SKY_VIEW_SIZE: vec2<f32> = vec2<f32>(256.0, 108.0);
 const AERIAL_SLICES: f32 = 32.0;
 
 struct Medium {
@@ -110,7 +201,18 @@ fn ray_sphere(o: vec3<f32>, d: vec3<f32>, r: f32) -> vec2<f32> {
     let disc = r * r - dot(perpendicular, perpendicular);
     if disc < 0.0 { return vec2<f32>(-1.0); }
     let s = sqrt(disc);
-    return vec2<f32>(-b - s, -b + s);
+    // The root nearer zero from the roots' product (|o|^2 - r^2, its sign
+    // exact from |o| - r), not as the difference of two near-equal
+    // distances: a point metres above an Earth-sized sphere (radii in km)
+    // lost the near root's sign to rounding and saw through the ground.
+    let l = length(o);
+    let c = (l - r) * (l + r);
+    if b < 0.0 {
+        let far = s - b;
+        return vec2<f32>(c / far, far);
+    }
+    let near = -b - s;
+    return vec2<f32>(near, select(c / near, -b + s, near == 0.0));
 }
 
 // Bruneton's transmittance parameterisation: (r, mu) <-> uv.
@@ -159,39 +261,46 @@ fn horizon_zenith(p: SkyMedium, r: f32) -> f32 {
     return SKY_PI - acos(clamp(s, -1.0, 1.0));
 }
 
-// Sky-view LUT: rows concentrate at the horizon, columns near the sun's
-// azimuth (the sky is symmetric about it).
-fn sky_view_uv(p: SkyMedium, r: f32, zenith: f32, azimuth: f32) -> vec2<f32> {
+// The sky maps' rows: concentrated at the horizon (seen from radius `r`),
+// above it from v 0 (the zenith) to 0.5, below it to 1 (the nadir).
+fn sky_zenith_v(p: SkyMedium, r: f32, zenith: f32) -> f32 {
     let horizon = horizon_zenith(p, r);
-    var v: f32;
     if zenith < horizon {
-        v = 0.5 * (1.0 - sqrt(max(1.0 - zenith / horizon, 0.0)));
-    } else {
-        v = 0.5 + 0.5 * sqrt(clamp((zenith - horizon) / max(SKY_PI - horizon, 1e-5), 0.0, 1.0));
+        return 0.5 * (1.0 - sqrt(max(1.0 - zenith / horizon, 0.0)));
     }
-    return vec2<f32>(sqrt(clamp(azimuth / SKY_PI, 0.0, 1.0)), v);
+    return 0.5 + 0.5 * sqrt(clamp((zenith - horizon) / max(SKY_PI - horizon, 1e-5), 0.0, 1.0));
+}
+
+fn sky_v_zenith(p: SkyMedium, r: f32, v: f32) -> f32 {
+    let horizon = horizon_zenith(p, r);
+    if v < 0.5 {
+        let c = 1.0 - 2.0 * v;
+        return horizon * (1.0 - c * c);
+    }
+    let c = 2.0 * v - 1.0;
+    return horizon + c * c * (SKY_PI - horizon);
+}
+
+// Sky-view LUT: rows concentrate at the horizon, columns near the first
+// sun's azimuth, on both sides of it (u 0.5): with more than one sun the sky
+// is not symmetric about the first one's vertical plane.
+fn sky_view_uv(p: SkyMedium, r: f32, zenith: f32, azimuth: f32) -> vec2<f32> {
+    let u = 0.5 + 0.5 * sign(azimuth) * sqrt(clamp(abs(azimuth) / SKY_PI, 0.0, 1.0));
+    return vec2<f32>(u, sky_zenith_v(p, r, zenith));
 }
 
 fn sky_view_angles(p: SkyMedium, r: f32, uv: vec2<f32>) -> vec2<f32> {
-    let horizon = horizon_zenith(p, r);
-    var zenith: f32;
-    if uv.y < 0.5 {
-        let c = 1.0 - 2.0 * uv.y;
-        zenith = horizon * (1.0 - c * c);
-    } else {
-        let c = 2.0 * uv.y - 1.0;
-        zenith = horizon + c * c * (SKY_PI - horizon);
-    }
-    return vec2<f32>(zenith, uv.x * uv.x * SKY_PI);
+    let c = 2.0 * uv.x - 1.0;
+    return vec2<f32>(sky_v_zenith(p, r, uv.y), sign(c) * c * c * SKY_PI);
 }
 
-// Zenith and sun-relative azimuth of world direction `d` seen from the
-// camera.
+// Zenith and signed azimuth from the first sun of world direction `d` seen
+// from the camera.
 fn sky_view_direction_angles(frame: SkyFrame, d: vec3<f32>) -> vec2<f32> {
     let up = normalize(frame.eye.xyz);
     let basis = sky_view_basis(up, frame.sun.xyz);
     let local = transpose(basis) * d;
-    return vec2<f32>(acos(clamp(local.y, -1.0, 1.0)), abs(atan2(local.z, local.x)));
+    return vec2<f32>(acos(clamp(local.y, -1.0, 1.0)), atan2(local.z, local.x));
 }
 
 // Aerial-perspective slice coordinate (0..1) of a distance (km): slices are

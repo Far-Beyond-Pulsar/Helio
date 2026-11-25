@@ -121,7 +121,7 @@ fn run_depth_history_fixture(translated_origin: bool) {
         });
         // The fixture never executes, so the resolve always writes
         // histories[0] and reads histories[1].
-        let create_bind = |pass: &TsrPass| {
+        let create_bind = |pass: &TsrPass, reprojection: &wgpu::Buffer| {
             make_resolve_bg(
                 &device,
                 &pass.bgl,
@@ -136,9 +136,26 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 &pass.linear_sampler,
                 &cameras,
                 &pass.uniform_buf,
+                reprojection,
             )
         };
-        let mut bind = create_bind(&pass);
+        // The frame's reprojection: fixed in the plain fixture; published by
+        // the spine's history pass, prepared with TSR, in the translated one.
+        let fixed = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::bytes_of(
+                &helio_frame_api::history::HistoryReprojection::new(
+                    camera.view_proj,
+                    [0.0; 3],
+                    camera.prev_view_proj,
+                    identity,
+                )
+                .with_previous(true, 1),
+            ),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let mut reprojection_pass = helio_pass_history::HistoryReprojectionPass::standalone();
+        let mut bind = create_bind(&pass, &fixed);
         let probe = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: None,
             source: wgpu::ShaderSource::Wgsl(
@@ -272,12 +289,6 @@ fn run_depth_history_fixture(translated_origin: bool) {
                 flags,
                 previous_jitter_uv: [0.0; 2],
                 _pad: [0.0; 2],
-                reprojection: Reprojection::new(
-                    camera.view_proj,
-                    [0.0; 3],
-                    camera.prev_view_proj,
-                    identity,
-                ),
             };
             queue.write_buffer(&pass.uniform_buf, 0, bytemuck::bytes_of(&uniform));
             let mut raster_depth = 0.5;
@@ -387,24 +398,28 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         "test",
                     );
                 }
-                pass.prepare(&PrepareContext {
-                    device: &device,
-                    queue: &queue,
-                    camera: &cameras,
-                    camera_data: &previous,
-                    camera_generation: 0,
-                    scene_buffers: &scene_buffers,
-                    registry: &registry,
-                    resize: false,
-                    width: 64,
-                    height: 8,
-                    frame_num: 0,
-                    delta_time: time_delta,
-                    time: 0.0,
-                    time_delta: 0.0,
-                    world_origin: origin.into(),
-                    owns_device: true,
-                    uploads: None,
+                ({
+                    let prepare = PrepareContext {
+                        device: &device,
+                        queue: &queue,
+                        camera: &cameras,
+                        camera_data: &previous,
+                        camera_generation: 0,
+                        scene_buffers: &scene_buffers,
+                        registry: &registry,
+                        resize: false,
+                        width: 64,
+                        height: 8,
+                        frame_num: 0,
+                        delta_time: time_delta,
+                        time: 0.0,
+                        time_delta: 0.0,
+                        world_origin: origin.into(),
+                        owns_device: true,
+                        uploads: None,
+                    };
+                    reprojection_pass.prepare(&prepare).unwrap();
+                    pass.prepare(&prepare)
                 })
                 .unwrap();
                 let mut current = previous;
@@ -418,24 +433,28 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     pass.reset_history();
                 }
                 let next_origin: glam::DVec3 = current_origin.into();
-                pass.prepare(&PrepareContext {
-                    device: &device,
-                    queue: &queue,
-                    camera: &cameras,
-                    camera_data: &current,
-                    camera_generation: 1,
-                    scene_buffers: &scene_buffers,
-                    registry: &registry,
-                    resize: false,
-                    width: 64,
-                    height: 8,
-                    frame_num: 1,
-                    delta_time: time_delta,
-                    time: 0.0,
-                    time_delta: 0.0,
-                    world_origin: next_origin,
-                    owns_device: true,
-                    uploads: None,
+                ({
+                    let prepare = PrepareContext {
+                        device: &device,
+                        queue: &queue,
+                        camera: &cameras,
+                        camera_data: &current,
+                        camera_generation: 1,
+                        scene_buffers: &scene_buffers,
+                        registry: &registry,
+                        resize: false,
+                        width: 64,
+                        height: 8,
+                        frame_num: 1,
+                        delta_time: time_delta,
+                        time: 0.0,
+                        time_delta: 0.0,
+                        world_origin: next_origin,
+                        owns_device: true,
+                        uploads: None,
+                    };
+                    reprojection_pass.prepare(&prepare).unwrap();
+                    pass.prepare(&prepare)
                 })
                 .unwrap();
                 let successive = (13..=15).contains(&case);
@@ -448,30 +467,33 @@ fn run_depth_history_fixture(translated_origin: bool) {
                     if flags & 1 != 0 {
                         pass.reset_history();
                     }
-                    pass.prepare(&PrepareContext {
-                        device: &device,
-                        queue: &queue,
-                        camera: &cameras,
-                        camera_data: &current,
-                        camera_generation: 2,
-                        scene_buffers: &scene_buffers,
-                        registry: &registry,
-                        resize: false,
-                        width: 64,
-                        height: 8,
-                        frame_num: 2,
-                        delta_time: time_delta,
-                        time: 0.0,
-                        time_delta: 0.0,
-                        world_origin: final_origin.into(),
-                        owns_device: true,
-                        uploads: None,
+                    ({
+                        let prepare = PrepareContext {
+                            device: &device,
+                            queue: &queue,
+                            camera: &cameras,
+                            camera_data: &current,
+                            camera_generation: 2,
+                            scene_buffers: &scene_buffers,
+                            registry: &registry,
+                            resize: false,
+                            width: 64,
+                            height: 8,
+                            frame_num: 2,
+                            delta_time: time_delta,
+                            time: 0.0,
+                            time_delta: 0.0,
+                            world_origin: final_origin.into(),
+                            owns_device: true,
+                            uploads: None,
+                        };
+                        reprojection_pass.prepare(&prepare).unwrap();
+                        pass.prepare(&prepare)
                     })
                     .unwrap();
                 }
                 if case == 19 {
                     pass.on_resize(&device, helio_core::RenderSize::uniform(64, 8));
-                    bind = create_bind(&pass);
                     probe_bind = create_probe_bind(&pass);
                     // Seed the replacement texture with otherwise valid history.
                     // This distinguishes reset from incidental cleared-depth rejection.
@@ -486,28 +508,33 @@ fn run_depth_history_fixture(translated_origin: bool) {
                         extent,
                     );
                     seed_history(&queue, &pass, stored_depth);
-                    pass.prepare(&PrepareContext {
-                        device: &device,
-                        queue: &queue,
-                        camera: &cameras,
-                        camera_data: &current,
-                        camera_generation: 2,
-                        scene_buffers: &scene_buffers,
-                        registry: &registry,
-                        resize: true,
-                        width: 64,
-                        height: 8,
-                        frame_num: 2,
-                        delta_time: time_delta,
-                        time: 0.0,
-                        time_delta: 0.0,
-                        world_origin: next_origin,
-                        owns_device: true,
-                        uploads: None,
+                    ({
+                        let prepare = PrepareContext {
+                            device: &device,
+                            queue: &queue,
+                            camera: &cameras,
+                            camera_data: &current,
+                            camera_generation: 2,
+                            scene_buffers: &scene_buffers,
+                            registry: &registry,
+                            resize: true,
+                            width: 64,
+                            height: 8,
+                            frame_num: 2,
+                            delta_time: time_delta,
+                            time: 0.0,
+                            time_delta: 0.0,
+                            world_origin: next_origin,
+                            owns_device: true,
+                            uploads: None,
+                        };
+                        reprojection_pass.prepare(&prepare).unwrap();
+                        pass.prepare(&prepare)
                     })
                     .unwrap();
                 }
                 queue.write_buffer(&cameras, 0, bytemuck::cast_slice(&[current, current]));
+                bind = create_bind(&pass, &reprojection_pass.buffer().unwrap());
                 raster_depth =
                     (10.0 + delta[2] as f32 * if successive { 2.0 } else { 1.0 }) / 100.0;
             }
@@ -682,26 +709,5 @@ fn seed_history(queue: &wgpu::Queue, pass: &TsrPass, depth: f32) {
         bytemuck::cast_slice(&depth_coarse),
         layout,
         extent,
-    );
-}
-
-#[test]
-fn previous_view_rebase_preserves_physical_coordinates_and_f64_cancellation() {
-    // A90-degree view rotation maps (x,y,z) to(-z,y,x), plus translation.
-    let view = [
-        0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 2.0, -3.0, 1.0,
-    ];
-    let rebased = rebase_previous_view(view, [2.5, -1.25, 7.0]);
-    assert_eq!(&rebased[..12], &view[..12]);
-    assert_eq!(&rebased[12..], &[-6.0, 0.75, -0.5, 1.0]);
-    let mut translated = [0.0; 16];
-    for i in [0, 5, 10, 15] {
-        translated[i] = 1.0;
-    }
-    translated[14] = -16_777_216.0;
-    assert_eq!(
-        rebase_previous_view(translated, [0.0, 0.0, 16_777_216.25])[14],
-        0.25,
-        "casting the origin shift to f32 before composition loses the physical residual"
     );
 }

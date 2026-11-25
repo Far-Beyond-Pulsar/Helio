@@ -1,0 +1,17 @@
+[package]
+name = "helio-pass-history"
+version = "0.1.0"
+edition = "2021"
+description = "Helio's spine pass publishing a pixel's history (helio_frame_api::history): the reprojection, where a pixel was, the previous guides"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+helio-feature-api = { path = "../../../helio-feature-api" }
+helio-frame-api = { path = "../../../helio-frame-api" }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+glam = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
