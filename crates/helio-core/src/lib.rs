@@ -151,6 +151,16 @@ pub use instance::wgpu_instance_descriptor;
 pub const TEXTURE_BINDING_ARRAYS: wgpu::Features = wgpu::Features::TEXTURE_BINDING_ARRAY
     .union(wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING);
 
+/// Slots at the start of a scene's texture table that hold no texture: the host
+/// creates its texture store with this many reserved
+/// (`TextureStore::with_reserved_slots`), so a table binds its white fallback
+/// view there and a reader maps "no texture" to slot 0 instead of indexing the
+/// array with an unassigned slot (`u32::MAX`). Without the reservation the
+/// bound view at that slot would be the first real texture, and an index past
+/// the table's live prefix (a device that binds arrays partially binds only the
+/// prefix) would read an unbound descriptor.
+pub const TEXTURE_TABLE_RESERVED_SLOTS: u32 = 1;
+
 /// The most textures a texture table bound as binding arrays holds, whatever
 /// the device offers; the device's own binding-array limits can lower it (see
 /// [`texture_table_capacity`]).
