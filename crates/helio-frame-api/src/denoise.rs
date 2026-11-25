@@ -36,12 +36,32 @@
 //!
 //! | output | format | x | y | z | w |
 //! |---|---|---|---|---|---|
-//! | 0 | `Rgba16Float` | `a` | `Co / Y` | `Cg / Y` | the luminance's standard error |
+//! | 0 | `Rgba16Float` | `a` | `Co / Y` | `Cg / Y` | the samples' worth `N` behind the estimate (below 0: no light yet) |
 //! | 1 | `Rgba16Float` | `b.x` | `b.y` | `b.z` | 1 / hit distance (harmonic mean) |
 //!
 //! read with `denoise_irradiance(out0, out1, normal)` (RGB irradiance). A
 //! pass-through signal is read with `denoise_irradiance_input(in0, in1,
 //! normal0, normal)`.
+//!
+//! **A short estimate leans on a prior.** `N` counts the producer's samples
+//! (a traced pixel's estimate is one, whatever it summed) the output rests
+//! on: its history's and its neighbours'. An estimate is settled at
+//! [`SETTLED_SAMPLES`]; short of it (a disocclusion, a view that turned,
+//! detail the camera's jitter moves under a pixel every frame) one heavy
+//! tailed sample shows nearly in full. A reader that holds a low-variance
+//! estimate of the same quantity, its **prior** (the GI probes' irradiance
+//! for indirect diffuse; for r5's shadows, the shadow pages' filtered
+//! visibility; for direct light, the light's unshadowed term times that
+//! visibility), reads `denoise_irradiance_with_prior(out0, out1, normal,
+//! prior, hold)`: the output and the prior weighted by the samples each is
+//! worth, the prior `hold * max(SETTLED_SAMPLES - N, 0)` (`hold` in [0, 1]:
+//! how much of the prior is there, 0 where the reader has none), so a
+//! settled estimate is the output alone and a young one the prior, filled
+//! by its samples as they come (James-Stein shrinkage with the prior's
+//! worth the settled estimate's deficit). The prior is applied at the
+//! reader, after the denoiser, and never enters its history: fed back each
+//! frame, a prior worth `k` samples holds a running mean of light `mu` at
+//! `(mu + k p) / (1 + k)` whatever its length, a bias that never settles.
 //!
 //! **Which pixel is traced.** One in each block of `side x side` internal
 //! pixels ([`TraceBlock`]), rotating over the block's pixels so every pixel is
@@ -59,11 +79,23 @@ use helio_core::graph::ResourceFormat;
 use helio_core::shader::ShaderSnippet;
 use helio_feature_api::{BuildEnv, FeatureRegistrar, NodeBuild};
 
+/// The samples' worth at which a denoised estimate is settled: the
+/// spatial stage widens until a record rests on this many frames' worth
+/// (`helio-pass-denoise`), and a reader leans its prior on the deficit
+/// below it (`denoise_irradiance_with_prior`; WGSL
+/// `DENOISE_SETTLED_SAMPLES`). Sixteen samples bring a heavy-tailed
+/// sample's excess to a sixteenth (a sample of a sunlit leaf among shaded
+/// ones, 30 times their light, to twice it), and are a block of 16 pixels'
+/// samples over its 16 frames of rotation.
+pub const SETTLED_SAMPLES: f32 = 16.0;
+
 /// Marker opting a shader into [`IRRADIANCE_SNIPPET`].
 pub const IRRADIANCE_MARKER: &str = "//!use frame_denoise_irradiance";
 /// The irradiance signal's encodings (`shaders/denoise_irradiance.wgsl`):
 /// `denoise_traced_offset`, `denoise_irradiance_add` (a producer's sample),
 /// `denoise_irradiance` (a reader's output decode),
+/// `denoise_irradiance_samples` and `denoise_irradiance_with_prior` (a
+/// reader with a prior of its own),
 /// `denoise_irradiance_input` (the pass-through decode), the YCoCg pair.
 pub const IRRADIANCE_SNIPPET: ShaderSnippet =
     helio_core::wgsl_snippet!(IRRADIANCE_MARKER, "shaders/denoise_irradiance.wgsl");
@@ -327,6 +359,15 @@ mod tests {
         }
         assert_eq!(bayer_rank(1, 0, 4), 8);
         assert_eq!(bayer_rank(0, 1, 4), 12);
+    }
+
+    #[test]
+    fn the_settled_samples_are_the_snippet_s() {
+        let text = include_str!("shaders/denoise_irradiance.wgsl");
+        assert!(text.contains(&format!(
+            "const DENOISE_SETTLED_SAMPLES: f32 = {:.1};",
+            SETTLED_SAMPLES
+        )));
     }
 
     #[test]

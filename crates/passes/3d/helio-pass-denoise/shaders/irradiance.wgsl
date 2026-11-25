@@ -11,9 +11,9 @@
 //    pixels of the nearest 2x2 blocks, a tent of the block over their
 //    distance times the surface and occluder stops) folded into the pixel's history,
 //    read where the frame's history says the pixel was (the bilinear taps
-//    that held the same surface). The history's length falls by the
-//    producer's confidence and the share of the footprint that held the
-//    surface, and is capped.
+//    that held the same surface, renormalised, with the samples they hold).
+//    The history's length falls by the producer's confidence, and is
+//    capped.
 // 2. `records` (a block, for blocks of 4 and 16): the block's record, the
 //    temporal result at its representative pixel (its centre). A signal
 //    traced at every pixel has its pixels as records.
@@ -28,8 +28,9 @@
 //    with the pixel's own temporal result by the samples each rests on. Its
 //    result is the signal's output and the history the next frame reads:
 //    the spatial stage is recurrent (its work accumulates over frames, as
-//    ReBLUR's post-blur history does), while the luminance's moments stay
-//    the raw samples' (the variance never sees the filter).
+//    ReBLUR's post-blur history does). It reports the samples' worth behind
+//    each estimate (`denoise_irradiance_samples`), what a reader leans its
+//    own prior on where that is short of DENOISE_SETTLED_SAMPLES.
 //
 // The mean is kept: no weight that decides how much a sample counts depends
 // on the light it carries (only on geometry, a hit distance pooled over
@@ -39,12 +40,12 @@
 //
 // Values are the linear irradiance a + b . n (`denoise_irradiance_linear`),
 // its chroma as ratios to luminance, 1 / hit distance; a pixel's state also
-// a history length and the first two moments of the luminance at the
-// pixel's normal (f32: the variance is their difference, which half floats
-// cannot resolve). Layouts (the history's two first are the outputs):
-//   A Rgba16Float (a, Co / Y, Cg / Y, standard error; -1: no light yet)
+// its history's length (f32: a running count). Layouts (the history's two
+// first are the outputs):
+//   A Rgba16Float (a, Co / Y, Cg / Y, the samples' worth behind the
+//                 estimate; -1: no light yet)
 //   B Rgba16Float (b, 1 / hit distance)
-//   M Rgba32Float (length, mean, mean square)    pixels only; the temporal
+//   M R32Float (length)                          pixels only; the temporal
 //                                                result's is the next
 //                                                frame's history's
 //   N Rg32Float (length, samples)                 records only: the history
@@ -88,7 +89,7 @@ struct DenoiseParams {
 @group(1) @binding(4) var hist_m_in: texture_2d<f32>;
 @group(1) @binding(5) var temp_a_out: texture_storage_2d<rgba16float, write>;
 @group(1) @binding(6) var temp_b_out: texture_storage_2d<rgba16float, write>;
-@group(1) @binding(7) var temp_m_out: texture_storage_2d<rgba32float, write>;
+@group(1) @binding(7) var temp_m_out: texture_storage_2d<r32float, write>;
 // records
 @group(1) @binding(8) var rec_temp_a: texture_2d<f32>;
 @group(1) @binding(9) var rec_temp_b: texture_2d<f32>;
@@ -122,9 +123,9 @@ struct DenoiseParams {
 const RADIUS_MIN_PIXELS: f32 = 1.41421356;
 // The spatial stage's step: a record's estimate rests on `length` frames;
 // the filter's footprint of (2 step + 1)^2 records adds about step^2 of
-// them, so a step of 4 / sqrt(length) keeps about 16 frames' worth behind
-// every estimate (one block from 16 frames on, four at one).
-const SPATIAL_FRAMES: f32 = 16.0;
+// them, so a step of sqrt(DENOISE_SETTLED_SAMPLES / length) keeps a settled
+// estimate's worth behind every estimate where the geometry lets it (one
+// block from 16 frames on, four at one).
 // Chroma ratios of real colours: Co / Y and Cg / Y stay within +-2 (pure
 // red: Co / Y = 2).
 const CHROMA_LIMIT: f32 = 2.0;
@@ -276,39 +277,38 @@ fn chroma_ratio(chroma: vec2<f32>, luma: f32) -> vec2<f32> {
 
 // A pixel's state while it is blended: (a, Co, Cg, 1 / hit) with the chroma
 // times the luminance at the pixel's normal (so blending by any weight
-// averages the ratios by luminance), (b), (mean, mean square).
+// averages the ratios by luminance), (b).
 struct State {
     a: vec4<f32>,
     b: vec3<f32>,
-    m: vec2<f32>,
 }
 
 fn state_scaled(s: State, w: f32) -> State {
-    return State(s.a * w, s.b * w, s.m * w);
+    return State(s.a * w, s.b * w);
 }
 
 fn state_add(x: State, y: State) -> State {
-    return State(x.a + y.a, x.b + y.b, x.m + y.m);
+    return State(x.a + y.a, x.b + y.b);
 }
 
 fn load_history(t: vec2<i32>, n: vec3<f32>) -> State {
     let a = finite4(textureLoad(hist_a_in, t, 0));
     let b = finite4(textureLoad(hist_b_in, t, 0));
     let y = luma_at(a.x, b.xyz, n);
-    return State(vec4<f32>(a.x, a.yz * y, b.w), b.xyz, textureLoad(hist_m_in, t, 0).yz);
+    return State(vec4<f32>(a.x, a.yz * y, b.w), b.xyz);
 }
 
-// The standard error of a mean of `length` samples of moments `m`; -1 for
-// no light.
-fn standard_error(m: vec2<f32>, length: f32) -> f32 {
-    return select(-1.0, sqrt(max(m.y - m.x * m.x, 0.0) / max(length, 1.0)), length > 0.0);
+// The samples' worth an estimate of `length` frames reports (A's w): -1
+// for no light.
+fn worth(length: f32) -> f32 {
+    return select(-1.0, length, length > 0.0);
 }
 
 fn store_temp(p: vec2<i32>, s: State, length: f32, n: vec3<f32>) {
     let chroma = chroma_ratio(s.a.yz, luma_at(s.a.x, s.b, n));
-    textureStore(temp_a_out, p, half4(vec4<f32>(s.a.x, chroma, standard_error(s.m, length)), p, 0u));
+    textureStore(temp_a_out, p, half4(vec4<f32>(s.a.x, chroma, worth(length)), p, 0u));
     textureStore(temp_b_out, p, half4(vec4<f32>(s.b, s.a.w), p, 1u));
-    textureStore(temp_m_out, p, vec4<f32>(length, s.m, 0.0));
+    textureStore(temp_m_out, p, vec4<f32>(length, 0.0, 0.0, 0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -364,7 +364,7 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         // sample of one colour whatever normal it was traced at; carried
         // times the luminance it scales.
         let chroma = clamp(s0.yz / max(s0.x, 1e-12), vec2<f32>(-CHROMA_LIMIT), vec2<f32>(CHROMA_LIMIT));
-        fresh = state_add(fresh, State(vec4<f32>(l.x, chroma * max(y, 0.0), inverse_hit(s0.w)) * w, l.yzw * w, vec2<f32>(y, y * y) * w));
+        fresh = state_add(fresh, State(vec4<f32>(l.x, chroma * max(y, 0.0), inverse_hit(s0.w)) * w, l.yzw * w));
         confidence += w * select(1.0, saturate(s1.w), (params.flags & 1u) != 0u);
         weight += w;
     }
@@ -385,8 +385,13 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>) {
                     held += textureLoad(hist_m_in, t, 0).x * w / footprint;
                 }
             }
-            // A footprint the surface held in part is a weaker history.
-            length = held * footprint;
+            // The taps that held the surface, renormalised, with the
+            // samples they hold: the share of the footprint that held it
+            // says where the history is read from, not how many samples it
+            // rests on. (Scaled by that share, a history under sub-pixel
+            // detail the jitter moves, a canopy's leaves, lost what it
+            // missed every frame and never grew past a frame or two.)
+            length = held;
         }
     }
     if weight > 0.0 {
@@ -399,7 +404,7 @@ fn temporal(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let alpha = select(0.0, weight / total, weight > 0.0);
-    store_temp(p, State(mix(history.a, fresh.a, alpha), mix(history.b, fresh.b, alpha), mix(history.m, fresh.m, alpha)), total, g.n);
+    store_temp(p, State(mix(history.a, fresh.a, alpha), mix(history.b, fresh.b, alpha)), total, g.n);
 }
 
 @compute @workgroup_size(8, 8)
@@ -435,7 +440,7 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         textureStore(out_n, b, vec4<f32>(length, 0.0, 0.0, 0.0));
         return;
     }
-    let s = clamp(round(sqrt(SPATIAL_FRAMES / max(length, 1.0))), 1.0, 4.0);
+    let s = clamp(round(sqrt(DENOISE_SETTLED_SAMPLES / max(length, 1.0))), 1.0, 4.0);
     let step = i32(s) << iteration.x;
     // One radius for every tap: the harmonic mean hit distance of the
     // footprint's records, each counted alike (a record's own ray lengths
@@ -455,7 +460,6 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     var sum_a = vec4<f32>(0.0);
     var sum_b = vec4<f32>(0.0);
     var sum_luma = 0.0;
-    var sum_variance = 0.0;
     var sum_spread = 0.0;
     var total = 0.0;
     for (var j = 0; j < 9; j++) {
@@ -490,7 +494,6 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
         sum_a += w * vec4<f32>(fa.x, fa.yz * y, 0.0);
         sum_luma += w * y;
         sum_b += w * fb;
-        sum_variance += w * w * fa.w * fa.w;
         sum_spread += w * w / max(nq, 1e-6);
         total += w;
     }
@@ -504,11 +507,12 @@ fn spatial(@builtin(global_invocation_id) id: vec3<u32>) {
     // Rounded without bias: the records reach the history (`reconstruct`).
     let stream = 4u + 2u * iteration.x;
     let chroma = chroma_ratio(sum_a.yz, sum_luma);
-    textureStore(out_a, b, half4(vec4<f32>(sum_a.x * inv, chroma, sqrt(sum_variance) * inv), b, stream));
-    textureStore(out_b, b, half4(sum_b * inv, b, stream + 1u));
     // A weighted mean of independent estimates of n_q samples each holds
     // (sum w)^2 / sum (w^2 / n_q) samples' worth.
-    textureStore(out_n, b, vec4<f32>(length, total * total / sum_spread, 0.0, 0.0));
+    let samples = total * total / sum_spread;
+    textureStore(out_a, b, half4(vec4<f32>(sum_a.x * inv, chroma, samples), b, stream));
+    textureStore(out_b, b, half4(sum_b * inv, b, stream + 1u));
+    textureStore(out_n, b, vec4<f32>(length, samples, 0.0, 0.0));
 }
 
 @compute @workgroup_size(8, 8)
@@ -517,7 +521,7 @@ fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= params.size) {
         return;
     }
-    // The moments are the temporal result's: its M is the next frame's
+    // The length is the temporal result's: its M is the next frame's
     // history M (the two swap, nothing is copied).
     let m = textureLoad(own_m, p, 0);
     let g = guide(p);
@@ -535,7 +539,6 @@ fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
     var sa = vec4<f32>(0.0);
     var sb = vec4<f32>(0.0);
     var luma = 0.0;
-    var error = 0.0;
     var spread = 0.0;
     var total = 0.0;
     for (var ring = 0; ring < 2 && total <= 0.0; ring++) {
@@ -574,7 +577,6 @@ fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
             sa += w * vec4<f32>(ra.x, ra.yz * y, 0.0);
             luma += w * y;
             sb += w * rb;
-            error += w * ra.w;
             spread += w * w / max(textureLoad(rec_n, q, 0).y, 1e-6);
             total += w;
         }
@@ -582,12 +584,15 @@ fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
     var a = oa;
     var b = ob;
     if total > 0.0 {
-        let e_s = error / total;
         let chroma_s = chroma_ratio(sa.yz, luma);
         sa /= total;
         sb /= total;
+        // The samples' worth the records serve the pixel with: a weighted
+        // mean's, times the share of the pixel's tent their geometry lets
+        // them serve (1 on an open surface; toward 0 at a contact).
+        let n_s = min(total, 1.0) * total * total / spread;
         if oa.w < 0.0 {
-            a = vec4<f32>(sa.x, chroma_s, e_s);
+            a = vec4<f32>(sa.x, chroma_s, n_s);
             b = sb;
         } else {
             // By the samples each rests on: the pixel's own its length, the
@@ -596,15 +601,15 @@ fn reconstruct(@builtin(global_invocation_id) id: vec3<u32>) {
             // geometry lets them serve (1 on an open surface; toward 0 at a
             // contact, where the pixel keeps its own). Neither depends on
             // the light, so the mix keeps the mean.
-            let n_s = min(total, 1.0) * total * total / spread;
             let t = n_s / (n_s + max(m.x, 1e-6));
             let y_p = luma_at(oa.x, ob.xyz, g.n);
             let y_s = luma_at(sa.x, sb.xyz, g.n);
             let wy_p = (1.0 - t) * y_p;
             let wy_s = t * y_s;
             let chroma = select(oa.yz, (wy_p * oa.yz + wy_s * chroma_s) / (wy_p + wy_s), wy_p + wy_s > 0.0);
-            let e = sqrt((1.0 - t) * (1.0 - t) * oa.w * oa.w + t * t * e_s * e_s);
-            a = vec4<f32>(mix(oa.x, sa.x, t), chroma, e);
+            // Two independent estimates mixed by the samples each rests
+            // on hold their sum.
+            a = vec4<f32>(mix(oa.x, sa.x, t), chroma, n_s + m.x);
             b = mix(ob, sb, t);
         }
     }

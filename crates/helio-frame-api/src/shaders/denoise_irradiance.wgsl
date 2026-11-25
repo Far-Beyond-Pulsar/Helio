@@ -96,6 +96,29 @@ fn denoise_irradiance(out0: vec4<f32>, out1: vec4<f32>, n: vec3<f32>) -> vec3<f3
     return denoise_irradiance_rgb(max(out0.x + dot(out1.xyz, n), 0.0), out0.yz);
 }
 
+// The samples' worth at which an estimate is settled
+// (`helio_frame_api::denoise::SETTLED_SAMPLES`).
+const DENOISE_SETTLED_SAMPLES: f32 = 16.0;
+
+// The samples' worth behind the denoiser's output (below 0: no light yet).
+fn denoise_irradiance_samples(out0: vec4<f32>) -> f32 {
+    return out0.w;
+}
+
+// The denoiser's output at a pixel of normal `n` leaning on the reader's
+// prior `prior` (RGB irradiance, a low-variance estimate of the same light)
+// where it rests on fewer than DENOISE_SETTLED_SAMPLES samples: the two
+// weighted by the samples each is worth, the prior the deficit times
+// `hold` (in [0, 1], how much of the prior is there). The weights depend on
+// counts alone, never on either value's light.
+fn denoise_irradiance_with_prior(out0: vec4<f32>, out1: vec4<f32>, n: vec3<f32>, prior: vec3<f32>, hold: f32) -> vec3<f32> {
+    let e = denoise_irradiance(out0, out1, n);
+    let samples = max(denoise_irradiance_samples(out0), 0.0);
+    let k = saturate(hold) * max(DENOISE_SETTLED_SAMPLES - samples, 0.0);
+    if samples + k <= 0.0 { return e; }
+    return (samples * e + k * max(prior, vec3<f32>(0.0))) / (samples + k);
+}
+
 // A pass-through signal's texel at a pixel of normal `n`, traced at `n0`.
 fn denoise_irradiance_input(signal0: vec4<f32>, signal1: vec4<f32>, n0: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     let l = denoise_irradiance_linear(signal0, signal1, n0);
