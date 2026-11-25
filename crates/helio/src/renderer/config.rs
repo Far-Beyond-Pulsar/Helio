@@ -89,7 +89,9 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     }
     #[cfg(not(target_arch = "wasm32"))]
     if adapter_features.contains(TEXTURE_BINDING_ARRAYS) {
-        optional |= TEXTURE_BINDING_ARRAYS;
+        // With the arrays, the partially bound ones too: a pass then binds the
+        // texture table's live prefix, not every slot (`texture_table_binds_partially`).
+        optional |= TEXTURE_BINDING_ARRAYS | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY;
     }
     // Request ray tracing if available (native only, requires Vulkan)
     #[cfg(not(target_arch = "wasm32"))]
@@ -195,6 +197,18 @@ mod tests {
     fn complete_texture_binding_array_capability_is_requested_together() {
         let requested = required_wgpu_features(TEXTURE_BINDING_ARRAYS);
         assert!(requested.contains(TEXTURE_BINDING_ARRAYS));
+    }
+
+    #[test]
+    fn partially_bound_arrays_are_requested_with_the_texture_table_and_never_alone() {
+        let with = required_wgpu_features(
+            TEXTURE_BINDING_ARRAYS | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY,
+        );
+        assert!(with.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY));
+        let without = required_wgpu_features(TEXTURE_BINDING_ARRAYS);
+        assert!(!without.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY));
+        let alone = required_wgpu_features(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY);
+        assert!(!alone.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY));
     }
 
     #[test]

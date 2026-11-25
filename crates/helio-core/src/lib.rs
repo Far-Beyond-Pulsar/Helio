@@ -209,6 +209,20 @@ pub fn texture_table_uses_binding_arrays(features: wgpu::Features) -> bool {
     !cfg!(target_arch = "wasm32") && features.contains(TEXTURE_BINDING_ARRAYS)
 }
 
+/// Whether a bind group may bind only the first slots of the texture table
+/// (its live prefix) while its layout and shaders keep the full capacity:
+/// binding arrays with [`wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY`]
+/// (Vulkan, D3D12). wgpu validates and tracks every view of a bound group
+/// once per render pass that uses it, so a table of thousands of slots whose
+/// tail is one repeated fallback view costs every pass that binds it
+/// (`CommandEncoder::finish`, serial per segment); binding the prefix makes
+/// that cost scale with the textures the scene holds. Without it a table
+/// binds every slot.
+pub fn texture_table_binds_partially(features: wgpu::Features) -> bool {
+    texture_table_uses_binding_arrays(features)
+        && features.contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY)
+}
+
 /// How many textures the texture table holds on a device with `features`
 /// and `limits`: every stage that binds it can address all of them. The
 /// scene's texture store is this big, and each reader's bindings are.
