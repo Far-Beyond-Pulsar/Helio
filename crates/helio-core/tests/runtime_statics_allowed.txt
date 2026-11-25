@@ -11,5 +11,6 @@ helio-presets/src/presets.rs 2 the base node registry made once and a warn-once 
 helio-settings/src/lib.rs 2 read-only tables of constants
 helio-tasks/src/lib.rs 1 the task host, which the host installs into each copy through runtime::attach
 passes/3d/helio-pass-buffer-view/src/lib.rs 1 a read-only table of constants
+passes/3d/helio-pass-denoise/src/lib.rs 1 a read-only table of constants (the denoiser's settings group)
 passes/3d/helio-pass-reference/src/lib.rs 2 read-only tables of constants
 scenedb-inspector-agent/src/lib.rs 1 the debug inspector's bridge: started by the host (engine_backend) only, never by a plugin library

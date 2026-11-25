@@ -29,6 +29,7 @@ helio-pass-planar-reflection = { path = "../passes/3d/helio-pass-planar-reflecti
 helio-pass-postprocess = { path = "../passes/3d/helio-pass-postprocess" }
 helio-pass-ssr = { path = "../passes/3d/helio-pass-ssr" }
 helio-pass-reference = { path = "../passes/3d/helio-pass-reference" }
+helio-pass-denoise = { path = "../passes/3d/helio-pass-denoise" }
 helio-pass-tsr = { workspace = true }
 
 [dev-dependencies]

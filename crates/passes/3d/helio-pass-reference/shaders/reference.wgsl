@@ -4,7 +4,7 @@
 //!use frame_bsdf
 //!use frame_light_samples
 //!use frame_sky
-//!use sky_table
+//!use sky_radiance
 // The reference path tracer (`helio_pass_reference`): a wavefront path
 // tracer over the frame's ray streams and light samples, knowing no kind.
 // A frame traces one path for each pixel of a window of the image (the
@@ -36,7 +36,13 @@ struct ReferenceFrame {
 
 // A path (48 bytes): what reaches the eye from here on is multiplied by
 // `throughput`; `radiance` what reached it so far; `diffuse` the part that
-// came by a first bounce off a diffuse lobe (`REFERENCE_DIFFUSE_FIRST`);
+// came by a first bounce off a diffuse lobe: each later contribution times
+// the diffuse lobe's share of the BSDF in the first bounce's direction
+// (`REFERENCE_DIFFUSE_FIRST` set, the share in `flags`' upper bits, 10 bits
+// a channel: `first_share`), so its mean is the first bounce's diffuse
+// lobe's integral whichever lobe drew the direction (a draw's lobe would
+// count a rough specular lobe's share as diffuse where the diffuse lobe's
+// density covers it);
 // `pdf` the density of its last BSDF sample.
 struct Path {
     throughput: vec3<f32>,
@@ -45,16 +51,21 @@ struct Path {
     flags: u32,
     diffuse: vec3<f32>,
     pdf: f32,
+    // The path's own ray cone (`scene_ray_cone`'s encoding): the footprint
+    // its hits stand for, which sets how far a ray leaving one starts off it
+    // and the light query's footprint (`cone_ray`). Its rays are sent
+    // with no width (`exact_cone`).
+    cone: u32,
 }
 
-// A light query's path: the throughput at its hit and the stream row of
-// the hit (32 bytes: scalar padding, a `vec3` would align to 16 and make
-// it 48).
+// A light query's path: the throughput at its hit, the stream row of the
+// hit and the path's cone there (32 bytes: scalar padding, a `vec3` would
+// align to 16 and make it 48).
 struct Owner {
     throughput: vec3<f32>,
     path: u32,
     row: u32,
-    _pad0: u32,
+    cone: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -87,10 +98,11 @@ const REFERENCE_REACH: f32 = 1e9;
 @group(0) @binding(19) var<storage, read_write> image: array<vec4<f32>>;
 @group(0) @binding(20) var<storage, read_write> image_diffuse: array<vec4<f32>>;
 @group(0) @binding(21) var<uniform> sky_frame: SkyFrame;
-@group(0) @binding(22) var<uniform> sky_table: array<vec4<f32>, 2304>;
+@group(0) @binding(22) var sky_radiance: texture_3d<f32>;
 @group(0) @binding(23) var<storage, read_write> stats: array<atomic<u32>>;
 // x: this stage's depth.
 @group(0) @binding(24) var<uniform> stage: vec4<u32>;
+@group(0) @binding(25) var sky_radiance_sampler: sampler;
 
 override REFERENCE_STAT: u32 = 0u;
 
@@ -125,22 +137,46 @@ fn ray_offset(p: vec3<f32>, width: f32) -> f32 {
     return 0.002 + 4e-6 * max(abs(p.x), max(abs(p.y), abs(p.z))) + 0.01 * width;
 }
 
+// The cone a reference ray is sent with, in coordinate space `space`: no
+// width and no spread, so every tracer answers with its exact geometry (a
+// tracer may meet coarser geometry where a ray's footprint covers it, as the
+// voxel terrain's walk does) and its surface's finest detail; the path keeps
+// its own cone (`Path::cone`) for what it needs a footprint for.
+fn exact_cone(space: u32) -> u32 {
+    return scene_cone_in_space(scene_ray_cone(0.0, 0.0, RAY_MASK_ALL), space);
+}
+
+// A ray of cone `cone`, for its footprint and spread.
+fn cone_ray(cone: u32) -> SceneRay {
+    return SceneRay(vec3<f32>(0.0), 0.0, vec3<f32>(0.0, 0.0, 1.0), cone);
+}
+
 // The sky's radiance along unit `d` from frame point `p`: the
-// atmosphere's sky table there (irradiance / pi in L2 harmonics) back to
-// radiance band by band, as GI's probe rays take it; without an
+// atmosphere's radiance table there (`sky_radiance_eval`, from the eye the
+// sky the sky pass draws), as GI's probe rays take it; without an
 // atmosphere, the flat sky and ground. The sun's disc is not in it: the sun
 // is a light the samplers sample (a delta light no BSDF sample meets), so it
 // is counted once.
-fn sky_radiance(p: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
+fn sky_radiance_at(p: vec3<f32>, d: vec3<f32>) -> vec3<f32> {
     if sky_frame.planet.w < 0.5 { return select(frame.ground.rgb, frame.sky.rgb, d.y >= 0.0); }
-    return sky_table_eval((p - frame.eye.xyz) * 0.001, d, vec3<f32>(1.0, 1.5, 4.0));
+    return sky_radiance_eval((p - frame.eye.xyz) * 0.001, d);
+}
+
+// The diffuse lobe's share packed into a path's flags (bits 1 to 30).
+fn first_share_bits(share: vec3<f32>) -> u32 {
+    let q = vec3<u32>(clamp(share, vec3<f32>(0.0), vec3<f32>(1.0)) * 1023.0 + 0.5);
+    return (q.x << 1u) | (q.y << 11u) | (q.z << 21u);
+}
+
+fn first_share(flags: u32) -> vec3<f32> {
+    return vec3<f32>(f32((flags >> 1u) & 1023u), f32((flags >> 11u) & 1023u), f32((flags >> 21u) & 1023u)) / 1023.0;
 }
 
 // `c` reaching the eye along path `path` at depth `depth`.
 fn add(path: ptr<function, Path>, c: vec3<f32>, depth: u32) {
     (*path).radiance += c;
     if depth >= 1u && ((*path).flags & REFERENCE_DIFFUSE_FIRST) != 0u {
-        (*path).diffuse += c;
+        (*path).diffuse += c * first_share((*path).flags);
     }
 }
 
@@ -159,9 +195,9 @@ fn reference_camera(@builtin(global_invocation_id) id: vec3<u32>) {
     let near = frame.clip_to_frame * vec4<f32>(ndc, 1.0, 1.0);
     let mid = frame.clip_to_frame * vec4<f32>(ndc, 0.5, 1.0);
     let dir = normalize(mid.xyz / mid.w - near.xyz / near.w);
-    paths[p] = Path(vec3<f32>(1.0), pixel, vec3<f32>(0.0), 0u, vec3<f32>(0.0), 0.0);
-    cur_rows[p] = p;
     let cone = scene_cone_in_space(scene_ray_cone(0.0, frame.eye.w, RAY_MASK_ALL), frame.info.z);
+    paths[p] = Path(vec3<f32>(1.0), pixel, vec3<f32>(0.0), 0u, vec3<f32>(0.0), 0.0, cone);
+    cur_rows[p] = p;
     cur_rays[p] = SceneRay(frame.eye.xyz, REFERENCE_REACH, dir, cone);
     cur_hits[p] = SceneHit(0.0, 0u, 0u, 0u);
 }
@@ -192,7 +228,7 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
         let ray = cur_rays[r];
         let hit = cur_hits[r];
         if hit.t <= 0.0 {
-            add(&path, path.throughput * sky_radiance(ray.origin, ray.dir), depth);
+            add(&path, path.throughput * sky_radiance_at(ray.origin, ray.dir), depth);
         } else if !scene_hit_inside(hit) {
             // (The inside of something solid gives no light.)
             let row = cur_surfaces[r];
@@ -206,14 +242,14 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
             // emissive surfaces (emission stays emission at hits), so its
             // weight is 1 and it is counted once.
             add(&path, path.throughput * s.emissive, depth);
-            let footprint = scene_ray_footprint(ray, hit.t);
+            let footprint = scene_ray_footprint(cone_ray(path.cone), hit.t);
             // One light sample at the hit (every kind's samplers'), lit from
             // both sides where light passes through it.
             let two_sided = (s.flags & SURFACE_FLAG_TWO_SIDED) != 0u;
             let pixel = path.pixel;
             let u = vec2<f32>(random(pixel, depth, 2u), random(pixel, depth, 3u));
             query = light_query_point(at, footprint, s.normal, two_sided, u, hash(hash(pixel ^ frame.info.y) ^ (depth * 0x9e3779b9u)), scene_ray_space(ray));
-            owner = Owner(path.throughput, p, r, 0u, 0u, 0u);
+            owner = Owner(path.throughput, p, r, path.cone, 0u, 0u);
             want_query = true;
             if depth < frame.info.w {
                 let b = bsdf_sample(s, wo, vec3<f32>(random(pixel, depth, 4u), random(pixel, depth, 5u), random(pixel, depth, 6u)));
@@ -231,12 +267,21 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
                 }
                 if kept && random(pixel, depth, 7u) < survive {
                     throughput /= survive;
-                    if depth == 0u && (b.lobe == BSDF_LOBE_DIFFUSE || through) {
-                        path.flags |= REFERENCE_DIFFUSE_FIRST;
+                    if depth == 0u {
+                        // The diffuse lobe's share of the BSDF along the
+                        // direction (light through a thin surface is
+                        // diffuse): the BSDF less the same surface with
+                        // nothing to scatter (its specular lobe alone).
+                        var specular_only = s;
+                        specular_only.albedo = vec4<f32>(vec3<f32>(0.0), s.albedo.a);
+                        specular_only.subsurface_color = vec3<f32>(0.0);
+                        let full = bsdf_eval(s, wo, b.wi);
+                        let share = (full - bsdf_eval(specular_only, wo, b.wi)) / max(full, vec3<f32>(1e-30));
+                        path.flags |= REFERENCE_DIFFUSE_FIRST | first_share_bits(select(share, vec3<f32>(1.0), through));
                     }
                     path.throughput = throughput;
                     path.pdf = b.pdf;
-                    // The ray's cone (Akenine-Moller et al., "Improved
+                    // The path's cone (Akenine-Moller et al., "Improved
                     // Shader and Texture Level of Detail Using Ray Cones",
                     // RTG II, 2021): it starts as wide as the footprint that
                     // found the hit (the contract's: a ray leaves a hit as
@@ -247,8 +292,8 @@ fn reference_shade(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local_
                     // for the others.
                     let alpha = bsdf_alphas(s);
                     let lobe = select(2.0, 2.0 * sqrt(alpha.x * alpha.y), b.lobe == BSDF_LOBE_SPECULAR);
-                    let cone = scene_cone_in_space(scene_ray_cone(footprint, scene_ray_spread(ray) + lobe, RAY_MASK_ALL), scene_ray_space(ray));
-                    next = SceneRay(at + face * (sign(side_i) * ray_offset(at, footprint)), REFERENCE_REACH, b.wi, cone);
+                    path.cone = scene_ray_cone(footprint, scene_ray_spread(cone_ray(path.cone)) + lobe, RAY_MASK_ALL);
+                    next = SceneRay(at + face * (sign(side_i) * ray_offset(at, footprint)), REFERENCE_REACH, b.wi, exact_cone(scene_ray_space(ray)));
                     want_next = true;
                 }
             }
@@ -329,14 +374,11 @@ fn reference_shadow(@builtin(global_invocation_id) id: vec3<u32>, @builtin(local
             }
             let c = o.throughput * bsdf_eval(s, wo, dir) * light_sample_radiance(sample) * weight;
             if luminance(c) > 0.0 && (!crosses || (s.flags & SURFACE_FLAG_TWO_SIDED) != 0u) {
-                let footprint = scene_ray_footprint(ray, hit.t);
+                let footprint = scene_ray_footprint(cone_ray(o.cone), hit.t);
                 let off = ray_offset(at, footprint);
                 let distance = light_sample_distance(sample);
                 let reach = select(max(distance - 2.0 * off, 1e-4), REFERENCE_REACH, distance >= LIGHT_SAMPLE_FAR);
-                // As wide as the footprint that found the hit, with no
-                // spread: it stands for that patch of surface.
-                let cone = scene_cone_in_space(scene_ray_cone(footprint, 0.0, RAY_MASK_ALL), scene_ray_space(ray));
-                shadow = SceneRay(at + face * (sign(side_i) * off), reach, dir, cone);
+                shadow = SceneRay(at + face * (sign(side_i) * off), reach, dir, exact_cone(scene_ray_space(ray)));
                 light = vec4<u32>(bitcast<vec3<u32>>(c), o.path);
                 want = true;
             }
