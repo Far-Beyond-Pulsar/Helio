@@ -3731,7 +3731,7 @@ test checks each derivation):
 | ray width | the block's footprint | the patch one ray's estimate stands for |
 | `OCCLUSION_START` | 2 mm | `gi_ray_offset`'s constant part |
 | `NEAR_SLICES` | 4 (8 azimuths) | every pixel within the block's side along them: 8 x side taps, deterministic, no history of its own |
-| `RESERVOIR_BYTES` | 32 | the layout above |
+| `RESERVOIR_BYTES` | 36 | the layout above (the receiver as three f32 since "Bright discs in the editor") |
 
 **The visibility decision** (measured, `pixel_gather`'s two occluder
 tests: a room halved by a wall to half its height, a glowing panel on one
@@ -3810,11 +3810,11 @@ shading and the reservoirs with internal pixels / side^2 (plus a quarter
 for the re-traced samples), the shadow and visibility rays with the texels
 whose hit needs its own light and whose sample was reused; the denoiser
 with internal pixels (its records with traced texels); memory a traced
-texel 388 bytes (32 a reservoir twice, 16 each of texel state, signal, the
+texel 396 bytes (36 a reservoir twice, 16 each of texel state, signal, the
 chosen estimate and the hit's light, 80 a row of the pixels' stream at 1.25
 rows, 48 a row of the shadow and of the visibility streams, 64 a light
 query and its sample) and 8 a pixel for the near field: at 1920x1080,
-67 MB at a sixteenth, 218 MB at a quarter, 821 MB at every pixel, plus the
+68 MB at a sixteenth, 223 MB at a quarter, 838 MB at every pixel, plus the
 denoiser's (142-232 MB). Nothing scales with the scene, the lights or the
 world's size: an Earth costs what a room does.
 
@@ -5759,3 +5759,81 @@ editor; a real-frames check of r4/r5 clients (none exists yet).
   lighter-tailed where the block cannot resolve the point anyway. Not
   built: the gate passes without it, and it changes what a hit means for
   every reader of a stream.
+
+#### Bright discs in the editor: a reservoir's receiver at the frame's precision
+
+**The fault.** The editor on the example planet (`voxel_planet`, an Earth
+on sand with shrubs, boulders and 10 cm terraces) showed a dozen glowing
+yellow discs a few metres across on the ground, steady for minutes; main
+(no pixels' gather) showed none, voxel_craft and the voxel_flight holds
+did not show them. Reproduced headless with `voxel_editor_harness`, which
+first had to render what the editor does: it set no pipeline (main's
+pipelines are the default pipelines plugin's files, served once a project
+is open) and linked no GI. It now opens the level's project (its plugins,
+its `.pulsar/project/` settings: GI's 1 m probe spacing), runs the
+pipeline the level names as World Settings migrates it, and links GI's and
+the default pipelines' roots.
+
+| view or switch (60 m up, pitched 5 degrees down) | discs |
+|---|---|
+| lit; indirect diffuse (view 23) | yes; yes, brightest there |
+| direct light (view 22) | none |
+| GI at `probes` | none |
+| the gather's reuse off (one plain ray a block) | yes |
+| the hits' cache light off; their far side's own light off (from disk) | yes; yes |
+| the radiance cache (view 39, indirect over direct by colour, from disk) | its cells sane where the pixels are |
+| a texel's own sample's estimate taken as pi times its radiance (from disk) | none |
+
+**The cause.** A reservoir kept its receiver (the traced pixel's point)
+as a distance and a 16:16 octahedral direction from the eye: up to about
+3e-5 of the distance off. A sample's weight W is taken at the receiver's
+exact point (`gather_temporal`, from the G-buffer), and its estimate there
+again (`gather_spatial`), but from the receiver unpacked: for a hit a few
+of GI's ray offsets away (`gi_ray_offset`: 2 mm and 4e-6 of the distance;
+a terrace's riser, a shrub's leaf beside the receiver) the geometry term at
+a receiver a few millimetres off is a different number, by orders of
+magnitude, none or many times the sample's. Past some tens of metres the
+offset is smaller than the packing's error; the voxel ground's steps put
+such hits under most far pixels. The bright estimates, steady because the
+packing is deterministic, the denoiser spread into discs (its kernel's
+footprint, with the dotted texture of the texels that had one). The
+history's receiver and a re-trace from it went through the same packing.
+
+**The fix.** The reservoir keeps its receiver as the frame holds it: three
+f32 from the eye (36 bytes, was 32; zero: no reservoir, a surface point is
+never the eye). Its error is then the frame's own (6e-8 of the distance),
+a share of the ray offset at any distance, as the offset was designed
+for. Nothing else changes: the canonical estimate, the history's shift
+and the re-trace all read a receiver that is the point they were taken
+at. `a_packed_reservoir_keeps_its_estimate_at_any_distance` (GI's lib,
+the gather's own functions on the GPU): a sample three ray offsets from
+its receiver, rising at a third or a thirtieth, packed and unpacked at 2.5
+m to 2.5 km keeps its estimate within what f32 resolves of that rise (1.000
+to 1.011); with the old packing it was 0.67 at 25 m and none from there
+on. A ReSTIR reservoir's receiver is its reconnection point (Ouyang et al.
+2021; Lin et al. 2022's GRIS): its weight is defined at that point, so it
+is stored at the precision of the hits it reconnects to: a quantized
+receiver is a different reconnection than the one weighed.
+
+**Measured** (the harness on a fresh copy of the level, 1196x729; "off"
+is the same build with the old packing from disk; the same build twice
+for the noise): the lit start view's discs gone; outside them (pixels the
+old packing did not brighten by over 0.03) mean |difference| 0.0054 lit,
+0.0114 indirect, luminance +0.6% / +0.8% in the old (the discs' halos),
+against 0.0006 / 0.0003 run to run. One warm patch remains in the indirect
+view (a few metres at 400 m, reuse on or off, none lit); not identified.
+voxel_craft (1080p, burst 16, fix against off): pose 0 mean |difference|
+0.0007, luminance -0.11%; pose 12 0.0009, -0.15%; pose 12's speckle 10.4
+pixels a frame (17.2 off; gate 20). The cathedral at a sixteenth against
+its corrected reference: ratio 1.024, mean relative error 0.102 (off:
+1.095, 0.135). The Earth hold (voxel_flight, ground, 25 s, no clouds): mean
+|difference| 0.0010, luminance +0.08%. Memory: 8 bytes more a traced texel
+(two reservoirs).
+
+**Main's state in the editor's path** (not r3's, not changed): the
+level's view shows sand, shrubs and boulders and no grass or trees; from 2
+m the harness draws the shrubs and boulders, so the raster drops nothing
+there. The level's woods ask for grass or dirt ground (surfaces 1 and 2)
+and moisture over 0.28-0.36, and the camera stands over sand: most likely
+a dry region by the generator's rules rather than missing trees. Not
+checked further.
