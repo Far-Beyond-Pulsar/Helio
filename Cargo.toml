@@ -58,8 +58,8 @@ helio-core = { path = "crates/helio-core" }
 helio-scene-join = { path = "crates/helio-scene-join" }
 helio-settings = { path = "crates/helio-settings" }
 helio-tasks = { path = "crates/helio-tasks" }
-pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f9589128fa018570c768663ed6820c2f6874a00f", features = ["gpu"] }
-pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "f9589128fa018570c768663ed6820c2f6874a00f" }
+pulsar_scenedb = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2e9ae1ff9dec935bf94b73cfa38c01d27e8ce256", features = ["gpu"] }
+pulsar_scenedb_derive = { git = "https://github.com/Far-Beyond-Pulsar/SceneDB", rev = "2e9ae1ff9dec935bf94b73cfa38c01d27e8ce256" }
 # Must stay pinned to the exact rev pulsar_scenedb's own Cargo.toml pins --
 # a different rev is a different SourceId and thus a second,
 # type-incompatible copy of this crate in the build (see helio-wasm's
