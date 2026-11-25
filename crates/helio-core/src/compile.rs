@@ -175,3 +175,82 @@ fn build_checked<T>(
             .unwrap_or_else(|| "the build panicked".to_owned())),
     }
 }
+
+/// The pipelines of a pass that exist in many variants (a material's program,
+/// a draw's raster state), each compiled off the frame the first time its key
+/// is asked for.
+///
+/// A frame asks [`get`](Self::get); a key never seen before starts its compile
+/// on the host's task system ([`Compiling`]) and answers `None` until it is
+/// ready, so a frame that meets a new variant draws without it (or with a
+/// stand-in the pass picks) instead of waiting for the backend's shader
+/// compiler. A variant that fails to build is logged by its job and then answers
+/// `None` like one still compiling; it is not retried until [`clear`](Self::clear).
+pub struct Variants<K, T> {
+    entries: std::collections::HashMap<K, Compiling<T>>,
+}
+
+impl<K, T> Default for Variants<K, T> {
+    fn default() -> Self {
+        Self {
+            entries: Default::default(),
+        }
+    }
+}
+
+impl<K, T> Variants<K, T>
+where
+    K: std::hash::Hash + Eq + Clone,
+    T: Send + Sync + 'static,
+{
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The variant `key` once it is built. Starts building it with `build`
+    /// when it was never asked for (`label` names the job); never waits.
+    pub fn get(
+        &mut self,
+        device: &wgpu::Device,
+        key: &K,
+        label: impl FnOnce() -> String,
+        build: impl FnOnce(&wgpu::Device) -> T + Send + 'static,
+    ) -> Option<&T> {
+        if !self.entries.contains_key(key) {
+            self.entries
+                .insert(key.clone(), Compiling::start(device, label(), build));
+        }
+        self.entries.get(key)?.ready()
+    }
+
+    /// Whether `key` was asked for (built, failed or still compiling).
+    pub fn contains(&self, key: &K) -> bool {
+        self.entries.contains_key(key)
+    }
+
+    /// The variant `key` if it is built, without starting anything.
+    pub fn ready(&self, key: &K) -> Option<&T> {
+        self.entries.get(key).and_then(Compiling::ready)
+    }
+
+    /// Blocks until `key` is built or has failed: for tests and offline tools
+    /// that have no frame to keep drawing. `None` when it was never asked for.
+    pub fn wait(&self, key: &K) -> Option<Result<&T, &str>> {
+        self.entries.get(key).map(Compiling::wait)
+    }
+
+    /// Forgets every variant (the pass's state they were built for changed).
+    /// Compiles still running finish and are dropped.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Variants asked for, built or not.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
