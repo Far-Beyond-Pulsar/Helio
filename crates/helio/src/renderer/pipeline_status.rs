@@ -137,6 +137,12 @@ pub enum PipelineStatus {
         reason: String,
         details: Vec<String>,
     },
+    /// The assigned pipeline is being built off the frame thread and nothing
+    /// renders yet; the output shows that it is on its way. (A pipeline
+    /// replacing one that renders builds while that one keeps drawing, and the
+    /// status stays `Ready`: see
+    /// [`Renderer::pipeline_building`](super::Renderer::pipeline_building).)
+    Building { id: String },
     /// The pipeline's graph renders.
     Ready,
 }

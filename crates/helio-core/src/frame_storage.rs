@@ -13,6 +13,10 @@ struct ErasedAllocation {
     drop_fn: unsafe fn(*mut (), usize),
 }
 
+// SAFETY: an allocation is only made by `retain_boxed_slice`, which takes `T: Send`
+// elements, and is dropped by the storage that owns it.
+unsafe impl Send for ErasedAllocation {}
+
 impl ErasedAllocation {
     unsafe fn drop(self) {
         (self.drop_fn)(self.ptr, self.len);
@@ -26,7 +30,7 @@ impl ErasedAllocation {
 /// ownership in the executor rather than in a process-wide leak.
 #[derive(Default)]
 pub struct RenderFrameStorage {
-    values: Vec<Box<dyn Any>>,
+    values: Vec<Box<dyn Any + Send>>,
     allocations: Vec<ErasedAllocation>,
 }
 
@@ -57,7 +61,7 @@ impl RenderFrameStorage {
     /// The erased value remains pinned in its box. The lifetime is tied to the
     /// storage borrow by the caller, so it cannot outlive the executor-owned
     /// frame arena without an explicit unsafe escape by the caller.
-    pub fn retain<T: 'static>(&mut self, value: T) -> &T {
+    pub fn retain<T: Send + 'static>(&mut self, value: T) -> &T {
         self.values.push(Box::new(value));
         self.values
             .last()
@@ -76,7 +80,7 @@ impl RenderFrameStorage {
     /// duration of this storage borrow. This is used for wgpu descriptors whose
     /// elements borrow frame-local texture views and therefore cannot satisfy
     /// the `'static` bound of [`Self::retain`].
-    pub fn retain_boxed_slice<'a, T: 'a>(&'a mut self, value: Box<[T]>) -> &'a [T] {
+    pub fn retain_boxed_slice<'a, T: Send + 'a>(&'a mut self, value: Box<[T]>) -> &'a [T] {
         let len = value.len();
         let ptr = Box::into_raw(value) as *mut T;
         unsafe fn drop_allocation<T>(ptr: *mut (), len: usize) {

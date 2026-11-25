@@ -32,7 +32,7 @@ pub struct PassBuildContext<'a> {
 
 /// Context-based graph builder. The higher-ranked lifetime keeps the context
 /// borrowed for construction only; no renderer-owned GPU reference escapes.
-pub type PassGraphBuilderFn = Box<dyn for<'a> FnOnce(PassBuildContext<'a>) -> RenderGraph>;
+pub type PassGraphBuilderFn = Box<dyn for<'a> FnOnce(PassBuildContext<'a>) -> RenderGraph + Send>;
 
 /// Shared handle to the application's authoritative SceneDB.
 /// Read-only GPU projection of the frontend-owned SceneDB.

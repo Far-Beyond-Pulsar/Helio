@@ -70,7 +70,7 @@ fn text_pipeline(id: &str, text: &'static str) -> (NamedPipeline, Arc<AtomicUsiz
 }
 
 /// A pipeline whose build fails with `failure`.
-struct FailingPipeline(Box<dyn Fn() -> PipelineFailure>);
+struct FailingPipeline(Box<dyn Fn() -> PipelineFailure + Send>);
 
 impl IntoGraph for FailingPipeline {
     fn into_graph(

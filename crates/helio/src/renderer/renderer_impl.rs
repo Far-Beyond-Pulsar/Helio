@@ -145,6 +145,9 @@ pub struct Renderer {
     /// A pipeline change waiting for the next frame boundary
     /// ([`Renderer::set_pipeline`]).
     pub(crate) pending_pipeline: Option<PendingPipeline>,
+    /// The pipeline being built off the frame thread, until a frame boundary
+    /// finds it done.
+    pub(crate) pipeline_build: Option<super::pipeline_control::PipelineBuild>,
     /// How a host says a pipeline is assigned, shown on the status screen.
     pub(crate) status_hint: String,
     /// What the host published for the next frames' features to read
@@ -647,7 +650,7 @@ impl Renderer {
     /// Whether a pass needs more frames to finish what it shows: a host
     /// that renders on demand keeps rendering while this holds.
     pub fn needs_frame(&self) -> bool {
-        self.graph.needs_frame()
+        self.graph.needs_frame() || self.pipeline_build.is_some()
     }
 
     /// The passes' diagnostics lines, for a host's log.

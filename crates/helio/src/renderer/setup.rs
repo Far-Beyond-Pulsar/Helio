@@ -244,6 +244,7 @@ impl Renderer {
             pipeline_status: PipelineStatus::None,
             pipeline_id: None,
             pending_pipeline: None,
+            pipeline_build: None,
             status_hint: super::status_screen::DEFAULT_HINT.to_owned(),
             scene_payloads: Default::default(),
             #[cfg(all(feature = "shader-hot-reload", not(target_arch = "wasm32")))]

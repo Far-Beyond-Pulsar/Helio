@@ -123,6 +123,10 @@ impl Gpu {
             0.1,
             100.0,
         );
+        // A frame boundary starts a pipeline change and installs it once it has
+        // built, off this thread. These tests read the outcome of the frame they
+        // draw, so they wait for the build.
+        renderer.apply_pending_pipeline();
         renderer.render(&camera, &view).expect("the frame renders");
 
         let row = (width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);

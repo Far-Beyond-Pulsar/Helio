@@ -2,28 +2,120 @@
 //!
 //! A renderer exists with no pipeline. The host assigns one
 //! ([`Renderer::set_pipeline`]) and the change happens at the next frame
-//! boundary: the old graph is dropped (its GPU resources with it) and the new
-//! one built, or, when it does not build, the status screen takes its place with
-//! the reason. Nothing else is ever drawn in a pipeline's stead.
+//! boundary: the new graph is built off the frame thread (a pipeline's passes
+//! create their GPU pipelines as they are constructed, hundreds of
+//! milliseconds), and the frame that finds it done swaps it in. While it builds
+//! the renderer keeps drawing what it drew (a pipeline that renders, or the
+//! status screen, which says it is building). When the pipeline does not
+//! build, the status screen takes its place with the reason. Nothing else is
+//! ever drawn in a pipeline's stead.
+
+use std::sync::{Arc, Condvar, Mutex};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use helio_core::{RenderGraph, RenderSize};
 
-use super::builder::PassBuildContext;
+use super::builder::{PassBuildContext, SceneDbHandle};
+use super::config::RendererConfig;
+use super::debug::DebugDrawState;
 use super::pipeline_status::{
     NamedPipeline, PendingPipeline, PipelineFailure, PipelineStatus, UNNAMED_PIPELINE,
 };
 use super::renderer_impl::{GraphRebuilder, Renderer};
 use super::status_screen;
 
+/// What a pipeline's build reads, owned: the build runs on a worker, which
+/// borrows nothing of the renderer.
+struct BuildInputs {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
+    config: RendererConfig,
+    debug_state: Arc<Mutex<DebugDrawState>>,
+    camera_buffer: wgpu::Buffer,
+    debug_camera_buffer: wgpu::Buffer,
+    stats: helio_core::FrameStats,
+    owns_device: bool,
+    scene_db: SceneDbHandle,
+}
+
+impl BuildInputs {
+    fn context(&self) -> PassBuildContext<'_> {
+        PassBuildContext {
+            device: &self.device,
+            queue: &self.queue,
+            config: self.config.clone(),
+            debug_state: self.debug_state.clone(),
+            camera_buffer: &self.camera_buffer,
+            debug_camera_buffer: &self.debug_camera_buffer,
+            stats: &self.stats,
+            owns_device: self.owns_device,
+            scene_db: self.scene_db.clone(),
+        }
+    }
+}
+
+type BuildResult = Result<RenderGraph, PipelineFailure>;
+
+/// Where a build leaves its graph for the frame thread to take.
+#[derive(Default)]
+struct BuildSlot {
+    result: Mutex<Option<BuildResult>>,
+    done: Condvar,
+}
+
+impl BuildSlot {
+    fn set(&self, result: BuildResult) {
+        *self.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+        self.done.notify_all();
+    }
+
+    /// The result when the build has ended; never waits.
+    fn take(&self) -> Option<BuildResult> {
+        self.result.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+
+    /// Blocks until the build ends: for a host with no frame to keep drawing
+    /// ([`Renderer::apply_pending_pipeline`]).
+    fn wait(&self) -> BuildResult {
+        let mut result = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(result) = result.take() {
+                return result;
+            }
+            result = self.done.wait(result).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+/// A pipeline being built off the frame thread.
+pub(crate) struct PipelineBuild {
+    id: String,
+    /// The pipeline already renders under this id: the new graph takes its
+    /// passes' persistent state.
+    inherit: bool,
+    slot: Arc<BuildSlot>,
+    started: Instant,
+    /// The size the build was made for: a resize while it ran is applied to
+    /// its graph when it is installed (a graph resizes in place).
+    built_for: (u32, u32, f32),
+}
+
 impl Renderer {
     /// Assigns `pipeline`, or none with `None`, at the next frame boundary
     /// (the start of the next [`render`](Self::render), or
     /// [`apply_pending_pipeline`](Self::apply_pending_pipeline)). A later call
-    /// before then replaces this one.
+    /// before then replaces this one, and one while the previous pipeline is
+    /// still building drops that build's graph.
     ///
-    /// The previous graph is dropped, and with it everything it owned, except
-    /// that a pipeline with the id the renderer already renders keeps its
-    /// persistent pass state (it is the same pipeline built again).
+    /// A pipeline builds off the frame thread; the renderer swaps it in at the
+    /// first frame boundary after it is done (it keeps drawing what it drew
+    /// until then). The previous graph is then dropped, and with it everything
+    /// it owned, except that a pipeline with the id the renderer already renders
+    /// keeps its persistent pass state (it is the same pipeline built again).
     pub fn set_pipeline(&mut self, pipeline: Option<NamedPipeline>) {
         self.pending_pipeline = Some(match pipeline {
             Some(pipeline) => PendingPipeline::Assign(pipeline),
@@ -41,11 +133,28 @@ impl Renderer {
         });
     }
 
-    /// Whether the renderer has a pipeline that renders, none, or one that did
-    /// not build (and why). Reflects a [`set_pipeline`](Self::set_pipeline)
-    /// from the next frame boundary on.
+    /// Whether the renderer has a pipeline that renders, none, one that is
+    /// building, or one that did not build (and why). Reflects a
+    /// [`set_pipeline`](Self::set_pipeline) from the next frame boundary on.
     pub fn pipeline_status(&self) -> &PipelineStatus {
         &self.pipeline_status
+    }
+
+    /// The id of the pipeline being built off the frame thread, if one is. A
+    /// pipeline replacing one that renders builds while that one still draws,
+    /// so [`pipeline_status`](Self::pipeline_status) says nothing about it
+    /// until it is swapped in; a host that follows the outcome reads the
+    /// status once this is `None`.
+    pub fn pipeline_building(&self) -> Option<&str> {
+        self.pipeline_build.as_ref().map(|build| build.id.as_str())
+    }
+
+    /// Whether a pipeline change is on its way: asked for and not yet started
+    /// ([`set_pipeline`](Self::set_pipeline), taken at the next frame boundary)
+    /// or building. A host that reports the outcome of a change waits for this
+    /// to be `false`, then reads [`pipeline_status`](Self::pipeline_status).
+    pub fn pipeline_change_pending(&self) -> bool {
+        self.pending_pipeline.is_some() || self.pipeline_build.is_some()
     }
 
     /// The id of the pipeline the renderer was last given, whether it built or
@@ -77,49 +186,135 @@ impl Renderer {
     }
 
     /// Makes the pipeline change [`set_pipeline`](Self::set_pipeline) asked
-    /// for, if one is waiting. [`render`](Self::render) does it at the start
-    /// of every frame; a host that does not render while hidden calls it to
-    /// have [`pipeline_status`](Self::pipeline_status) current.
+    /// for, if one is waiting, and waits for it to be built: when this returns
+    /// [`pipeline_status`](Self::pipeline_status) is current. For a host with
+    /// no frame to keep drawing meanwhile (a test, an offline tool, a renderer
+    /// being constructed); [`render`](Self::render) does the same at the start
+    /// of every frame without waiting.
     pub fn apply_pending_pipeline(&mut self) {
+        self.begin_pending_pipeline(false);
+        self.finish_pipeline_build(true);
+    }
+
+    /// The frame-boundary step of [`render`](Self::render): starts the pending
+    /// pipeline change, and installs a build that has ended. Never waits.
+    pub(crate) fn advance_pipeline(&mut self) {
+        self.begin_pending_pipeline(true);
+        self.finish_pipeline_build(false);
+    }
+
+    /// Starts what [`set_pipeline`](Self::set_pipeline) asked for. A clear or
+    /// a failure is made at once; a pipeline starts building off the frame
+    /// thread, and `announce` puts the "building" screen up when what is drawn
+    /// is not a pipeline.
+    fn begin_pending_pipeline(&mut self, announce: bool) {
         let Some(pending) = self.pending_pipeline.take() else {
             return;
         };
         helio_core::cpu_scope!("Helio: apply pipeline");
         // The change builds from the renderer's configuration as it is now.
         self.pending_rebuild = false;
+        // A build still running is replaced; its graph is dropped unread.
+        self.pipeline_build = None;
         match pending {
             PendingPipeline::Clear => {
                 self.pipeline_id = None;
                 self.show_status(PipelineStatus::None, None);
             }
             PendingPipeline::Fail { id, failure } => self.show_invalid(id, failure),
-            PendingPipeline::Assign(NamedPipeline { id, pipeline }) => {
-                let same = self.pipeline_status.is_ready()
-                    && self.pipeline_id.as_deref() == Some(id.as_str());
-                let config = self.renderer_config();
-                let built = self.guarded_build(|renderer| {
-                    Some(pipeline.into_graph(PassBuildContext {
-                        device: &renderer.device,
-                        queue: &renderer.queue,
-                        config,
-                        debug_state: renderer.debug_state.clone(),
-                        camera_buffer: &renderer.camera_buffer,
-                        debug_camera_buffer: &renderer.debug_camera_buffer,
-                        stats: &renderer.stats,
-                        owns_device: renderer.owns_device,
-                        scene_db: renderer.scene_db.clone(),
-                    }))
-                });
-                match built {
-                    Some(Ok(graph)) => {
-                        self.install_pipeline_graph(graph, same);
-                        self.pipeline_id = Some(id);
-                        self.pipeline_status = PipelineStatus::Ready;
-                    }
-                    Some(Err(failure)) => self.show_invalid(id, failure),
-                    None => unreachable!("the closure always builds"),
+            PendingPipeline::Assign(pipeline) => self.start_pipeline_build(pipeline, announce),
+        }
+    }
+
+    fn start_pipeline_build(&mut self, NamedPipeline { id, pipeline }: NamedPipeline, announce: bool) {
+        let inherit =
+            self.pipeline_status.is_ready() && self.pipeline_id.as_deref() == Some(id.as_str());
+        let inputs = BuildInputs {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            config: self.renderer_config(),
+            debug_state: self.debug_state.clone(),
+            camera_buffer: self.camera_buffer.clone(),
+            debug_camera_buffer: self.debug_camera_buffer.clone(),
+            stats: self.stats.clone(),
+            owns_device: self.owns_device,
+            scene_db: self.scene_db.clone(),
+        };
+        let built_for = (
+            inputs.config.width,
+            inputs.config.height,
+            inputs.config.render_scale,
+        );
+        let slot = Arc::new(BuildSlot::default());
+        let started = Instant::now();
+        let job = {
+            let slot = Arc::clone(&slot);
+            move || {
+                let device = Arc::clone(&inputs.device);
+                let built = guard_build(&device, || Some(pipeline.into_graph(inputs.context())));
+                slot.set(built.expect("a pipeline's build always ends in a result"));
+            }
+        };
+        // No threads on the web: the pipeline builds where it is asked for.
+        #[cfg(target_arch = "wasm32")]
+        job();
+        #[cfg(not(target_arch = "wasm32"))]
+        helio_tasks::submit(
+            helio_tasks::JobSpec::new(format!("Build render pipeline {id}")).owner("helio"),
+            move |_| job(),
+        );
+        if announce && !self.pipeline_status.is_ready() {
+            // What is drawn is not a pipeline: say that one is on its way.
+            self.pipeline_id = Some(id.clone());
+            self.show_status(PipelineStatus::Building { id: id.clone() }, None);
+        }
+        self.pipeline_build = Some(PipelineBuild {
+            id,
+            inherit,
+            slot,
+            started,
+            built_for,
+        });
+    }
+
+    /// Installs the pipeline build that has ended (waiting for it when `wait`).
+    fn finish_pipeline_build(&mut self, wait: bool) {
+        let result = match &self.pipeline_build {
+            None => return,
+            Some(build) if wait => build.slot.wait(),
+            Some(build) => match build.slot.take() {
+                Some(result) => result,
+                None => return,
+            },
+        };
+        let build = self
+            .pipeline_build
+            .take()
+            .expect("a build that ended is the one in flight");
+        helio_core::cpu_scope!("Helio: install pipeline");
+        log::info!(
+            target: "helio::pipeline",
+            "render pipeline `{}` built in {:.0} ms",
+            build.id,
+            build.started.elapsed().as_secs_f64() * 1000.0
+        );
+        match result {
+            Ok(graph) => {
+                self.install_pipeline_graph(graph, build.inherit && self.pipeline_status.is_ready());
+                self.pipeline_id = Some(build.id);
+                self.pipeline_status = PipelineStatus::Ready;
+                let now = (self.output_width, self.output_height, self.render_scale);
+                if now != build.built_for {
+                    // Resized while it built: the graph sizes its textures in place.
+                    let internal = [
+                        ((self.output_width as f32 * self.render_scale).ceil() as u32).max(1),
+                        ((self.output_height as f32 * self.render_scale).ceil() as u32).max(1),
+                    ];
+                    self.graph
+                        .resize(RenderSize::new(internal, [self.output_width, self.output_height]));
                 }
             }
+            Err(failure) => self.show_invalid(build.id, failure),
         }
     }
 
@@ -137,46 +332,13 @@ impl Renderer {
         self.show_invalid(id, failure);
     }
 
-    /// Runs `build` (a pipeline's, or a rebuilder's) with what can go wrong in
-    /// it made into the pipeline's failure: a panic in a pass constructor, and
-    /// a GPU validation error (a shader the GPU rejects). The host's frame
-    /// thread survives a pipeline that cannot be built.
+    /// Runs `build` (a rebuilder's) with what can go wrong in it made into the
+    /// pipeline's failure: see [`guard_build`].
     pub(crate) fn guarded_build(
         &self,
         build: impl FnOnce(&Self) -> Option<Result<RenderGraph, PipelineFailure>>,
     ) -> Option<Result<RenderGraph, PipelineFailure>> {
-        // Pass constructors create pipelines eagerly, so a validation error is
-        // raised here and not at the first frame.
-        #[cfg(not(target_arch = "wasm32"))]
-        let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(self)));
-        #[cfg(not(target_arch = "wasm32"))]
-        let gpu_error = pollster::block_on(scope.pop());
-        #[cfg(target_arch = "wasm32")]
-        let gpu_error: Option<wgpu::Error> = None;
-
-        match built {
-            Err(payload) => {
-                let message = payload
-                    .downcast_ref::<&str>()
-                    .map(|s| (*s).to_owned())
-                    .or_else(|| payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic".to_owned());
-                Some(Err(
-                    PipelineFailure::new(status_screen::REASON_PANIC).with_errors([message])
-                ))
-            }
-            Ok(Some(Ok(mut graph))) => match gpu_error {
-                None => Some(Ok(graph)),
-                Some(error) => {
-                    let mut failure = PipelineFailure::new(status_screen::REASON_GPU)
-                        .with_errors([error.to_string()]);
-                    failure.rebuilder = graph.take_graph_data::<GraphRebuilder>();
-                    Some(Err(failure))
-                }
-            },
-            Ok(other) => other,
-        }
+        guard_build(&self.device, || build(self))
     }
 
     /// Shows `failure` for the pipeline `id`, and logs it when it is news.
@@ -220,6 +382,9 @@ impl Renderer {
                         log::error!(target: "helio::pipeline", "  {detail}");
                     }
                 }
+                PipelineStatus::Building { id } => {
+                    log::info!(target: "helio::pipeline", "building render pipeline `{id}`: drawing the status screen meanwhile");
+                }
                 PipelineStatus::Ready => {}
             }
         }
@@ -242,5 +407,51 @@ impl Renderer {
         self.enable_jitter = false;
         self.clear_target_next_frame = true;
         self.pipeline_status = status;
+    }
+}
+
+/// Runs `build` (a pipeline's, or a rebuilder's) with what can go wrong in it
+/// made into the pipeline's failure: a panic in a pass constructor, and a GPU
+/// validation error (a shader the GPU rejects). The host's frame thread
+/// survives a pipeline that cannot be built, and so does a worker.
+pub(crate) fn guard_build(
+    device: &wgpu::Device,
+    build: impl FnOnce() -> Option<Result<RenderGraph, PipelineFailure>>,
+) -> Option<Result<RenderGraph, PipelineFailure>> {
+    // Pass constructors create pipelines eagerly, so a validation error is
+    // raised here and not at the first frame. (An error scope belongs to the
+    // thread that pushed it: the one that builds.)
+    #[cfg(not(target_arch = "wasm32"))]
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(build));
+    #[cfg(not(target_arch = "wasm32"))]
+    let gpu_error = pollster::block_on(scope.pop());
+    #[cfg(target_arch = "wasm32")]
+    let gpu_error: Option<wgpu::Error> = {
+        let _ = device;
+        None
+    };
+
+    match built {
+        Err(payload) => {
+            let message = payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".to_owned());
+            Some(Err(
+                PipelineFailure::new(status_screen::REASON_PANIC).with_errors([message])
+            ))
+        }
+        Ok(Some(Ok(mut graph))) => match gpu_error {
+            None => Some(Ok(graph)),
+            Some(error) => {
+                let mut failure = PipelineFailure::new(status_screen::REASON_GPU)
+                    .with_errors([error.to_string()]);
+                failure.rebuilder = graph.take_graph_data::<GraphRebuilder>();
+                Some(Err(failure))
+            }
+        },
+        Ok(other) => other,
     }
 }

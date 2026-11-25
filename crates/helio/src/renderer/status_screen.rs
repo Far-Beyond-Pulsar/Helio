@@ -57,6 +57,17 @@ pub(crate) fn content_for(
             hint: hint.to_owned(),
             rebuilds: false,
         }),
+        PipelineStatus::Building { id } => Some(StatusContent {
+            tone: Tone::Idle,
+            kicker: "Loading".into(),
+            title: "Building the render pipeline".into(),
+            pipeline: Some(id.clone()),
+            reason: "The pipeline's shaders and passes are being built; the scene draws when it is done."
+                .into(),
+            details: Vec::new(),
+            hint: String::new(),
+            rebuilds: false,
+        }),
         PipelineStatus::Invalid {
             id,
             reason,

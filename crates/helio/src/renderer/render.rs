@@ -77,8 +77,11 @@ impl Renderer {
         }
         // After the resize (the pipeline builds at the new size), before the
         // rebuild (a new pipeline is a rebuild already).
-        self.apply_pending_pipeline();
-        if std::mem::take(&mut self.pending_rebuild) {
+        self.advance_pipeline();
+        // A rebuild waits for a pipeline still building: that pipeline is
+        // built from the configuration as it was asked for, and installs
+        // before the next one starts (`apply_rebuild_now` defers the same way).
+        if self.pipeline_build.is_none() && std::mem::take(&mut self.pending_rebuild) {
             helio_core::cpu_scope!("Helio: rebuild graph");
             self.apply_rebuild_now();
         }
@@ -442,7 +445,7 @@ impl Renderer {
             self.queue.submit(std::iter::once(encoder.finish()));
             self.stats.submitted();
         }
-        self.apply_pending_pipeline();
+        self.advance_pipeline();
 
         let now = Instant::now();
         let dt = now

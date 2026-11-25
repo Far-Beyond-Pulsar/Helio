@@ -31,7 +31,11 @@ use super::{PassBuildContext, PipelineFailure};
 /// Consumed once per construction; a pipeline that must build again after a
 /// graph-level configuration change keeps what it needs in the rebuilder it
 /// installs on the graph.
-pub trait IntoGraph {
+///
+/// `Send`: the renderer builds a pipeline on a worker of the host's task
+/// system (`Renderer::set_pipeline`), so a pipeline holds nothing that is tied
+/// to the thread that assigned it.
+pub trait IntoGraph: Send {
     fn into_graph(
         self: Box<Self>,
         ctx: PassBuildContext<'_>,
@@ -42,7 +46,7 @@ pub trait IntoGraph {
 /// and the renderer reports the panic as the pipeline's failure).
 impl<F> IntoGraph for F
 where
-    F: for<'a> FnOnce(PassBuildContext<'a>) -> RenderGraph,
+    F: for<'a> FnOnce(PassBuildContext<'a>) -> RenderGraph + Send,
 {
     fn into_graph(
         self: Box<Self>,

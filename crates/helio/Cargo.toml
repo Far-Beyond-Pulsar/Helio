@@ -15,6 +15,8 @@ bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 image = { workspace = true, features = ["png"] }
 helio-core = { workspace = true }
+# A pipeline builds on a worker of the host's task system.
+helio-tasks = { workspace = true }
 helio-settings = { workspace = true }
 helio-feature-api = { path = "../helio-feature-api" }
 helio-pass-postprocess = { workspace = true }
