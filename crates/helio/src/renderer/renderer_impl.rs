@@ -132,6 +132,9 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     /// A configuration change asks for a graph rebuild before the next frame.
     pub(crate) pending_rebuild: bool,
+    /// A rebuild holds the frame until it is built (see
+    /// [`Renderer::set_blocking_builds`]).
+    pub(crate) blocking_builds: bool,
     /// CPU time of the last resize, in milliseconds.
     pub(crate) last_resize_ms: f64,
     pub(crate) clear_target_next_frame: bool,

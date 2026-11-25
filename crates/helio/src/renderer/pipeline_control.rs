@@ -91,12 +91,22 @@ impl BuildSlot {
     }
 }
 
+/// What a build off the frame thread makes.
+#[derive(Clone, Copy)]
+enum BuildKind {
+    /// A pipeline [`Renderer::set_pipeline`] assigned. `inherit`: it already
+    /// renders under this id, so the new graph takes its passes' persistent
+    /// state.
+    Pipeline { inherit: bool },
+    /// The renderer's own pipeline again from its changed configuration
+    /// ([`Renderer::request_graph_rebuild`], a quality or resolution change).
+    Rebuild,
+}
+
 /// A pipeline being built off the frame thread.
 pub(crate) struct PipelineBuild {
     id: String,
-    /// The pipeline already renders under this id: the new graph takes its
-    /// passes' persistent state.
-    inherit: bool,
+    kind: BuildKind,
     slot: Arc<BuildSlot>,
     started: Instant,
     /// The size the build was made for: a resize while it ran is applied to
@@ -121,6 +131,17 @@ impl Renderer {
             Some(pipeline) => PendingPipeline::Assign(pipeline),
             None => PendingPipeline::Clear,
         });
+    }
+
+    /// Whether a rebuild from a changed configuration (a quality or resolution
+    /// change, [`request_graph_rebuild`](Self::request_graph_rebuild)) holds
+    /// the frame until it is built (the default: the frame after the request
+    /// draws the rebuilt graph), or builds off the frame thread while the old
+    /// graph keeps drawing, like an assigned pipeline. A host that shows a
+    /// loading state for pipelines (`SceneRenderer` in background mode) wants
+    /// the second.
+    pub fn set_blocking_builds(&mut self, blocking: bool) {
+        self.blocking_builds = blocking;
     }
 
     /// Reports that the pipeline `id` could not be made at all (the host found
@@ -229,17 +250,7 @@ impl Renderer {
     fn start_pipeline_build(&mut self, NamedPipeline { id, pipeline }: NamedPipeline, announce: bool) {
         let inherit =
             self.pipeline_status.is_ready() && self.pipeline_id.as_deref() == Some(id.as_str());
-        let inputs = BuildInputs {
-            device: self.device.clone(),
-            queue: self.queue.clone(),
-            config: self.renderer_config(),
-            debug_state: self.debug_state.clone(),
-            camera_buffer: self.camera_buffer.clone(),
-            debug_camera_buffer: self.debug_camera_buffer.clone(),
-            stats: self.stats.clone(),
-            owns_device: self.owns_device,
-            scene_db: self.scene_db.clone(),
-        };
+        let inputs = self.build_inputs();
         let built_for = (
             inputs.config.width,
             inputs.config.height,
@@ -270,15 +281,90 @@ impl Renderer {
         }
         self.pipeline_build = Some(PipelineBuild {
             id,
-            inherit,
+            kind: BuildKind::Pipeline { inherit },
             slot,
             started,
             built_for,
         });
     }
 
+    /// Starts the rebuild of the pipeline that renders, from the renderer's
+    /// configuration as it is now, off the frame thread: the frames keep
+    /// drawing the graph being replaced until [`Self::finish_pipeline_build`]
+    /// finds the new one done. Does nothing for a graph installed without a
+    /// rebuilder, and waits for a build already running (its configuration was
+    /// taken when it started).
+    pub(crate) fn begin_rebuild(&mut self) {
+        if self.pipeline_build.is_some() {
+            self.pending_rebuild = true;
+            return;
+        }
+        let Some(rebuilder) = self.graph_rebuilder.clone() else {
+            return;
+        };
+        let inputs = self.build_inputs();
+        let built_for = (
+            inputs.config.width,
+            inputs.config.height,
+            inputs.config.render_scale,
+        );
+        let id = self
+            .pipeline_id
+            .clone()
+            .unwrap_or_else(|| UNNAMED_PIPELINE.to_owned());
+        let slot = Arc::new(BuildSlot::default());
+        let started = Instant::now();
+        let job = {
+            let slot = Arc::clone(&slot);
+            move || {
+                let device = Arc::clone(&inputs.device);
+                let built = guard_build(&device, || {
+                    Some(rebuilder(
+                        &inputs.device,
+                        &inputs.queue,
+                        inputs.config.clone(),
+                        inputs.debug_state.clone(),
+                        &inputs.camera_buffer,
+                        &inputs.debug_camera_buffer,
+                        &inputs.stats,
+                    ))
+                });
+                slot.set(built.expect("a rebuild always ends in a result"));
+            }
+        };
+        #[cfg(target_arch = "wasm32")]
+        job();
+        #[cfg(not(target_arch = "wasm32"))]
+        helio_tasks::submit(
+            helio_tasks::JobSpec::new(format!("Rebuild render pipeline {id}")).owner("helio"),
+            move |_| job(),
+        );
+        self.pipeline_build = Some(PipelineBuild {
+            id,
+            kind: BuildKind::Rebuild,
+            slot,
+            started,
+            built_for,
+        });
+    }
+
+    /// What a build reads, owned (the worker borrows nothing of the renderer).
+    fn build_inputs(&self) -> BuildInputs {
+        BuildInputs {
+            device: self.device.clone(),
+            queue: self.queue.clone(),
+            config: self.renderer_config(),
+            debug_state: self.debug_state.clone(),
+            camera_buffer: self.camera_buffer.clone(),
+            debug_camera_buffer: self.debug_camera_buffer.clone(),
+            stats: self.stats.clone(),
+            owns_device: self.owns_device,
+            scene_db: self.scene_db.clone(),
+        }
+    }
+
     /// Installs the pipeline build that has ended (waiting for it when `wait`).
-    fn finish_pipeline_build(&mut self, wait: bool) {
+    pub(crate) fn finish_pipeline_build(&mut self, wait: bool) {
         let result = match &self.pipeline_build {
             None => return,
             Some(build) if wait => build.slot.wait(),
@@ -298,23 +384,36 @@ impl Renderer {
             build.id,
             build.started.elapsed().as_secs_f64() * 1000.0
         );
-        match result {
-            Ok(graph) => {
-                self.install_pipeline_graph(graph, build.inherit && self.pipeline_status.is_ready());
+        match (build.kind, result) {
+            (BuildKind::Pipeline { inherit }, Ok(graph)) => {
+                self.install_pipeline_graph(graph, inherit && self.pipeline_status.is_ready());
                 self.pipeline_id = Some(build.id);
                 self.pipeline_status = PipelineStatus::Ready;
-                let now = (self.output_width, self.output_height, self.render_scale);
-                if now != build.built_for {
-                    // Resized while it built: the graph sizes its textures in place.
-                    let internal = [
-                        ((self.output_width as f32 * self.render_scale).ceil() as u32).max(1),
-                        ((self.output_height as f32 * self.render_scale).ceil() as u32).max(1),
-                    ];
-                    self.graph
-                        .resize(RenderSize::new(internal, [self.output_width, self.output_height]));
-                }
+                self.resize_to_current(build.built_for);
             }
-            Err(failure) => self.show_invalid(build.id, failure),
+            (BuildKind::Pipeline { .. }, Err(failure)) => self.show_invalid(build.id, failure),
+            (BuildKind::Rebuild, Ok(replacement)) => {
+                self.install_replacement_graph(replacement);
+                self.clear_target_next_frame = true;
+                self.resize_to_current(build.built_for);
+            }
+            // The pipeline no longer builds (a plugin it needs was disabled, a
+            // shader broke): say so on the output instead of keeping a graph
+            // that is not what was asked for.
+            (BuildKind::Rebuild, Err(failure)) => self.fail_current_pipeline(failure),
+        }
+    }
+
+    /// Resized while a build ran: the graph sizes its textures in place.
+    fn resize_to_current(&mut self, built_for: (u32, u32, f32)) {
+        let now = (self.output_width, self.output_height, self.render_scale);
+        if now != built_for {
+            let internal = [
+                ((self.output_width as f32 * self.render_scale).ceil() as u32).max(1),
+                ((self.output_height as f32 * self.render_scale).ceil() as u32).max(1),
+            ];
+            self.graph
+                .resize(RenderSize::new(internal, [self.output_width, self.output_height]));
         }
     }
 
@@ -330,15 +429,6 @@ impl Renderer {
             .clone()
             .unwrap_or_else(|| UNNAMED_PIPELINE.to_owned());
         self.show_invalid(id, failure);
-    }
-
-    /// Runs `build` (a rebuilder's) with what can go wrong in it made into the
-    /// pipeline's failure: see [`guard_build`].
-    pub(crate) fn guarded_build(
-        &self,
-        build: impl FnOnce(&Self) -> Option<Result<RenderGraph, PipelineFailure>>,
-    ) -> Option<Result<RenderGraph, PipelineFailure>> {
-        guard_build(&self.device, || build(self))
     }
 
     /// Shows `failure` for the pipeline `id`, and logs it when it is news.

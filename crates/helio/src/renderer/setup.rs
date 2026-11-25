@@ -237,6 +237,7 @@ impl Renderer {
             owns_device: true,
             pending_resize: None,
             pending_rebuild: false,
+            blocking_builds: true,
             last_resize_ms: 0.0,
             stats,
             graph_rebuilder: None,

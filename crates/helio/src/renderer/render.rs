@@ -80,10 +80,13 @@ impl Renderer {
         self.advance_pipeline();
         // A rebuild waits for a pipeline still building: that pipeline is
         // built from the configuration as it was asked for, and installs
-        // before the next one starts (`apply_rebuild_now` defers the same way).
+        // before the next one starts (`begin_rebuild` defers the same way).
         if self.pipeline_build.is_none() && std::mem::take(&mut self.pending_rebuild) {
             helio_core::cpu_scope!("Helio: rebuild graph");
-            self.apply_rebuild_now();
+            self.begin_rebuild();
+            if self.blocking_builds {
+                self.finish_pipeline_build(true);
+            }
         }
 
         let now = Instant::now();

@@ -78,33 +78,6 @@ impl Renderer {
         log::trace!("apply_resize_now: total resize {}ms", self.last_resize_ms);
     }
 
-    /// Rebuilds the graph from [`Self::renderer_config`] (a configuration
-    /// change: the pass set or pass settings). No-op for graphs installed
-    /// without a rebuilder.
-    pub(crate) fn apply_rebuild_now(&mut self) {
-        if self.pipeline_build.is_some() {
-            // A pipeline is being built from the configuration as it was asked
-            // for: this rebuild would be built from the graph it replaces.
-            // Run it once that is installed.
-            self.pending_rebuild = true;
-            return;
-        }
-        // One stored config, not a field per pass-specific flag, so no
-        // setting can be dropped by a rebuild (Helio#254/#255).
-        let config = self.renderer_config();
-        match self.guarded_build(|renderer| renderer.build_replacement_graph(config)) {
-            Some(Ok(replacement)) => {
-                self.install_replacement_graph(replacement);
-                self.clear_target_next_frame = true;
-            }
-            // The pipeline no longer builds (a plugin it needs was disabled, a
-            // shader broke): say so on the output instead of keeping a graph
-            // that is not what was asked for.
-            Some(Err(failure)) => self.fail_current_pipeline(failure),
-            None => {}
-        }
-    }
-
     /// How long the last resize took on the CPU, in milliseconds.
     pub fn last_resize_ms(&self) -> f64 {
         self.last_resize_ms
