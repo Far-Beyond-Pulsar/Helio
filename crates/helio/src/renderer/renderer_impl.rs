@@ -480,6 +480,16 @@ impl Renderer {
         }
     }
 
+    /// Show or hide the editor's ground grid and its world-space line layers
+    /// (curves, volume bounds) without leaving editor mode. A capture hides
+    /// them for its frames and shows them again after.
+    pub fn set_editor_overlay_visibility(&mut self, grid: bool, overlays: bool) {
+        if let Ok(mut s) = self.debug_state.lock() {
+            s.editor_grid_visible = grid;
+            s.editor_overlays_visible = overlays;
+        }
+    }
+
     /// Hands every pass its own latest GPU time (passes whose output shows
     /// their cost use it). Returns whether any output changes, so a host that
     /// idles between frames knows to draw one.

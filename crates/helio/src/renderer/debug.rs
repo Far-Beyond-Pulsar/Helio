@@ -22,6 +22,12 @@ pub struct DebugVertex {
 
 pub struct DebugDrawState {
     pub editor_enabled: bool,
+    /// Whether the editor draws its infinite ground grid. A host turns it off
+    /// for a capture (the editor's screenshot tool) and back on afterwards.
+    pub editor_grid_visible: bool,
+    /// Whether the editor draws its world-space line layers and volume bounds
+    /// (a spline's curve, a light's range). Off for a capture, like the grid.
+    pub editor_overlays_visible: bool,
     /// Double-precision world position of the frame's coordinate origin (see
     /// `Renderer::origin_for`). Overlays defined in world space (the grid
     /// plane at world y = 0, debug lines) are placed relative to it.
@@ -415,6 +421,8 @@ impl Default for DebugDrawState {
     fn default() -> Self {
         Self {
             editor_enabled: false,
+            editor_grid_visible: true,
+            editor_overlays_visible: true,
             world_origin: glam::DVec3::ZERO,
             user_lines: Vec::new(),
             user_lines_generation: 0,
@@ -1150,8 +1158,9 @@ impl RenderPass for DebugDrawPass {
         if self.editor_mode {
             let editor_enabled = state.editor_enabled;
             let volume_gen = state.editor_volume_generation;
+            let overlays_visible = state.editor_overlays_visible;
 
-            if !editor_enabled {
+            if !editor_enabled || (!overlays_visible && !state.editor_grid_visible) {
                 if self.cached_line_gen != 0 {
                     self.pass.update_lines(ctx.device, ctx.queue, &[]);
                     self.cached_line_gen = 0;
@@ -1164,7 +1173,24 @@ impl RenderPass for DebugDrawPass {
 
             // The grid itself is procedural and is drawn as a single
             // fullscreen triangle.
-            self.update_infinite_grid(ctx, state.world_origin);
+            if state.editor_grid_visible {
+                self.update_infinite_grid(ctx, state.world_origin);
+            }
+            if !overlays_visible {
+                // Grid only: the line layers stay out of the frame, and the
+                // next frame that shows them uploads them again.
+                if self.cached_line_gen != 0 {
+                    self.pass.update_lines(ctx.device, ctx.queue, &[]);
+                    self.cached_line_gen = 0;
+                }
+                self.editor_origin = None;
+                self.editor_last_volume_gen = None;
+                if self.cached_tri_gen != 0 {
+                    self.pass.update_tris(ctx.device, ctx.queue, &[]);
+                    self.cached_tri_gen = 0;
+                }
+                return Ok(());
+            }
 
             // Overlay lines (volume bounds, editor line layers) are world
             // space, drawn relative to the frame origin (subtracted in double
@@ -1233,7 +1259,7 @@ impl RenderPass for DebugDrawPass {
             let enabled = self
                 .state
                 .lock()
-                .map(|state| state.editor_enabled)
+                .map(|state| state.editor_enabled && state.editor_grid_visible)
                 .unwrap_or(false);
             if enabled && self.grid_depth_test {
                 self.draw_infinite_grid(ctx);
