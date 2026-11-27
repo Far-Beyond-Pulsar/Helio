@@ -461,6 +461,8 @@ impl GraphTexturePool {
             return &self.textures[idx];
         }
 
+        // The graph's targets, whoever declared them (`crate::vram`).
+        let _vram_owner = crate::vram::root_scope(crate::vram::GRAPH_TARGETS);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(&desc.name),
             size: wgpu::Extent3d {

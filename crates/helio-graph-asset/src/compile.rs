@@ -111,6 +111,8 @@ pub(crate) fn build_graph(
         let first_pass = graph.pass_count();
         let node_started = std::time::Instant::now();
         {
+            // What the node's passes allocate, now and in every frame, is the node's.
+            let _vram_owner = helio_core::vram::node(&node.kind);
             let mut build = NodeBuild {
                 graph: &mut graph,
                 env: &mut *env,
@@ -395,6 +397,8 @@ fn build(
     pipeline: Arc<GraphAssetPipeline>,
     ctx: PassBuildContext<'_>,
 ) -> Result<RenderGraph, PipelineFailure> {
+    // What the build allocates outside a node (preparers, finishers) is the renderer's.
+    let _vram_owner = helio_core::vram::helio();
     let mut env = build_env(&ctx);
     let asset = match &pipeline.source {
         Source::Fixed(asset) => Arc::clone(asset),

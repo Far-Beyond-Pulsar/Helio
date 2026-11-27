@@ -42,6 +42,9 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
+        // What the renderer allocates here (its targets, uploads, the profiler) is
+        // Helio's; its passes and derivations open their own owners (`helio_core::vram`).
+        let _vram_owner = helio_core::vram::helio();
         helio_core::cpu_scope!("Helio::Renderer::render");
         // Treat the caller's ordinary output texture as the PC mirror when
         // this renderer was created by HelioGraphicsContext with XR active.

@@ -98,6 +98,23 @@ pub fn host_handle() -> HostHandle {
     }
 }
 
+/// Hands this copy's state and task host to a loaded library through its
+/// entry point `attach`
+/// ([`export_runtime_attach!`](crate::export_runtime_attach)), and returns
+/// what the library answered. Call it before anything else of the library
+/// runs.
+///
+/// # Safety
+///
+/// `attach` is that entry point of a library built from the same sources,
+/// loaded for as long as it runs Helio code.
+pub unsafe fn share_with(attach: AttachFn) -> bool {
+    // Leaked: the library keeps it.
+    let handle: &'static HostHandle = Box::leak(Box::new(host_handle()));
+    // SAFETY: the caller's contract; the handle lives for the process.
+    unsafe { attach((handle as *const HostHandle).cast()) }
+}
+
 /// Forwards to the host's task host, which lives for the process.
 struct ForwardTasks(&'static dyn helio_tasks::TaskHost);
 

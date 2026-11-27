@@ -103,6 +103,7 @@ pub fn run_scene_derivations(
     });
     let mut recorded = false;
     for derivation in derivations.iter_mut() {
+        let _vram_owner = crate::vram::derivation(derivation.name());
         let output = derivation.derive(
             &SceneDerivationContext {
                 device,

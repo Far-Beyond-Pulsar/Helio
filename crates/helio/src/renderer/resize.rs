@@ -11,6 +11,9 @@ use super::renderer_impl::Renderer;
 
 impl Renderer {
     pub fn set_render_size(&mut self, width: u32, height: u32) {
+        // What the renderer allocates here (its targets, uploads, the profiler) is
+        // Helio's; its passes and derivations open their own owners (`helio_core::vram`).
+        let _vram_owner = helio_core::vram::helio();
         let width = width.max(1);
         let height = height.max(1);
         if self.output_width == width && self.output_height == height {

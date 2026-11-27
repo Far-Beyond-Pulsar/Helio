@@ -216,6 +216,10 @@ pub struct RenderGraph {
     /// The gate of each build-order slot's pass, if it was added under one
     /// ([`Self::set_member_gate`]).
     member_gates: Vec<Option<crate::graph::MemberGate>>,
+    /// The video-memory owner each pass was built under (`crate::vram`), by
+    /// the pass's address, which stays put while the box moves between
+    /// `passes` and `dormant`. Its `prepare` and `execute` run in it.
+    pass_owners: HashMap<usize, &'static str>,
     /// The gate passes added now are put under.
     current_gate: Option<crate::graph::MemberGate>,
     /// Per-frame membership answers, kept to avoid an allocation a frame.
@@ -421,6 +425,7 @@ impl RenderGraph {
             dormant: Vec::new(),
             next_slot: 0,
             member_gates: Vec::new(),
+            pass_owners: HashMap::new(),
             current_gate: None,
             membership_scratch: Vec::new(),
             scene_rows: Default::default(),
@@ -793,6 +798,11 @@ impl RenderGraph {
         self.pass_index_map
             .entry(type_id)
             .or_insert(self.passes.len());
+        // The owner the pass is built under (its node's, `crate::vram`), or the
+        // renderer's when it is added outside any.
+        let owner = crate::vram::current()
+            .map_or(crate::vram::HELIO, |owner| crate::vram::intern(&owner));
+        self.pass_owners.insert(pass_key(&*pass), owner);
         self.passes.push(pass);
         self.member_slots.push(self.next_slot);
         self.member_gates.push(self.current_gate.clone());
@@ -1969,6 +1979,7 @@ impl RenderGraph {
                     let _prepare_scope = profiling::is_profiling_enabled().then(|| {
                         profiling::ProfileScope::new(format!("{}::prepare", $pass.name()))
                     });
+                    let _vram_owner = crate::vram::root_scope(pass_owner(&self.pass_owners, &**$pass));
                     $pass.prepare(&prepare_ctx)?;
                 }
 
@@ -2076,6 +2087,7 @@ impl RenderGraph {
                         ctx.apply_reflected_bind_groups();
                         #[cfg(not(target_arch = "wasm32"))]
                         profiling::profile_scope!(pass.name());
+                        let _vram_owner = crate::vram::root_scope(pass_owner(&self.pass_owners, &**pass));
                         pass.execute(&mut ctx)?;
                     }
 
@@ -2271,6 +2283,7 @@ impl RenderGraph {
                         ctx.apply_reflected_bind_groups();
                         #[cfg(not(target_arch = "wasm32"))]
                         profiling::profile_scope!(pass.name());
+                        let _vram_owner = crate::vram::root_scope(pass_owner(&self.pass_owners, &**pass));
                         pass.execute(&mut ctx)?;
 
                         if pass_index + 1 >= c.chain_range.end {
@@ -2344,6 +2357,7 @@ impl RenderGraph {
                             ctx.apply_reflected_bind_groups();
                             #[cfg(not(target_arch = "wasm32"))]
                             profiling::profile_scope!(pass.name());
+                            let _vram_owner = crate::vram::root_scope(pass_owner(&self.pass_owners, &**pass));
                             pass.execute(&mut ctx)?;
                         }
                     }
@@ -2403,6 +2417,7 @@ impl RenderGraph {
                     ctx.apply_reflected_bind_groups();
                     #[cfg(not(target_arch = "wasm32"))]
                     profiling::profile_scope!(pass.name());
+                    let _vram_owner = crate::vram::root_scope(pass_owner(&self.pass_owners, &**pass));
                     pass.execute(&mut ctx)?;
                 }
 
@@ -3277,4 +3292,17 @@ impl crate::view::ViewRunner for GraphViews<'_> {
             .execute_with_registry(&scene, request.target, request.depth, &mut registry)?;
         Ok(true)
     }
+}
+
+/// A pass's key in [`RenderGraph::pass_owners`]: its address.
+fn pass_key(pass: &dyn RenderPass) -> usize {
+    pass as *const dyn RenderPass as *const () as usize
+}
+
+/// The video-memory owner `pass` was built under ([`RenderGraph::add_pass`]).
+fn pass_owner(owners: &HashMap<usize, &'static str>, pass: &dyn RenderPass) -> &'static str {
+    owners
+        .get(&pass_key(pass))
+        .copied()
+        .unwrap_or(crate::vram::HELIO)
 }

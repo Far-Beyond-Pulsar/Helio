@@ -73,6 +73,7 @@ pub mod texture_mips;
 pub mod traits;
 pub mod upload;
 pub mod view;
+pub mod vram;
 
 /// RAII CPU span that lands in the engine flamegraph's profiler, on the thread
 /// that creates it. A no-op unless the `profiling` feature is enabled (and always
